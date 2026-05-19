@@ -6,3 +6,4 @@
 *.log
 Cargo.lock
 .idea/
+.claude/settings.local.json
