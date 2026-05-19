@@ -1,0 +1,8 @@
+/target/
+*.img
+*.bin
+*.o
+*.a
+*.log
+Cargo.lock
+.idea/

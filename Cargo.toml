@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = [
+    "kernel",
+    "kernel-shared",
+    "minix-ipc",
+    "server-rt",
+    "servers/pm",
+    "servers/vfs",
+    "servers/vm",
+    "servers/rs",
+    "servers/ds",
+    "servers/sched",
+    "drivers/driver-rt",
+    "drivers/virtio-blk",
+    "drivers/virtio-net",
+    "drivers/virtio-console",
+    "drivers/memory",
+    "fs/mfs",
+    "fs/pfs",
+    "userland/init",
+    "userland/sh",
+    "userland/coreutils",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+repository = "https://github.com/KevinBarnard/minix-4"
+
+[profile.release]
+opt-level = 's'
+panic = "abort"
+overflow-checks = false
+
+[profile.dev]
+panic = "abort"

@@ -1,0 +1,20 @@
+# Cargo configuration for MINIX 4
+#
+# The kernel builds with a custom target spec (no_std, no_main, kernel code model).
+# Servers and userland build with a freestanding user-space target.
+
+[build]
+# Default target for `cargo build` -- set per-crate via .cargo/config.toml
+# or override with --target on command line.
+
+[target.aarch64-unknown-none]
+runner = "tools/qemu-run.sh"
+rustflags = ["-C", "link-arg=-Tkernel/src/arch/aarch64/linker.ld"]
+
+[target.x86_64-unknown-none]
+rustflags = ["-C", "link-arg=-Tkernel/src/arch/x86_64/linker.ld"]
+
+# Aliases for common development commands
+[alias]
+kernel-aarch64 = "build -p kernel --target aarch64-unknown-none --release"
+kernel-x86_64 = "build -p kernel --target x86_64-unknown-none --release"
