@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "a9aa72920279",
+  "strategy": "manual-commit",
+  "branch": "chore/entire-claude-integration",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".entire/settings.json",
+    ".gitignore"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a9/aa72920279/0/metadata.json",
+      "transcript": "/a9/aa72920279/0/full.jsonl",
+      "content_hash": "/a9/aa72920279/0/content_hash.txt",
+      "prompt": "/a9/aa72920279/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25,
+    "cache_creation_tokens": 104268,
+    "cache_read_tokens": 606306,
+    "output_tokens": 11211,
+    "api_call_count": 15
+  }
+}
