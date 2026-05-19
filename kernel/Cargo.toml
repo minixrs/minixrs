@@ -1,0 +1,7 @@
+[package]
+name = "minix4-kernel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+minix4-kernel-shared = { path = "../kernel-shared" }

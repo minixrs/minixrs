@@ -1,0 +1,9 @@
+[package]
+name = "minix4-mfs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+minix4-kernel-shared = { path = "../../kernel-shared" }
+minix4-ipc = { path = "../../minix-ipc" }
+minix4-server-rt = { path = "../../server-rt" }
