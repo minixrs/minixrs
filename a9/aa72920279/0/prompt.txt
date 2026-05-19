@@ -1,0 +1,1 @@
+Entire is setup and we have files that need to be added or ignored believe added to this repo
