@@ -1,0 +1,44 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "32272ecebbed",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-1-aarch64-boot",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/build.md",
+    "docs/plan.md",
+    "external/limine/.gitignore",
+    "external/limine/Makefile",
+    "external/limine/README.md",
+    "kernel/Cargo.toml",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/entry.S",
+    "kernel/src/arch/aarch64/exception.rs",
+    "kernel/src/arch/aarch64/limine.rs",
+    "kernel/src/arch/aarch64/linker.ld",
+    "kernel/src/arch/aarch64/mod.rs",
+    "kernel/src/arch/aarch64/uart.rs",
+    "kernel/src/arch/aarch64/vectors.S",
+    "kernel/src/arch/mod.rs",
+    "kernel/src/main.rs",
+    "kernel/src/panic.rs",
+    "kernel/src/uart.rs",
+    "tools/limine.conf",
+    "tools/qemu-run.sh"
+  ],
+  "sessions": [
+    {
+      "metadata": "/32/272ecebbed/0/metadata.json",
+      "transcript": "/32/272ecebbed/0/full.jsonl",
+      "content_hash": "/32/272ecebbed/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 5,
+    "cache_creation_tokens": 4649,
+    "cache_read_tokens": 361728,
+    "output_tokens": 1949,
+    "api_call_count": 5
+  }
+}

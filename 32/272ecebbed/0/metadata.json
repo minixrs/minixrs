@@ -1,0 +1,58 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "32272ecebbed",
+  "session_id": "8528f73a-4661-4d0a-81f5-83b799aa8fd9",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-20T01:23:08.09095Z",
+  "branch": "feature/phase-1-aarch64-boot",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/build.md",
+    "docs/plan.md",
+    "external/limine/.gitignore",
+    "external/limine/Makefile",
+    "external/limine/README.md",
+    "kernel/Cargo.toml",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/entry.S",
+    "kernel/src/arch/aarch64/exception.rs",
+    "kernel/src/arch/aarch64/limine.rs",
+    "kernel/src/arch/aarch64/linker.ld",
+    "kernel/src/arch/aarch64/mod.rs",
+    "kernel/src/arch/aarch64/uart.rs",
+    "kernel/src/arch/aarch64/vectors.S",
+    "kernel/src/arch/mod.rs",
+    "kernel/src/main.rs",
+    "kernel/src/panic.rs",
+    "kernel/src/uart.rs",
+    "tools/limine.conf",
+    "tools/qemu-run.sh"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7",
+  "turn_id": "b67f5e7ad94f",
+  "checkpoint_transcript_start": 607,
+  "transcript_lines_at_start": 607,
+  "token_usage": {
+    "input_tokens": 5,
+    "cache_creation_tokens": 4649,
+    "cache_read_tokens": 361728,
+    "output_tokens": 1949,
+    "api_call_count": 5
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-20T01:23:08.073762Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "total_lines_changed": 0,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}
