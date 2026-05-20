@@ -20,6 +20,11 @@ pub struct ExceptionFrame {
     pub _pad: u64,
 }
 
+// Frame layout is hand-encoded in vectors.S (sub sp, sp, #0x120 + the stp/str
+// sequence). Catch accidental field reordering or resizing at compile time
+// instead of as silent stack corruption on the first real exception.
+const _: () = assert!(core::mem::size_of::<ExceptionFrame>() == 0x120);
+
 unsafe extern "C" {
     static _vector_table: u8;
 }
