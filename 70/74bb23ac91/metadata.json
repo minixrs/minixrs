@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "7074bb23ac91",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-1-aarch64-boot",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "kernel/src/arch/aarch64/exception.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/70/74bb23ac91/0/metadata.json",
+      "transcript": "/70/74bb23ac91/0/full.jsonl",
+      "content_hash": "/70/74bb23ac91/0/content_hash.txt",
+      "prompt": "/70/74bb23ac91/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 26,
+    "cache_creation_tokens": 135761,
+    "cache_read_tokens": 544034,
+    "output_tokens": 10500,
+    "api_call_count": 11
+  }
+}
