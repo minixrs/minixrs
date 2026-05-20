@@ -387,14 +387,15 @@ Full documentation and project scaffolding so future contributors have complete 
 
 **Milestone:** `docs/` is comprehensive enough to start coding Phase 1 without re-exploring MINIX 3.
 
-### Phase 1: Kernel Scaffolding + Boot (aarch64, QEMU virt)
+### Phase 1: Kernel Scaffolding + Boot (aarch64, QEMU virt) (complete)
 
 - Cargo workspace with `kernel`, `kernel-shared` crates
-- Custom Rust target spec: `aarch64-minix-kernel.json`
-- Vendor Limine header, write `entry.S` with Limine request structs for aarch64 UEFI
-- PL011 UART early serial output (QEMU virt machine)
-- `tools/mkimage.sh` and `tools/qemu-run.sh` for `qemu-system-aarch64 -M virt`
-- **Milestone:** QEMU boots, prints "MINIX 4 booting" to serial, halts
+- Builds via `aarch64-unknown-none` + linker script (`kernel/src/arch/aarch64/linker.ld`); the bespoke `aarch64-minix-kernel.json` target spec is deferred to Phase 2 (the stock target is sufficient for boot)
+- Vendor Limine v9.x binary + header (`external/limine/Makefile`); Rust-side request block in `kernel/src/arch/aarch64/limine.rs` (base revision, HHDM, memmap, paging mode, stack size)
+- PL011 UART driver at `kernel/src/arch/aarch64/uart.rs` with `core::fmt::Write` adapter; MMIO base is HHDM-relative (Limine base revision 2 keeps the [0, 4 GiB) blanket map covering PL011)
+- aarch64 exception vector table (`vectors.S` + `exception.rs`); any unexpected trap routes through `exception_entry` and panics with a decoded ESR_EL1/ELR_EL1/FAR_EL1 dump
+- `tools/qemu-run.sh` is the cargo runner: stages an ESP under `target/esp/`, auto-detects edk2 firmware, boots with `qemu-system-aarch64 -M virt` via `-drive file=fat:rw:...`
+- **Milestone:** `cargo run -p minix4-kernel --target aarch64-unknown-none --release` boots through UEFI + Limine, prints `MINIX 4 booting on aarch64` + HHDM offset, then halts in `wfe`. Exception path verified by injecting a deliberate fault and observing a clean panic dump.
 
 ### Phase 2: Kernel IPC + Scheduling (the heart of MINIX)
 
