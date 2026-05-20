@@ -100,13 +100,13 @@ Example kernel target spec:
 
 ```sh
 # Build kernel
-cargo build -p kernel --target aarch64-unknown-none --release
+cargo build -p minix4-kernel --target aarch64-unknown-none --release
 
 # Build a specific server
 cargo build -p minix4-pm --target aarch64-unknown-none --release
 
 # Build all servers
-cargo build --workspace --exclude kernel --target aarch64-unknown-none --release
+cargo build --workspace --exclude minix4-kernel --target aarch64-unknown-none --release
 
 # Alias (defined in .cargo/config.toml)
 cargo kernel-aarch64
