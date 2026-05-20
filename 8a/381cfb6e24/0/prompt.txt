@@ -1,0 +1,1 @@
+phase 2 of @docs/plan.md is probalby too big for a single pr.  Split out to workable slices and work on the first section, document slices in the plan as well

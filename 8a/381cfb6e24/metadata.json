@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "8a381cfb6e24",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-1-kernel-shared",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel-shared/src/com.rs",
+    "kernel-shared/src/endpoint.rs",
+    "kernel-shared/src/error.rs",
+    "kernel-shared/src/ipc_const.rs",
+    "kernel-shared/src/lib.rs",
+    "kernel-shared/src/message.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8a/381cfb6e24/0/metadata.json",
+      "transcript": "/8a/381cfb6e24/0/full.jsonl",
+      "content_hash": "/8a/381cfb6e24/0/content_hash.txt",
+      "prompt": "/8a/381cfb6e24/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 890,
+    "cache_creation_tokens": 155885,
+    "cache_read_tokens": 3809187,
+    "output_tokens": 48889,
+    "api_call_count": 37
+  }
+}
