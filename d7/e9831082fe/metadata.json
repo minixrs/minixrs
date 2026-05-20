@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "d7e9831082fe",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-1-aarch64-boot",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/build.md",
+    "docs/plan.md",
+    "kernel/Cargo.toml",
+    "kernel/src/arch/aarch64/entry.S",
+    "kernel/src/arch/aarch64/limine.rs",
+    "kernel/src/main.rs",
+    "tools/limine.conf"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d7/e9831082fe/0/metadata.json",
+      "transcript": "/d7/e9831082fe/0/full.jsonl",
+      "content_hash": "/d7/e9831082fe/0/content_hash.txt",
+      "prompt": "/d7/e9831082fe/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2401,
+    "cache_creation_tokens": 455920,
+    "cache_read_tokens": 11523476,
+    "output_tokens": 121738,
+    "api_call_count": 86
+  }
+}

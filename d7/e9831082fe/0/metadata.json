@@ -1,0 +1,86 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "d7e9831082fe",
+  "session_id": "8528f73a-4661-4d0a-81f5-83b799aa8fd9",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-20T01:22:19.158723Z",
+  "branch": "feature/phase-1-aarch64-boot",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/build.md",
+    "docs/plan.md",
+    "kernel/Cargo.toml",
+    "kernel/src/arch/aarch64/entry.S",
+    "kernel/src/arch/aarch64/limine.rs",
+    "kernel/src/main.rs",
+    "tools/limine.conf"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7",
+  "turn_id": "b67f5e7ad94f",
+  "token_usage": {
+    "input_tokens": 2401,
+    "cache_creation_tokens": 455920,
+    "cache_read_tokens": 11523476,
+    "output_tokens": 121738,
+    "api_call_count": 86
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-20T01:22:19.138934Z",
+    "agent_lines": 52,
+    "agent_removed": 14,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 52,
+    "total_lines_changed": 66,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 764,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "external/limine/.gitignore": 1,
+        "external/limine/Makefile": 38,
+        "external/limine/README.md": 16,
+        "kernel/Cargo.toml": 3,
+        "kernel/build.rs": 52,
+        "kernel/src/arch/aarch64/entry.S": 24,
+        "kernel/src/arch/aarch64/exception.rs": 65,
+        "kernel/src/arch/aarch64/limine.rs": 161,
+        "kernel/src/arch/aarch64/linker.ld": 60,
+        "kernel/src/arch/aarch64/mod.rs": 27,
+        "kernel/src/arch/aarch64/uart.rs": 72,
+        "kernel/src/arch/aarch64/vectors.S": 103,
+        "kernel/src/arch/mod.rs": 7,
+        "kernel/src/main.rs": 33,
+        "kernel/src/panic.rs": 15,
+        "kernel/src/uart.rs": 7,
+        "tools/limine.conf": 8,
+        "tools/qemu-run.sh": 72
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 809,
+      "agent_lines_removed": 8
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 816,
+      "agent_lines_removed": 14
+    }
+  ]
+}
