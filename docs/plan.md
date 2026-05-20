@@ -210,8 +210,7 @@ minix-4/
 pub struct Message {
     pub m_source: Endpoint,    // Who sent this (set by kernel)
     pub m_type: i32,           // Call number or result code
-    pub _pad: u32,
-    pub payload: [u8; 88],     // Typed access via accessor methods
+    pub payload: [u8; 96],     // Typed access via accessor methods
 }
 ```
 
@@ -398,6 +397,31 @@ Full documentation and project scaffolding so future contributors have complete 
 - **Milestone:** `cargo run -p minix4-kernel --target aarch64-unknown-none --release` boots through UEFI + Limine, prints `MINIX 4 booting on aarch64` + HHDM offset, then halts in `wfe`. Exception path verified by injecting a deliberate fault and observing a clean panic dump.
 
 ### Phase 2: Kernel IPC + Scheduling (the heart of MINIX)
+
+Phase 2 is split into 6 PR-sized slices. Each slice is independently
+buildable, boots, and produces observable output. The Phase 2 milestone
+("two processes exchange IPC messages") is satisfied at the end of Slice
+2.5; Slice 2.6 finishes the kernel-call surface needed by Phase 3.
+
+- **Slice 2.1** — `kernel-shared` foundation: `Message`, `Endpoint`,
+  IPC primitive numbers, kernel-call numbers, task and server endpoint
+  constants, MINIX errno values. Host-side unit tests; no kernel changes.
+- **Slice 2.2** — Process and privilege tables: `Proc`, `Priv`,
+  generation-aware endpoint math, RTS/MF flag bitfields, boot-time table
+  init. Milestone: UART dumps the populated proc table.
+- **Slice 2.3** — aarch64 SVC entry + context switch (cooperative). EL0
+  stub task does `svc #0`, kernel dispatches a stub `do_ipc()`,
+  `switch_to_user(&proc)` returns control. No preemption yet.
+- **Slice 2.4** — GICv3 + ARM generic timer + run queues. Two EL0 stub
+  tasks print interleaved bursts proving timer-driven preemption.
+- **Slice 2.5** — IPC primitives (`mini_send`, `mini_receive`,
+  `mini_notify`, `mini_senda`, `mini_sendnb`, `deadlock_check`). Two
+  tasks ping-pong messages. **This is the Phase 2 milestone.**
+- **Slice 2.6** — Kernel-call dispatch and the minimum `SYS_*` set
+  (`SYS_GETINFO` + 13 stubs returning `OK`/`ENOSYS`). A stub task
+  `SENDREC`s `SYSTEM` for `SYS_GETINFO` and gets a populated reply.
+
+Aggregate scope:
 
 - `kernel-shared`: Message struct, Endpoint, all call numbers, error codes
 - Process table (`Proc`), privilege table (`Priv`)
