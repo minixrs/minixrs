@@ -18,14 +18,32 @@ MINIX 4 uses a hybrid build system:
 ## Quick Start
 
 ```sh
-# Build the kernel for aarch64
-cargo kernel-aarch64
+# One-time: download the pinned Limine binary release into external/limine/dist/
+make -C external/limine
 
-# Create a bootable disk image
-tools/mkimage.sh
+# Build + launch the kernel under QEMU. The cargo runner (tools/qemu-run.sh)
+# stages an ESP directory at target/esp/, drops Limine + the kernel ELF in,
+# and boots qemu-system-aarch64 with QEMU's directory-as-FAT helper -- no
+# disk-image scripting needed for Phase 1.
+cargo run -p minix4-kernel --target aarch64-unknown-none --release
+```
 
-# Run in QEMU
-tools/qemu-run.sh
+Expected serial output:
+
+```
+MINIX 4 booting on aarch64
+HHDM offset: 0xffff000000000000
+```
+
+The kernel then halts in a `wfe` loop. Exit QEMU with `Ctrl-A x`.
+
+### UEFI firmware
+
+`tools/qemu-run.sh` auto-detects the aarch64 UEFI firmware in a few common
+locations (homebrew QEMU, `/usr/share/edk2-aarch64`, AAVMF). Override with:
+
+```sh
+QEMU_EFI_AARCH64=/path/to/QEMU_EFI.fd cargo run -p minix4-kernel ...
 ```
 
 ## Cargo Workspace
