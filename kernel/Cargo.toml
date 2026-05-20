@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 minix4-kernel-shared = { path = "../kernel-shared" }
+
+[build-dependencies]
+cc = "1"
