@@ -1,0 +1,46 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "7074bb23ac91",
+  "session_id": "e91a0afe-59b9-4c43-b3db-daf132b6e02d",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-20T03:39:12.098235Z",
+  "branch": "feature/phase-1-aarch64-boot",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "kernel/src/arch/aarch64/exception.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "ebb02c444640",
+  "token_usage": {
+    "input_tokens": 26,
+    "cache_creation_tokens": 135761,
+    "cache_read_tokens": 544034,
+    "output_tokens": 10500,
+    "api_call_count": 11
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-20T03:39:12.092103Z",
+    "agent_lines": 5,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 5,
+    "total_lines_changed": 5,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
