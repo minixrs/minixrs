@@ -1,0 +1,109 @@
+//! Process counts and well-known endpoints.
+//!
+//! Matches MINIX 3 `include/minix/com.h`. Kernel tasks (`ASYNCM`, `IDLE`,
+//! `CLOCK`, `SYSTEM`, `HARDWARE`) live at negative process numbers; the
+//! system servers and other user-space processes live at non-negative
+//! process numbers in the order they boot.
+
+use crate::endpoint::{Endpoint, ProcNr, make_endpoint};
+
+/// Number of kernel tasks (slots with negative proc-numbers).
+pub const NR_TASKS: usize = 5;
+/// Number of user-process slots in the process table.
+pub const NR_PROCS: usize = 256;
+/// Number of slots in the privilege table — system (privileged) processes.
+pub const NR_SYS_PROCS: usize = 64;
+
+// ---------------------------------------------------------------------------
+// Kernel tasks — negative proc-numbers.
+// ---------------------------------------------------------------------------
+
+/// Asynchronous-message driver (kernel pseudo-task).
+pub const ASYNCM: ProcNr = -5;
+/// Idle task (runs when nothing else is runnable).
+pub const IDLE: ProcNr = -4;
+/// Clock task (kernel pseudo-task for timer-driven work).
+pub const CLOCK: ProcNr = -3;
+/// System task (handles `SYS_*` kernel calls).
+pub const SYSTEM: ProcNr = -2;
+/// Hardware-interrupt pseudo-task (source endpoint for IRQ notifications).
+pub const HARDWARE: ProcNr = -1;
+
+// ---------------------------------------------------------------------------
+// Well-known user-space servers — generation 0 at boot.
+// Order mirrors the MINIX 3 boot image.
+// ---------------------------------------------------------------------------
+
+pub const PM_PROC_NR: ProcNr = 0;
+pub const VFS_PROC_NR: ProcNr = 1;
+pub const RS_PROC_NR: ProcNr = 2;
+pub const MEM_PROC_NR: ProcNr = 3;
+pub const LOG_PROC_NR: ProcNr = 4;
+pub const TTY_PROC_NR: ProcNr = 5;
+pub const DS_PROC_NR: ProcNr = 6;
+pub const MFS_PROC_NR: ProcNr = 7;
+pub const VM_PROC_NR: ProcNr = 8;
+pub const PFS_PROC_NR: ProcNr = 9;
+pub const SCHED_PROC_NR: ProcNr = 10;
+pub const INIT_PROC_NR: ProcNr = 11;
+
+/// One past the highest boot-server proc-number (`init` is the last slot
+/// allocated from the boot image).
+pub const NR_BOOT_PROCS: usize = (INIT_PROC_NR as usize) + 1;
+
+// Compile-time guarantees that the proc tables can hold every boot process.
+const _: () = assert!(NR_PROCS >= NR_BOOT_PROCS);
+const _: () = assert!(NR_SYS_PROCS >= NR_BOOT_PROCS);
+
+/// Build a boot-time endpoint (generation 0) for a task or server.
+pub const fn boot_endpoint(p: ProcNr) -> Endpoint {
+    make_endpoint(0, p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoint::{endpoint_gen, endpoint_proc};
+
+    #[test]
+    fn task_endpoints_have_negative_procs() {
+        for p in [ASYNCM, IDLE, CLOCK, SYSTEM, HARDWARE] {
+            assert!(p < 0, "task proc {p} should be negative");
+        }
+    }
+
+    #[test]
+    fn server_endpoints_distinct_and_nonnegative() {
+        let servers = [
+            PM_PROC_NR, VFS_PROC_NR, RS_PROC_NR, MEM_PROC_NR, LOG_PROC_NR,
+            TTY_PROC_NR, DS_PROC_NR, MFS_PROC_NR, VM_PROC_NR, PFS_PROC_NR,
+            SCHED_PROC_NR, INIT_PROC_NR,
+        ];
+        for &p in &servers {
+            assert!(p >= 0, "server proc {p} should be non-negative");
+        }
+        let mut seen = [false; NR_BOOT_PROCS];
+        for &p in &servers {
+            let i = p as usize;
+            assert!(!seen[i], "duplicate proc_nr {p}");
+            seen[i] = true;
+        }
+    }
+
+    #[test]
+    fn boot_endpoint_roundtrips_for_tasks_and_servers() {
+        for p in [SYSTEM, IDLE, CLOCK, PM_PROC_NR, VFS_PROC_NR, INIT_PROC_NR] {
+            let e = boot_endpoint(p);
+            assert_eq!(endpoint_gen(e), 0);
+            assert_eq!(endpoint_proc(e), p);
+        }
+    }
+
+    #[test]
+    fn nr_boot_procs_covers_init() {
+        // `INIT_PROC_NR as usize` is constant so the comparison is also
+        // checked statically via `const _: () = assert!(...)` below; this
+        // test keeps the invariant visible at test-discovery time.
+        const { assert!(NR_BOOT_PROCS > INIT_PROC_NR as usize) };
+    }
+}
