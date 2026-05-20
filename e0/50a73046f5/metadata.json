@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "e050a73046f5",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-1-kernel-shared",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".cargo/config.toml",
+    "docs/build.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e0/50a73046f5/0/metadata.json",
+      "transcript": "/e0/50a73046f5/0/full.jsonl",
+      "content_hash": "/e0/50a73046f5/0/content_hash.txt",
+      "prompt": "/e0/50a73046f5/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 11,
+    "cache_creation_tokens": 3937,
+    "cache_read_tokens": 851945,
+    "output_tokens": 2740,
+    "api_call_count": 6
+  }
+}
