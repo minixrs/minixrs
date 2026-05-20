@@ -1,0 +1,9 @@
+while not trivial phase 1 in @docs/plan.md is probably as small of a PR as we can do with meaning.  Let's get the startup message printing
+
+---
+
+Is the output from UEFI that X86 cannot be loaded on AARCH64 the problem
+
+---
+
+update plan.md with status
