@@ -34,8 +34,9 @@ The MINIX 3 source is available at https://github.com/Stichting-MINIX-Research-F
 # Build kernel for aarch64 (primary target)
 cargo kernel-aarch64
 
-# Run in QEMU
-tools/qemu-run.sh
+# Boot in QEMU (cargo runner wires tools/qemu-run.sh); `timeout` lets
+# QEMU exit since the kernel halts in `wfe`.
+timeout 8 cargo run -p minix4-kernel --target aarch64-unknown-none --release
 
 # Build kernel for x86_64
 cargo kernel-x86_64
@@ -69,3 +70,10 @@ See `docs/architecture.md` for the full system design. Key concepts:
 - IPC linked lists use `Option<ProcNr>` indices into static arrays, not raw pointers
 - Message types are defined in `kernel-shared` and shared across all crates
 - Assembly is confined to `.S` files (assembled via `cc` crate in `build.rs`); use `core::arch::asm!` only for single-instruction operations
+- Static mutable tables use `UnsafeCell<[T; N]>` inside a `#[repr(transparent)]` newtype with `unsafe impl Sync`; document the single-threaded-boot invariant in the `// SAFETY:` comment
+- Custom `Display` impls that must honor `{:<width$}` render through a stack buffer (`arrayvec::ArrayString<N>`) and call `f.pad(s)` — `write!(f, ...)` from inside `Display::fmt` ignores the outer width spec
+- Forward declarations intended for later slices (constants, fields, re-exports) get module-level `#![allow(dead_code)]` with a one-line comment naming the consuming slice
+
+## Documentation
+
+`docs/plan.md` tracks slice status with three markers: `◀ next` (unstarted), `◀ ready (branch ..., pending merge)` (implemented but unmerged), `✓ shipped (PR #N, merged YYYY-MM-DD)` (merged). Flip the previous slice forward and slide `◀ next` ahead as part of each slice's PR.
