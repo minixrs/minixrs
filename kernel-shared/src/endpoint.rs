@@ -7,7 +7,12 @@
 //!
 //! Mirrors MINIX 3 `include/minix/type.h` (`typedef int endpoint_t`) and
 //! `include/minix/endpoint.h` (the `_ENDPOINT(g, n)` / `_ENDPOINT_P(e)` /
-//! `_ENDPOINT_G(e)` macros).
+//! `_ENDPOINT_G(e)` macros), with one deliberate ABI deviation: MINIX 4
+//! uses sign-extension of the low `ENDPOINT_GEN_SHIFT` bits to recover
+//! negative task slots, rather than MINIX 3's `MAX_NR_TASKS` offset-bias
+//! trick. The consequence is that `make_endpoint(0, p) != p` for negative
+//! `p` — use `boot_endpoint(p)` explicitly when constructing an endpoint
+//! from a kernel-task `ProcNr` constant like `SYSTEM`.
 
 /// Kernel-assigned identifier for a process; encodes generation + proc_nr.
 pub type Endpoint = i32;
@@ -19,18 +24,29 @@ pub type ProcNr = i32;
 /// Generation counter — bumped when a process slot is reused.
 pub type GenNr = i32;
 
+/// Width of the proc-number field within an endpoint, in bits. Generation
+/// occupies the bits above this.
+pub const ENDPOINT_GEN_SHIFT: i32 = 15;
+
+/// Mask covering the proc-number field of an endpoint.
+pub const ENDPOINT_PROC_MASK: i32 = (1 << ENDPOINT_GEN_SHIFT) - 1;
+
+/// Highest positive proc-number representable at generation zero (one less
+/// than the sign-bit boundary of the proc field). Sentinel endpoints live
+/// just below this so they decode to gen 0 with proc-numbers well outside
+/// any plausible `NR_PROCS`. Mirrors MINIX 3's `_ENDPOINT_SLOT_TOP`.
+pub const ENDPOINT_SLOT_TOP: ProcNr = (1 << (ENDPOINT_GEN_SHIFT - 1)) - 1;
+
 /// Special endpoint matching any sender (used as the `src` argument to
-/// `RECEIVE`).
-pub const ANY: Endpoint = 0x7ace;
+/// `RECEIVE`). Always at generation zero.
+pub const ANY: Endpoint = make_endpoint(0, ENDPOINT_SLOT_TOP);
 
-/// Special endpoint referring to the calling process itself.
-pub const SELF: Endpoint = 0x8ace;
+/// Special endpoint meaning "no process". Always at generation zero.
+pub const NONE: Endpoint = make_endpoint(0, ENDPOINT_SLOT_TOP - 1);
 
-/// Special endpoint meaning "no process".
-pub const NONE: Endpoint = 0x6ace;
-
-const ENDPOINT_GEN_SHIFT: i32 = 15;
-const ENDPOINT_PROC_MASK: i32 = (1 << ENDPOINT_GEN_SHIFT) - 1;
+/// Special endpoint referring to the calling process itself. Always at
+/// generation zero.
+pub const SELF: Endpoint = make_endpoint(0, ENDPOINT_SLOT_TOP - 2);
 
 /// Encode `(generation, proc_nr)` into an endpoint.
 pub const fn make_endpoint(g: GenNr, p: ProcNr) -> Endpoint {
@@ -57,12 +73,35 @@ pub const fn endpoint_gen(e: Endpoint) -> GenNr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::com::NR_PROCS;
 
     #[test]
     fn special_endpoints_distinct() {
         assert_ne!(ANY, SELF);
         assert_ne!(ANY, NONE);
         assert_ne!(SELF, NONE);
+    }
+
+    #[test]
+    fn special_endpoints_have_generation_zero() {
+        // MINIX 3 invariant: ANY, NONE, SELF must decode to gen 0 so they
+        // can never collide with a real (gen, proc) endpoint.
+        for s in [ANY, NONE, SELF] {
+            assert_eq!(endpoint_gen(s), 0, "sentinel {s:#x} should be at gen 0");
+        }
+    }
+
+    #[test]
+    fn special_endpoints_outside_proc_range() {
+        // Sentinels must decode to proc-numbers well above any plausible
+        // NR_PROCS so a real gen-0 endpoint never aliases a sentinel.
+        for s in [ANY, NONE, SELF] {
+            let p = endpoint_proc(s);
+            assert!(
+                p >= NR_PROCS as ProcNr,
+                "sentinel {s:#x} decoded to proc {p}, inside NR_PROCS={NR_PROCS}"
+            );
+        }
     }
 
     #[test]
