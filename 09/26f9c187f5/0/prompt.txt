@@ -1,0 +1,5 @@
+Go ahead with slice 2.2 from @docs/plan.md
+
+---
+
+update plan doc
