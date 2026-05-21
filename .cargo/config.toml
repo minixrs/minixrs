@@ -16,5 +16,5 @@ rustflags = ["-C", "link-arg=-Tkernel/src/arch/x86_64/linker.ld"]
 
 # Aliases for common development commands
 [alias]
-kernel-aarch64 = "build -p kernel --target aarch64-unknown-none --release"
-kernel-x86_64 = "build -p kernel --target x86_64-unknown-none --release"
+kernel-aarch64 = "build -p minix4-kernel --target aarch64-unknown-none --release"
+kernel-x86_64 = "build -p minix4-kernel --target x86_64-unknown-none --release"
