@@ -1,0 +1,9 @@
+/review 3
+
+---
+
+Item 1 looking at the code we only have 256 processes.  That seems rather slim.  I think we could expland this up a larger number.
+
+---
+
+Yes roll this into item 1, go ahead and fix the 4 and 5 as well removing log that is not needed and forcing the alignment
