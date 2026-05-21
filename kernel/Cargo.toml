@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 minix4-kernel-shared = { path = "../kernel-shared" }
+arrayvec = { version = "0.7", default-features = false }
 
 [build-dependencies]
 cc = "1"
