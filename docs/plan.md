@@ -403,10 +403,14 @@ buildable, boots, and produces observable output. The Phase 2 milestone
 ("two processes exchange IPC messages") is satisfied at the end of Slice
 2.5; Slice 2.6 finishes the kernel-call surface needed by Phase 3.
 
-- **Slice 2.1** — `kernel-shared` foundation: `Message`, `Endpoint`,
-  IPC primitive numbers, kernel-call numbers, task and server endpoint
-  constants, MINIX errno values. Host-side unit tests; no kernel changes.
-- **Slice 2.2** — Process and privilege tables: `Proc`, `Priv`,
+- **Slice 2.1** ✓ shipped (PR #3, merged 2026-05-20) — `kernel-shared`
+  foundation: `Message` (104-byte, 8-aligned `repr(C)`), `Endpoint`
+  (generation-aware, 15-bit signed proc field, sentinels derived from
+  `ENDPOINT_SLOT_TOP`), IPC primitive numbers, kernel-call numbers,
+  task and server endpoint constants (renumbered contiguously; no
+  static `LOG` slot), MINIX errno values. `NR_PROCS = 1024`. 21
+  host-side unit tests; no kernel changes.
+- **Slice 2.2** ◀ next — Process and privilege tables: `Proc`, `Priv`,
   generation-aware endpoint math, RTS/MF flag bitfields, boot-time table
   init. Milestone: UART dumps the populated proc table.
 - **Slice 2.3** — aarch64 SVC entry + context switch (cooperative). EL0
