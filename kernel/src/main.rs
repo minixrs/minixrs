@@ -13,6 +13,8 @@ mod arch;
 #[cfg(target_os = "none")]
 mod panic;
 #[cfg(target_os = "none")]
+mod proc;
+#[cfg(target_os = "none")]
 mod uart;
 
 #[cfg(target_os = "none")]
@@ -41,6 +43,10 @@ extern "C" fn kmain() -> ! {
             "Limine base revision unsupported (loader is too old)"
         );
     }
+
+    proc::init();
+    let _ = writeln!(con);
+    let _ = proc::dump_tables(&mut con);
 
     arch::halt()
 }

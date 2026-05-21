@@ -1,7 +1,9 @@
+pub mod context;
 pub mod exception;
 pub mod limine;
 pub mod uart;
 
+pub use context::ArchRegisterFrame;
 pub use uart::Pl011 as Uart;
 pub use uart::{set_base as set_uart_base, PL011_PHYS_BASE};
 
