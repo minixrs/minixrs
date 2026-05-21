@@ -1,18 +1,24 @@
 //! Process counts and well-known endpoints.
 //!
-//! Matches MINIX 3 `include/minix/com.h`. Kernel tasks (`ASYNCM`, `IDLE`,
-//! `CLOCK`, `SYSTEM`, `HARDWARE`) live at negative process numbers; the
-//! system servers and other user-space processes live at non-negative
-//! process numbers in the order they boot.
+//! Kernel tasks (`ASYNCM`, `IDLE`, `CLOCK`, `SYSTEM`, `HARDWARE`) live at
+//! negative process numbers; system servers and other user-space processes
+//! live at non-negative process numbers in the order they boot. The set of
+//! kernel tasks follows MINIX 3 `include/minix/com.h`; the user-space proc
+//! numbering does not — see the boot-image section below.
 
-use crate::endpoint::{Endpoint, ProcNr, make_endpoint};
+use crate::endpoint::{ENDPOINT_SLOT_TOP, Endpoint, ProcNr, make_endpoint};
 
 /// Number of kernel tasks (slots with negative proc-numbers).
 pub const NR_TASKS: usize = 5;
 /// Number of user-process slots in the process table.
-pub const NR_PROCS: usize = 256;
+pub const NR_PROCS: usize = 1024;
 /// Number of slots in the privilege table — system (privileged) processes.
 pub const NR_SYS_PROCS: usize = 64;
+
+// NR_PROCS must not grow into the sentinel range (ANY/NONE/SELF live at
+// ENDPOINT_SLOT_TOP, -1, -2). Raising NR_PROCS past this bound would alias
+// a real endpoint with a sentinel.
+const _: () = assert!(NR_PROCS < (ENDPOINT_SLOT_TOP as usize) - 2);
 
 // ---------------------------------------------------------------------------
 // Kernel tasks — negative proc-numbers.
@@ -31,21 +37,23 @@ pub const HARDWARE: ProcNr = -1;
 
 // ---------------------------------------------------------------------------
 // Well-known user-space servers — generation 0 at boot.
-// Order mirrors the MINIX 3 boot image.
+//
+// MINIX 4 boot image: renumbered contiguously from 0. Differs from MINIX
+// 3, which scatters slots (no slot 7) and places SCHED at 4. LOG is not
+// statically slotted in MINIX 4 — RS spawns it on demand.
 // ---------------------------------------------------------------------------
 
 pub const PM_PROC_NR: ProcNr = 0;
 pub const VFS_PROC_NR: ProcNr = 1;
 pub const RS_PROC_NR: ProcNr = 2;
 pub const MEM_PROC_NR: ProcNr = 3;
-pub const LOG_PROC_NR: ProcNr = 4;
-pub const TTY_PROC_NR: ProcNr = 5;
-pub const DS_PROC_NR: ProcNr = 6;
-pub const MFS_PROC_NR: ProcNr = 7;
-pub const VM_PROC_NR: ProcNr = 8;
-pub const PFS_PROC_NR: ProcNr = 9;
-pub const SCHED_PROC_NR: ProcNr = 10;
-pub const INIT_PROC_NR: ProcNr = 11;
+pub const TTY_PROC_NR: ProcNr = 4;
+pub const DS_PROC_NR: ProcNr = 5;
+pub const MFS_PROC_NR: ProcNr = 6;
+pub const VM_PROC_NR: ProcNr = 7;
+pub const PFS_PROC_NR: ProcNr = 8;
+pub const SCHED_PROC_NR: ProcNr = 9;
+pub const INIT_PROC_NR: ProcNr = 10;
 
 /// One past the highest boot-server proc-number (`init` is the last slot
 /// allocated from the boot image).
@@ -75,9 +83,9 @@ mod tests {
     #[test]
     fn server_endpoints_distinct_and_nonnegative() {
         let servers = [
-            PM_PROC_NR, VFS_PROC_NR, RS_PROC_NR, MEM_PROC_NR, LOG_PROC_NR,
-            TTY_PROC_NR, DS_PROC_NR, MFS_PROC_NR, VM_PROC_NR, PFS_PROC_NR,
-            SCHED_PROC_NR, INIT_PROC_NR,
+            PM_PROC_NR, VFS_PROC_NR, RS_PROC_NR, MEM_PROC_NR, TTY_PROC_NR,
+            DS_PROC_NR, MFS_PROC_NR, VM_PROC_NR, PFS_PROC_NR, SCHED_PROC_NR,
+            INIT_PROC_NR,
         ];
         for &p in &servers {
             assert!(p >= 0, "server proc {p} should be non-negative");
