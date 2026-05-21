@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "b0c76983b830",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-2-proc-priv-tables",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "CLAUDE.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b0/c76983b830/0/metadata.json",
+      "transcript": "/b0/c76983b830/0/full.jsonl",
+      "content_hash": "/b0/c76983b830/0/content_hash.txt",
+      "prompt": "/b0/c76983b830/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 5084,
+    "cache_read_tokens": 1047298,
+    "output_tokens": 2089,
+    "api_call_count": 5
+  }
+}
