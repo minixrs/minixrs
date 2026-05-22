@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "8be6d1aec365",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-2-proc-priv-tables",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "kernel/src/proc/table.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8b/e6d1aec365/0/metadata.json",
+      "transcript": "/8b/e6d1aec365/0/full.jsonl",
+      "content_hash": "/8b/e6d1aec365/0/content_hash.txt",
+      "prompt": "/8b/e6d1aec365/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 35,
+    "cache_creation_tokens": 319330,
+    "cache_read_tokens": 838569,
+    "output_tokens": 14452,
+    "api_call_count": 15
+  }
+}
