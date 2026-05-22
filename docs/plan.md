@@ -410,8 +410,7 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   task and server endpoint constants (renumbered contiguously; no
   static `LOG` slot), MINIX errno values. `NR_PROCS = 1024`. 21
   host-side unit tests; no kernel changes.
-- **Slice 2.2** ◀ ready (branch `feature/phase-2-2-proc-priv-tables`,
-  pending merge) — `Proc` and `Priv` structs with kernel-internal
+- **Slice 2.2** ✓ shipped (PR #4, merged 2026-05-22) — `Proc` and `Priv` structs with kernel-internal
   `RTS_*` / `MF_*` / priv-flag / trap-mask constants in
   `kernel/src/proc/flags.rs`; static `PROC_TABLE` (1029 slots) and
   `PRIV_TABLE` (64 slots) under `UnsafeCell` + `unsafe impl Sync` with
