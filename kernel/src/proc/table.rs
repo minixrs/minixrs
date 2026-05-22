@@ -169,9 +169,9 @@ pub(crate) unsafe fn priv_table_ref() -> &'static [Priv; NR_SYS_PROCS] {
 
 /// Populate `PROC_TABLE` and `PRIV_TABLE` from `IMAGE`.
 ///
-/// Called once from `kmain` during boot. Idempotent in practice (re-running
-/// would overwrite the same slots with the same data), but slice 2.4's
-/// scheduler will assume one-shot init — do not call twice.
+/// Called exactly once from `kmain` during boot. Slice 2.4's scheduler will
+/// assume one-shot init; double-calling would clobber any RTS bits the
+/// scheduler has set since.
 pub fn init() {
     init_empty_slots();
     init_boot_image();
@@ -222,7 +222,9 @@ fn populate_priv(id: PrivId, entry: &BootEntry, n_active: u16) {
     if entry.trap_mask == SRV_T {
         // SRV_T privs can send to every active slot. Set bits [0, n_active).
         fill_bits(&mut pr.ipc_to, n_active as usize);
-        // SRV_T privs can issue every Phase-2 kernel call.
+        // SRV_T privs can issue every kernel call defined so far.
+        // TODO(slice 2.6): widen as new kernel calls land — this bound must
+        // track the highest `SYS_*` number, not the Phase-2 count.
         fill_bits(&mut pr.k_call_mask, NR_KERN_CALLS_PHASE2);
     }
     // Kernel-task slots leave ipc_to and k_call_mask zeroed.
