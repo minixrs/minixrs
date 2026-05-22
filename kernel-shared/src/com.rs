@@ -18,22 +18,22 @@ pub const NR_SYS_PROCS: usize = 64;
 // NR_PROCS must not grow into the sentinel range (ANY/NONE/SELF live at
 // ENDPOINT_SLOT_TOP, -1, -2). Raising NR_PROCS past this bound would alias
 // a real endpoint with a sentinel.
-const _: () = assert!(NR_PROCS < (ENDPOINT_SLOT_TOP as usize) - 2);
+const _: () = assert!(NR_PROCS < (ENDPOINT_SLOT_TOP.get() as usize) - 2);
 
 // ---------------------------------------------------------------------------
 // Kernel tasks — negative proc-numbers.
 // ---------------------------------------------------------------------------
 
 /// Asynchronous-message driver (kernel pseudo-task).
-pub const ASYNCM: ProcNr = -5;
+pub const ASYNCM: ProcNr = ProcNr::new(-5);
 /// Idle task (runs when nothing else is runnable).
-pub const IDLE: ProcNr = -4;
+pub const IDLE: ProcNr = ProcNr::new(-4);
 /// Clock task (kernel pseudo-task for timer-driven work).
-pub const CLOCK: ProcNr = -3;
+pub const CLOCK: ProcNr = ProcNr::new(-3);
 /// System task (handles `SYS_*` kernel calls).
-pub const SYSTEM: ProcNr = -2;
+pub const SYSTEM: ProcNr = ProcNr::new(-2);
 /// Hardware-interrupt pseudo-task (source endpoint for IRQ notifications).
-pub const HARDWARE: ProcNr = -1;
+pub const HARDWARE: ProcNr = ProcNr::new(-1);
 
 // ---------------------------------------------------------------------------
 // Well-known user-space servers — generation 0 at boot.
@@ -43,21 +43,21 @@ pub const HARDWARE: ProcNr = -1;
 // statically slotted in MINIX 4 — RS spawns it on demand.
 // ---------------------------------------------------------------------------
 
-pub const PM_PROC_NR: ProcNr = 0;
-pub const VFS_PROC_NR: ProcNr = 1;
-pub const RS_PROC_NR: ProcNr = 2;
-pub const MEM_PROC_NR: ProcNr = 3;
-pub const TTY_PROC_NR: ProcNr = 4;
-pub const DS_PROC_NR: ProcNr = 5;
-pub const MFS_PROC_NR: ProcNr = 6;
-pub const VM_PROC_NR: ProcNr = 7;
-pub const PFS_PROC_NR: ProcNr = 8;
-pub const SCHED_PROC_NR: ProcNr = 9;
-pub const INIT_PROC_NR: ProcNr = 10;
+pub const PM_PROC_NR: ProcNr = ProcNr::new(0);
+pub const VFS_PROC_NR: ProcNr = ProcNr::new(1);
+pub const RS_PROC_NR: ProcNr = ProcNr::new(2);
+pub const MEM_PROC_NR: ProcNr = ProcNr::new(3);
+pub const TTY_PROC_NR: ProcNr = ProcNr::new(4);
+pub const DS_PROC_NR: ProcNr = ProcNr::new(5);
+pub const MFS_PROC_NR: ProcNr = ProcNr::new(6);
+pub const VM_PROC_NR: ProcNr = ProcNr::new(7);
+pub const PFS_PROC_NR: ProcNr = ProcNr::new(8);
+pub const SCHED_PROC_NR: ProcNr = ProcNr::new(9);
+pub const INIT_PROC_NR: ProcNr = ProcNr::new(10);
 
 /// One past the highest boot-server proc-number (`init` is the last slot
 /// allocated from the boot image).
-pub const NR_BOOT_PROCS: usize = (INIT_PROC_NR as usize) + 1;
+pub const NR_BOOT_PROCS: usize = (INIT_PROC_NR.get() as usize) + 1;
 
 // Compile-time guarantees that the proc tables can hold every boot process.
 const _: () = assert!(NR_PROCS >= NR_BOOT_PROCS);
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn task_endpoints_have_negative_procs() {
         for p in [ASYNCM, IDLE, CLOCK, SYSTEM, HARDWARE] {
-            assert!(p < 0, "task proc {p} should be negative");
+            assert!(p.is_task(), "task proc {p} should be negative");
         }
     }
 
@@ -88,11 +88,11 @@ mod tests {
             INIT_PROC_NR,
         ];
         for &p in &servers {
-            assert!(p >= 0, "server proc {p} should be non-negative");
+            assert!(p.get() >= 0, "server proc {p} should be non-negative");
         }
         let mut seen = [false; NR_BOOT_PROCS];
         for &p in &servers {
-            let i = p as usize;
+            let i = p.get() as usize;
             assert!(!seen[i], "duplicate proc_nr {p}");
             seen[i] = true;
         }
@@ -109,9 +109,9 @@ mod tests {
 
     #[test]
     fn nr_boot_procs_covers_init() {
-        // `INIT_PROC_NR as usize` is constant so the comparison is also
+        // `INIT_PROC_NR.get() as usize` is constant so the comparison is also
         // checked statically via `const _: () = assert!(...)` below; this
         // test keeps the invariant visible at test-discovery time.
-        const { assert!(NR_BOOT_PROCS > INIT_PROC_NR as usize) };
+        const { assert!(NR_BOOT_PROCS > INIT_PROC_NR.get() as usize) };
     }
 }
