@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "42b4b5313d93",
+  "session_id": "e7787a64-dd0b-4f28-87b5-d677b196df4b",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-22T05:48:40.41455Z",
+  "branch": "feature/phase-2-2-proc-priv-tables",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/plan.md"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "9356bb36888f",
+  "checkpoint_transcript_start": 108,
+  "transcript_lines_at_start": 108,
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 16294,
+    "cache_read_tokens": 304510,
+    "output_tokens": 3173,
+    "api_call_count": 3
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-22T05:48:40.40622Z",
+    "agent_lines": 1,
+    "agent_removed": 2,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "total_lines_changed": 3,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
