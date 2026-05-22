@@ -220,7 +220,7 @@ Typed message accessors (e.g., `msg.as_vfs_read()`) replace MINIX 3's opaque `m1
 
 ```rust
 pub const NR_TASKS: usize = 5;     // ASYNCM, IDLE, CLOCK, SYSTEM, HARDWARE
-pub const NR_PROCS: usize = 256;
+pub const NR_PROCS: usize = 1024;
 
 pub struct Proc {
     pub regs: ArchRegisterFrame,
@@ -410,12 +410,24 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   task and server endpoint constants (renumbered contiguously; no
   static `LOG` slot), MINIX errno values. `NR_PROCS = 1024`. 21
   host-side unit tests; no kernel changes.
-- **Slice 2.2** ◀ next — Process and privilege tables: `Proc`, `Priv`,
-  generation-aware endpoint math, RTS/MF flag bitfields, boot-time table
-  init. Milestone: UART dumps the populated proc table.
-- **Slice 2.3** — aarch64 SVC entry + context switch (cooperative). EL0
-  stub task does `svc #0`, kernel dispatches a stub `do_ipc()`,
-  `switch_to_user(&proc)` returns control. No preemption yet.
+- **Slice 2.2** ✓ shipped (PR #4, merged 2026-05-22) — `Proc` and `Priv` structs with kernel-internal
+  `RTS_*` / `MF_*` / priv-flag / trap-mask constants in
+  `kernel/src/proc/flags.rs`; static `PROC_TABLE` (1029 slots) and
+  `PRIV_TABLE` (64 slots) under `UnsafeCell` + `unsafe impl Sync` with
+  documented single-threaded boot invariants; a 16-entry boot `IMAGE`
+  drives `proc::init()`, and `proc::dump_tables()` writes a tabular
+  UART view (5 kernel tasks runnable, 11 boot servers blocked on
+  `RTS_NO_PRIV`, contiguous priv-ids 0–15). `kernel-shared` migrated
+  `ProcNr` / `PrivId` / `SysId` from `i32` aliases to newtypes,
+  added `NR_SYS_CALLS = 32` and a new `sys_limits` module
+  (`NR_IO_RANGE`, `NR_IRQ`, `NR_MEM_RANGE`). `ArchRegisterFrame` stub
+  in `arch/aarch64/context.rs` ready for slice 2.3 to populate. 25
+  host-side tests pass (21 existing + 4 new newtype round-trips);
+  clean release build with no warnings.
+- **Slice 2.3** ◀ next — aarch64 SVC entry + context switch
+  (cooperative). EL0 stub task does `svc #0`, kernel dispatches a stub
+  `do_ipc()`, `switch_to_user(&proc)` returns control. No preemption
+  yet.
 - **Slice 2.4** — GICv3 + ARM generic timer + run queues. Two EL0 stub
   tasks print interleaved bursts proving timer-driven preemption.
 - **Slice 2.5** — IPC primitives (`mini_send`, `mini_receive`,

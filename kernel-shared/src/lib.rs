@@ -14,6 +14,7 @@ pub mod endpoint;
 pub mod error;
 pub mod ipc_const;
 pub mod message;
+pub mod sys_limits;
 
-pub use endpoint::{Endpoint, GenNr, ProcNr};
+pub use endpoint::{Endpoint, GenNr, PrivId, ProcNr, SysId};
 pub use message::Message;

@@ -27,6 +27,14 @@ pub const SYS_SETGRANT: i32 = KERNEL_CALL + 13;
 /// Number of kernel calls reserved for Phase 2.
 pub const NR_KERN_CALLS_PHASE2: usize = 14;
 
+/// Size of the privilege-table kernel-call mask, in bits. Sized as a single
+/// `u32` chunk (32 slots) to leave headroom past Phase 2's 14 calls while
+/// keeping the bitmap a single word per privilege slot.
+pub const NR_SYS_CALLS: usize = 32;
+
+const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS_PHASE2);
+const _: () = assert!(NR_SYS_CALLS % 32 == 0);
+
 #[cfg(test)]
 mod tests {
     use super::*;
