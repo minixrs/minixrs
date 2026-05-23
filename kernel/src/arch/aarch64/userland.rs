@@ -36,9 +36,10 @@ pub const USER_CODE_VA: u64 = 0x0040_0000; // 4 MiB
 /// Virtual address at which the EL0 stub's stack page is mapped.
 pub const USER_STACK_VA: u64 = 0x0080_0000; // 8 MiB
 
-/// First proc-table slot beyond the boot image (`NR_TASKS + NR_BOOT_PROCS =
-/// 5 + 11 = 16`, which corresponds to `ProcNr(11)`). Slice 2.6 will replace
-/// this ad-hoc occupant with a properly-loaded INIT.
+/// First proc-table slot beyond the boot image. Boot procs occupy
+/// `0..=INIT_PROC_NR` (i.e. `0..=10`), so `ProcNr(11)` is the first free
+/// user slot. Slice 2.6 will replace this ad-hoc occupant with a
+/// properly-loaded INIT.
 const STUB_PROC_NR: ProcNr = ProcNr::new(11);
 
 // ----- Static storage ------------------------------------------------------
@@ -85,10 +86,12 @@ unsafe extern "C" {
 /// page-table arena, user pages, or `PROC_TABLE[STUB_PROC_NR]` may exist
 /// concurrently.
 pub unsafe fn userland_bootstrap() -> &'static mut Proc {
-    // 1. Verify Limine left MAIR_EL1's index 0 as Normal WB. We rely on it
-    //    for both user pages; rewriting MAIR would silently retype any
-    //    kernel page that uses an index we change.
+    // 1. Verify Limine left MAIR_EL1's index 0 as Normal WB and that
+    //    TCR_EL1's TTBR0-side fields match what `activate_user_ttbr0`
+    //    expects. We never rewrite either register — these asserts are the
+    //    bootstrap's only guard against a Limine config drift.
     mmu::assert_mair_normal_wb();
+    mmu::assert_tcr_el1_ttbr0_ready();
 
     // 2. Resolve physical addresses for our static storage. The page tables
     //    and the user code/stack pages all live in the kernel image (`.bss`
