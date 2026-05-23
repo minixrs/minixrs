@@ -147,11 +147,37 @@ pub fn assert_mair_normal_wb() {
     );
 }
 
+/// Verify Limine programmed TCR_EL1's TTBR0-side walk structure the way our
+/// page-table math assumes: 48-bit VA (T0SZ=16) so the walk has 4 levels,
+/// and 4 KiB granule (TG0=0) so `pte_index` shifts by 12+9*… correctly.
+/// IRGN0/ORGN0/SH0 are perf-only on single-core slice 2.3 and are reported
+/// in the panic message but not enforced; `activate_user_ttbr0` leaves them
+/// as Limine set them.
+pub fn assert_tcr_el1_ttbr0_ready() {
+    let tcr: u64;
+    // SAFETY: TCR_EL1 is readable at EL1; no side effects.
+    unsafe {
+        asm!("mrs {0}, tcr_el1", out(reg) tcr, options(nomem, nostack, preserves_flags));
+    }
+
+    let t0sz = tcr & 0x3F;
+    let tg0 = (tcr >> 14) & 0x3;
+    let irgn0 = (tcr >> 8) & 0x3;
+    let orgn0 = (tcr >> 10) & 0x3;
+    let sh0 = (tcr >> 12) & 0x3;
+
+    assert!(
+        t0sz == 16 && tg0 == 0b00,
+        "TCR_EL1 = {tcr:#018x} (T0SZ={t0sz} TG0={tg0} IRGN0={irgn0} ORGN0={orgn0} SH0={sh0}); \
+         slice 2.3 requires T0SZ=16 (48-bit VA, 4-level walk) and TG0=0 (4 KiB granule)",
+    );
+}
+
 /// Install `root_pa` as TTBR0_EL1 and ensure TTBR0 walks are enabled.
 ///
-/// Limine has already programmed TCR_EL1 with T0SZ=16, TG0=4 KiB,
-/// IRGN0=ORGN0=WBWA, SH0=Inner (verified by the diagnostic print in kmain),
-/// so we only need to clear EPD0 if set. We deliberately read-modify-write
+/// `assert_tcr_el1_ttbr0_ready` has already confirmed that Limine programmed
+/// the structural TTBR0 fields (T0SZ=16, TG0=4 KiB) to match our walker, so
+/// here we only need to clear EPD0 if set. We deliberately read-modify-write
 /// just bit 7 — touching any other TCR field risks perturbing TTBR1, which
 /// Limine owns and whose translations the kernel is actively using.
 ///
@@ -191,12 +217,17 @@ pub unsafe fn activate_user_ttbr0(root_pa: u64) {
 ///
 /// SAFETY: `va..va+len` must be a valid mapped range readable at EL1.
 pub unsafe fn flush_icache_range(va: u64, len: usize) {
-    // Cache-line size: read CTR_EL0.DminLine to get the data-side line size
-    // in words (4 B). 0 means "default", but we always set it conservatively
-    // to 64 bytes on QEMU virt (cortex-a72 default).
-    const LINE_BYTES: u64 = 64;
+    // CTR_EL0.DminLine (bits 19:16) = log2 of the minimum D-cache line
+    // size in words; multiply by the 4 B word size to get bytes. QEMU virt
+    // reports 64 here; Apple Silicon reports 128.
+    let ctr: u64;
+    // SAFETY: CTR_EL0 is readable at EL1; no side effects.
+    unsafe {
+        asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+    }
+    let line_bytes = 4_u64 << ((ctr >> 16) & 0xF);
 
-    let mut p = va & !(LINE_BYTES - 1);
+    let mut p = va & !(line_bytes - 1);
     let end = va + len as u64;
     while p < end {
         // SAFETY: `dc cvau` / `ic ivau` are EL0-permissive cache ops on a
@@ -204,7 +235,7 @@ pub unsafe fn flush_icache_range(va: u64, len: usize) {
         unsafe {
             asm!("dc cvau, {0}", in(reg) p, options(nostack, preserves_flags));
         }
-        p += LINE_BYTES;
+        p += line_bytes;
     }
     // SAFETY: barrier + i-cache invalidation; no memory access.
     unsafe {

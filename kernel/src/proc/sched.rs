@@ -25,7 +25,6 @@ use crate::proc::table::proc_slot_mut;
 /// Currently-running process number. `i32::MIN` is the "no process running"
 /// sentinel — chosen because it can never collide with a real `ProcNr`
 /// (kernel tasks are `-5..=-1`, user processes are `0..NR_PROCS`).
-#[unsafe(no_mangle)]
 pub static CURRENT_PROC_NR: AtomicI32 = AtomicI32::new(i32::MIN);
 
 const NO_PROC: i32 = i32::MIN;
