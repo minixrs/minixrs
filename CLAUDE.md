@@ -34,8 +34,9 @@ The MINIX 3 source is available at https://github.com/Stichting-MINIX-Research-F
 # Build kernel for aarch64 (primary target)
 cargo kernel-aarch64
 
-# Boot in QEMU (cargo runner wires tools/qemu-run.sh); `timeout` lets
-# QEMU exit since the kernel halts in `wfe`.
+# Boot in QEMU (cargo runner wires tools/qemu-run.sh). The kernel runs
+# indefinitely once EL0 starts (slice 2.4+), so `timeout` is mandatory.
+# Redirect to a file when you need to grep tick output -- live tail loses lines.
 timeout 8 cargo run -p minix4-kernel --target aarch64-unknown-none --release
 
 # Build kernel for x86_64
@@ -70,6 +71,9 @@ See `docs/architecture.md` for the full system design. Key concepts:
 - IPC linked lists use `Option<ProcNr>` indices into static arrays, not raw pointers
 - Message types are defined in `kernel-shared` and shared across all crates
 - Assembly is confined to `.S` files (assembled via `cc` crate in `build.rs`); use `core::arch::asm!` only for single-instruction operations
+- New `.S` files must be added to `kernel/build.rs`'s `sources` array; offset blocks (`.equ REGS_*_OFFSET …`) are duplicated per-file since there is no cross-`.S` include
+- To end a `&mut` borrow before an `unsafe` call that re-borrows the same static, capture state into locals (bool / scalar) and rely on NLL — `drop(&mut x)` is a no-op and triggers a `dropping_references` warning
+- Run-queue admission is decoupled from boot: `IMAGE.runnable` marks IPC reachability; only `proc::sched::enqueue` puts a proc in the scheduler's run queue
 - Static mutable tables use `UnsafeCell<[T; N]>` inside a `#[repr(transparent)]` newtype with `unsafe impl Sync`; document the single-threaded-boot invariant in the `// SAFETY:` comment
 - Custom `Display` impls that must honor `{:<width$}` render through a stack buffer (`arrayvec::ArrayString<N>`) and call `f.pad(s)` — `write!(f, ...)` from inside `Display::fmt` ignores the outer width spec
 - Forward declarations intended for later slices (constants, fields, re-exports) get module-level `#![allow(dead_code)]` with a one-line comment naming the consuming slice

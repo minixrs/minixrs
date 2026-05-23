@@ -59,6 +59,12 @@ pub struct Proc {
     /// Message to deliver when we unblock (used with `MF_DELIVERMSG`).
     pub deliver_msg: Message,
 
+    // ----- Run-queue state -------------------------------------------------
+    /// Next process in the same priority-band run queue, or `None` if last.
+    /// Mirrors MINIX 3's `p_nextready` but as a [`ProcNr`] index per the
+    /// no-raw-pointers convention in `CLAUDE.md`.
+    pub next_ready: Option<ProcNr>,
+
     /// ASCII process name, NUL-padded; first 0 byte terminates.
     pub name: [u8; PROC_NAME_LEN],
 }
@@ -94,6 +100,7 @@ impl Proc {
             m_type: 0,
             payload: [0; 96],
         },
+        next_ready: None,
         name: [0; PROC_NAME_LEN],
     };
 }
