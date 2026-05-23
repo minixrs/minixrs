@@ -63,7 +63,7 @@ cp "$ROOT/tools/limine.conf" "$ESP/limine.conf"
 cp "$KERNEL" "$ESP/boot/kernel"
 
 exec qemu-system-aarch64 \
-    -M virt -cpu cortex-a72 -m 256M \
+    -M "virt,gic-version=3" -cpu cortex-a72 -m 256M \
     -bios "$FIRMWARE" \
     -drive "file=fat:rw:fat-type=32:$ESP,format=raw,if=virtio" \
     -display none \
