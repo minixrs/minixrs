@@ -1,7 +1,10 @@
 pub mod context;
 pub mod exception;
+pub mod gic;
+pub mod irq;
 pub mod limine;
 pub mod mmu;
+pub mod timer;
 pub mod uart;
 pub mod userland;
 

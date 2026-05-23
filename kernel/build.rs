@@ -22,6 +22,7 @@ fn main() {
                 "src/arch/aarch64/entry.S",
                 "src/arch/aarch64/vectors.S",
                 "src/arch/aarch64/trap.S",
+                "src/arch/aarch64/interrupt.S",
                 "src/arch/aarch64/user_stub.S",
             ];
             for src in &sources {
