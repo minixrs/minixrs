@@ -1,0 +1,1 @@
+in @kernel/src/main.rs there is config logic to only do kmain for target_os none and a not config os main. It seems that if we put the default of @.cargo/config.toml build to a none os triple we would not need to include this extra logic
