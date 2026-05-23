@@ -1,0 +1,9 @@
+work on slice 2.4 of phase 2 in @docs/plan.md
+
+---
+
+/claude-md-management:revise-claude-md
+
+---
+
+apply both
