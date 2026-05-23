@@ -11,6 +11,8 @@
 #[cfg(target_os = "none")]
 mod arch;
 #[cfg(target_os = "none")]
+mod ipc;
+#[cfg(target_os = "none")]
 mod panic;
 #[cfg(target_os = "none")]
 mod proc;
@@ -48,7 +50,22 @@ extern "C" fn kmain() -> ! {
     let _ = writeln!(con);
     let _ = proc::dump_tables(&mut con);
 
-    arch::halt()
+    // Slice 2.3: hand off to the first EL0 task. `userland_bootstrap`
+    // builds the TTBR0 mappings, copies the EL0 stub into its code page,
+    // and returns the populated process slot. `switch_to_user` then erets
+    // into EL0 and never returns — the SVC handler tail-calls
+    // `el1_return_to_user` after each `do_ipc`, so control stays in EL0.
+    let _ = writeln!(con, "\nentering EL0 stub task...");
+
+    // DIAG slice 2.3: print SP_EL1 / TCR_EL1 / TTBR1_EL1 so we know
+    // whether our TTBR0 setup is about to invalidate the kernel stack.
+    // SAFETY: single-threaded boot context; no other reference into the
+    // page-table arena, user pages, or the stub proc slot exists.
+    let stub = unsafe { arch::userland_bootstrap() };
+    // SAFETY: `stub` was just populated with a sane EL0 entry state;
+    // TTBR0 was activated inside `userland_bootstrap`. DAIF is still
+    // masked from boot, which matches the SPSR we eret into.
+    unsafe { proc::sched::switch_to_user(stub) }
 }
 
 #[cfg(not(target_os = "none"))]
