@@ -9,6 +9,7 @@ pub mod dump;
 pub mod flags;
 pub mod priv_struct;
 pub mod proc_struct;
+pub mod sched;
 pub mod table;
 
 // Re-exports for later slices: `Proc`, `Priv`, `IoRange`, and `MemRange` are

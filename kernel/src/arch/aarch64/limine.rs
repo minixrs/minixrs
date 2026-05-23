@@ -1,3 +1,8 @@
+// `kernel_physical_base` / `kernel_virtual_base` are convenience accessors on
+// the kernel-address response; slice 2.3 only consumes `kernel_va_to_pa`,
+// but the bases are part of the API surface Phase 3's VM server will need.
+#![allow(dead_code)]
+
 //! Rust-side Limine boot protocol requests for aarch64.
 //!
 //! Magic IDs are copied from `external/limine/dist/limine.h`. Each request
@@ -167,3 +172,70 @@ static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest {
     response: AtomicU64::new(0),
     stack_size: 64 * 1024,
 };
+
+// --- Kernel address ----------------------------------------------------
+//
+// Limine returns the (physical_base, virtual_base) pair where it loaded the
+// kernel image. Slice 2.3 needs this to derive PAs for kernel-image
+// addresses (e.g. the static page-table arena that lives in `.bss` and the
+// `_user_stub_start` symbol in `.rodata`) — we can't go through HHDM for
+// those, because the kernel image is mapped via TTBR1, not via HHDM.
+
+#[repr(C)]
+struct KernelAddressResponse {
+    revision: u64,
+    physical_base: u64,
+    virtual_base: u64,
+}
+
+#[repr(C)]
+struct KernelAddressRequest {
+    id: [u64; 4],
+    revision: u64,
+    response: AtomicU64,
+}
+
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static KERNEL_ADDRESS_REQUEST: KernelAddressRequest = KernelAddressRequest {
+    id: [
+        0xc7b1dd30df4c8b88,
+        0x0a82e883a194f07b,
+        0x71ba76863cc55f63,
+        0xb2644a48c516a487,
+    ],
+    revision: 0,
+    response: AtomicU64::new(0),
+};
+
+fn kernel_address_response() -> Option<&'static KernelAddressResponse> {
+    let p = KERNEL_ADDRESS_REQUEST.response.load(Ordering::Relaxed)
+        as *const KernelAddressResponse;
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: Limine filled `response` with a pointer to a valid
+    // KernelAddressResponse in our address space and does not mutate it
+    // afterward; the struct is `'static`.
+    Some(unsafe { &*p })
+}
+
+/// Physical base of the kernel image, as reported by Limine.
+pub fn kernel_physical_base() -> Option<u64> {
+    kernel_address_response().map(|r| r.physical_base)
+}
+
+/// Virtual base of the kernel image, as reported by Limine.
+pub fn kernel_virtual_base() -> Option<u64> {
+    kernel_address_response().map(|r| r.virtual_base)
+}
+
+/// Translate a kernel-image virtual address to its physical address.
+///
+/// Only valid for VAs that lie inside the kernel ELF image (`.text`,
+/// `.rodata`, `.data`, `.bss`). Other VAs (HHDM-mapped device memory,
+/// future user-space mappings) require their own translation.
+pub fn kernel_va_to_pa(va: u64) -> Option<u64> {
+    let r = kernel_address_response()?;
+    Some(va.wrapping_sub(r.virtual_base).wrapping_add(r.physical_base))
+}
