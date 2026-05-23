@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "35add150d9b7",
+  "session_id": "fde3ccc3-55bf-41b9-b382-af63f597b839",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-23T06:27:22.975141Z",
+  "branch": "feature/phase-2-4-gicv3-timer-runqueues",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/plan.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "51fa2b362467",
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 89355,
+    "cache_read_tokens": 199657,
+    "output_tokens": 11685,
+    "api_call_count": 6
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-23T06:27:22.970828Z",
+    "agent_lines": 18,
+    "agent_removed": 4,
+    "human_added": 943,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 962,
+    "total_lines_changed": 1088,
+    "agent_percentage": 2.0220588235294117,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 1,
+      "user_lines_removed": 1,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "docs/plan.md": 1
+      },
+      "user_removed_per_file": {
+        "docs/plan.md": 1
+      }
+    }
+  ]
+}
