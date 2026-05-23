@@ -68,3 +68,24 @@ extern "C" fn exception_entry(frame: &ExceptionFrame, kind: u64) -> ! {
         frame.esr_el1
     );
 }
+
+/// Diagnose-and-panic helper for EL0 sync exceptions that aren't `SVC`.
+///
+/// `trap.S` calls this from vector slot 8 when ESR_EL1.EC ≠ 0x15 (SVC64).
+/// Slice 2.3 doesn't expect any other EL0 sync exception in the happy path,
+/// so we treat them as fatal — same policy as slice 2.2's blanket
+/// `exception_entry`.
+#[unsafe(no_mangle)]
+extern "C" fn el0_sync_unexpected(esr: u64, elr: u64, far: u64) -> ! {
+    let mut uart = Pl011::new();
+    let ec = (esr >> 26) & 0x3F;
+    let iss = esr & 0xFF_FFFF;
+    let _ = writeln!(uart);
+    let _ = writeln!(uart, "!!! unexpected EL0 sync exception (not SVC)");
+    let _ = writeln!(
+        uart,
+        "    ESR_EL1  = {esr:#018x}  (EC = {ec:#04x}, ISS = {iss:#08x})",
+    );
+    let _ = writeln!(uart, "    ELR_EL1  = {elr:#018x}  FAR_EL1  = {far:#018x}");
+    panic!("EL0 sync exception: EC={ec:#x} ESR_EL1={esr:#x}");
+}

@@ -83,8 +83,18 @@ _vector_table:
     .balign 0x80
     EXC_ENTRY el1h_serror,  7
     // Lower EL using AArch64
+    //
+    // Slot 8 (synchronous EL0 trap) is the SVC entry point — slice 2.3
+    // wires it to `el0_64_sync_entry` in `trap.S` instead of the generic
+    // panic macro so EL0 IPC traps land in the SVC handler rather than
+    // dumping registers and crashing. The .balign before the next entry
+    // keeps the per-vector 128-byte spacing intact.
     .balign 0x80
-    EXC_ENTRY el0_64_sync,    8
+    .global el0_64_sync
+    .type el0_64_sync, %function
+el0_64_sync:
+    b       el0_64_sync_entry
+    .size el0_64_sync, . - el0_64_sync
     .balign 0x80
     EXC_ENTRY el0_64_irq,     9
     .balign 0x80

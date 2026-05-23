@@ -1,14 +1,20 @@
+// REGS_*_OFFSET constants are the canonical source for the mirrored `.equ`
+// directives in trap.S; they're consumed by assembly, not by Rust callers,
+// so the dead-code lint would otherwise fire. The size + align asserts at
+// the bottom of this file are the active guards.
+#![allow(dead_code)]
+
 //! Process register frame — saved on entry to EL1 and restored on `eret`.
 //!
-//! Slice 2.2 defines the layout; slice 2.3 wires up the SVC entry path that
+//! Slice 2.2 defined the layout; slice 2.3 wires up the SVC entry path that
 //! actually populates and restores it. The field order matches what an EL0
-//! → EL1 trap will need to save (general-purpose registers, then the three
-//! special EL1 system registers). Fields are `pub` so the trap stub can
-//! access them by name from assembly via `offset_of!` once it exists.
+//! → EL1 trap saves (general-purpose registers, then SP_EL0 and the two EL1
+//! system registers that carry the return state). Field offsets are mirrored
+//! into `trap.S` via `.equ` directives; the `assert!(size_of == 272)` canary
+//! below catches accidental drift.
 
 /// Saved register state for a user-mode process, captured at EL1 exception
-/// entry. Layout mirrors what `vectors.S` will eventually push on entry to
-/// the SVC handler.
+/// entry. Layout matches the load/store sequence in `trap.S`.
 #[repr(C, align(16))]
 #[derive(Copy, Clone, Debug)]
 pub struct ArchRegisterFrame {
@@ -31,3 +37,21 @@ impl ArchRegisterFrame {
         spsr_el1: 0,
     };
 }
+
+// ----- Offsets mirrored into trap.S -----------------------------------------
+//
+// trap.S declares matching `.equ REGS_*_OFFSET, …` lines. If you change the
+// layout, update both sides; the `size_of` assert below catches drift in
+// the trailing fields.
+
+/// Offset of `x[0]` within [`ArchRegisterFrame`].
+pub const REGS_X_OFFSET: usize = 0;
+/// Offset of `sp_el0` within [`ArchRegisterFrame`].
+pub const REGS_SP_EL0_OFFSET: usize = 31 * 8;
+/// Offset of `elr_el1` within [`ArchRegisterFrame`].
+pub const REGS_ELR_OFFSET: usize = 31 * 8 + 8;
+/// Offset of `spsr_el1` within [`ArchRegisterFrame`].
+pub const REGS_SPSR_OFFSET: usize = 31 * 8 + 16;
+
+const _: () = assert!(core::mem::size_of::<ArchRegisterFrame>() == 32 * 8 + 16);
+const _: () = assert!(core::mem::align_of::<ArchRegisterFrame>() == 16);
