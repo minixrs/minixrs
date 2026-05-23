@@ -425,7 +425,7 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   host-side tests pass (21 existing + 4 new newtype round-trips);
   clean release build with no warnings.
 - **Slice 2.3** ✓ shipped (PR #5, merged 2026-05-22) — aarch64 SVC entry
-  + cooperative context switch. `entry.S`
+  cooperative context switch. `entry.S`
   promotes the kernel from Limine's EL1t to EL1h on a primed SP_EL1
   (`mov x9, sp; msr SPSel, #1; mov sp, x9` — the only sequence that
   worked on QEMU virt / Cortex-A72; a bare `msr sp_el1, xN` from EL1t
@@ -441,10 +441,25 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   `frame.x[0]`. `proc::sched::switch_to_user` wraps the eret. Verified
   in QEMU: `do_ipc[N]: call_nr=3 src_dst=32766 msg=0x0...` repeats
   ~16K times per second.
-- **Slice 2.4** ◀ next — GICv3 + ARM generic timer + run queues. Two
-  EL0 stub tasks print interleaved bursts proving timer-driven
-  preemption.
-- **Slice 2.5** — IPC primitives (`mini_send`, `mini_receive`,
+- **Slice 2.4** ◀ ready (branch `feature/phase-2-4-gicv3-timer-runqueues`,
+  pending merge) — GICv3 + ARM generic timer + run queues. New
+  `arch/aarch64/{gic,timer,irq}.rs` + `interrupt.S` bring up GICD/GICR
+  (QEMU virt cortex-a72, `-machine virt,gic-version=3`), enable PPI 27
+  (EL1 virtual timer) at 100 Hz, and route the IRQ through vector slot
+  9 → `el0_64_irq_entry` (mirrors slice 2.3's slot-8 treatment) →
+  `do_irq` → ICC_IAR1_EL1 ack / `clock::tick` / ICC_EOIR1_EL1. New
+  `proc::sched` adds priority-banded FIFO run queues (`enqueue`,
+  `dequeue`, `pick_proc`, `reschedule`, `run`) chained through
+  `Proc::next_ready: Option<ProcNr>`. New `kernel/src/clock.rs` owns
+  the per-tick handler — prints `current_proc.name[0]` to PL011, then
+  decrements `quantum_left` and triggers `reschedule` on
+  `RTS_NO_QUANTUM`. `userland_bootstrap` now stages two EL0 stubs (A
+  and B at `0x40_0000`/`0x41_0000` sharing one code page, distinct
+  stacks at `0x80_0000`/`0x81_0000`); SPSR drops to `0x340` so IRQs
+  are unmasked at EL0. Verified in QEMU: 171 A ticks vs 170 B ticks
+  over ~3.4 s, clean `AAAAA BBBBB AAAAA …` 5-per-quantum bursts with
+  `do_ipc[N]` SVC traces interleaved (proves SVC + IRQ paths coexist).
+- **Slice 2.5** ◀ next — IPC primitives (`mini_send`, `mini_receive`,
   `mini_notify`, `mini_senda`, `mini_sendnb`, `deadlock_check`). Two
   tasks ping-pong messages. **This is the Phase 2 milestone.**
 - **Slice 2.6** — Kernel-call dispatch and the minimum `SYS_*` set

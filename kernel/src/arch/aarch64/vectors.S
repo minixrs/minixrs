@@ -95,8 +95,15 @@ _vector_table:
 el0_64_sync:
     b       el0_64_sync_entry
     .size el0_64_sync, . - el0_64_sync
+    // Slot 9 (EL0 AArch64 IRQ) — slice 2.4 wires it to `el0_64_irq_entry`
+    // in `interrupt.S`, same idiom as slot 8 above. The IRQ path is the
+    // GICv3 + virtual-timer preemption tick.
     .balign 0x80
-    EXC_ENTRY el0_64_irq,     9
+    .global el0_64_irq
+    .type el0_64_irq, %function
+el0_64_irq:
+    b       el0_64_irq_entry
+    .size el0_64_irq, . - el0_64_irq
     .balign 0x80
     EXC_ENTRY el0_64_fiq,    10
     .balign 0x80
