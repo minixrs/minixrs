@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "b627578f8a93",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-3-el0-svc-entry",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/plan.md",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/context.rs",
+    "kernel/src/arch/aarch64/entry.S",
+    "kernel/src/arch/aarch64/exception.rs",
+    "kernel/src/arch/aarch64/limine.rs",
+    "kernel/src/arch/aarch64/mmu.rs",
+    "kernel/src/arch/aarch64/mod.rs",
+    "kernel/src/arch/aarch64/trap.S",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/arch/aarch64/vectors.S",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/main.rs",
+    "kernel/src/proc/mod.rs",
+    "kernel/src/proc/sched.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b6/27578f8a93/0/metadata.json",
+      "transcript": "/b6/27578f8a93/0/full.jsonl",
+      "content_hash": "/b6/27578f8a93/0/content_hash.txt",
+      "prompt": "/b6/27578f8a93/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 174,
+    "cache_creation_tokens": 1518353,
+    "cache_read_tokens": 34419764,
+    "output_tokens": 211863,
+    "api_call_count": 146
+  }
+}
