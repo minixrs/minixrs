@@ -18,7 +18,12 @@ fn main() {
 
     match arch.as_str() {
         "aarch64" => {
-            let sources = ["src/arch/aarch64/entry.S", "src/arch/aarch64/vectors.S"];
+            let sources = [
+                "src/arch/aarch64/entry.S",
+                "src/arch/aarch64/vectors.S",
+                "src/arch/aarch64/trap.S",
+                "src/arch/aarch64/user_stub.S",
+            ];
             for src in &sources {
                 println!("cargo:rerun-if-changed={src}");
                 let stem = std::path::Path::new(src)
