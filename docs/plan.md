@@ -424,8 +424,8 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   in `arch/aarch64/context.rs` ready for slice 2.3 to populate. 25
   host-side tests pass (21 existing + 4 new newtype round-trips);
   clean release build with no warnings.
-- **Slice 2.3** ◀ ready (branch feature/phase-2-3-el0-svc-entry, pending
-  merge) — aarch64 SVC entry + cooperative context switch. `entry.S`
+- **Slice 2.3** ✓ shipped (PR #5, merged 2026-05-22) — aarch64 SVC entry
+  + cooperative context switch. `entry.S`
   promotes the kernel from Limine's EL1t to EL1h on a primed SP_EL1
   (`mov x9, sp; msr SPSel, #1; mov sp, x9` — the only sequence that
   worked on QEMU virt / Cortex-A72; a bare `msr sp_el1, xN` from EL1t
