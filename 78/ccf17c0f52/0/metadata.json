@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "78ccf17c0f52",
+  "session_id": "bc6b951a-9d6d-4605-bedd-58f1d053e828",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-24T02:33:36.154713Z",
+  "branch": "feature/phase-2-5-ipc-primitives",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "CLAUDE.md"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "dd06c21ee554",
+  "checkpoint_transcript_start": 480,
+  "transcript_lines_at_start": 480,
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 6675,
+    "cache_read_tokens": 1893672,
+    "output_tokens": 4476,
+    "api_call_count": 6
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-24T02:33:36.132439Z",
+    "agent_lines": 1,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "total_lines_changed": 1,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
