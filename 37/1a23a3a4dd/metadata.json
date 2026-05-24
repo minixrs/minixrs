@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "371a23a3a4dd",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-5-ipc-primitives",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "kernel/src/ipc/deadlock.rs",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/ipc/notify.rs",
+    "kernel/src/ipc/receive.rs",
+    "kernel/src/ipc/send.rs",
+    "kernel/src/ipc/senda.rs",
+    "kernel/src/proc/sched.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/37/1a23a3a4dd/0/metadata.json",
+      "transcript": "/37/1a23a3a4dd/0/full.jsonl",
+      "content_hash": "/37/1a23a3a4dd/0/content_hash.txt",
+      "prompt": "/37/1a23a3a4dd/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 66,
+    "cache_creation_tokens": 180501,
+    "cache_read_tokens": 4196768,
+    "output_tokens": 38090,
+    "api_call_count": 36
+  }
+}
