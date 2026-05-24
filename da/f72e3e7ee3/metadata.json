@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "daf72e3e7ee3",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-6-kernel-call-dispatch",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/main.rs",
+    "kernel/src/system/do_getinfo.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/da/f72e3e7ee3/0/metadata.json",
+      "transcript": "/da/f72e3e7ee3/0/full.jsonl",
+      "content_hash": "/da/f72e3e7ee3/0/content_hash.txt",
+      "prompt": "/da/f72e3e7ee3/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 151,
+    "cache_creation_tokens": 400437,
+    "cache_read_tokens": 15154044,
+    "output_tokens": 128605,
+    "api_call_count": 79
+  }
+}
