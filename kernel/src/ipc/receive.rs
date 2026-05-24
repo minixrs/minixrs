@@ -115,6 +115,10 @@ fn take_pending_notification(
     let pending_snapshot: [u32; IPC_MAP_CHUNKS] =
         priv_table[caller_priv_idx].notify_pending;
 
+    // TODO(slice 2.6+): when src_e != ANY, resolve priv_id directly
+    // (endpoint → proc_index → priv_id) and test that single bit, rather
+    // than scanning the whole bitmap. Current map is 64 bits so the walk
+    // is fine, but cost grows with NR_SYS_PROCS.
     for chunk_idx in 0..pending_snapshot.len() {
         let mut chunk = pending_snapshot[chunk_idx];
         while chunk != 0 {

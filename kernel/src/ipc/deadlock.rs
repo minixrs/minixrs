@@ -12,7 +12,6 @@ use core::sync::atomic::Ordering;
 
 use minix4_kernel_shared::ProcNr;
 use minix4_kernel_shared::endpoint::{Endpoint, endpoint_proc};
-use minix4_kernel_shared::ipc_const::SEND;
 
 use crate::proc::Proc;
 use crate::proc::flags::{RTS_RECEIVING, RTS_SENDING};
@@ -90,7 +89,3 @@ pub fn deadlock_check(
         cur_e = next_e;
     }
 }
-
-// Silence unused-import warnings when no consumer has been hooked up yet.
-#[allow(dead_code)]
-const _: i32 = SEND;

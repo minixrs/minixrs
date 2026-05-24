@@ -23,9 +23,17 @@ use crate::proc::{Priv, Proc, sched};
 
 /// Set bit `id` in a sysproc-indexed bitmap (the same encoding MINIX 3
 /// uses for `s_ipc_to`, `s_notify_pending`, `s_asyn_pending`).
+///
+/// Out-of-range ids are silently ignored — matches the symmetric
+/// behavior of [`get_sys_bit`] and keeps the kernel from panicking on a
+/// caller bug. Today every caller passes an in-range `PrivId`, so this
+/// is pure hardening.
 #[inline]
 fn set_sys_bit(map: &mut [u32], id: PrivId) {
     let n = id.as_usize();
+    if n / 32 >= map.len() {
+        return;
+    }
     map[n / 32] |= 1 << (n % 32);
 }
 
@@ -69,6 +77,9 @@ pub fn mini_notify(
     caller_nr: minix4_kernel_shared::ProcNr,
     dst_e: Endpoint,
 ) -> i32 {
+    // TODO(phase 3+): okendpt-style (gen, slot) validation — stale
+    // endpoints after slot recycle should return EDEADSRCDST. Phase 2
+    // has no slot recycling, so `endpoint_proc` alone is sufficient.
     let dst_nr = endpoint_proc(dst_e);
     let Some(dst_idx) = proc_index(dst_nr) else {
         return EBADSRCDST;
