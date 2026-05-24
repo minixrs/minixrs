@@ -1,0 +1,59 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "371a23a3a4dd",
+  "session_id": "50053f68-72b2-4eaf-a27d-cd0805fa8d02",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-24T04:31:17.203245Z",
+  "branch": "feature/phase-2-5-ipc-primitives",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "kernel/src/ipc/deadlock.rs",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/ipc/notify.rs",
+    "kernel/src/ipc/receive.rs",
+    "kernel/src/ipc/send.rs",
+    "kernel/src/ipc/senda.rs",
+    "kernel/src/proc/sched.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "17bcf2baddc1",
+  "token_usage": {
+    "input_tokens": 66,
+    "cache_creation_tokens": 180501,
+    "cache_read_tokens": 4196768,
+    "output_tokens": 38090,
+    "api_call_count": 36
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-24T04:31:17.190936Z",
+    "agent_lines": 124,
+    "agent_removed": 50,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 124,
+    "total_lines_changed": 174,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 124,
+      "agent_lines_removed": 50
+    }
+  ]
+}
