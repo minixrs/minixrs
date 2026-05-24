@@ -27,11 +27,6 @@ mod senda;
 // SENDREC fast path can read/write the request and reply without each
 // caller dragging in `ipc::message` paths directly.
 pub(crate) use message::{copy_msg_from_user, copy_msg_to_user};
-// `get_sys_bit` — shared with `crate::system` so the SYSTEM fast path
-// applies the same `ipc_to` permission check that `mini_send` does
-// (send.rs:59), keeping the trust model identical regardless of which
-// path delivers the message.
-pub(crate) use notify::get_sys_bit;
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};

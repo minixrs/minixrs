@@ -33,7 +33,8 @@ use minix4_kernel_shared::endpoint::Endpoint;
 use minix4_kernel_shared::error::{EBADREQUEST, ECALLDENIED, OK};
 use minix4_kernel_shared::message::Message;
 
-use crate::ipc::{copy_msg_from_user, copy_msg_to_user, get_sys_bit};
+use crate::ipc::{copy_msg_from_user, copy_msg_to_user};
+use crate::proc::bitmap::{get_call_bit, get_sys_bit};
 use crate::proc::table::{N_PROC_SLOTS, proc_index};
 use crate::proc::{Priv, Proc};
 use crate::uart::Uart;
@@ -67,23 +68,24 @@ pub fn kernel_call_sendrec(
     caller_nr: ProcNr,
     user_msg_va: u64,
 ) -> i32 {
-    let Some(caller_idx) = proc_index(caller_nr) else {
-        return ECALLDENIED;
-    };
-    let Some(caller_priv_id) = proc_table[caller_idx].priv_id else {
-        return ECALLDENIED;
-    };
+    // Kernel invariants: any proc that reached the SVC handler has a slot
+    // and a priv_id installed (proc::init or userland_bootstrap), and
+    // SYSTEM is populated by proc::init. A None here is a structural bug
+    // in those bootstrap paths, not a user-recoverable error — panic at
+    // the call site rather than mask it behind ECALLDENIED.
+    let caller_idx = proc_index(caller_nr).expect("caller in proc table");
+    let caller_priv_id = proc_table[caller_idx]
+        .priv_id
+        .expect("caller priv populated");
+    let system_idx = proc_index(SYSTEM).expect("SYSTEM in proc table");
+    let system_priv_id = proc_table[system_idx]
+        .priv_id
+        .expect("SYSTEM priv populated by proc::init");
 
     // Apply the same ipc_to permission check that `mini_send` does
     // (`ipc/send.rs:59`) — the SYSTEM endpoint isn't a special trust
     // boundary, just a routing shortcut, so a caller without SYSTEM in its
     // ipc_to bitmap must still be denied here.
-    let Some(system_idx) = proc_index(SYSTEM) else {
-        return ECALLDENIED;
-    };
-    let Some(system_priv_id) = proc_table[system_idx].priv_id else {
-        return ECALLDENIED;
-    };
     if !get_sys_bit(
         &priv_table[caller_priv_id.as_usize()].ipc_to,
         system_priv_id,
@@ -145,8 +147,7 @@ fn kernel_call_dispatch(
     }
     let call_idx = call_idx as usize;
 
-    let chunk = caller_priv.k_call_mask[call_idx / 32];
-    if chunk & (1u32 << (call_idx % 32)) == 0 {
+    if !get_call_bit(&caller_priv.k_call_mask, call_idx) {
         return ECALLDENIED;
     }
 

@@ -34,6 +34,7 @@ use crate::arch::aarch64::mmu::{
     self, ATTR_IDX_NORMAL, PAGE_SIZE, PTE_AF, PTE_AP_RO_EL0, PTE_AP_RW_EL0, PTE_PXN,
     PTE_SH_INNER, PTE_UXN, PageTable, pte_attr_idx,
 };
+use crate::proc::bitmap::{set_call_bit, set_sys_bit};
 use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
 use crate::proc::table::{priv_slot_mut, proc_index, proc_slot_mut, proc_table_ref};
@@ -372,11 +373,9 @@ unsafe fn install_stub_c_priv() {
     pr.flags = SYS_PROC | BILLABLE | PREEMPTIBLE;
     pr.trap_mask = USR_T;
     pr.ipc_to.fill(0);
-    let sys = system_priv_id.as_usize();
-    pr.ipc_to[sys / 32] |= 1u32 << (sys % 32);
+    set_sys_bit(&mut pr.ipc_to, system_priv_id);
     pr.k_call_mask.fill(0);
-    let call_bit = (SYS_GETINFO - KERNEL_CALL) as usize;
-    pr.k_call_mask[call_bit / 32] |= 1u32 << (call_bit % 32);
+    set_call_bit(&mut pr.k_call_mask, (SYS_GETINFO - KERNEL_CALL) as usize);
     pr.notify_pending.fill(0);
     pr.asyn_pending.fill(0);
     pr.sig_mgr = boot_endpoint(RS_PROC_NR);
@@ -396,8 +395,7 @@ unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId)
     pr.flags = SYS_PROC | BILLABLE | PREEMPTIBLE;
     pr.trap_mask = SRV_T;
     pr.ipc_to.fill(0);
-    let peer = peer_priv_id.as_usize();
-    pr.ipc_to[peer / 32] |= 1u32 << (peer % 32);
+    set_sys_bit(&mut pr.ipc_to, peer_priv_id);
     pr.k_call_mask.fill(0);
     pr.notify_pending.fill(0);
     pr.asyn_pending.fill(0);
