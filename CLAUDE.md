@@ -81,6 +81,7 @@ See `docs/architecture.md` for the full system design. Key concepts:
 - Every EL1 → EL0 transition (SVC tail via `el1_svc_tail`, `sched::reschedule`, `sched::run`) calls `sched::schedule_next`, which flushes `Proc::deliver_msg` to the user buffer at `Proc::deliver_msg_vir` and clears `MF_DELIVERMSG` before resuming
 - IPC blocking pairs with the new `sched::rts_set` / `rts_unset` helpers — they capture `nr`, end the `&mut Proc` borrow, then call `enqueue` / `dequeue` so RTS state and the run queue stay in sync. Same NLL-capture pattern slice 2.4 used in `clock::tick`
 - `kernel/build.rs` skips assembly when `CARGO_CFG_TARGET_OS != "none"` so `cargo check --workspace` / `cargo test --workspace` keep working on host. The kernel's real modules are gated by `#[cfg(target_os = "none")]` in `main.rs` regardless
+- `cargo test -p minix4-kernel` runs zero tests by design — every kernel module is gated on `#[cfg(target_os = "none")]` and host-test infra is not yet built; host-runnable tests live in `kernel-shared` (currently 25). QEMU is the primary verification for kernel code (`timeout 8 cargo run -p minix4-kernel --target aarch64-unknown-none --release`)
 
 ## Documentation
 
