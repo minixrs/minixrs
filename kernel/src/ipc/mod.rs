@@ -52,6 +52,10 @@ static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Cadence of the boot-time IPC trace. ~600 IPC ops/sec under the
 /// slice-2.5 ping-pong demo → ~6 trace lines/sec; well under PL011's
 /// ~290 lines/sec ceiling at 115200 baud.
+///
+/// TODO(phase 4): once servers come online and per-second IPC rate
+/// jumps an order of magnitude, this needs to become a runtime knob
+/// (DS_SUBSCRIBE-driven) or scale by load.
 const TRACE_EVERY: u64 = 100;
 
 /// IPC dispatch. Called from `trap.S` immediately after the SVC entry
@@ -127,52 +131,85 @@ fn dispatch(
     if src_dst_e == ANY && call_nr != RECEIVE {
         return EBADCALL;
     }
-    // call_nr in range and permitted by trap_mask.
-    if !(0..=SENDA).contains(&call_nr) {
-        return EBADCALL;
-    }
-    if trap_mask & (1 << call_nr) == 0 {
-        return ETRAPDENIED;
-    }
-
+    // Match on call_nr first so unknown primitives return EBADCALL.
+    // Each arm gates on its own trap_mask bit so a valid-but-denied
+    // primitive returns ETRAPDENIED. Keeps error precedence stable as
+    // new primitives are added (no risk of an out-of-range call_nr
+    // sneaking past the range check and getting ETRAPDENIED from a
+    // stale `1 << call_nr` shift).
     match call_nr {
-        SEND => send::mini_send(
-            proc_table,
-            priv_table,
-            caller_nr,
-            src_dst_e,
-            user_msg_va,
-            SendFlags::Blocking,
-        ),
-        RECEIVE => receive::mini_receive(
-            proc_table,
-            priv_table,
-            caller_nr,
-            src_dst_e,
-            user_msg_va,
-            RecvFlags::Blocking,
-        ),
-        SENDREC => do_sendrec(
-            proc_table, priv_table, caller_nr, src_dst_e, user_msg_va,
-        ),
-        NOTIFY => notify::mini_notify(proc_table, priv_table, caller_nr, src_dst_e),
-        SENDNB => send::mini_send(
-            proc_table,
-            priv_table,
-            caller_nr,
-            src_dst_e,
-            user_msg_va,
-            SendFlags::NonBlocking,
-        ),
-        SENDA => senda::mini_senda(
-            proc_table,
-            priv_table,
-            caller_nr,
-            user_msg_va,
-            extra as usize,
-        ),
+        SEND => trap_gate(trap_mask, SEND, || {
+            send::mini_send(
+                proc_table,
+                priv_table,
+                caller_nr,
+                src_dst_e,
+                user_msg_va,
+                SendFlags::Blocking,
+            )
+        }),
+        RECEIVE => trap_gate(trap_mask, RECEIVE, || {
+            receive::mini_receive(
+                proc_table,
+                priv_table,
+                caller_nr,
+                src_dst_e,
+                user_msg_va,
+                RecvFlags::Blocking,
+            )
+        }),
+        SENDREC => trap_gate(trap_mask, SENDREC, || {
+            do_sendrec(
+                proc_table, priv_table, caller_nr, src_dst_e, user_msg_va,
+            )
+        }),
+        NOTIFY => trap_gate(trap_mask, NOTIFY, || {
+            notify::mini_notify(proc_table, priv_table, caller_nr, src_dst_e)
+        }),
+        SENDNB => trap_gate(trap_mask, SENDNB, || {
+            send::mini_send(
+                proc_table,
+                priv_table,
+                caller_nr,
+                src_dst_e,
+                user_msg_va,
+                SendFlags::NonBlocking,
+            )
+        }),
+        SENDA => trap_gate(trap_mask, SENDA, || {
+            senda::mini_senda(
+                proc_table,
+                priv_table,
+                caller_nr,
+                user_msg_va,
+                extra as usize,
+            )
+        }),
         _ => EBADCALL,
     }
+}
+
+/// Permission gate: returns `ETRAPDENIED` if the caller's `trap_mask`
+/// doesn't permit `call_nr`, otherwise runs `f` and returns its result.
+///
+/// The shift is done in `u32` to dodge two pitfalls: (a) `1u16 <<
+/// SENDA(16)` panics in debug builds and wraps to 0 in release, and (b)
+/// every caller funnels through the match in `dispatch`, so `call_nr`
+/// is one of the IPC primitive constants — but the explicit u32 widen
+/// makes the gate robust to future re-use.
+///
+/// TODO(slice 2.6+): widen `Priv::trap_mask` from `u16` to `u32` to
+/// match MINIX 3's `unsigned int` so SENDA's bit (16) actually fits.
+/// Until then SENDA is dispatcher-denied here even though
+/// `mini_senda` would otherwise reply `ENOSYS` — see the note on
+/// `senda::mini_senda`.
+#[inline]
+fn trap_gate(trap_mask: u16, call_nr: i32, f: impl FnOnce() -> i32) -> i32 {
+    let bit = 1u32.wrapping_shl(call_nr as u32);
+    if (trap_mask as u32) & bit == 0 {
+        return ETRAPDENIED;
+    }
+    f()
 }
 
 /// `SENDREC` is the atomic-send-then-receive primitive used by every

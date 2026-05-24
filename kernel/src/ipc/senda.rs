@@ -17,6 +17,17 @@ use crate::proc::table::N_PROC_SLOTS;
 use crate::proc::{Priv, Proc};
 
 /// `SENDA` primitive. TODO(slice 2.6+): wire up real async delivery.
+///
+/// When the real implementation lands, bounds-check `user_table_va`
+/// (and reject `table_size == 0` etc.) *before* returning any other
+/// error so the caller-visible error precedence — EFAULT > everything
+/// else — stays stable across the stub→real transition.
+///
+/// Also note: today this primitive is dispatcher-denied via
+/// `trap_gate` (SENDA's bit 16 doesn't fit in the current `u16`
+/// `trap_mask`, so the gate always returns ETRAPDENIED before reaching
+/// this function). The `ENOSYS` body is only reachable once
+/// `trap_mask` widens — see the TODO on `ipc::trap_gate`.
 pub fn mini_senda(
     _proc_table: &mut [Proc; N_PROC_SLOTS],
     _priv_table: &mut [Priv; NR_SYS_PROCS],

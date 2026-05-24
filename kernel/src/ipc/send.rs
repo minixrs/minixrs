@@ -36,6 +36,9 @@ pub fn mini_send(
     user_msg_va: u64,
     flags: SendFlags,
 ) -> i32 {
+    // TODO(phase 3+): okendpt-style (gen, slot) validation — stale
+    // endpoints after slot recycle should return EDEADSRCDST. Phase 2
+    // has no slot recycling, so `endpoint_proc` alone is sufficient.
     let dst_nr = endpoint_proc(dst_e);
     let Some(dst_idx) = proc_index(dst_nr) else {
         return EBADSRCDST;
@@ -60,6 +63,10 @@ pub fn mini_send(
     // Copy the outgoing message out of user memory. The sender cannot
     // spoof `m_source` — MINIX 3 stomps it with the kernel's view of the
     // caller's endpoint (proc.c:918).
+    //
+    // Note: copy precedes deadlock_check deliberately — a userspace bug
+    // (bad VA) surfaces as EFAULT rather than masquerading as a
+    // kernel-detected ELOCKED. Keep this ordering.
     let mut msg = match copy_msg_from_user(user_msg_va) {
         Ok(m) => m,
         Err(e) => return e,

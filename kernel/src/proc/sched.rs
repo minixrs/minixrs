@@ -254,8 +254,17 @@ unsafe fn set_tpidr_to(p: &mut Proc) {
 ///
 /// Does *not* touch the run queue — `rts_set`/`rts_unset` keep blocked
 /// procs off, and `reschedule` handles the quantum-rotation case
-/// separately. If `pick_proc` finds nothing runnable (which should never
-/// happen once IDLE is on the queue), the previous current stays current.
+/// separately. If `pick_proc` finds nothing runnable, the previous
+/// current stays current.
+///
+/// TODO(slice 2.6+): once IDLE is enqueued at boot, an empty run queue
+/// becomes an invariant violation rather than the expected
+/// "both-stubs-briefly-blocked" state we see in slice 2.5. At that
+/// point, add `debug_assert!(pick_proc().is_some(), "run queue empty
+/// — IDLE missing?")` so a regression that dequeues IDLE blows up
+/// loudly. Today only stubs A/B are enqueued (see
+/// `arch/aarch64/userland.rs::userland_bootstrap`), so the assert
+/// would fire spuriously.
 ///
 /// SAFETY: caller must hold the single-threaded / IRQ-masked invariant
 /// and must not hold any other reference into `PROC_TABLE` while this
