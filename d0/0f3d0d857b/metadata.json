@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "d00f3d0d857b",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-5-ipc-primitives",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/plan.md",
+    "kernel-shared/src/ipc_const.rs",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/trap.S",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/ipc/deadlock.rs",
+    "kernel/src/ipc/message.rs",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/ipc/notify.rs",
+    "kernel/src/ipc/receive.rs",
+    "kernel/src/ipc/send.rs",
+    "kernel/src/ipc/senda.rs",
+    "kernel/src/proc/proc_struct.rs",
+    "kernel/src/proc/sched.rs",
+    "kernel/src/proc/table.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d0/0f3d0d857b/0/metadata.json",
+      "transcript": "/d0/0f3d0d857b/0/full.jsonl",
+      "content_hash": "/d0/0f3d0d857b/0/content_hash.txt",
+      "prompt": "/d0/0f3d0d857b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 93,
+    "cache_creation_tokens": 1030417,
+    "cache_read_tokens": 16280086,
+    "output_tokens": 124824,
+    "api_call_count": 73
+  }
+}
