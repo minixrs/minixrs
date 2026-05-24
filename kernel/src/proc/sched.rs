@@ -163,6 +163,50 @@ pub unsafe fn dequeue(nr: ProcNr) {
     // Not found — leave the queue untouched.
 }
 
+/// Set bits in `p.rts_flags`; if the process transitions from runnable
+/// (all-clear) to blocked, splice it out of the run queue.
+///
+/// Mirrors MINIX 3 `kernel/proc.h:206` `RTS_SET` — the macro that pairs
+/// every `rts_flags |= …` with the corresponding `dequeue` call.
+///
+/// Caller pattern: hold `&mut Proc` to the affected slot, call this, then
+/// let NLL drop the borrow before any subsequent `proc_slot_mut` against
+/// the same slot — `dequeue` re-borrows internally.
+///
+/// SAFETY: caller must hold the single-threaded-boot / IRQ-masked
+/// invariant on `PROC_TABLE` and `RUNQ`. The borrow on `p` ends at this
+/// function's last use of it (capturing `nr`); the subsequent `dequeue`
+/// then re-enters cleanly.
+pub unsafe fn rts_set(p: &mut Proc, flag: u32) {
+    let was_runnable = p.rts_flags.load(Ordering::Relaxed) == 0;
+    p.rts_flags.fetch_or(flag, Ordering::Relaxed);
+    let nr = p.nr;
+    if was_runnable {
+        // SAFETY: caller's invariants; `p`'s borrow has been captured.
+        unsafe { dequeue(nr) }
+    }
+}
+
+/// Clear bits in `p.rts_flags`; if the process transitions from blocked
+/// to runnable (all bits cleared), splice it onto the tail of its
+/// priority band's run queue.
+///
+/// Mirrors MINIX 3 `kernel/proc.h:216` `RTS_UNSET` — the converse pairing
+/// to `RTS_SET`. Note that unblocking from RTS_SENDING while RTS_RECEIVING
+/// is also set (mid-SENDREC) does *not* enqueue, because `prev & !flag`
+/// is still non-zero.
+///
+/// SAFETY: caller must hold the same invariant as [`rts_set`].
+pub unsafe fn rts_unset(p: &mut Proc, flag: u32) {
+    let prev = p.rts_flags.fetch_and(!flag, Ordering::Relaxed);
+    let nr = p.nr;
+    let now_runnable = (prev & !flag) == 0;
+    if now_runnable && prev != 0 {
+        // SAFETY: caller's invariants; `p`'s borrow has been captured.
+        unsafe { enqueue(nr) }
+    }
+}
+
 /// Return the head of the highest-priority non-empty run queue.
 ///
 /// Mirrors MINIX 3 `kernel/proc.c:1795` `pick_proc`. Lower priority value =
@@ -203,40 +247,67 @@ unsafe fn set_tpidr_to(p: &mut Proc) {
     }
 }
 
+/// Pick the highest-priority runnable process, park its register frame in
+/// `TPIDR_EL1`, and flush any pending `MF_DELIVERMSG` into its user
+/// buffer. Called at every EL1 → EL0 transition (SVC tail, IRQ tail,
+/// first-dispatch from `run`).
+///
+/// Does *not* touch the run queue — `rts_set`/`rts_unset` keep blocked
+/// procs off, and `reschedule` handles the quantum-rotation case
+/// separately. If `pick_proc` finds nothing runnable, the previous
+/// current stays current.
+///
+/// TODO(slice 2.6+): once IDLE is enqueued at boot, an empty run queue
+/// becomes an invariant violation rather than the expected
+/// "both-stubs-briefly-blocked" state we see in slice 2.5. At that
+/// point, add `debug_assert!(pick_proc().is_some(), "run queue empty
+/// — IDLE missing?")` so a regression that dequeues IDLE blows up
+/// loudly. Today only stubs A/B are enqueued (see
+/// `arch/aarch64/userland.rs::userland_bootstrap`), so the assert
+/// would fire spuriously.
+///
+/// SAFETY: caller must hold the single-threaded / IRQ-masked invariant
+/// and must not hold any other reference into `PROC_TABLE` while this
+/// runs.
+pub unsafe fn schedule_next() {
+    let next_nr = match pick_proc() {
+        Some(nr) => nr,
+        None => return,
+    };
+    CURRENT_PROC_NR.store(next_nr.get(), Ordering::Relaxed);
+    // SAFETY: next_nr came from the run queue; single-borrow.
+    unsafe {
+        let next = proc_slot_mut(next_nr).expect("schedule_next: next out of range");
+        set_tpidr_to(next);
+        crate::ipc::flush_deliver_msg(next);
+    }
+}
+
 /// First entry into EL0 from `kmain`.
 ///
 /// Pre-condition: the desired-to-run procs have already been [`enqueue`]d.
-/// Picks the highest-priority head, parks its frame in `TPIDR_EL1`, and
-/// jumps to the assembly restore-and-`eret` stub. Never returns.
+/// Picks the highest-priority head, parks its frame in `TPIDR_EL1`,
+/// flushes any pending `MF_DELIVERMSG`, and jumps to the assembly
+/// restore-and-`eret` stub. Never returns.
 ///
-/// SAFETY: at least one process must be enqueued (otherwise we'd `panic` in
-/// EL1 with the boot stack still active). The picked process's `regs` must
-/// be fully initialized — see `userland_bootstrap`. Must be called with
-/// DAIF (I) still masked at EL1; the per-proc SPSR carries the EL0 mask
-/// state that takes effect on `eret`.
+/// SAFETY: at least one process must be enqueued (otherwise we stay on
+/// boot context with no `TPIDR_EL1` set). Must be called with DAIF (I)
+/// still masked at EL1; the per-proc SPSR carries the EL0 mask state
+/// that takes effect on `eret`.
 pub unsafe fn run() -> ! {
-    let first_nr = pick_proc().expect("run: empty run queue");
-    CURRENT_PROC_NR.store(first_nr.get(), Ordering::Relaxed);
-    // SAFETY: single-threaded boot; we hold the only reference into the
-    // first proc's slot.
-    let first = unsafe { proc_slot_mut(first_nr).expect("run: nr out of range") };
-    // SAFETY: same — exclusive borrow above.
-    unsafe { set_tpidr_to(first) };
+    // SAFETY: forwarded.
+    unsafe { schedule_next() }
     // SAFETY: trap.S contract documented at `el1_return_to_user`.
     unsafe { el1_return_to_user() }
 }
 
-/// Quantum-exhaust path: re-enqueue the current proc at the tail of its
-/// priority band, pick the next runnable, and update `TPIDR_EL1`.
+/// Quantum-exhaust path: rotate the current proc to the tail of its
+/// priority band (refilling its quantum), then pick the next runnable.
 ///
 /// Called from `clock::tick` when the running proc's `quantum_left` hits
 /// zero. The IRQ stub's trailing `bl el1_return_to_user` reads the
 /// (possibly new) `TPIDR_EL1` and restores that frame, so the context
 /// switch happens transparently.
-///
-/// If `pick_proc` somehow finds no runnable proc (we just re-enqueued
-/// current, so it should always find at least that one), we leave
-/// `TPIDR_EL1` alone and stay on the current proc.
 ///
 /// SAFETY: caller holds the single-threaded invariant; called only from
 /// IRQ context with no other PROC_TABLE / RUNQ borrows live.
@@ -244,28 +315,24 @@ pub unsafe fn reschedule() {
     let cur_raw = CURRENT_PROC_NR.load(Ordering::Relaxed);
     if cur_raw != NO_PROC {
         let cur_nr = ProcNr::new(cur_raw);
-        // Refill quantum and clear the quantum-exhaust flag *before*
-        // re-enqueuing, so the re-enqueued process is in the runnable state.
         // SAFETY: single-threaded; cur_nr came from CURRENT_PROC_NR.
-        unsafe {
+        let cur_runnable_after_refill = unsafe {
             let cur = proc_slot_mut(cur_nr).expect("reschedule: current out of range");
             cur.quantum_left = cur.quantum_ms as u64;
             cur.rts_flags.fetch_and(!RTS_NO_QUANTUM, Ordering::Relaxed);
-        }
-        // SAFETY: cur_nr borrow above has been dropped.
-        unsafe {
-            dequeue(cur_nr);
-            enqueue(cur_nr);
+            cur.rts_flags.load(Ordering::Relaxed) == 0
+        };
+        // Only rotate runnable cur. If cur is also blocked on something
+        // else (e.g. IPC), `rts_set` already dequeued it — leave it off.
+        if cur_runnable_after_refill {
+            // SAFETY: cur_nr borrow above has been dropped.
+            unsafe {
+                dequeue(cur_nr);
+                enqueue(cur_nr);
+            }
         }
     }
 
-    let next_nr = match pick_proc() {
-        Some(nr) => nr,
-        None => return, // No runnable procs — stay on current.
-    };
-    CURRENT_PROC_NR.store(next_nr.get(), Ordering::Relaxed);
-    // SAFETY: next_nr is in range (came from a queue we just maintained).
-    let next = unsafe { proc_slot_mut(next_nr).expect("reschedule: next out of range") };
-    // SAFETY: exclusive borrow above.
-    unsafe { set_tpidr_to(next) };
+    // SAFETY: same single-threaded invariant.
+    unsafe { schedule_next() }
 }

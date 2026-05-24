@@ -149,6 +149,19 @@ pub(crate) unsafe fn proc_table_ref() -> &'static [Proc; N_PROC_SLOTS] {
     unsafe { &*PROC_TABLE.0.get() }
 }
 
+/// Borrow `PROC_TABLE` mutably as a slice. Used by `ipc::do_ipc` to hand a
+/// single `&mut [Proc]` down through every IPC primitive — avoiding the
+/// two-`&mut`-from-one-`UnsafeCell` hazard that arises if each primitive
+/// re-borrows individual slots via `proc_slot_mut`.
+///
+/// SAFETY: caller must hold the single-threaded-boot / IRQ-masked
+/// invariant and must not hold any other reference into `PROC_TABLE`
+/// while the returned borrow is live.
+pub(crate) unsafe fn proc_table_mut_slice() -> &'static mut [Proc; N_PROC_SLOTS] {
+    // SAFETY: forwarded — caller's invariants.
+    unsafe { &mut *PROC_TABLE.0.get() }
+}
+
 /// SAFETY: caller must ensure no other reference into `PRIV_TABLE` exists.
 pub(crate) unsafe fn priv_slot_mut(id: PrivId) -> Option<&'static mut Priv> {
     let idx = priv_index(id)?;
@@ -161,6 +174,18 @@ pub(crate) unsafe fn priv_slot_mut(id: PrivId) -> Option<&'static mut Priv> {
 pub(crate) unsafe fn priv_table_ref() -> &'static [Priv; NR_SYS_PROCS] {
     // SAFETY: single-threaded boot context.
     unsafe { &*PRIV_TABLE.0.get() }
+}
+
+/// Borrow `PRIV_TABLE` mutably as a slice. Companion of
+/// [`proc_table_mut_slice`] — `ipc::do_ipc` materializes both at once and
+/// passes them down to the per-primitive handlers.
+///
+/// SAFETY: caller must hold the single-threaded-boot / IRQ-masked
+/// invariant and must not hold any other reference into `PRIV_TABLE`
+/// while the returned borrow is live.
+pub(crate) unsafe fn priv_table_mut_slice() -> &'static mut [Priv; NR_SYS_PROCS] {
+    // SAFETY: forwarded — caller's invariants.
+    unsafe { &mut *PRIV_TABLE.0.get() }
 }
 
 // ---------------------------------------------------------------------------

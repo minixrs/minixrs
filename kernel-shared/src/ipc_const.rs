@@ -20,6 +20,11 @@ pub const SENDA: i32 = 16;
 /// but unused in Phase 2.
 pub const MINIX_KERNINFO: i32 = 32;
 
+/// `m_type` value of the synthetic message the kernel deposits in a
+/// receiver's buffer when a `NOTIFY` is delivered. Mirrors MINIX 3
+/// `include/minix/com.h`'s `NOTIFY_MESSAGE`.
+pub const NOTIFY_MESSAGE: i32 = 0x1000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
