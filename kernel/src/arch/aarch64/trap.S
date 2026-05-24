@@ -89,9 +89,14 @@ el0_64_sync_entry:
     cmp     x13, #ESR_EC_SVC64
     b.ne    1f
 
-    // SVC64 — call do_ipc(&mut frame).
+    // SVC64 — call do_ipc(&mut frame), then run the slice-2.5 SVC tail
+    // (schedule the next runnable proc + flush MF_DELIVERMSG into its
+    // user buffer). The tail may transparently swap TPIDR_EL1 to a
+    // different proc; the subsequent `el1_return_to_user` reads the new
+    // TPIDR_EL1 and restores that frame.
     mov     x0, x29
     bl      do_ipc
+    bl      el1_svc_tail
     b       el1_return_to_user
 
 1:  // Non-SVC EL0 sync exception — diagnose and panic.

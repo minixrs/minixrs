@@ -1,48 +1,282 @@
-//! IPC subsystem.
+//! IPC subsystem — the heart of the MINIX microkernel.
 //!
-//! Slice 2.3 ships only `do_ipc` as an observable stub — it prints the
-//! caller's IPC arguments to the UART and stores `OK` in the caller's `x0`,
-//! proving that the EL0 → SVC → kernel → eret round-trip works end-to-end.
+//! Slice 2.5 lights up the real IPC engine. `do_ipc` is the single SVC
+//! entry point; it materializes mutable borrows of `PROC_TABLE` and
+//! `PRIV_TABLE`, performs trap-mask gating, and dispatches to one of the
+//! per-primitive handlers (`mini_send`, `mini_receive`, `mini_notify`,
+//! `mini_senda`). The handlers operate on the explicit table slices —
+//! they never touch the static directly — which keeps each primitive
+//! testable in isolation and prevents the two-`&mut`-from-one-
+//! `UnsafeCell` UB hazard that arises if each primitive re-borrows
+//! individual slots.
 //!
-//! Slice 2.5 replaces this with the real IPC engine: `mini_send`,
-//! `mini_receive`, `mini_notify`, the `caller_q` traversal, `MF_DELIVERMSG`
-//! delivery, and trap-mask enforcement.
+//! After every SVC, `el1_svc_tail` runs `schedule_next` to pick the
+//! highest-priority runnable proc and flush any pending `MF_DELIVERMSG`
+//! into its user buffer. That keeps the run queue honest when the caller
+//! blocks (`rts_set` already dequeued it) and ensures a receiver that
+//! got unblocked sees its message before resuming.
+
+mod deadlock;
+mod message;
+mod notify;
+mod receive;
+mod send;
+mod senda;
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use minix4_kernel_shared::ProcNr;
+use minix4_kernel_shared::endpoint::{ANY, Endpoint};
+use minix4_kernel_shared::error::{EBADCALL, ECALLDENIED, ETRAPDENIED, OK};
+use minix4_kernel_shared::ipc_const::{
+    NOTIFY, RECEIVE, SEND, SENDA, SENDNB, SENDREC,
+};
 
 use crate::arch::ArchRegisterFrame;
+use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND};
+use crate::proc::sched::{self, CURRENT_PROC_NR};
+use crate::proc::table::{
+    N_PROC_SLOTS, priv_table_mut_slice, proc_index, proc_table_mut_slice,
+};
+use crate::proc::{Priv, Proc};
 use crate::uart::Uart;
 
-static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
+use receive::RecvFlags;
+use send::SendFlags;
 
-/// IPC dispatch.
+/// Running total of IPC calls dispatched. Sampled at [`TRACE_EVERY`]
+/// intervals for the boot-time observability trace.
+static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Cadence of the boot-time IPC trace. ~600 IPC ops/sec under the
+/// slice-2.5 ping-pong demo → ~6 trace lines/sec; well under PL011's
+/// ~290 lines/sec ceiling at 115200 baud.
 ///
-/// Called from `trap.S` immediately after the SVC entry stub has saved the
-/// caller's registers into `frame`. MINIX-style argument convention:
+/// TODO(phase 4): once servers come online and per-second IPC rate
+/// jumps an order of magnitude, this needs to become a runtime knob
+/// (DS_SUBSCRIBE-driven) or scale by load.
+const TRACE_EVERY: u64 = 100;
+
+/// IPC dispatch. Called from `trap.S` immediately after the SVC entry
+/// stub has saved the caller's registers into `frame`.
 ///
-/// | reg | meaning                       |
-/// |-----|-------------------------------|
-/// | x0  | source/destination endpoint   |
-/// | x1  | call number (SEND, SENDREC …) |
-/// | x2  | pointer to the user's Message |
+/// Argument convention (mirrors MINIX 3 `kernel/proc.c:609 do_ipc`):
 ///
-/// The slice-2.3 stub doesn't actually deliver a message anywhere — it just
-/// logs the call and synthesizes an `OK` return value in `frame.x[0]`.
+/// | reg | meaning                          |
+/// |-----|----------------------------------|
+/// | x0  | source/destination endpoint      |
+/// | x1  | IPC primitive number             |
+/// | x2  | pointer to the user's `Message`  |
+/// | x3  | (SENDA only) table length        |
+///
+/// The result is written back into `frame.x[0]` — the SVC restore path
+/// puts it in the caller's `x0` on `eret`.
 #[unsafe(no_mangle)]
 pub extern "C" fn do_ipc(frame: &mut ArchRegisterFrame) {
-    let src_dst = frame.x[0] as i32;
-    let call_nr = frame.x[1] as i32;
-    let msg_addr = frame.x[2];
+    let src_dst_e: Endpoint = frame.x[0] as i32;
+    let call_nr: i32 = frame.x[1] as i32;
+    let user_msg_va: u64 = frame.x[2];
+    let extra: u64 = frame.x[3];
 
-    let n = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    let mut uart = Uart::new();
-    let _ = writeln!(
-        uart,
-        "do_ipc[{n}]: call_nr={call_nr} src_dst={src_dst} msg={msg_addr:#018x}",
+    // SAFETY: SVC dispatch is single-threaded (DAIF.I masked at EL1); no
+    // other code can write to PROC_TABLE/PRIV_TABLE before we return.
+    let proc_table = unsafe { proc_table_mut_slice() };
+    let priv_table = unsafe { priv_table_mut_slice() };
+
+    let cur_raw = CURRENT_PROC_NR.load(Ordering::Relaxed);
+    let caller_nr = ProcNr::new(cur_raw);
+
+    let result = dispatch(
+        proc_table,
+        priv_table,
+        caller_nr,
+        call_nr,
+        src_dst_e,
+        user_msg_va,
+        extra,
     );
 
-    // OK return code, MINIX-style. The SVC restore path puts this in the
-    // caller's x0.
-    frame.x[0] = 0;
+    frame.x[0] = result as u64;
+
+    let n = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % TRACE_EVERY == 0 {
+        let mut uart = Uart::new();
+        let _ = writeln!(
+            uart,
+            "[ipc {n}] caller={caller_nr} call={call_nr} target={src_dst_e:#x} result={result}",
+        );
+    }
 }
+
+fn dispatch(
+    proc_table: &mut [Proc; N_PROC_SLOTS],
+    priv_table: &mut [Priv; NR_SYS_PROCS],
+    caller_nr: ProcNr,
+    call_nr: i32,
+    src_dst_e: Endpoint,
+    user_msg_va: u64,
+    extra: u64,
+) -> i32 {
+    // Permission gate: caller must have a priv slot whose trap_mask
+    // permits this primitive. Mirrors MINIX 3 `do_sync_ipc:562-568`.
+    let Some(caller_idx) = proc_index(caller_nr) else {
+        return EBADCALL;
+    };
+    let Some(caller_priv_id) = proc_table[caller_idx].priv_id else {
+        return ECALLDENIED;
+    };
+    let trap_mask = priv_table[caller_priv_id.as_usize()].trap_mask;
+    // ANY-source endpoint is only legal as a RECEIVE filter.
+    if src_dst_e == ANY && call_nr != RECEIVE {
+        return EBADCALL;
+    }
+    // Match on call_nr first so unknown primitives return EBADCALL.
+    // Each arm gates on its own trap_mask bit so a valid-but-denied
+    // primitive returns ETRAPDENIED. Keeps error precedence stable as
+    // new primitives are added (no risk of an out-of-range call_nr
+    // sneaking past the range check and getting ETRAPDENIED from a
+    // stale `1 << call_nr` shift).
+    match call_nr {
+        SEND => trap_gate(trap_mask, SEND, || {
+            send::mini_send(
+                proc_table,
+                priv_table,
+                caller_nr,
+                src_dst_e,
+                user_msg_va,
+                SendFlags::Blocking,
+            )
+        }),
+        RECEIVE => trap_gate(trap_mask, RECEIVE, || {
+            receive::mini_receive(
+                proc_table,
+                priv_table,
+                caller_nr,
+                src_dst_e,
+                user_msg_va,
+                RecvFlags::Blocking,
+            )
+        }),
+        SENDREC => trap_gate(trap_mask, SENDREC, || {
+            do_sendrec(
+                proc_table, priv_table, caller_nr, src_dst_e, user_msg_va,
+            )
+        }),
+        NOTIFY => trap_gate(trap_mask, NOTIFY, || {
+            notify::mini_notify(proc_table, priv_table, caller_nr, src_dst_e)
+        }),
+        SENDNB => trap_gate(trap_mask, SENDNB, || {
+            send::mini_send(
+                proc_table,
+                priv_table,
+                caller_nr,
+                src_dst_e,
+                user_msg_va,
+                SendFlags::NonBlocking,
+            )
+        }),
+        SENDA => trap_gate(trap_mask, SENDA, || {
+            senda::mini_senda(
+                proc_table,
+                priv_table,
+                caller_nr,
+                user_msg_va,
+                extra as usize,
+            )
+        }),
+        _ => EBADCALL,
+    }
+}
+
+/// Permission gate: returns `ETRAPDENIED` if the caller's `trap_mask`
+/// doesn't permit `call_nr`, otherwise runs `f` and returns its result.
+///
+/// The shift is done in `u32` to dodge two pitfalls: (a) `1u16 <<
+/// SENDA(16)` panics in debug builds and wraps to 0 in release, and (b)
+/// every caller funnels through the match in `dispatch`, so `call_nr`
+/// is one of the IPC primitive constants — but the explicit u32 widen
+/// makes the gate robust to future re-use.
+///
+/// TODO(slice 2.6+): widen `Priv::trap_mask` from `u16` to `u32` to
+/// match MINIX 3's `unsigned int` so SENDA's bit (16) actually fits.
+/// Until then SENDA is dispatcher-denied here even though
+/// `mini_senda` would otherwise reply `ENOSYS` — see the note on
+/// `senda::mini_senda`.
+#[inline]
+fn trap_gate(trap_mask: u16, call_nr: i32, f: impl FnOnce() -> i32) -> i32 {
+    let bit = 1u32.wrapping_shl(call_nr as u32);
+    if (trap_mask as u32) & bit == 0 {
+        return ETRAPDENIED;
+    }
+    f()
+}
+
+/// `SENDREC` is the atomic-send-then-receive primitive used by every
+/// `_syscall()` wrapper. SEND half blocks (or delivers); on success we
+/// mark `MF_REPLY_PEND` and run the RECEIVE half against the same partner.
+fn do_sendrec(
+    proc_table: &mut [Proc; N_PROC_SLOTS],
+    priv_table: &mut [Priv; NR_SYS_PROCS],
+    caller_nr: ProcNr,
+    dst_e: Endpoint,
+    user_msg_va: u64,
+) -> i32 {
+    let send_result = send::mini_send(
+        proc_table,
+        priv_table,
+        caller_nr,
+        dst_e,
+        user_msg_va,
+        SendFlags::Blocking,
+    );
+    if send_result != OK {
+        return send_result;
+    }
+    let Some(caller_idx) = proc_index(caller_nr) else {
+        return EBADCALL;
+    };
+    proc_table[caller_idx].misc_flags |= MF_REPLY_PEND;
+    receive::mini_receive(
+        proc_table,
+        priv_table,
+        caller_nr,
+        dst_e,
+        user_msg_va,
+        RecvFlags::Blocking,
+    )
+}
+
+/// Copy a pending IPC message out to the user buffer recorded at
+/// RECEIVE-time and clear `MF_DELIVERMSG`. Called from
+/// `sched::schedule_next` on every EL1 → EL0 transition.
+pub fn flush_deliver_msg(p: &mut Proc) {
+    if p.misc_flags & MF_DELIVERMSG == 0 {
+        return;
+    }
+    // Best-effort; if the user buffer is bad, slice 2.5 has no place to
+    // signal that (the receiver hasn't returned yet). Phase 3 adds
+    // MF_MSGFAILED + signal delivery to handle this. The bounds check
+    // in `copy_msg_to_user` keeps an out-of-range VA from faulting EL1.
+    let _ = message::copy_msg_to_user(p.deliver_msg_vir, &p.deliver_msg);
+    p.misc_flags &= !MF_DELIVERMSG;
+}
+
+/// SVC-tail shim. `trap.S` calls this between `do_ipc` and
+/// `el1_return_to_user`; it picks the next runnable proc (which may be
+/// the same caller, may be a higher-priority receiver that just
+/// unblocked, or may be someone else entirely if the caller blocked)
+/// and flushes any pending message into the new current proc's user
+/// buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn el1_svc_tail() {
+    // SAFETY: SVC dispatch context — single-threaded, DAIF.I masked,
+    // no other PROC_TABLE/RUNQ references live at this point.
+    unsafe { sched::schedule_next() }
+}
+
+// ---------------------------------------------------------------------------
+// Re-exported / locally needed `kernel_shared` items.
+// ---------------------------------------------------------------------------
+
+use minix4_kernel_shared::com::NR_SYS_PROCS;

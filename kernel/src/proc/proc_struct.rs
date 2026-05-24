@@ -58,6 +58,10 @@ pub struct Proc {
     pub send_msg: Message,
     /// Message to deliver when we unblock (used with `MF_DELIVERMSG`).
     pub deliver_msg: Message,
+    /// User-space VA where the next delivered IPC message should land.
+    /// Set when RECEIVE / SENDREC blocks (or its caller arrives mid-flight);
+    /// consumed by `flush_deliver_msg` on every EL1 → EL0 transition.
+    pub deliver_msg_vir: u64,
 
     // ----- Run-queue state -------------------------------------------------
     /// Next process in the same priority-band run queue, or `None` if last.
@@ -100,6 +104,7 @@ impl Proc {
             m_type: 0,
             payload: [0; 96],
         },
+        deliver_msg_vir: 0,
         next_ready: None,
         name: [0; PROC_NAME_LEN],
     };
