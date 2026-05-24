@@ -35,6 +35,26 @@ pub const NR_SYS_CALLS: usize = 32;
 const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS_PHASE2);
 const _: () = assert!(NR_SYS_CALLS % 32 == 0);
 
+// ---------------------------------------------------------------------------
+// `SYS_GETINFO` request sub-types.
+//
+// `SYS_GETINFO` is a multi-purpose introspection call: the request sub-type
+// in the first 4 bytes of the message payload selects what the kernel reports
+// back. Numbering matches MINIX 3 `include/minix/sysinfo.h` so the same wire
+// values can be reused once musl + servers land.
+// ---------------------------------------------------------------------------
+
+/// `SYS_GETINFO` request: return the caller's endpoint, priv flags, init
+/// flags, and process name. The kernel writes the reply into the payload of
+/// the request message in-place; on return `m_type == OK`.
+pub const GET_WHOAMI: i32 = 12;
+
+/// Length of the `name` field in the `GET_WHOAMI` reply payload. MINIX 4 uses
+/// the kernel's own `PROC_NAME_LEN` here rather than MINIX 3's 44-byte field —
+/// the name is only used for debug/log output and the kernel never stores more
+/// than 16 bytes per slot.
+pub const SYS_GETINFO_NAME_LEN: usize = 16;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +75,12 @@ mod tests {
     #[test]
     fn kernel_call_base_matches_minix3() {
         assert_eq!(KERNEL_CALL, 0x600);
+    }
+
+    #[test]
+    fn get_whoami_matches_minix3() {
+        // Pinned by MINIX 3 include/minix/sysinfo.h; servers / musl wrappers
+        // built later in the project depend on this value.
+        assert_eq!(GET_WHOAMI, 12);
     }
 }

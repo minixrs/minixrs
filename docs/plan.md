@@ -486,9 +486,43 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   every line `result=0`; no panic / `el0_sync_unexpected`; `A`/`B`
   clock-tick interleaving from slice 2.4 still visible. **Phase 2
   milestone reached.**
-- **Slice 2.6** ◀ next — Kernel-call dispatch and the minimum `SYS_*`
-  set (`SYS_GETINFO` + 13 stubs returning `OK`/`ENOSYS`). A stub task
-  `SENDREC`s `SYSTEM` for `SYS_GETINFO` and gets a populated reply.
+- **Slice 2.6** ◀ ready (branch `feature/phase-2-6-kernel-call-dispatch`,
+  pending merge) — Kernel-call dispatch + minimum `SYS_*` set. New
+  `kernel/src/system/{mod,do_getinfo,stubs}.rs` implement the MINIX 3
+  fast-path shape: `ipc::dispatch`'s SENDREC arm detects
+  `src_dst_e == boot_endpoint(SYSTEM)` and diverts to
+  `system::kernel_call_sendrec`, which runs synchronously in the
+  caller's EL1 context (mirrors `kernel/system.c::kernel_call`). The
+  dispatcher applies `Priv::k_call_mask` gating and the same `ipc_to`
+  permission check that `mini_send` does (re-exported `get_sys_bit`).
+  `SYS_GETINFO` is real (`GET_WHOAMI` writes caller's endpoint,
+  priv flags, and `name` into the payload in-place and returns `OK`);
+  the other 13 Phase-2 `SYS_*` calls land as `ENOSYS` stubs with their
+  canonical MINIX 3 `do_*` names so Phase 3+ can swap real handlers in
+  without touching dispatch. A `const _: () = assert!(NR_KERN_CALLS_
+  PHASE2 == 14)` next to the dispatch match locks arm coverage — adding
+  a new `SYS_*` without a new arm is a compile error.
+  `kernel-shared/callnr.rs` gains `GET_WHOAMI = 12` (matches MINIX 3
+  `include/minix/sysinfo.h`) and `SYS_GETINFO_NAME_LEN = 16` (kernel's
+  `PROC_NAME_LEN`; deviates from MINIX 3's 44 B because MINIX 4 never
+  stores more than 16 B per slot). `user_stub.S` gains a third
+  `.rodata.user_stub_c` blob — SENDREC to `ENDPOINT_SYS` (`0x7FFE` =
+  `boot_endpoint(SYSTEM)`) with `m_type = SYS_GETINFO` and
+  `payload[0..4] = GET_WHOAMI`, persistent counter in `x19`.
+  `userland.rs` adds stub C's code/stack pages plus `STUB_C_PROC_NR`
+  (13) / `STUB_C_PRIV_ID` (18). `install_stub_c_priv` differs from the
+  slice-2.5 helper: `trap_mask = USR_T` (only SENDREC), `ipc_to`
+  opened only to SYSTEM's priv slot (resolved at boot via
+  `proc_table_ref()` so the IMAGE order isn't hard-coded), and
+  `k_call_mask` opened only to `SYS_GETINFO`. `ipc/mod.rs`'s trace
+  gains a `TRACE_HEAD = 12` head carve-out — C's fast-path rate
+  (~125 K ops/sec) would otherwise drown A↔B's ~10 SVCs/sec in the
+  modulo-100 sampling and the slice-2.5 ping-pong would look like it
+  regressed; the head trace shows each stub's first SVC explicitly.
+  Verified in QEMU over 8 s: SVC #1 = stub A SENDREC → B (result=0),
+  SVCs #2–4 = stub B RECEIVE/SEND/RECEIVE (all result=0), SVCs #5+ =
+  stub C SENDREC → SYSTEM with 6536 `[ksys N]` dispatches all
+  `result=0`; clean — no `el0_sync_unexpected`, no panic.
 
 Aggregate scope:
 

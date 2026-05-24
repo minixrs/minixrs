@@ -12,23 +12,32 @@
  *   Stub B — echo server: RECEIVE from ANY, then SEND back to whoever
  *   m_source identifies. Mirrors m_type unchanged.
  *
+ *   Stub C — kernel-call client (slice 2.6): SENDREC to the SYSTEM
+ *   endpoint with m_type = SYS_GETINFO and payload[0..4] = GET_WHOAMI in
+ *   a loop. The kernel dispatcher writes endpoint, priv-flags, init-flags,
+ *   and name back into the payload; the reply's m_type is OK (0).
+ *
  * Each stub carves its 104-byte Message buffer out of [SP_EL0 - 104,
  * SP_EL0). SP stays 16-byte aligned (104 rounds to nothing modulo 16;
  * we never sub more than 104 so the stack top remains usable). The stack
  * pages are 4 KiB so we have headroom.
  *
- * Endpoint constants below are the boot endpoints of slots 11 and 12 —
- * `make_endpoint(0, 11) = 11`, `make_endpoint(0, 12) = 12`. ANY's encoding
- * is `(1 << 14) - 1 = 0x3FFF` (ENDPOINT_SLOT_TOP at generation 0).
+ * Endpoint constants below are the boot endpoints of slots 11, 12, and
+ * the SYSTEM kernel task (-2). make_endpoint(0, p) = p & 0x7FFF, so
+ * SYSTEM at gen 0 = (-2 & 0x7FFF) = 0x7FFE. ANY's encoding is
+ * `(1 << 14) - 1 = 0x3FFF` (ENDPOINT_SLOT_TOP at generation 0).
  */
 
-    .equ SEND,        1
-    .equ RECEIVE,     2
-    .equ SENDREC,     3
-    .equ ANY,         0x3FFF
-    .equ ENDPOINT_A,  11
-    .equ ENDPOINT_B,  12
-    .equ MSG_SIZE,    104                  // sizeof(Message); fits in `mov` imm12
+    .equ SEND,         1
+    .equ RECEIVE,      2
+    .equ SENDREC,      3
+    .equ ANY,          0x3FFF
+    .equ ENDPOINT_A,   11
+    .equ ENDPOINT_B,   12
+    .equ ENDPOINT_SYS, 0x7FFE              // boot_endpoint(SYSTEM)
+    .equ SYS_GETINFO,  0x600               // KERNEL_CALL + 0
+    .equ GET_WHOAMI,   12
+    .equ MSG_SIZE,     104                 // sizeof(Message); fits in `mov` imm12
 
 /* ---- Stub A: sender ----------------------------------------------------- */
 
@@ -79,3 +88,32 @@ _user_stub_b_start:
     .global _user_stub_b_end
 _user_stub_b_end:
     .size _user_stub_b_start, _user_stub_b_end - _user_stub_b_start
+
+/* ---- Stub C: kernel-call client --------------------------------------- */
+
+    .section .rodata.user_stub_c, "a", %progbits
+    .balign 4
+    .global _user_stub_c_start
+    .type _user_stub_c_start, %object
+_user_stub_c_start:
+    mov     x19, #0                         // persistent call counter
+1:
+    // Build the request at [SP_EL0 - 104, SP_EL0):
+    //   [+0]   m_source — kernel overwrites
+    //   [+4]   m_type    = SYS_GETINFO
+    //   [+8]   payload[0..4] = GET_WHOAMI
+    sub     x9, sp, #MSG_SIZE
+    str     wzr, [x9, #0]
+    mov     w10, #SYS_GETINFO
+    str     w10, [x9, #4]
+    mov     w10, #GET_WHOAMI
+    str     w10, [x9, #8]
+    mov     x0, #ENDPOINT_SYS
+    mov     x1, #SENDREC
+    mov     x2, x9
+    svc     #0
+    add     x19, x19, #1
+    b       1b
+    .global _user_stub_c_end
+_user_stub_c_end:
+    .size _user_stub_c_start, _user_stub_c_end - _user_stub_c_start

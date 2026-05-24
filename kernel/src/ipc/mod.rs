@@ -23,6 +23,16 @@ mod receive;
 mod send;
 mod senda;
 
+// User-buffer copy helpers — exposed to `crate::system` so the SYSTEM
+// SENDREC fast path can read/write the request and reply without each
+// caller dragging in `ipc::message` paths directly.
+pub(crate) use message::{copy_msg_from_user, copy_msg_to_user};
+// `get_sys_bit` — shared with `crate::system` so the SYSTEM fast path
+// applies the same `ipc_to` permission check that `mini_send` does
+// (send.rs:59), keeping the trust model identical regardless of which
+// path delivers the message.
+pub(crate) use notify::get_sys_bit;
+
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -57,6 +67,14 @@ static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// jumps an order of magnitude, this needs to become a runtime knob
 /// (DS_SUBSCRIBE-driven) or scale by load.
 const TRACE_EVERY: u64 = 100;
+
+/// Number of leading SVCs to trace unconditionally, regardless of
+/// [`TRACE_EVERY`]. Gives the early-boot output enough granularity to
+/// show each stub's first IPC call — slice 2.6 added a third stub (C)
+/// whose fast-path SENDRECs to SYSTEM outpace stubs A and B by orders
+/// of magnitude, so without this aid the slice-2.5 ping-pong looks like
+/// it regressed even though A↔B are still cooperating fine.
+const TRACE_HEAD: u64 = 12;
 
 /// IPC dispatch. Called from `trap.S` immediately after the SVC entry
 /// stub has saved the caller's registers into `frame`.
@@ -100,7 +118,7 @@ pub extern "C" fn do_ipc(frame: &mut ArchRegisterFrame) {
     frame.x[0] = result as u64;
 
     let n = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if n % TRACE_EVERY == 0 {
+    if n <= TRACE_HEAD || n % TRACE_EVERY == 0 {
         let mut uart = Uart::new();
         let _ = writeln!(
             uart,
@@ -159,9 +177,18 @@ fn dispatch(
             )
         }),
         SENDREC => trap_gate(trap_mask, SENDREC, || {
-            do_sendrec(
-                proc_table, priv_table, caller_nr, src_dst_e, user_msg_va,
-            )
+            // Fast-path: SENDREC to the SYSTEM endpoint never enters mini_send.
+            // MINIX 3 `proc.c::do_ipc` does the same divert — SYSTEM has no
+            // scheduler context, so a real send would block forever.
+            if src_dst_e == crate::system::system_endpoint() {
+                crate::system::kernel_call_sendrec(
+                    proc_table, priv_table, caller_nr, user_msg_va,
+                )
+            } else {
+                do_sendrec(
+                    proc_table, priv_table, caller_nr, src_dst_e, user_msg_va,
+                )
+            }
         }),
         NOTIFY => trap_gate(trap_mask, NOTIFY, || {
             notify::mini_notify(proc_table, priv_table, caller_nr, src_dst_e)
