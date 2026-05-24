@@ -12,6 +12,16 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Host builds (cargo check / cargo test on macOS or Linux) compile the
+    // kernel crate as a no-op (main.rs gates every real module on
+    // `target_os = "none"`). Skip assembly entirely for those — the ELF .o
+    // files clang would produce here aren't link-compatible with the
+    // host's mach-o or glibc-flavored ELF and would only break tests.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "none" {
+        return;
+    }
+
     let arch =
         std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH unset");
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR unset"));
