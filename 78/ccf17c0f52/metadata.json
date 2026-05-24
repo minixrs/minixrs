@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "78ccf17c0f52",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-2-5-ipc-primitives",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "CLAUDE.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/78/ccf17c0f52/0/metadata.json",
+      "transcript": "/78/ccf17c0f52/0/full.jsonl",
+      "content_hash": "/78/ccf17c0f52/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 6675,
+    "cache_read_tokens": 1893672,
+    "output_tokens": 4476,
+    "api_call_count": 6
+  }
+}
