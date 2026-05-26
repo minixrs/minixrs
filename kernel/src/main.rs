@@ -19,6 +19,8 @@ mod panic;
 #[cfg(target_os = "none")]
 mod proc;
 #[cfg(target_os = "none")]
+mod system;
+#[cfg(target_os = "none")]
 mod uart;
 
 #[cfg(target_os = "none")]
