@@ -5,6 +5,7 @@
 //! consume the tables yet — slice 2.3 will start reading from them when SVC
 //! entry lands, and slice 2.5 when the IPC primitives go live.
 
+pub(crate) mod bitmap;
 pub mod dump;
 pub mod flags;
 pub mod priv_struct;

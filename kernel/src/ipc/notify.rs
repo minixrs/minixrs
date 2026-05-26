@@ -10,42 +10,16 @@
 
 use core::sync::atomic::Ordering;
 
-use minix4_kernel_shared::PrivId;
 use minix4_kernel_shared::com::NR_SYS_PROCS;
 use minix4_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
 use minix4_kernel_shared::error::{EBADSRCDST, ECALLDENIED, OK};
 use minix4_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minix4_kernel_shared::message::Message;
 
+use crate::proc::bitmap::{get_sys_bit, set_sys_bit};
 use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND, RTS_RECEIVING, RTS_SENDING};
 use crate::proc::table::{N_PROC_SLOTS, proc_index};
 use crate::proc::{Priv, Proc, sched};
-
-/// Set bit `id` in a sysproc-indexed bitmap (the same encoding MINIX 3
-/// uses for `s_ipc_to`, `s_notify_pending`, `s_asyn_pending`).
-///
-/// Out-of-range ids are silently ignored — matches the symmetric
-/// behavior of [`get_sys_bit`] and keeps the kernel from panicking on a
-/// caller bug. Today every caller passes an in-range `PrivId`, so this
-/// is pure hardening.
-#[inline]
-fn set_sys_bit(map: &mut [u32], id: PrivId) {
-    let n = id.as_usize();
-    if n / 32 >= map.len() {
-        return;
-    }
-    map[n / 32] |= 1 << (n % 32);
-}
-
-/// Test bit `id` in a sysproc-indexed bitmap.
-#[inline]
-pub(crate) fn get_sys_bit(map: &[u32], id: PrivId) -> bool {
-    let n = id.as_usize();
-    if n / 32 >= map.len() {
-        return false;
-    }
-    map[n / 32] & (1 << (n % 32)) != 0
-}
 
 /// MINIX 3 `WILLRECEIVE(dst, src_e)`. Returns true when `dst` is blocked
 /// in `RECEIVE` (and not also in `SEND`, to dodge the SENDREC mid-flight

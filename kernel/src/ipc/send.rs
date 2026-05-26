@@ -13,7 +13,8 @@ use minix4_kernel_shared::ipc_const::SEND;
 
 use crate::ipc::deadlock::deadlock_check;
 use crate::ipc::message::copy_msg_from_user;
-use crate::ipc::notify::{get_sys_bit, will_receive};
+use crate::ipc::notify::will_receive;
+use crate::proc::bitmap::get_sys_bit;
 use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND, RTS_RECEIVING, RTS_SENDING};
 use crate::proc::table::{N_PROC_SLOTS, proc_index};
 use crate::proc::{Priv, Proc, sched};
