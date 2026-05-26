@@ -1,0 +1,73 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "5de1ad859d80",
+  "session_id": "7a5e0f16-30e9-43f6-973f-96da7852e8f9",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-26T13:15:50.168223Z",
+  "branch": "feature/phase-3-1a-frame-allocator-addrspace",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/plan.md",
+    "kernel/src/arch/aarch64/addrspace.rs",
+    "kernel/src/arch/aarch64/limine.rs",
+    "kernel/src/arch/aarch64/mod.rs",
+    "kernel/src/main.rs",
+    "kernel/src/mm/frame.rs",
+    "kernel/src/mm/mod.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-7[1m]",
+  "turn_id": "71c5d4ac21c5",
+  "token_usage": {
+    "input_tokens": 4722,
+    "cache_creation_tokens": 646095,
+    "cache_read_tokens": 11635002,
+    "output_tokens": 87339,
+    "api_call_count": 71
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-26T13:15:50.153278Z",
+    "agent_lines": 808,
+    "agent_removed": 9,
+    "human_added": 1,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 809,
+    "total_lines_changed": 819,
+    "agent_percentage": 99.75579975579976,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 804,
+      "agent_lines_removed": 5
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 808,
+      "agent_lines_removed": 9
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 808,
+      "agent_lines_removed": 9
+    }
+  ]
+}
