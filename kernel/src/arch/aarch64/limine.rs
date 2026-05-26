@@ -99,7 +99,25 @@ pub fn hhdm_offset() -> Option<u64> {
     Some(unsafe { core::ptr::read_volatile(&(*p).offset) })
 }
 
-// --- Memmap (request only -- response not consumed in Phase 1) ----------
+// --- Memmap --------------------------------------------------------------
+
+#[repr(C)]
+pub struct MemmapEntry {
+    pub base: u64,
+    pub length: u64,
+    pub kind: u64,
+}
+
+/// Memory map entry type: free for use by the kernel.
+pub const MEMMAP_USABLE: u64 = 0;
+
+#[repr(C)]
+struct MemmapResponseRaw {
+    revision: u64,
+    entry_count: u64,
+    /// Pointer to an array of `entry_count` pointers, each to a [`MemmapEntry`].
+    entries: *const *const MemmapEntry,
+}
 
 #[repr(C)]
 struct MemmapRequest {
@@ -120,6 +138,52 @@ static MEMMAP_REQUEST: MemmapRequest = MemmapRequest {
     revision: 0,
     response: AtomicU64::new(0),
 };
+
+/// Iterate Limine's memory map. Yields one [`MemmapEntry`] per region in the
+/// order Limine reported them. Returns `None` if Limine didn't populate the
+/// response (e.g. unsupported revision).
+pub fn memmap_entries() -> Option<MemmapIter> {
+    let p = MEMMAP_REQUEST.response.load(Ordering::Relaxed) as *const MemmapResponseRaw;
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: Limine filled `response` with a pointer to a valid
+    // MemmapResponseRaw in our address space and does not mutate it
+    // afterward; the `entries` indirection is itself a stable Limine-owned
+    // array of pointers to stable entries.
+    let (entries, count) = unsafe { ((*p).entries, (*p).entry_count) };
+    if entries.is_null() {
+        return None;
+    }
+    Some(MemmapIter {
+        entries,
+        idx: 0,
+        count,
+    })
+}
+
+pub struct MemmapIter {
+    entries: *const *const MemmapEntry,
+    idx: u64,
+    count: u64,
+}
+
+impl Iterator for MemmapIter {
+    type Item = &'static MemmapEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx >= self.count {
+            return None;
+        }
+        // SAFETY: `idx < count`; Limine's `entries[idx]` points at a valid
+        // entry. Entries live for the kernel's lifetime — bootloader memory
+        // for them is in BOOTLOADER_RECLAIMABLE, but we never reclaim it.
+        let entry: &'static MemmapEntry =
+            unsafe { &*(*self.entries.add(self.idx as usize)) };
+        self.idx += 1;
+        Some(entry)
+    }
+}
 
 // --- Paging mode (request only) -----------------------------------------
 
