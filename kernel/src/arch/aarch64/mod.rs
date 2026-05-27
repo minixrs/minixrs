@@ -1,3 +1,4 @@
+pub mod addrspace;
 pub mod context;
 pub mod exception;
 pub mod gic;

@@ -458,8 +458,8 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   are unmasked at EL0. Verified in QEMU: 171 A ticks vs 170 B ticks
   over ~3.4 s, clean `AAAAA BBBBB AAAAA …` 5-per-quantum bursts with
   `do_ipc[N]` SVC traces interleaved (proves SVC + IRQ paths coexist).
-- **Slice 2.5** ◀ ready (branch `feature/phase-2-5-ipc-primitives`,
-  pending merge) — IPC primitives in Rust. New `kernel/src/ipc/{mod,
+- **Slice 2.5** ✓ shipped (PR #7, merged 2026-05-23) — IPC primitives in
+  Rust. New `kernel/src/ipc/{mod,
   message, send, receive, notify, senda, deadlock}.rs`: `do_ipc`
   dispatcher with trap-mask gating, `mini_send` / `mini_receive` /
   `mini_notify` / `mini_sendnb` faithful to MINIX 3 `kernel/proc.c`,
@@ -486,8 +486,8 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   every line `result=0`; no panic / `el0_sync_unexpected`; `A`/`B`
   clock-tick interleaving from slice 2.4 still visible. **Phase 2
   milestone reached.**
-- **Slice 2.6** ◀ ready (branch `feature/phase-2-6-kernel-call-dispatch`,
-  pending merge) — Kernel-call dispatch + minimum `SYS_*` set. New
+- **Slice 2.6** ✓ shipped (PR #8, merged 2026-05-25) — Kernel-call
+  dispatch + minimum `SYS_*` set. New
   `kernel/src/system/{mod,do_getinfo,stubs}.rs` implement the MINIX 3
   fast-path shape: `ipc::dispatch`'s SENDREC arm detects
   `src_dst_e == boot_endpoint(SYSTEM)` and diverts to
@@ -537,10 +537,82 @@ Aggregate scope:
 
 ### Phase 3: VM Server + Memory Management
 
-- `servers/vm/`: Page fault handling, mmap, brk/sbrk
-- Kernel: aarch64 translation table creation per process, do_vmctl complete
-- fork() clones address space, exec() loads new ELF
-- **Milestone:** Boot processes each have isolated address spaces; VM handles page faults
+Phase 3 is split into 7 PR-sized slices (decomposition tracked in
+`~/.claude/plans/work-on-phase-3-optimized-petal.md`). Each slice
+independently builds, boots, and prints observable progress. The Phase 3
+milestone ("Boot processes each have isolated address spaces; VM handles
+page faults") is satisfied at the end of slice 3.4; slices 3.5/3.6 then
+add brk + mmap on top. POSIX fork and exec are deferred to Phase 4
+(PM-driven).
+
+Architecture choices (locked in by plan): per-process TTBR0 + 8-bit
+ARMv8 ASIDs, kernel writes all user PTEs (VM passes decisions in via
+SYS_VMCTL subcalls), kernel reads cross-AS user memory via HHDM after
+walking the target proc's page table, VM uses static `[Region; N]`
+per-proc tables (no allocator), stubs A/B/C from Phase 2.5/2.6 migrated
+to per-proc TTBR0 in 3.1b and kept as regression coverage.
+
+- **Slice 3.1a** ◀ ready (branch `feature/phase-3-1a-frame-allocator-addrspace`,
+  pending merge) — Physical frame allocator + addrspace API, kernel-only,
+  no EL0 changes. New `kernel/src/mm/{mod,frame}.rs`: intrusive free-list +
+  per-region bump pointers seeded from Limine `MEMMAP_USABLE` entries
+  (capacity `MAX_REGIONS = 16`; QEMU virt + Apple Silicon QEMU both fit
+  comfortably). Frames inside the kernel image, embedded boot image, and
+  Phase-2.5/2.6 static stub pages live in `EXECUTABLE_AND_MODULES` and
+  are never visible to the allocator — no explicit reservation logic
+  needed. `alloc_frame` zeros on hand-out so the caller never sees
+  residual state; `free_frame` pushes via HHDM. `kernel-shared` /
+  `Limine` integration: extended `arch/aarch64/limine.rs` with a
+  `MemmapEntry` repr-C struct and a `memmap_entries()` iterator that
+  walks the `**entry` indirection Limine uses. New
+  `kernel/src/arch/aarch64/addrspace.rs`: `AddrSpace::new` allocates
+  one L0 frame; `map_page(va, pa, Prot)` walks/allocates L1/L2/L3 on
+  demand via the frame allocator, writes the leaf PTE through HHDM
+  using the same PTE bit constants as `mmu.rs`; `walk_pt(va)` returns
+  `Option<u64>`; `destroy()` recursively frees intermediate tables and
+  the L0 root (leaf frames are caller-owned, not freed here). One-shot
+  `mm_smoke_test` in `kmain` builds a throwaway AddrSpace, installs four
+  mappings across distinct L2 slots, walks them all (plus one negative
+  check), tears down, then verifies the free-list is LIFO by asserting
+  the next `alloc_frame` returns the just-freed L0 PA. The smoke test is
+  removed in 3.1b once real per-proc AddrSpaces replace `userland.rs`'s
+  static `L0/L1/L2/L3_*` tables. Verified in QEMU over 8 s:
+  `[mm] frame_alloc OK ttbr0_pa=0x40000000 / map OK / walk OK / free OK`
+  prints in order; A↔B ping-pong head trace (`[ipc 1..4]`) and stub C
+  SYS_GETINFO carve-out (~726 K SVCs, every line `result=0`) both
+  unchanged from slice 2.6; no panic, no `el0_sync_unexpected`.
+- **Slice 3.1b** ◀ next — Per-process TTBR0s + 8-bit ASIDs +
+  minimal page-fault-diagnostic handler. Adds `Proc::ttbr0_pa` and
+  `Proc::asid`, rewrites `userland.rs` to allocate each stub's own
+  AddrSpace from 3.1a's machinery, swaps TTBR0_EL1 (with ASID tag) on
+  every EL1 → EL0 transition, and replaces `el0_sync_unexpected`'s
+  panic for EC=0x20/0x24 with a one-page ESR/FAR/ELR decoder so 3.2's
+  real handler has a tractable scaffold. IPC user-copy still reads
+  via the caller's TTBR0 (single-AS); cross-AS redesign lands in 3.4.
+- **Slice 3.2** — Real `do_page_fault` + `RTS_PAGEFAULT` + kernel-resolved
+  heap-window fault retry + 4th stub D.
+- **Slice 3.3** — Real `SYS_VMCTL` subcalls (`PT_MAP`, `PT_UNMAP`,
+  `CLEAR_PAGEFAULT`, `GET_PAGEFAULT`, `VMINHIBIT_SET/_CLEAR`) exercised
+  from stub D directly (no fake-VM bridge).
+- **Slice 3.4** — Real VM server boots, kernel ELF loader, cross-AS IPC
+  delivery (HHDM-after-walk), kernel-originated `VM_PAGEFAULT` send.
+  **Phase 3 milestone reached here.**
+- **Slice 3.5** — VM region tracking (static `[Region; N]` per proc) +
+  `VM_BRK`.
+- **Slice 3.6** — `VM_MMAP` / `VM_MUNMAP` + Phase 3 doc/CLAUDE.md cleanup.
+
+Aggregate scope (Phase 3 as a whole):
+
+- `kernel/src/mm/`: physical frame allocator
+- `kernel/src/arch/aarch64/addrspace.rs`: per-process page-table API
+- Per-proc TTBR0 + ASID allocator; context switch updates TTBR0_EL1
+- EL1 page-fault handler routes to VM via kernel-originated SEND
+- `kernel/src/system/do_vmctl.rs`: real SYS_VMCTL subcalls
+- `kernel/src/boot_image/elf.rs`: minimal ELF loader for VM bootstrap
+- `servers/vm/`: receive loop, region tracking, page-fault resolution,
+  brk, mmap (all static-allocation; no heap allocator in VM)
+- **Milestone:** Boot processes each have isolated address spaces; VM
+  handles page faults
 
 ### Phase 4: Core Servers (PM, VFS, RS, DS, SCHED)
 
