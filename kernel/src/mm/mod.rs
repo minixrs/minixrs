@@ -19,6 +19,8 @@ pub mod frame;
 
 pub use frame::{Frame, FRAME_SIZE, alloc_frame, free_frame, init_from_limine_memmap};
 
+use core::cell::UnsafeCell;
+
 /// Translate a physical address to its kernel HHDM virtual address.
 ///
 /// The HHDM offset is captured at `init` time from Limine's response;
@@ -29,7 +31,16 @@ pub fn phys_to_hhdm(pa: u64) -> *mut u8 {
     (pa + hhdm_offset()) as *mut u8
 }
 
-static mut HHDM_OFFSET: u64 = 0;
+/// HHDM offset capture. Wrapped in the same `UnsafeCell` + `Sync` newtype
+/// pattern as `kernel/src/proc/table.rs` and `frame::AllocatorCell`, per
+/// CLAUDE.md's static-mutable-state convention — `static mut` would be
+/// inconsistent here and trips Rust 2024 lints.
+#[repr(transparent)]
+struct HhdmOffset(UnsafeCell<u64>);
+// SAFETY: written exactly once at boot before any reader, single-threaded.
+unsafe impl Sync for HhdmOffset {}
+
+static HHDM: HhdmOffset = HhdmOffset(UnsafeCell::new(0));
 
 /// Set the HHDM offset captured from Limine. Must be called once during
 /// boot before any frame allocation.
@@ -38,11 +49,11 @@ static mut HHDM_OFFSET: u64 = 0;
 /// concurrent use of [`phys_to_hhdm`].
 pub unsafe fn set_hhdm_offset(off: u64) {
     // SAFETY: caller's contract — single-threaded boot, single writer.
-    unsafe { HHDM_OFFSET = off };
+    unsafe { *HHDM.0.get() = off };
 }
 
 pub(crate) fn hhdm_offset() -> u64 {
     // SAFETY: written exactly once at boot before any reader; the value is
     // a plain `u64` so a torn read is impossible on aarch64.
-    unsafe { HHDM_OFFSET }
+    unsafe { *HHDM.0.get() }
 }

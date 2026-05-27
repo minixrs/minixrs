@@ -184,7 +184,9 @@ fn mm_smoke_test(con: &mut uart::Uart) {
         reused_pa == l0_pa,
         "smoke: expected free-list reuse of L0 PA {l0_pa:#x}, got {reused_pa:#x}",
     );
-    // Put it back so the bump pointer doesn't leak this single frame.
+    // Return it so the free list inherits a non-empty state for the next
+    // slice; the bump regions are never repopulated by `free_frame`, so
+    // the frame would otherwise sit idle outside the allocator's reach.
     mm::free_frame(reused);
 
     let _ = writeln!(con, "[mm] free OK (destroy + reuse verified)");

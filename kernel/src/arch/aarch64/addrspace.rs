@@ -221,8 +221,17 @@ fn next_table(parent_pa: u64, idx: usize) -> Option<u64> {
     if desc & PTE_VALID == 0 {
         return None;
     }
-    // At L0/L1/L2, a table descriptor has PTE_TABLE=1. (L3 page descriptors
-    // also have PTE_TABLE=1, but we never call `next_table` at L3.)
+    // At L0/L1/L2, a table descriptor has PTE_TABLE=1; a valid entry with
+    // PTE_TABLE=0 is a *block* descriptor (2 MiB / 1 GiB block) and must
+    // NOT be followed as a sub-table. Slice 3.1a only ever writes table
+    // descriptors via `ensure_next_table`, so this branch never fires
+    // today — the check is future-proofing for any later slice that maps
+    // a block (large-page support, identity ranges, etc.). (L3 page
+    // descriptors also have PTE_TABLE=1, but we never call `next_table`
+    // at L3.)
+    if desc & PTE_TABLE == 0 {
+        return None;
+    }
     Some(desc & PA_MASK)
 }
 

@@ -2,8 +2,10 @@
 //! bump pointers seeded from Limine's memmap.
 //!
 //! The allocator's state is just two pieces:
-//!  - a `[Region; MAX_REGIONS]` array of `(next_free_pa, end_pa)` bump
-//!    pointers, one per `MEMMAP_USABLE` region Limine reported;
+//!  - a `[Region; MAX_REGIONS]` array of `(base_pa, next_free_pa, end_pa)`
+//!    bump pointers, one per `MEMMAP_USABLE` region Limine reported. `base_pa`
+//!    is kept after init so `free_frame` can bounds-check freed PAs against
+//!    the *original* extent, not the post-bump remainder;
 //!  - a single free-list head pointer (kernel virtual address, HHDM-relative)
 //!    of recently-freed frames.
 //!
@@ -58,13 +60,20 @@ impl Frame {
 
 #[derive(Copy, Clone)]
 struct Region {
-    /// Next PA to hand out from this region; 0 means "region unused".
+    /// First PA in this region, captured at init time. Stays fixed for the
+    /// life of the allocator so `free_frame` can check `base_pa <= pa`
+    /// against the region's *original* extent — `next_free_pa` advances on
+    /// every bump, so it can't double as the lower bound.
+    base_pa: u64,
+    /// Next PA to hand out from this region; equals `base_pa` until the
+    /// first allocation, then advances toward `end_pa`.
     next_free_pa: u64,
     /// One-past-the-last PA in this region.
     end_pa: u64,
 }
 
 const EMPTY_REGION: Region = Region {
+    base_pa: 0,
     next_free_pa: 0,
     end_pa: 0,
 };
@@ -109,10 +118,8 @@ static ALLOC: AllocatorCell = AllocatorCell(UnsafeCell::new(Allocator {
 /// SAFETY: must be called exactly once, single-threaded, after
 /// [`crate::mm::set_hhdm_offset`].
 pub unsafe fn init_from_limine_memmap() {
-    let entries = match memmap_entries() {
-        Some(it) => it,
-        None => panic!("Limine did not populate the memmap response"),
-    };
+    let entries =
+        memmap_entries().expect("Limine did not populate the memmap response");
 
     // SAFETY: single-threaded boot, single writer.
     let a = unsafe { &mut *ALLOC.0.get() };
@@ -142,6 +149,7 @@ pub unsafe fn init_from_limine_memmap() {
              grow the constant in mm::frame"
         );
         a.regions[a.region_count] = Region {
+            base_pa: base,
             next_free_pa: base,
             end_pa: base.checked_add(len).expect("USABLE region overflows u64"),
         };
@@ -182,15 +190,14 @@ pub fn alloc_frame() -> Option<Frame> {
             a.allocs += 1;
             // Zero the frame on first hand-out. Page-table walkers expect
             // intermediate tables to start all-invalid, and zero pages are
-            // what user-mode brk/mmap expects too. Cost: one 4 KiB write,
+            // what user-mode brk/mmap expects too. Cost: one 4 KiB memset,
             // amortized over the frame's lifetime.
             // SAFETY: HHDM covers this PA (Limine base revision 2 blanket-maps
-            // [0, 4 GiB)), and the frame is exclusively ours.
+            // [0, 4 GiB)), the frame is exclusively ours, and HHDM is
+            // cacheable normal memory — no MMIO side-channel that would
+            // require `write_volatile`.
             unsafe {
-                let dst = crate::mm::phys_to_hhdm(pa) as *mut u64;
-                for i in 0..(FRAME_SIZE / 8) {
-                    ptr::write_volatile(dst.add(i), 0);
-                }
+                ptr::write_bytes(crate::mm::phys_to_hhdm(pa), 0, FRAME_SIZE);
             }
             return Some(Frame::from_addr(pa));
         }
@@ -204,22 +211,29 @@ pub fn alloc_frame() -> Option<Frame> {
 /// without thinking about residual state).
 ///
 /// Panics if `frame` lies outside the union of all tracked regions — that
-/// would mean a caller forged a frame from a non-USABLE PA.
+/// would mean a caller forged a frame from a non-USABLE PA (e.g. a kernel-image
+/// PA from `EXECUTABLE_AND_MODULES`, or a gap between two USABLE regions).
+///
+/// **Precondition (not checked):** the same frame must not be freed twice.
+/// A double free silently corrupts the free list — the intrusive `next`
+/// pointer on the freed frame gets overwritten with the previous head, and
+/// the next two `alloc_frame` calls hand out the same PA. Detecting at
+/// runtime would require an O(n) free-list walk per free (or extra
+/// per-frame state); both are overkill for a single-threaded boot
+/// allocator. The bounds check below catches forged-PA cases but cannot
+/// distinguish a legitimate frame from one already on the list.
 pub fn free_frame(frame: Frame) {
     let pa = frame.addr();
 
     // SAFETY: single-threaded boot invariant.
     let a = unsafe { &mut *ALLOC.0.get() };
 
-    // Bounds-check against tracked regions.
+    // Bounds-check against tracked regions. `base_pa` is captured at init
+    // time and never advances, so `[base_pa, end_pa)` is the region's
+    // original extent — exactly the set of legal frame PAs.
     let mut in_range = false;
     for r in &a.regions[..a.region_count] {
-        // Region originally spanned [base, end_pa); after bump-allocation
-        // `next_free_pa` may have advanced. The frame must still satisfy
-        // base ≤ pa < end_pa — we don't reconstruct `base` (it equals the
-        // original `next_free_pa`), so checking `pa < end_pa` together with
-        // "pa was alloc-able from somewhere" is enough.
-        if pa < r.end_pa {
+        if r.base_pa <= pa && pa < r.end_pa {
             in_range = true;
             break;
         }
