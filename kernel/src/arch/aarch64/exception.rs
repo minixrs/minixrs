@@ -144,7 +144,8 @@ extern "C" fn el0_sync_unexpected(esr: u64, elr: u64, far: u64) -> ! {
 /// Flow: classify the fault, stash it in the proc's
 /// [`PageFaultState`](crate::proc::page_fault::PageFaultState), block the
 /// proc on `RTS_PAGEFAULT`, then — for this slice only — resolve heap-window
-/// faults inline (the kernel stands in for the not-yet-existing VM server).
+/// *translation* faults inline (the kernel stands in for the not-yet-existing
+/// VM server; permission faults halt, as re-protecting is a VM-server job).
 /// On return, `trap.S` runs `el1_svc_tail` (= `sched::schedule_next`) and
 /// `el1_return_to_user`, so the now-runnable faulting proc is rescheduled
 /// and retries the aborting instruction (aarch64 leaves `ELR_EL1` at the
@@ -179,25 +180,43 @@ extern "C" fn do_page_fault(esr: u64, elr: u64, far: u64) {
         flags |= PFF_PERMISSION;
     }
 
-    // SAFETY: exception context — single-threaded, DAIF.I masked. The
-    // faulting proc is CURRENT and not otherwise borrowed.
-    let p = unsafe { sched::current_proc_mut() }.expect("page fault: no current proc");
-    p.page_fault_state = PageFaultState { addr: far, flags, ip: elr };
-    let window = p.heap_window;
-    let name = p.name[0];
-    // SAFETY: rts_set captures `nr` then ends the &mut Proc borrow before
-    // dequeue — the documented two-&mut-from-one-UnsafeCell avoidance.
-    unsafe { sched::rts_set(p, RTS_PAGEFAULT) };
+    // Record + block under a tightly-scoped borrow, then drop it before any
+    // rts transition. `rts_set`/`rts_unset` re-borrow the same slot via
+    // `dequeue`/`enqueue` (`proc_slot_mut`), so holding `p` live across them
+    // and using it afterward would alias the slot — the
+    // two-&mut-from-one-UnsafeCell hazard (see CLAUDE.md; mirrors the
+    // borrow scoping in `ipc::send`/`ipc::receive`). Capture every scalar the
+    // inline resolve needs here instead.
+    let (window, name, ttbr0_pa, asid);
+    {
+        // SAFETY: exception context — single-threaded, DAIF.I masked. The
+        // faulting proc is CURRENT and not otherwise borrowed.
+        let p = unsafe { sched::current_proc_mut() }.expect("page fault: no current proc");
+        p.page_fault_state = PageFaultState { addr: far, flags, ip: elr };
+        window = p.heap_window;
+        name = p.name[0];
+        ttbr0_pa = p.ttbr0_pa;
+        asid = p.asid;
+        // SAFETY: rts_set captures `nr` then ends its &mut Proc borrow before
+        // dequeue; the outer `p` borrow ends with this block.
+        unsafe { sched::rts_set(p, RTS_PAGEFAULT) };
+    }
 
     // No VM yet (slice 3.4 sends VM_PAGEFAULT here); a fault outside the
     // kernel-resolved heap window is unrecoverable → halt with the decoder.
     if !window.contains(far) {
         el0_sync_unexpected(esr, elr, far); // -> !
     }
+    // The inline resolve only maps fresh frames, so it satisfies translation
+    // faults. A permission fault means the page is already mapped with the
+    // wrong AP bits — `map_page_in` would return `AlreadyMapped` and the
+    // `.expect` below would panic misleadingly. Re-protecting an existing
+    // mapping is a VM-server job, so halt explicitly instead.
+    if flags & PFF_PERMISSION != 0 {
+        el0_sync_unexpected(esr, elr, far); // -> !
+    }
 
     // --- kernel-as-VM resolution (slice 3.4 lifts this into the VM server) ---
-    let ttbr0_pa = p.ttbr0_pa;
-    let asid = p.asid;
     let page_base = far & !((PAGE_SIZE as u64) - 1);
 
     let frame = alloc_frame().expect("page fault: out of frames");
@@ -215,9 +234,14 @@ extern "C" fn do_page_fault(esr: u64, elr: u64, far: u64) {
         frame.addr(),
     );
 
-    p.page_fault_state = PageFaultState::EMPTY;
-    // SAFETY: rts_unset captures `nr` then ends the borrow before enqueue.
-    unsafe { sched::rts_unset(p, RTS_PAGEFAULT) };
+    // SAFETY: fresh tightly-scoped borrow; the rts_set block above already
+    // ended. Clearing the fault state and unblocking happen together.
+    {
+        let p = unsafe { sched::current_proc_mut() }.expect("page fault: no current proc");
+        p.page_fault_state = PageFaultState::EMPTY;
+        // SAFETY: rts_unset captures `nr` then ends the borrow before enqueue.
+        unsafe { sched::rts_unset(p, RTS_PAGEFAULT) };
+    }
 }
 
 /// Tiny FSC-name decoder. Covers the codes a stub on a fresh AddrSpace
