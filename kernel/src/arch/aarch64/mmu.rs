@@ -177,10 +177,14 @@ pub unsafe fn enable_ttbr0_walks_once() {
 /// SAFETY: must be called with DAIF masked at EL1, single-threaded boot.
 /// `ttbr0_pa` must point at a valid L0 page table the caller owns.
 pub unsafe fn switch_ttbr0_with_asid(ttbr0_pa: u64, asid: u8) {
-    debug_assert!(asid != 0, "switch_ttbr0_with_asid: ASID 0 is reserved");
-    debug_assert!(
-        ttbr0_pa & (PAGE_SIZE as u64 - 1) == 0,
-        "switch_ttbr0_with_asid: ttbr0_pa not page-aligned",
+    // Hard guards (not debug_assert!): the kernel only ever builds --release,
+    // where debug_assert! is compiled out. A null/zero ASID here means a proc
+    // with no address space reached the scheduler; installing TTBR0_EL1 = 0
+    // would point the EL0 walk at PA 0. Fail loudly at the choke point.
+    assert!(asid != 0, "switch_ttbr0_with_asid: ASID 0 is reserved");
+    assert!(
+        ttbr0_pa != 0 && ttbr0_pa & (PAGE_SIZE as u64 - 1) == 0,
+        "switch_ttbr0_with_asid: ttbr0_pa {ttbr0_pa:#x} null or not page-aligned",
     );
     let tagged = ttbr0_pa | ((asid as u64) << 48);
     // `tlbi aside1, Xt` consumes the ASID from bits [63:48] of Xt; the
