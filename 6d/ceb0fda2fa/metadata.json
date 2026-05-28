@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "6dceb0fda2fa",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-3-2-page-fault-handler",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/plan.md",
+    "kernel/src/arch/aarch64/addrspace.rs",
+    "kernel/src/arch/aarch64/exception.rs",
+    "kernel/src/arch/aarch64/mmu.rs",
+    "kernel/src/arch/aarch64/trap.S",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/proc/mod.rs",
+    "kernel/src/proc/page_fault.rs",
+    "kernel/src/proc/proc_struct.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6d/ceb0fda2fa/0/metadata.json",
+      "transcript": "/6d/ceb0fda2fa/0/full.jsonl",
+      "content_hash": "/6d/ceb0fda2fa/0/content_hash.txt",
+      "prompt": "/6d/ceb0fda2fa/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 133,
+    "cache_creation_tokens": 378244,
+    "cache_read_tokens": 12555624,
+    "output_tokens": 91118,
+    "api_call_count": 67
+  }
+}
