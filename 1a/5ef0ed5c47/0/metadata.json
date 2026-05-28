@@ -1,0 +1,53 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "1a5ef0ed5c47",
+  "session_id": "86fc1091-dde9-4c23-8ab3-e16118705964",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-28T21:58:25.23833Z",
+  "branch": "feature/phase-3-2-page-fault-handler",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "kernel/src/arch/aarch64/exception.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "95263101f722",
+  "token_usage": {
+    "input_tokens": 40,
+    "cache_creation_tokens": 206498,
+    "cache_read_tokens": 1676094,
+    "output_tokens": 34413,
+    "api_call_count": 20
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-28T21:58:25.229535Z",
+    "agent_lines": 39,
+    "agent_removed": 15,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 39,
+    "total_lines_changed": 54,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 39,
+      "agent_lines_removed": 15
+    }
+  ]
+}
