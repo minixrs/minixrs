@@ -17,6 +17,12 @@
  *   a loop. The kernel dispatcher writes endpoint, priv-flags, init-flags,
  *   and name back into the payload; the reply's m_type is OK (0).
  *
+ *   Stub D — page-fault demo (slice 3.2): stores to an unmapped page in
+ *   its heap window (0x0100_0000) in a loop. The first store faults; the
+ *   kernel-as-VM handler allocates a frame, maps it RW, and unblocks the
+ *   stub, which retries and then loops over the now-mapped page (no SVC,
+ *   no further faults).
+ *
  * Each stub carves its 104-byte Message buffer out of [SP_EL0 - 104,
  * SP_EL0). SP stays 16-byte aligned (104 rounds to nothing modulo 16;
  * we never sub more than 104 so the stack top remains usable). The stack
@@ -117,3 +123,20 @@ _user_stub_c_start:
     .global _user_stub_c_end
 _user_stub_c_end:
     .size _user_stub_c_start, _user_stub_c_end - _user_stub_c_start
+
+/* ---- Stub D: page-fault demo (slice 3.2) ------------------------------- */
+
+    .section .rodata.user_stub_d, "a", %progbits
+    .balign 4
+    .global _user_stub_d_start
+    .type _user_stub_d_start, %object
+_user_stub_d_start:
+    movz    x20, #0x0100, lsl #16              // x20 = 0x0100_0000 (heap base)
+    mov     x19, #0                            // persistent counter
+1:
+    str     x19, [x20]                         // first store faults; then loops
+    add     x19, x19, #1
+    b       1b
+    .global _user_stub_d_end
+_user_stub_d_end:
+    .size _user_stub_d_start, _user_stub_d_end - _user_stub_d_start

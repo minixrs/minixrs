@@ -99,15 +99,18 @@ el0_64_sync_entry:
     bl      el1_svc_tail
     b       el1_return_to_user
 
-1:  // Non-SVC EL0 sync exception — diagnose and panic.
-    // Args: el0_sync_unexpected(esr, elr, far).
+1:  // Non-SVC EL0 sync exception — route through the page-fault handler.
+    // It resolves heap-window faults and returns; unrecoverable faults
+    // panic inside (el0_sync_unexpected is -> !). The tail mirrors the
+    // SVC path: schedule the next runnable proc (the just-unblocked
+    // faulting proc, or another), then eret into it.
+    // Args: do_page_fault(esr, elr, far).
     mov     x0, x12              // esr_el1
     mrs     x1, elr_el1
     mrs     x2, far_el1
-    bl      el0_sync_unexpected
-    // el0_sync_unexpected is -> !; if it ever returns, halt.
-2:  wfe
-    b       2b
+    bl      do_page_fault
+    bl      el1_svc_tail
+    b       el1_return_to_user
     .size el0_64_sync_entry, . - el0_64_sync_entry
 
 /*
