@@ -72,20 +72,79 @@ extern "C" fn exception_entry(frame: &ExceptionFrame, kind: u64) -> ! {
 /// Diagnose-and-panic helper for EL0 sync exceptions that aren't `SVC`.
 ///
 /// `trap.S` calls this from vector slot 8 when ESR_EL1.EC ≠ 0x15 (SVC64).
-/// Slice 2.3 doesn't expect any other EL0 sync exception in the happy path,
-/// so we treat them as fatal — same policy as slice 2.2's blanket
-/// `exception_entry`.
+/// Slice 3.1b extends slice 2.3's generic dump with a one-page decoder
+/// for EC=0x20 (instruction abort from a lower EL) and EC=0x24 (data
+/// abort from a lower EL): IFSC/DFSC, WnR, ISV. Slice 3.2's real
+/// `do_page_fault` lands on top of this scaffold — for now the policy
+/// is still "halt".
 #[unsafe(no_mangle)]
 extern "C" fn el0_sync_unexpected(esr: u64, elr: u64, far: u64) -> ! {
     let mut uart = Pl011::new();
     let ec = (esr >> 26) & 0x3F;
     let iss = esr & 0xFF_FFFF;
     let _ = writeln!(uart);
-    let _ = writeln!(uart, "!!! unexpected EL0 sync exception (not SVC)");
+    match ec {
+        0x20 => {
+            // Instruction abort, lower EL. ISS[5:0] = IFSC.
+            let ifsc = iss & 0x3F;
+            let _ = writeln!(
+                uart,
+                "!!! EL0 instruction abort (translation/permission)"
+            );
+            let _ = writeln!(
+                uart,
+                "    IFSC = {:#04x} ({})",
+                ifsc,
+                fsc_name(ifsc)
+            );
+        }
+        0x24 => {
+            // Data abort, lower EL. ISS[5:0]=DFSC, ISS[6]=WnR, ISS[24]=ISV.
+            let dfsc = iss & 0x3F;
+            let wnr = (iss >> 6) & 1;
+            let isv = (iss >> 24) & 1;
+            let _ = writeln!(
+                uart,
+                "!!! EL0 data abort (translation/permission)"
+            );
+            let _ = writeln!(
+                uart,
+                "    DFSC = {:#04x} ({})  WnR = {}  ISV = {}",
+                dfsc,
+                fsc_name(dfsc),
+                wnr,
+                isv,
+            );
+        }
+        _ => {
+            let _ = writeln!(uart, "!!! unexpected EL0 sync exception (not SVC)");
+        }
+    }
     let _ = writeln!(
         uart,
         "    ESR_EL1  = {esr:#018x}  (EC = {ec:#04x}, ISS = {iss:#08x})",
     );
     let _ = writeln!(uart, "    ELR_EL1  = {elr:#018x}  FAR_EL1  = {far:#018x}");
     panic!("EL0 sync exception: EC={ec:#x} ESR_EL1={esr:#x}");
+}
+
+/// Tiny FSC-name decoder. Covers the codes a stub on a fresh AddrSpace
+/// would actually hit. The full table (ARM ARM D13.2.40) has ~30 codes;
+/// we just want boot-log triage to be tractable. Slice 3.2's real PF
+/// handler will branch on FSC and replace this with structured handling.
+fn fsc_name(fsc: u64) -> &'static str {
+    match fsc {
+        0x04 => "translation fault, L0",
+        0x05 => "translation fault, L1",
+        0x06 => "translation fault, L2",
+        0x07 => "translation fault, L3",
+        0x09 => "access flag fault, L1",
+        0x0A => "access flag fault, L2",
+        0x0B => "access flag fault, L3",
+        0x0D => "permission fault, L1",
+        0x0E => "permission fault, L2",
+        0x0F => "permission fault, L3",
+        0x21 => "alignment fault",
+        _ => "other",
+    }
 }
