@@ -279,6 +279,24 @@ pub unsafe fn schedule_next() {
     unsafe {
         let next = proc_slot_mut(next_nr).expect("schedule_next: next out of range");
         set_tpidr_to(next);
+        // Per-proc TTBR0 + ASID install. Slice 3.1b: every runnable proc
+        // is an EL0 stub with a real address space; assert here so a
+        // future slice that mistakenly enqueues a kernel task (asid=0)
+        // is caught instead of silently inheriting the previous proc's
+        // TTBR0. The TTBR0 swap must happen *before* `flush_deliver_msg`
+        // — the flush writes via the active TTBR0, so the new proc's AS
+        // must already be live.
+        debug_assert!(
+            next.ttbr0_pa != 0 && next.asid != 0,
+            "schedule_next: proc nr={} has no AS (ttbr0_pa={:#x}, asid={})",
+            next.nr.get(),
+            next.ttbr0_pa,
+            next.asid,
+        );
+        crate::arch::aarch64::mmu::switch_ttbr0_with_asid(
+            next.ttbr0_pa,
+            next.asid,
+        );
         crate::ipc::flush_deliver_msg(next);
     }
 }

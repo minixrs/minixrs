@@ -63,6 +63,19 @@ pub struct Proc {
     /// consumed by `flush_deliver_msg` on every EL1 → EL0 transition.
     pub deliver_msg_vir: u64,
 
+    // ----- MMU state ------------------------------------------------------
+    /// PA of this proc's L0 page-table root, or 0 if the proc never runs at
+    /// EL0 (kernel tasks, unprivileged boot servers prior to VM setup).
+    /// Set by `arch::aarch64::userland::userland_bootstrap` for the EL0
+    /// stubs; `proc::sched::schedule_next` reads it on every context switch.
+    pub ttbr0_pa: u64,
+    /// 8-bit ARMv8 ASID for this address space. Goes into TTBR0_EL1[55:48]
+    /// on switch (TCR_EL1.AS = 0, the Limine default). 0 = uninitialized
+    /// (boot procs, kernel tasks); real values start at 1 and are handed
+    /// out by `arch::aarch64::asid::alloc_asid` in slice-3.1b boot order
+    /// (A=1, B=2, C=3).
+    pub asid: u8,
+
     // ----- Run-queue state -------------------------------------------------
     /// Next process in the same priority-band run queue, or `None` if last.
     /// Mirrors MINIX 3's `p_nextready` but as a [`ProcNr`] index per the
@@ -105,6 +118,8 @@ impl Proc {
             payload: [0; 96],
         },
         deliver_msg_vir: 0,
+        ttbr0_pa: 0,
+        asid: 0,
         next_ready: None,
         name: [0; PROC_NAME_LEN],
     };

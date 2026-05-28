@@ -62,74 +62,14 @@ pub const ATTR_IDX_NORMAL: u64 = 0;
 /// Expected MAIR_EL1[7:0] for AttrIdx 0.
 pub const MAIR_NORMAL_BYTE: u8 = 0xFF;
 
-// ----- PageTable -----------------------------------------------------------
-
-/// One 4 KiB page table — 512 × 8 B descriptors. The structure is its own
-/// alignment guarantee so we can place it in static storage and hand a raw
-/// physical address straight to TTBR0.
-#[repr(C, align(4096))]
-pub struct PageTable(pub [u64; PTES_PER_LEVEL]);
-
-impl PageTable {
-    /// All-zero (= all-invalid) table for static initialization.
-    pub const EMPTY: Self = Self([0; PTES_PER_LEVEL]);
-
-    #[inline]
-    pub fn set(&mut self, idx: usize, desc: u64) {
-        self.0[idx] = desc;
-    }
-}
-
-// ----- VA index helpers ----------------------------------------------------
-
-const fn pte_index(va: u64, level: u32) -> usize {
-    // Each level consumes 9 VA bits (4 KiB granule). L0 indexes bits
-    // [47:39], L1 [38:30], L2 [29:21], L3 [20:12].
-    let shift = PAGE_SHIFT + 9 * (3 - level);
-    ((va >> shift) & 0x1FF) as usize
-}
-
-/// Build a table descriptor pointing at `next_table_pa`.
-const fn make_table_desc(next_table_pa: u64) -> u64 {
-    (next_table_pa & 0x0000_FFFF_FFFF_F000) | PTE_VALID | PTE_TABLE
-}
-
-/// Build an L3 page descriptor for `pa` with the given attribute bits.
-const fn make_page_desc(pa: u64, attrs: u64) -> u64 {
-    (pa & 0x0000_FFFF_FFFF_F000) | PTE_VALID | PTE_TABLE | attrs
-}
-
-// ----- Walker -------------------------------------------------------------
-
-/// Install a single 4 KiB mapping from `va` to `pa` with `attrs`.
-///
-/// `tables` must hold at least 4 page tables: `tables[0]` is the L0 root
-/// (whose PA goes into TTBR0), and the walker writes the rest of the walk
-/// into `tables[1..]` if they are not already linked. The simple slice-2.3
-/// arrangement uses one fixed table at each level, so callers pre-allocate
-/// `[L0, L1, L2, L3_for_va]`.
-///
-/// SAFETY: `tables[i]` must be live for the duration of the mapping; their
-/// physical addresses must be reachable via [`super::limine::kernel_va_to_pa`].
-pub unsafe fn map_4k(
-    l0: &mut PageTable,
-    l1: &mut PageTable,
-    l2: &mut PageTable,
-    l3: &mut PageTable,
-    l1_pa: u64,
-    l2_pa: u64,
-    l3_pa: u64,
-    va: u64,
-    pa: u64,
-    attrs: u64,
-) {
-    l0.set(pte_index(va, 0), make_table_desc(l1_pa));
-    l1.set(pte_index(va, 1), make_table_desc(l2_pa));
-    l2.set(pte_index(va, 2), make_table_desc(l3_pa));
-    l3.set(pte_index(va, 3), make_page_desc(pa, attrs));
-}
-
 // ----- TTBR0 / TCR / MAIR ---------------------------------------------------
+//
+// Slice 3.1a's [`super::addrspace::AddrSpace`] owns the page-table walker
+// now; it consumes the PTE bit constants above and the frame allocator to
+// build per-proc trees in HHDM. Slice 2.5's static `PageTable` newtype,
+// `map_4k` helper, and `pte_index`/`make_*_desc` const fns lived here as
+// the only consumers — they're gone in slice 3.1b along with the static
+// userland page-table arrays.
 
 /// Verify Limine programmed AttrIdx 0 = Normal WB. We rely on this index
 /// throughout slice 2.3.
@@ -171,38 +111,95 @@ pub fn assert_tcr_el1_ttbr0_ready() {
         "TCR_EL1 = {tcr:#018x} (T0SZ={t0sz} TG0={tg0} IRGN0={irgn0} ORGN0={orgn0} SH0={sh0}); \
          slice 2.3 requires T0SZ=16 (48-bit VA, 4-level walk) and TG0=0 (4 KiB granule)",
     );
+
+    // Slice 3.1b: assert 8-bit ASIDs (TCR_EL1.AS = 0). Limine's aarch64
+    // default leaves this bit clear, putting ASID at TTBR0_EL1[55:48].
+    // If it ever flips to 16-bit, our `switch_ttbr0_with_asid` shift
+    // would silently truncate.
+    let as_bit = (tcr >> 36) & 1;
+    assert!(
+        as_bit == 0,
+        "TCR_EL1.AS={as_bit}; slice 3.1b requires 8-bit ASIDs (AS=0). \
+         Limine's aarch64 default is AS=0; if you see this, the bootloader changed.",
+    );
 }
 
-/// Install `root_pa` as TTBR0_EL1 and ensure TTBR0 walks are enabled.
+/// Clear `TCR_EL1.EPD0` so the MMU starts walking TTBR0 on EL0 accesses.
 ///
-/// `assert_tcr_el1_ttbr0_ready` has already confirmed that Limine programmed
-/// the structural TTBR0 fields (T0SZ=16, TG0=4 KiB) to match our walker, so
-/// here we only need to clear EPD0 if set. We deliberately read-modify-write
-/// just bit 7 — touching any other TCR field risks perturbing TTBR1, which
-/// Limine owns and whose translations the kernel is actively using.
+/// Limine leaves EPD0 set by default; until this runs, every EL0 address
+/// access translation-faults. Must be called exactly once during
+/// `userland_bootstrap`, before any proc is enqueued onto the scheduler.
 ///
-/// SAFETY: must be called with interrupts masked. `root_pa` must point at a
-/// valid L0 page table.
-pub unsafe fn activate_user_ttbr0(root_pa: u64) {
+/// Bit 7 (EPD0) is the only TCR_EL1 field we perturb; the TTBR1-side
+/// fields (which the kernel's own translation regime relies on, and which
+/// Limine programmed) stay as Limine left them. TTBR1_EL1 is never written
+/// from the kernel — Phase 3+ continues to own only TTBR0_EL1.
+///
+/// SAFETY: must be called with DAIF masked at EL1, single-threaded boot.
+pub unsafe fn enable_ttbr0_walks_once() {
     const TCR_EPD0: u64 = 1 << 7;
-
-    // SAFETY: TTBR0_EL1, TCR_EL1, and TLB-maintenance ops are EL1-only and
-    // touch no normal memory. Bit 7 (EPD0) is the only TCR field we
-    // perturb; the rest stays as Limine left it.
+    // SAFETY: caller's invariants. Read-modify-write of TCR_EL1 touches
+    // only bit 7; ISB serializes the new TCR view before any subsequent
+    // EL0 access can fault.
     unsafe {
         let tcr: u64;
-        asm!("mrs {0}, tcr_el1", out(reg) tcr, options(nomem, nostack, preserves_flags));
-        let new_tcr = tcr & !TCR_EPD0;
-
         asm!(
-            "msr ttbr0_el1, {root}",
-            "msr tcr_el1, {tcr}",
+            "mrs {0}, tcr_el1",
+            out(reg) tcr,
+            options(nomem, nostack, preserves_flags),
+        );
+        let new_tcr = tcr & !TCR_EPD0;
+        asm!(
+            "msr tcr_el1, {0}",
             "isb",
-            "tlbi vmalle1",
+            in(reg) new_tcr,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Install a per-proc TTBR0 + ASID and invalidate stale TLB entries for
+/// that ASID. Called from `proc::sched::schedule_next` on every EL1 → EL0
+/// transition that picks a proc with `ttbr0_pa != 0`.
+///
+/// `ttbr0_pa` is the L0-root PA, frame-aligned. `asid` is in [1, 255];
+/// caller is responsible for sourcing it from
+/// [`super::asid::alloc_asid`].
+///
+/// The TLBI is unconditional. With three ASIDs in slice 3.1b, the cost is
+/// negligible (~tens of cycles per switch on QEMU) and the simpler
+/// control flow is worth more than micro-optimization. A later slice can
+/// elide it once an "AS already activated" flag is added per AddrSpace.
+///
+/// Writes only TTBR0_EL1 — TTBR1 stays owned by Limine + the kernel's
+/// translation regime. The kernel never installs a custom TTBR1.
+///
+/// SAFETY: must be called with DAIF masked at EL1, single-threaded boot.
+/// `ttbr0_pa` must point at a valid L0 page table the caller owns.
+pub unsafe fn switch_ttbr0_with_asid(ttbr0_pa: u64, asid: u8) {
+    debug_assert!(asid != 0, "switch_ttbr0_with_asid: ASID 0 is reserved");
+    debug_assert!(
+        ttbr0_pa & (PAGE_SIZE as u64 - 1) == 0,
+        "switch_ttbr0_with_asid: ttbr0_pa not page-aligned",
+    );
+    let tagged = ttbr0_pa | ((asid as u64) << 48);
+    // `tlbi aside1, Xt` consumes the ASID from bits [63:48] of Xt; the
+    // remaining bits are RES0 / SBZ. We pass the same `asid << 48` we
+    // used for TTBR0 — keeps the encoding self-documenting.
+    //
+    // SAFETY: TTBR0_EL1 and TLBI ASIDE1 are EL1 ops with no normal-memory
+    // access. The ISB after MSR ensures the new TTBR0 is observed before
+    // the TLBI; the DSB ISH after the TLBI completes the invalidate; the
+    // trailing ISB context-synchronizes before the subsequent eret.
+    unsafe {
+        asm!(
+            "msr ttbr0_el1, {ttbr}",
+            "isb",
+            "tlbi aside1, {asid_x}",
             "dsb ish",
             "isb",
-            root = in(reg) root_pa,
-            tcr = in(reg) new_tcr,
+            ttbr = in(reg) tagged,
+            asid_x = in(reg) (asid as u64) << 48,
             options(nomem, nostack, preserves_flags),
         );
     }
