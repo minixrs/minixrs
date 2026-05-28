@@ -6,7 +6,13 @@
 //! as fatal: we print the relevant system registers and panic. Real IRQ,
 //! syscall, and page-fault handlers replace this in Phase 2 onward.
 
+use crate::arch::aarch64::addrspace::{Prot, map_page_in};
+use crate::arch::aarch64::mmu::{self, PAGE_SIZE};
 use crate::arch::aarch64::uart::Pl011;
+use crate::mm::alloc_frame;
+use crate::proc::flags::RTS_PAGEFAULT;
+use crate::proc::page_fault::{PFF_INSTR, PFF_PERMISSION, PFF_WRITE, PageFaultState};
+use crate::proc::sched;
 use core::arch::asm;
 use core::fmt::Write;
 
@@ -126,6 +132,116 @@ extern "C" fn el0_sync_unexpected(esr: u64, elr: u64, far: u64) -> ! {
     );
     let _ = writeln!(uart, "    ELR_EL1  = {elr:#018x}  FAR_EL1  = {far:#018x}");
     panic!("EL0 sync exception: EC={ec:#x} ESR_EL1={esr:#x}");
+}
+
+/// EL0 page-fault handler (slice 3.2).
+///
+/// `trap.S` calls this from vector slot 8 for every non-SVC EL0 sync
+/// exception, passing `(ESR_EL1, ELR_EL1, FAR_EL1)`. It returns for faults
+/// it resolves; for anything it can't, it tail-calls
+/// [`el0_sync_unexpected`] (`-> !`, the halt path).
+///
+/// Flow: classify the fault, stash it in the proc's
+/// [`PageFaultState`](crate::proc::page_fault::PageFaultState), block the
+/// proc on `RTS_PAGEFAULT`, then — for this slice only — resolve heap-window
+/// *translation* faults inline (the kernel stands in for the not-yet-existing
+/// VM server; permission faults halt, as re-protecting is a VM-server job).
+/// On return, `trap.S` runs `el1_svc_tail` (= `sched::schedule_next`) and
+/// `el1_return_to_user`, so the now-runnable faulting proc is rescheduled
+/// and retries the aborting instruction (aarch64 leaves `ELR_EL1` at the
+/// faulting insn).
+///
+/// Slice 3.4 replaces the inline resolve with a kernel-originated
+/// `VM_PAGEFAULT` send: the proc then stays blocked on `RTS_PAGEFAULT`
+/// across the reschedule until VM answers with
+/// `SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT)`. The block/record half here is
+/// already shaped for that.
+#[unsafe(no_mangle)]
+extern "C" fn do_page_fault(esr: u64, elr: u64, far: u64) {
+    let ec = (esr >> 26) & 0x3F;
+    let iss = esr & 0xFF_FFFF;
+
+    // Only EL0 instruction (0x20) / data (0x24) aborts are faults we try to
+    // resolve; any other non-SVC sync exception is a genuine bug.
+    if ec != 0x20 && ec != 0x24 {
+        el0_sync_unexpected(esr, elr, far); // -> !
+    }
+
+    // Arch-neutral classification for `page_fault_state` (read by VM in 3.3+).
+    let fsc = iss & 0x3F;
+    let mut flags = 0u32;
+    if ec == 0x20 {
+        flags |= PFF_INSTR;
+    }
+    if ec == 0x24 && (iss >> 6) & 1 != 0 {
+        flags |= PFF_WRITE;
+    }
+    if matches!(fsc, 0x0D..=0x0F) {
+        flags |= PFF_PERMISSION;
+    }
+
+    // Record + block under a tightly-scoped borrow, then drop it before any
+    // rts transition. `rts_set`/`rts_unset` re-borrow the same slot via
+    // `dequeue`/`enqueue` (`proc_slot_mut`), so holding `p` live across them
+    // and using it afterward would alias the slot — the
+    // two-&mut-from-one-UnsafeCell hazard (see CLAUDE.md; mirrors the
+    // borrow scoping in `ipc::send`/`ipc::receive`). Capture every scalar the
+    // inline resolve needs here instead.
+    let (window, name, ttbr0_pa, asid);
+    {
+        // SAFETY: exception context — single-threaded, DAIF.I masked. The
+        // faulting proc is CURRENT and not otherwise borrowed.
+        let p = unsafe { sched::current_proc_mut() }.expect("page fault: no current proc");
+        p.page_fault_state = PageFaultState { addr: far, flags, ip: elr };
+        window = p.heap_window;
+        name = p.name[0];
+        ttbr0_pa = p.ttbr0_pa;
+        asid = p.asid;
+        // SAFETY: rts_set captures `nr` then ends its &mut Proc borrow before
+        // dequeue; the outer `p` borrow ends with this block.
+        unsafe { sched::rts_set(p, RTS_PAGEFAULT) };
+    }
+
+    // No VM yet (slice 3.4 sends VM_PAGEFAULT here); a fault outside the
+    // kernel-resolved heap window is unrecoverable → halt with the decoder.
+    if !window.contains(far) {
+        el0_sync_unexpected(esr, elr, far); // -> !
+    }
+    // The inline resolve only maps fresh frames, so it satisfies translation
+    // faults. A permission fault means the page is already mapped with the
+    // wrong AP bits — `map_page_in` would return `AlreadyMapped` and the
+    // `.expect` below would panic misleadingly. Re-protecting an existing
+    // mapping is a VM-server job, so halt explicitly instead.
+    if flags & PFF_PERMISSION != 0 {
+        el0_sync_unexpected(esr, elr, far); // -> !
+    }
+
+    // --- kernel-as-VM resolution (slice 3.4 lifts this into the VM server) ---
+    let page_base = far & !((PAGE_SIZE as u64) - 1);
+
+    let frame = alloc_frame().expect("page fault: out of frames");
+    map_page_in(ttbr0_pa, page_base, frame.addr(), Prot::RW_DATA)
+        .expect("page fault: map_page_in");
+    // SAFETY: ASID-tagged TLBI; the faulting proc's TTBR0 is the live one.
+    unsafe { mmu::flush_tlb_asid(asid) };
+
+    let mut uart = Pl011::new();
+    let _ = writeln!(
+        uart,
+        "[pf] proc={} far={:#x} -> alloc frame={:#x}, map RW, retry",
+        name as char,
+        far,
+        frame.addr(),
+    );
+
+    // SAFETY: fresh tightly-scoped borrow; the rts_set block above already
+    // ended. Clearing the fault state and unblocking happen together.
+    {
+        let p = unsafe { sched::current_proc_mut() }.expect("page fault: no current proc");
+        p.page_fault_state = PageFaultState::EMPTY;
+        // SAFETY: rts_unset captures `nr` then ends the borrow before enqueue.
+        unsafe { sched::rts_unset(p, RTS_PAGEFAULT) };
+    }
 }
 
 /// Tiny FSC-name decoder. Covers the codes a stub on a fresh AddrSpace
