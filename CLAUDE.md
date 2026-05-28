@@ -37,6 +37,8 @@ cargo kernel-aarch64
 # Boot in QEMU (cargo runner wires tools/qemu-run.sh). The kernel runs
 # indefinitely once EL0 starts (slice 2.4+), so `timeout` is mandatory.
 # Redirect to a file when you need to grep tick output -- live tail loses lines.
+# The log interleaves raw single-char tick bytes; grep it with `grep -a`
+# (force text) or matches read as "Binary file matches".
 timeout 8 cargo run -p minix4-kernel --target aarch64-unknown-none --release
 
 # Build kernel for x86_64
@@ -67,6 +69,7 @@ See `docs/architecture.md` for the full system design. Key concepts:
 
 ## Code Conventions
 
+- The kernel ships `--release` only, so `debug_assert!` is compiled out. Use a hard `assert!` for invariants whose violation would silently corrupt (e.g. a null TTBR0/ASID reaching the scheduler); reserve `debug_assert!` for cheap "can't happen" documentation that's fine to drop in release
 - Kernel `unsafe` blocks require `// SAFETY:` comments documenting the invariant
 - IPC linked lists use `Option<ProcNr>` indices into static arrays, not raw pointers
 - Message types are defined in `kernel-shared` and shared across all crates

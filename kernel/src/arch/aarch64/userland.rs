@@ -38,10 +38,10 @@ use crate::arch::aarch64::asid::alloc_asid;
 use crate::arch::aarch64::mmu::{self, PAGE_SIZE, flush_icache_range};
 use crate::mm::{Frame, alloc_frame, phys_to_hhdm};
 use crate::proc::bitmap::{set_call_bit, set_sys_bit};
-use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, USR_T};
+use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, TSK_T, USR_T};
 use crate::proc::sched;
 use crate::proc::table::{priv_slot_mut, proc_index, proc_slot_mut, proc_table_ref};
-use crate::proc::{Priv, Proc};
+use crate::proc::{HeapWindow, Priv, Proc};
 
 // ----- EL0 virtual addresses ------------------------------------------------
 
@@ -60,18 +60,31 @@ pub const USER_CODE_VA_C: u64 = 0x0042_0000;
 /// VA at which stub C's stack page is mapped.
 pub const USER_STACK_VA_C: u64 = 0x0082_0000;
 
+/// VA at which stub D's code page is mapped.
+pub const USER_CODE_VA_D: u64 = 0x0043_0000;
+/// VA at which stub D's stack page is mapped.
+pub const USER_STACK_VA_D: u64 = 0x0083_0000;
+
+/// Stub D's kernel-resolved heap window (slice 3.2). Distinct from every
+/// code/stack VA above; stub D faults on first touch and the page-fault
+/// handler maps a frame in on demand. One page is enough for the demo.
+const HEAP_WINDOW_D: HeapWindow = HeapWindow { start: 0x0100_0000, end: 0x0100_4000 };
+
 /// First proc-table slot beyond the boot image — `ProcNr(11)`.
 const STUB_A_PROC_NR: ProcNr = ProcNr::new(11);
 /// Second stub slot, just after A.
 const STUB_B_PROC_NR: ProcNr = ProcNr::new(12);
 /// Slice-2.6 kernel-call client. Slot 13 — one past the slice-2.5 pair.
 const STUB_C_PROC_NR: ProcNr = ProcNr::new(13);
+/// Slice-3.2 page-fault demo. Slot 14.
+const STUB_D_PROC_NR: ProcNr = ProcNr::new(14);
 
-/// Privilege-table slots for the three stubs. Boot image uses 0..=15;
-/// 16, 17, and 18 are the first free entries.
+/// Privilege-table slots for the four stubs. Boot image uses 0..=15;
+/// 16, 17, 18, and 19 are the first free entries.
 const STUB_A_PRIV_ID: PrivId = PrivId::new(16);
 const STUB_B_PRIV_ID: PrivId = PrivId::new(17);
 const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
+const STUB_D_PRIV_ID: PrivId = PrivId::new(19);
 
 // SPSR_EL1 to install on each stub's `eret`. Matches slice 2.4: IRQs
 // unmasked at EL0 (bit 7 = 0), debug + SError + FIQ masked. EL0t.
@@ -86,6 +99,8 @@ unsafe extern "C" {
     static _user_stub_b_end: u8;
     static _user_stub_c_start: u8;
     static _user_stub_c_end: u8;
+    static _user_stub_d_start: u8;
+    static _user_stub_d_end: u8;
 }
 
 // ----- Bootstrap ----------------------------------------------------------
@@ -130,6 +145,7 @@ pub unsafe fn userland_bootstrap() {
             &_user_stub_a_end,
             USER_CODE_VA_A,
             USER_STACK_VA_A,
+            HeapWindow::EMPTY,
         );
         build_stub(
             STUB_B_PROC_NR,
@@ -139,6 +155,7 @@ pub unsafe fn userland_bootstrap() {
             &_user_stub_b_end,
             USER_CODE_VA_B,
             USER_STACK_VA_B,
+            HeapWindow::EMPTY,
         );
         build_stub(
             STUB_C_PROC_NR,
@@ -148,6 +165,17 @@ pub unsafe fn userland_bootstrap() {
             &_user_stub_c_end,
             USER_CODE_VA_C,
             USER_STACK_VA_C,
+            HeapWindow::EMPTY,
+        );
+        build_stub(
+            STUB_D_PROC_NR,
+            STUB_D_PRIV_ID,
+            b'D',
+            &_user_stub_d_start,
+            &_user_stub_d_end,
+            USER_CODE_VA_D,
+            USER_STACK_VA_D,
+            HEAP_WINDOW_D,
         );
     }
 
@@ -163,6 +191,7 @@ pub unsafe fn userland_bootstrap() {
         sched::enqueue(STUB_A_PROC_NR);
         sched::enqueue(STUB_B_PROC_NR);
         sched::enqueue(STUB_C_PROC_NR);
+        sched::enqueue(STUB_D_PROC_NR);
     }
 
     // 6. One-shot diagnostic: dump per-proc (ttbr0_pa, asid) so the
@@ -192,6 +221,7 @@ unsafe fn build_stub(
     stub_end: *const u8,
     code_va: u64,
     stack_va: u64,
+    heap_window: HeapWindow,
 ) {
     // Per-proc page-table tree. AddrSpace::new allocates and zeroes the
     // L0 root via the frame allocator.
@@ -233,6 +263,7 @@ unsafe fn build_stub(
             stack_va + PAGE_SIZE as u64,
             ttbr0_pa,
             asid,
+            heap_window,
         );
     }
 
@@ -278,6 +309,7 @@ fn populate_stub_slot(
     stack_top: u64,
     ttbr0_pa: u64,
     asid: u8,
+    heap_window: HeapWindow,
 ) {
     // Name: `id` followed by "-stub\0..." padding. Lets the clock tick
     // handler print `name[0]` to identify which stub is running.
@@ -307,6 +339,10 @@ fn populate_stub_slot(
     p.ttbr0_pa = ttbr0_pa;
     p.asid = asid;
 
+    // Kernel-resolved heap window (slice 3.2). Empty for A/B/C.
+    p.page_fault_state = crate::proc::PageFaultState::EMPTY;
+    p.heap_window = heap_window;
+
     // Run-queue link starts cleared — `sched::enqueue` sets it.
     p.next_ready = None;
 
@@ -330,6 +366,10 @@ unsafe fn install_stub_privs() {
     // SAFETY: B's borrow has been dropped.
     unsafe {
         install_stub_c_priv();
+    }
+    // SAFETY: C's borrow has been dropped.
+    unsafe {
+        install_stub_d_priv();
     }
 }
 
@@ -365,6 +405,29 @@ unsafe fn install_stub_c_priv() {
     pr.sig_mgr = boot_endpoint(RS_PROC_NR);
 }
 
+/// Install stub D's priv slot (slice 3.2). D does no IPC and no kernel
+/// calls — it only touches memory — so `trap_mask = TSK_T` (no IPC traps)
+/// and both bitmaps stay empty. The slot still has to exist so D is not
+/// `RTS_NO_PRIV` and can be scheduled. Slice 3.3 widens this when D starts
+/// issuing `SYS_VMCTL`.
+///
+/// SAFETY: single-threaded boot; mutates only priv-table slot
+/// `STUB_D_PRIV_ID`.
+unsafe fn install_stub_d_priv() {
+    // SAFETY: priv index in-range; no overlapping reference held.
+    let pr: &mut Priv =
+        unsafe { priv_slot_mut(STUB_D_PRIV_ID).expect("stub D priv slot in range") };
+    pr.id = STUB_D_PRIV_ID;
+    pr.proc_nr = Some(STUB_D_PROC_NR);
+    pr.flags = SYS_PROC | BILLABLE | PREEMPTIBLE;
+    pr.trap_mask = TSK_T;
+    pr.ipc_to.fill(0);
+    pr.k_call_mask.fill(0);
+    pr.notify_pending.fill(0);
+    pr.asyn_pending.fill(0);
+    pr.sig_mgr = boot_endpoint(RS_PROC_NR);
+}
+
 /// Set the per-stub priv slot. `peer_priv_id` is the only target the
 /// stub is permitted to send/notify (encoded as a single bit in
 /// `ipc_to`).
@@ -390,13 +453,13 @@ unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId)
 /// the end of `userland_bootstrap`; proves each stub has a distinct
 /// per-proc address space.
 ///
-/// SAFETY: single-threaded boot; read-only borrows on proc slots 11/12/13.
+/// SAFETY: single-threaded boot; read-only borrows on proc slots 11/12/13/14.
 unsafe fn print_addrspace_summary() {
     use crate::arch::aarch64::uart::Pl011;
     use core::fmt::Write;
     let mut uart = Pl011::new();
     let _ = writeln!(uart);
-    for &nr in &[STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR] {
+    for &nr in &[STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR, STUB_D_PROC_NR] {
         // SAFETY: sequential read-only borrow of the slot; no other
         // reference held while we read.
         let p = unsafe { proc_slot_mut(nr).expect("stub slot in range") };
