@@ -280,12 +280,13 @@ pub unsafe fn schedule_next() {
         let next = proc_slot_mut(next_nr).expect("schedule_next: next out of range");
         set_tpidr_to(next);
         // Per-proc TTBR0 + ASID install. Slice 3.1b: every runnable proc
-        // is an EL0 stub with a real address space; assert here so a
-        // future slice that mistakenly enqueues a kernel task (asid=0)
-        // is caught instead of silently inheriting the previous proc's
-        // TTBR0. The TTBR0 swap must happen *before* `flush_deliver_msg`
-        // — the flush writes via the active TTBR0, so the new proc's AS
-        // must already be live.
+        // is an EL0 stub with a real address space. This debug_assert gives
+        // a richer per-proc message in debug builds; the authoritative
+        // guard against a kernel task (asid=0) silently installing
+        // TTBR0_EL1 = 0 lives in `switch_ttbr0_with_asid`, which asserts
+        // unconditionally (the kernel only builds --release). The TTBR0
+        // swap must happen *before* `flush_deliver_msg` — the flush writes
+        // via the active TTBR0, so the new proc's AS must already be live.
         debug_assert!(
             next.ttbr0_pa != 0 && next.asid != 0,
             "schedule_next: proc nr={} has no AS (ttbr0_pa={:#x}, asid={})",
