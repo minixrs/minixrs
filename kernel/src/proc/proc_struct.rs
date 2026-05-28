@@ -15,6 +15,7 @@ use minix4_kernel_shared::{PrivId, ProcNr};
 use crate::arch::ArchRegisterFrame;
 
 use super::flags::RTS_SLOT_FREE;
+use super::page_fault::{HeapWindow, PageFaultState};
 
 /// Maximum length of a process name, including the trailing NUL byte if any.
 pub const PROC_NAME_LEN: usize = 16;
@@ -76,6 +77,17 @@ pub struct Proc {
     /// (A=1, B=2, C=3).
     pub asid: u8,
 
+    // ----- VM / page-fault state ------------------------------------------
+    /// Details of the fault this proc is blocked on. Only meaningful while
+    /// `RTS_PAGEFAULT` is set; reset to [`PageFaultState::EMPTY`] once the
+    /// fault is resolved. Read back by slice 3.3's `VMCTL_GET_PAGEFAULT`.
+    pub page_fault_state: PageFaultState,
+    /// Virtual-address range the kernel resolves on-demand in slice 3.2
+    /// (the kernel-as-VM stand-in). Empty for procs with no heap (kernel
+    /// tasks, the slice 2.5/2.6 stubs A/B/C). Slice 3.4 moves this into
+    /// the VM server's region table.
+    pub heap_window: HeapWindow,
+
     // ----- Run-queue state -------------------------------------------------
     /// Next process in the same priority-band run queue, or `None` if last.
     /// Mirrors MINIX 3's `p_nextready` but as a [`ProcNr`] index per the
@@ -120,6 +132,8 @@ impl Proc {
         deliver_msg_vir: 0,
         ttbr0_pa: 0,
         asid: 0,
+        page_fault_state: PageFaultState::EMPTY,
+        heap_window: HeapWindow::EMPTY,
         next_ready: None,
         name: [0; PROC_NAME_LEN],
     };

@@ -89,22 +89,7 @@ impl AddrSpace {
     /// as needed. Returns `Err(AlreadyMapped)` if `va` already has a leaf
     /// PTE (callers must `unmap_page` first to replace).
     pub fn map_page(&mut self, va: u64, pa: u64, prot: Prot) -> Result<(), MapError> {
-        check_va(va)?;
-        if pa & (FRAME_SIZE as u64 - 1) != 0 {
-            return Err(MapError::Misaligned);
-        }
-
-        let l0 = self.ttbr0_pa;
-        let l1 = ensure_next_table(l0, pte_index(va, 0))?;
-        let l2 = ensure_next_table(l1, pte_index(va, 1))?;
-        let l3 = ensure_next_table(l2, pte_index(va, 2))?;
-        let l3_table = table_mut(l3);
-        let idx = pte_index(va, 3);
-        if l3_table[idx] & PTE_VALID != 0 {
-            return Err(MapError::AlreadyMapped);
-        }
-        l3_table[idx] = make_page_desc(pa, prot_attrs(prot));
-        Ok(())
+        map_page_in(self.ttbr0_pa, va, pa, prot)
     }
 
     /// Clear the leaf PTE at `va`. Returns `Some(pa)` if a mapping was
@@ -167,6 +152,35 @@ impl AddrSpace {
 }
 
 // ----- helpers --------------------------------------------------------------
+
+/// Install a single 4 KiB mapping `va → pa` into the page-table tree rooted
+/// at `ttbr0_pa`, allocating intermediate L1/L2/L3 tables on demand.
+///
+/// This is the body of [`AddrSpace::map_page`], exposed as a free function
+/// so the kernel can map into a proc's *live* address space given only the
+/// `ttbr0_pa` stored on its [`Proc`](crate::proc::Proc) slot — without
+/// reconstructing an owning [`AddrSpace`] value (whose future `destroy`
+/// semantics would risk freeing a tree it does not own). The slice-3.2
+/// page-fault handler and slice-3.3's `VMCTL_PT_MAP` both go through here.
+///
+/// All table access is via HHDM; the target AS need not be the active one.
+pub fn map_page_in(ttbr0_pa: u64, va: u64, pa: u64, prot: Prot) -> Result<(), MapError> {
+    check_va(va)?;
+    if pa & (FRAME_SIZE as u64 - 1) != 0 {
+        return Err(MapError::Misaligned);
+    }
+
+    let l1 = ensure_next_table(ttbr0_pa, pte_index(va, 0))?;
+    let l2 = ensure_next_table(l1, pte_index(va, 1))?;
+    let l3 = ensure_next_table(l2, pte_index(va, 2))?;
+    let l3_table = table_mut(l3);
+    let idx = pte_index(va, 3);
+    if l3_table[idx] & PTE_VALID != 0 {
+        return Err(MapError::AlreadyMapped);
+    }
+    l3_table[idx] = make_page_desc(pa, prot_attrs(prot));
+    Ok(())
+}
 
 /// Mask selecting the PA bits of a descriptor (47:12).
 const PA_MASK: u64 = 0x0000_FFFF_FFFF_F000;

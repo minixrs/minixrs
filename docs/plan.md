@@ -580,8 +580,8 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   prints in order; A↔B ping-pong head trace (`[ipc 1..4]`) and stub C
   SYS_GETINFO carve-out (~726 K SVCs, every line `result=0`) both
   unchanged from slice 2.6; no panic, no `el0_sync_unexpected`.
-- **Slice 3.1b** ◀ ready (branch `feature/phase-3-1b-per-proc-ttbr0`,
-  pending merge) — Per-process TTBR0s + 8-bit ASIDs + minimal
+- **Slice 3.1b** ✓ shipped (PR #10, merged 2026-05-27) — Per-process
+  TTBR0s + 8-bit ASIDs + minimal
   page-fault-diagnostic handler. `Proc` gains `ttbr0_pa: u64` and
   `asid: u8` (placed in a new "MMU state" block between `deliver_msg_vir`
   and `next_ready`; `Proc::EMPTY` zeroes both — kernel tasks and
@@ -631,9 +631,38 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   `[ipc N]` traces from A↔B ping-pong, 2710 sampled `[ksys N]` traces
   from stub C's SYS_GETINFO, all `result=0`. Zero panic lines, zero
   `el0_sync_unexpected` lines, zero non-zero result codes.
-- **Slice 3.2** ◀ next — Real `do_page_fault` + `RTS_PAGEFAULT` + kernel-resolved
-  heap-window fault retry + 4th stub D.
-- **Slice 3.3** — Real `SYS_VMCTL` subcalls (`PT_MAP`, `PT_UNMAP`,
+- **Slice 3.2** ◀ ready (branch `feature/phase-3-2-page-fault-handler`,
+  pending merge) — Real EL0 page-fault handler + `RTS_PAGEFAULT` +
+  kernel-resolved heap-window faults + 4th stub D. New
+  `kernel/src/proc/page_fault.rs` carries arch-neutral `PageFaultState`
+  (`addr`/`flags`/`ip`; flag bits `PFF_WRITE`/`PFF_INSTR`/`PFF_PERMISSION`)
+  and `HeapWindow { start, end }` with a `contains` helper; `Proc` gains a
+  `page_fault_state` + `heap_window` block between `asid` and `next_ready`
+  (`Proc::EMPTY` zeroes both). `arch/aarch64/exception.rs` adds
+  `do_page_fault(esr, elr, far)`: it classifies the abort (EC 0x20/0x24,
+  FSC, WnR), records `page_fault_state`, blocks the faulting proc on the
+  3.1b `RTS_PAGEFAULT` bit via `sched::rts_set`, and — since no VM exists
+  yet — resolves heap-window faults inline (kernel-as-VM): `alloc_frame`,
+  new `addrspace::map_page_in(ttbr0_pa, …)` (the extracted `map_page` body,
+  reused so the kernel can map into a live tree by root PA), new
+  `mmu::flush_tlb_asid(asid)` (ASID-tagged TLBI without a TTBR0 write),
+  then `sched::rts_unset` requeues the proc. Faults outside the window
+  still halt via the verbatim 3.1b `el0_sync_unexpected` decoder. `trap.S`'s
+  non-SVC sync arm now mirrors the SVC tail (`bl do_page_fault; bl
+  el1_svc_tail; b el1_return_to_user`) so the unblocked proc is rescheduled
+  and retries the aborting instruction (aarch64 leaves `ELR_EL1` on it).
+  `user_stub.S` gains a `.rodata.user_stub_d` blob (store to `0x0100_0000`
+  in a loop, no SVC); `userland.rs` wires stub D (ProcNr 14, PrivId 19,
+  code `0x43_0000` / stack `0x83_0000`, heap window `[0x0100_0000,
+  0x0100_4000)`, `trap_mask = TSK_T` — D does no IPC) and threads a
+  `heap_window` arg through `build_stub` / `populate_stub_slot` (A/B/C pass
+  `HeapWindow::EMPTY`). `kernel-shared` untouched; 26 host tests stay
+  green. Verified in QEMU over 8 s: four `[as]` lines (D = ttbr0_pa
+  `0x40015000` / asid 4), exactly one `[pf] proc=D far=0x1000000 → alloc
+  frame=0x4001c000, map RW, retry`, then D round-robins; A↔B ping-pong
+  (1732 `[ipc]`) and stub C SYS_GETINFO (1720 `[ksys]`) all `result=0`;
+  zero panic / `el0_sync_unexpected` lines.
+- **Slice 3.3** ◀ next — Real `SYS_VMCTL` subcalls (`PT_MAP`, `PT_UNMAP`,
   `CLEAR_PAGEFAULT`, `GET_PAGEFAULT`, `VMINHIBIT_SET/_CLEAR`) exercised
   from stub D directly (no fake-VM bridge).
 - **Slice 3.4** — Real VM server boots, kernel ELF loader, cross-AS IPC

@@ -8,6 +8,7 @@
 pub(crate) mod bitmap;
 pub mod dump;
 pub mod flags;
+pub mod page_fault;
 pub mod priv_struct;
 pub mod proc_struct;
 pub mod sched;
@@ -19,6 +20,8 @@ pub mod table;
 // file again.
 #[allow(unused_imports)]
 pub use dump::dump_tables;
+#[allow(unused_imports)]
+pub use page_fault::{HeapWindow, PageFaultState};
 #[allow(unused_imports)]
 pub use priv_struct::{IoRange, MemRange, Priv};
 #[allow(unused_imports)]

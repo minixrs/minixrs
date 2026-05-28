@@ -209,6 +209,37 @@ pub unsafe fn switch_ttbr0_with_asid(ttbr0_pa: u64, asid: u8) {
     }
 }
 
+/// Invalidate all TLB entries tagged with `asid`, without touching TTBR0.
+///
+/// Used after mutating a *currently-active* address space's page tables
+/// (e.g. the slice-3.2 page-fault handler installing a heap page, or slice
+/// 3.3's `VMCTL_PT_MAP`/`VMCTL_PT_UNMAP`). For a fresh translation-fault
+/// resolve (invalid → valid) the TLBI is strictly redundant — ARMv8 does
+/// not cache invalid entries — but it is required for permission-fault
+/// resolves (valid → valid with new AP bits) and is cheap, so we always
+/// issue it for uniformity.
+///
+/// SAFETY: EL1 op with no normal-memory access; must run with DAIF masked
+/// in single-threaded boot/exception context. `asid` must be the live ASID
+/// of the address space whose PTEs were just changed.
+pub unsafe fn flush_tlb_asid(asid: u8) {
+    // `tlbi aside1, Xt` reads the ASID from bits [63:48] of Xt; the rest is
+    // RES0. `dsb ishst` orders the prior PTE store before the invalidate;
+    // `dsb ish` completes it; the trailing `isb` context-synchronizes.
+    //
+    // SAFETY: see fn doc.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi aside1, {asid_x}",
+            "dsb ish",
+            "isb",
+            asid_x = in(reg) (asid as u64) << 48,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
 /// Make instruction memory coherent with a recent data write at `va..va+len`.
 ///
 /// AArch64 caches are PIPT for data but VIPT-flavored for instructions; after
