@@ -1,39 +1,42 @@
-//! Slice-2.5 userland bootstrap: minimal TTBR0 setup + two EL0 stub tasks
-//! that exchange IPC messages.
+//! Slice-3.1b userland bootstrap: per-process address spaces with 8-bit
+//! ARMv8 ASIDs.
 //!
-//! Builds a 4-level page-table walk in static `.bss` storage that maps
-//! five user pages: one code page per stub plus one stack page per stub.
-//!   - `USER_CODE_VA_A` → physical `USER_CODE_PAGE_A` filled with the
-//!     sender stub (`_user_stub_a_start..._user_stub_a_end`). RO + EL0 X.
-//!   - `USER_CODE_VA_B` → physical `USER_CODE_PAGE_B` filled with the echo
-//!     stub (`_user_stub_b_start..._user_stub_b_end`). RO + EL0 X.
-//!   - `USER_STACK_VA_A` / `USER_STACK_VA_B` → two kernel-owned pages used
-//!     as each stub's EL0 stack. RW + EL0, no execute.
+//! Each of the three EL0 stubs (A, B, C — the slice 2.5 / 2.6 regression
+//! coverage) gets its own [`AddrSpace`] built from the slice-3.1a frame
+//! allocator. Code and stack pages are allocated as fresh frames, the
+//! stub blob is copied in via HHDM (`mm::phys_to_hhdm`), and the
+//! resulting `(ttbr0_pa, asid)` is stored on the proc slot. The scheduler
+//! ([`crate::proc::sched::schedule_next`]) installs that TTBR0 on every
+//! EL1 → EL0 transition.
 //!
-//! Each stub also gets its own privilege-table slot (16 = A, 17 = B) with
-//! `trap_mask = SRV_T` and `ipc_to` cross-linking A↔B — that's what lets
-//! the slice-2.5 IPC trap-mask and `ipc_to` enforcement permit the
-//! ping-pong while denying any other endpoint.
+//! What slice 3.1a's smoke test exercised in isolation — `AddrSpace::new`,
+//! `map_page`, `walk_pt`, the free-list reuse on `destroy` — now drives
+//! the three real EL0 stubs.
 //!
-//! After populating each stub's process slot and priv slot, the bootstrap
-//! enqueues both into the priority-banded run queue. The caller
-//! (`kmain`) then transfers control to the scheduler via `proc::sched::run`.
-//!
-//! Phase 3's VM server replaces this entire file with proper per-process
-//! address spaces, ELF loading, and copy-on-write semantics.
+//! What this slice does *not* do:
+//!   - Recover from page faults. EC=0x20 / EC=0x24 still panic via
+//!     [`super::exception::el0_sync_unexpected`]; slice 3.1b extends that
+//!     handler's ISS decoder so the dump is informative, but the policy
+//!     is still "halt" — real `do_page_fault` + `RTS_PAGEFAULT` land in
+//!     slice 3.2.
+//!   - Cross-AS IPC delivery. The SVC handler runs in the caller's TTBR0,
+//!     so single-AS reads in `ipc::message` still walk correctly; slice
+//!     3.4's HHDM-walk redesign of `flush_deliver_msg` swaps that out
+//!     once VM exists.
+//!   - Install a kernel-shared global mapping for the EL0 stubs. The
+//!     code page is mapped RO + EL0-executable into each per-proc AS
+//!     individually (zero shared frames).
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::Ordering;
 
 use minix4_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
 use minix4_kernel_shared::com::{RS_PROC_NR, SYSTEM, boot_endpoint};
 use minix4_kernel_shared::{PrivId, ProcNr};
 
-use crate::arch::aarch64::limine::kernel_va_to_pa;
-use crate::arch::aarch64::mmu::{
-    self, ATTR_IDX_NORMAL, PAGE_SIZE, PTE_AF, PTE_AP_RO_EL0, PTE_AP_RW_EL0, PTE_PXN,
-    PTE_SH_INNER, PTE_UXN, PageTable, pte_attr_idx,
-};
+use crate::arch::aarch64::addrspace::{AddrSpace, Prot};
+use crate::arch::aarch64::asid::alloc_asid;
+use crate::arch::aarch64::mmu::{self, PAGE_SIZE, flush_icache_range};
+use crate::mm::{Frame, alloc_frame, phys_to_hhdm};
 use crate::proc::bitmap::{set_call_bit, set_sys_bit};
 use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
@@ -47,20 +50,17 @@ pub const USER_CODE_VA_A: u64 = 0x0040_0000; // 4 MiB
 /// VA at which stub A's stack page is mapped.
 pub const USER_STACK_VA_A: u64 = 0x0080_0000; // 8 MiB
 
-/// VA at which stub B's code page is mapped (one 4 KiB page above A).
-/// Same 2 MiB L2 slot as A, so the L3_CODE table is shared.
+/// VA at which stub B's code page is mapped.
 pub const USER_CODE_VA_B: u64 = 0x0041_0000;
-/// VA at which stub B's stack page is mapped. Same 2 MiB L2 slot as A's
-/// stack, so the L3_STACK table is shared.
+/// VA at which stub B's stack page is mapped.
 pub const USER_STACK_VA_B: u64 = 0x0081_0000;
 
-/// VA at which stub C's code page is mapped (one 4 KiB page above B).
+/// VA at which stub C's code page is mapped.
 pub const USER_CODE_VA_C: u64 = 0x0042_0000;
-/// VA at which stub C's stack page is mapped. Same L2/L3 tables as A/B.
+/// VA at which stub C's stack page is mapped.
 pub const USER_STACK_VA_C: u64 = 0x0082_0000;
 
-/// First proc-table slot beyond the boot image — `ProcNr(11)`. Boot procs
-/// occupy `0..=INIT_PROC_NR` (i.e. `0..=10`).
+/// First proc-table slot beyond the boot image — `ProcNr(11)`.
 const STUB_A_PROC_NR: ProcNr = ProcNr::new(11);
 /// Second stub slot, just after A.
 const STUB_B_PROC_NR: ProcNr = ProcNr::new(12);
@@ -73,49 +73,9 @@ const STUB_A_PRIV_ID: PrivId = PrivId::new(16);
 const STUB_B_PRIV_ID: PrivId = PrivId::new(17);
 const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
 
-// SPSR_EL1 to install on each stub's `eret`. Compared to slice 2.3's
-// `0x3C0` (all four DAIF bits masked), we clear bit 7 (`I`) so that IRQs
-// are unmasked at EL0 — that's the whole point of slice 2.4. Bits set:
-//   - bit 9 (D) = 1     // debug mask
-//   - bit 8 (A) = 1     // SError mask
-//   - bit 7 (I) = 0     // IRQs ENABLED at EL0
-//   - bit 6 (F) = 1     // FIQ mask (we don't handle FIQ in slice 2.4)
-//   - bits 3:0 (M)     = 0 // EL0t
+// SPSR_EL1 to install on each stub's `eret`. Matches slice 2.4: IRQs
+// unmasked at EL0 (bit 7 = 0), debug + SError + FIQ masked. EL0t.
 const STUB_SPSR_EL0: u64 = 0x340;
-
-// ----- Static storage ------------------------------------------------------
-
-/// 4 KiB-aligned raw byte page, used for the EL0 stubs' code and stacks.
-#[repr(C, align(4096))]
-struct UserPage(UnsafeCell<[u8; PAGE_SIZE]>);
-// SAFETY: single-threaded boot context; no concurrent access. Same invariant
-// documented on `ProcStorage` / `PrivStorage` in `proc::table`.
-unsafe impl Sync for UserPage {}
-
-impl UserPage {
-    const EMPTY: Self = Self(UnsafeCell::new([0; PAGE_SIZE]));
-}
-
-#[repr(transparent)]
-struct PtSlot(UnsafeCell<PageTable>);
-// SAFETY: single-threaded boot; mutation is confined to `userland_bootstrap`.
-unsafe impl Sync for PtSlot {}
-
-static L0_TABLE: PtSlot = PtSlot(UnsafeCell::new(PageTable::EMPTY));
-static L1_TABLE: PtSlot = PtSlot(UnsafeCell::new(PageTable::EMPTY));
-static L2_TABLE: PtSlot = PtSlot(UnsafeCell::new(PageTable::EMPTY));
-static L3_CODE_TABLE: PtSlot = PtSlot(UnsafeCell::new(PageTable::EMPTY));
-static L3_STACK_TABLE: PtSlot = PtSlot(UnsafeCell::new(PageTable::EMPTY));
-
-/// Per-task code pages — A is the sender stub, B is the echo stub, C is the
-/// kernel-call client introduced in slice 2.6.
-static USER_CODE_PAGE_A: UserPage = UserPage::EMPTY;
-static USER_CODE_PAGE_B: UserPage = UserPage::EMPTY;
-static USER_CODE_PAGE_C: UserPage = UserPage::EMPTY;
-/// Per-task stack pages.
-static USER_STACK_PAGE_A: UserPage = UserPage::EMPTY;
-static USER_STACK_PAGE_B: UserPage = UserPage::EMPTY;
-static USER_STACK_PAGE_C: UserPage = UserPage::EMPTY;
 
 // ----- EL0 stub blobs (linked into the kernel image by `user_stub.S`) ------
 
@@ -130,239 +90,263 @@ unsafe extern "C" {
 
 // ----- Bootstrap ----------------------------------------------------------
 
-/// Wire up TTBR0 mappings, copy the EL0 stub into its shared code page,
-/// populate both stub proc slots, and enqueue them on the run queue.
+/// Build three per-process address spaces (one per EL0 stub), populate
+/// their proc + priv slots, and enqueue them on the scheduler.
 ///
-/// SAFETY: must be called exactly once from `kmain` before any EL0 code
-/// runs. Single-threaded boot context; no other reference into the static
-/// page-table arena, user pages, or `PROC_TABLE[STUB_*_PROC_NR]` may exist
-/// concurrently.
+/// Compared to slice 2.5/2.6 this:
+///   - Drops the static `L0_TABLE`/.../`L3_STACK_TABLE` + `USER_*_PAGE_*`
+///     arrays. Every frame is allocated from `mm::alloc_frame`.
+///   - Hands each stub its own `(ttbr0_pa, asid)` via
+///     [`build_stub`] + [`AddrSpace`].
+///   - No longer installs a single TTBR0 from boot context; the scheduler
+///     installs per-proc TTBR0 + ASID on every EL1 → EL0 transition.
+///
+/// SAFETY: must be called exactly once from `kmain` after `proc::init`,
+/// `mm::set_hhdm_offset`, and `mm::init_from_limine_memmap`. Single-
+/// threaded boot context; no other reference into the named proc slots
+/// or the frame allocator may be live concurrently.
 pub unsafe fn userland_bootstrap() {
-    // 1. Verify Limine left MAIR_EL1's index 0 as Normal WB and that
-    //    TCR_EL1's TTBR0-side fields match what `activate_user_ttbr0`
-    //    expects.
+    // 1. Verify Limine left MAIR_EL1 + TCR_EL1 in the shape our walker
+    //    + per-proc TTBR0 install expect. The slice-3.1b TCR_EL1.AS = 0
+    //    assert was added inside `assert_tcr_el1_ttbr0_ready`.
     mmu::assert_mair_normal_wb();
     mmu::assert_tcr_el1_ttbr0_ready();
 
-    // 2. Resolve physical addresses for our static storage.
-    let l0_pa = kernel_pa_of(L0_TABLE.0.get() as u64);
-    let l1_pa = kernel_pa_of(L1_TABLE.0.get() as u64);
-    let l2_pa = kernel_pa_of(L2_TABLE.0.get() as u64);
-    let l3_code_pa = kernel_pa_of(L3_CODE_TABLE.0.get() as u64);
-    let l3_stack_pa = kernel_pa_of(L3_STACK_TABLE.0.get() as u64);
-    let code_a_pa = kernel_pa_of(USER_CODE_PAGE_A.0.get() as u64);
-    let code_b_pa = kernel_pa_of(USER_CODE_PAGE_B.0.get() as u64);
-    let code_c_pa = kernel_pa_of(USER_CODE_PAGE_C.0.get() as u64);
-    let stack_a_pa = kernel_pa_of(USER_STACK_PAGE_A.0.get() as u64);
-    let stack_b_pa = kernel_pa_of(USER_STACK_PAGE_B.0.get() as u64);
-    let stack_c_pa = kernel_pa_of(USER_STACK_PAGE_C.0.get() as u64);
+    // 2. Clear TCR_EL1.EPD0 once. Per-proc TTBR0 install happens at every
+    //    context switch via `proc::sched::schedule_next`.
+    // SAFETY: DAIF still masked from Limine handoff; single-threaded boot.
+    unsafe { mmu::enable_ttbr0_walks_once() };
 
-    // 3. Build the user mappings. Each stub now has its own physical
-    //    code page so A (sender) and B (echo) can run distinct programs.
-    //    The four VAs split into two L2 slots (one for the 0x40_xxxx code
-    //    pair, one for the 0x80_xxxx stack pair), each backed by a single
-    //    L3 table.
-    let code_attrs =
-        PTE_AF | PTE_SH_INNER | PTE_AP_RO_EL0 | PTE_PXN | pte_attr_idx(ATTR_IDX_NORMAL);
-    let stack_attrs = PTE_AF
-        | PTE_SH_INNER
-        | PTE_AP_RW_EL0
-        | PTE_PXN
-        | PTE_UXN
-        | pte_attr_idx(ATTR_IDX_NORMAL);
-
-    // SAFETY: single-threaded boot; no other references into the table
-    // storage exist. PAs were resolved above.
+    // 3. Build each stub. Sequential calls — each build_stub allocates
+    //    fresh frames + a fresh AddrSpace and writes its proc slot.
+    // SAFETY: single-threaded boot; build_stub only touches its own
+    // allocated state + the named proc slot.
     unsafe {
-        let l0 = &mut *L0_TABLE.0.get();
-        let l1 = &mut *L1_TABLE.0.get();
-        let l2 = &mut *L2_TABLE.0.get();
-        let l3_code = &mut *L3_CODE_TABLE.0.get();
-        let l3_stack = &mut *L3_STACK_TABLE.0.get();
-
-        mmu::map_4k(
-            l0, l1, l2, l3_code,
-            l1_pa, l2_pa, l3_code_pa,
-            USER_CODE_VA_A, code_a_pa, code_attrs,
-        );
-        mmu::map_4k(
-            l0, l1, l2, l3_code,
-            l1_pa, l2_pa, l3_code_pa,
-            USER_CODE_VA_B, code_b_pa, code_attrs,
-        );
-        mmu::map_4k(
-            l0, l1, l2, l3_code,
-            l1_pa, l2_pa, l3_code_pa,
-            USER_CODE_VA_C, code_c_pa, code_attrs,
-        );
-        mmu::map_4k(
-            l0, l1, l2, l3_stack,
-            l1_pa, l2_pa, l3_stack_pa,
-            USER_STACK_VA_A, stack_a_pa, stack_attrs,
-        );
-        mmu::map_4k(
-            l0, l1, l2, l3_stack,
-            l1_pa, l2_pa, l3_stack_pa,
-            USER_STACK_VA_B, stack_b_pa, stack_attrs,
-        );
-        mmu::map_4k(
-            l0, l1, l2, l3_stack,
-            l1_pa, l2_pa, l3_stack_pa,
-            USER_STACK_VA_C, stack_c_pa, stack_attrs,
-        );
-    }
-
-    // 4. Copy each EL0 stub into its own code page; clean+invalidate so
-    //    the upcoming EL0 fetches see the new bytes.
-    // SAFETY: `_user_stub_*_start/end` are rodata symbols inside the
-    // kernel image; start ≤ end is enforced by the linker.
-    unsafe {
-        copy_stub_into_page(
-            &USER_CODE_PAGE_A,
-            &_user_stub_a_start,
-            &_user_stub_a_end,
-        );
-        copy_stub_into_page(
-            &USER_CODE_PAGE_B,
-            &_user_stub_b_start,
-            &_user_stub_b_end,
-        );
-        copy_stub_into_page(
-            &USER_CODE_PAGE_C,
-            &_user_stub_c_start,
-            &_user_stub_c_end,
-        );
-    }
-
-    // 5. Install TTBR0 with our L0 root.
-    // SAFETY: DAIF is still masked from boot.
-    unsafe { mmu::activate_user_ttbr0(l0_pa) };
-
-    // 6. Populate each stub's proc slot. Borrows are sequential, never
-    //    overlapping.
-    // SAFETY: single-threaded boot; sequential mutable borrows.
-    unsafe {
-        let pa = proc_slot_mut(STUB_A_PROC_NR).expect("STUB_A_PROC_NR within table");
-        populate_stub_slot(
-            pa,
+        build_stub(
             STUB_A_PROC_NR,
             STUB_A_PRIV_ID,
             b'A',
+            &_user_stub_a_start,
+            &_user_stub_a_end,
             USER_CODE_VA_A,
-            USER_STACK_VA_A + PAGE_SIZE as u64,
+            USER_STACK_VA_A,
         );
-    }
-    // SAFETY: same — A's borrow has been dropped before we take B.
-    unsafe {
-        let pb = proc_slot_mut(STUB_B_PROC_NR).expect("STUB_B_PROC_NR within table");
-        populate_stub_slot(
-            pb,
+        build_stub(
             STUB_B_PROC_NR,
             STUB_B_PRIV_ID,
             b'B',
+            &_user_stub_b_start,
+            &_user_stub_b_end,
             USER_CODE_VA_B,
-            USER_STACK_VA_B + PAGE_SIZE as u64,
+            USER_STACK_VA_B,
         );
-    }
-
-    // SAFETY: same — B's borrow has been dropped before we take C.
-    unsafe {
-        let pc = proc_slot_mut(STUB_C_PROC_NR).expect("STUB_C_PROC_NR within table");
-        populate_stub_slot(
-            pc,
+        build_stub(
             STUB_C_PROC_NR,
             STUB_C_PRIV_ID,
             b'C',
+            &_user_stub_c_start,
+            &_user_stub_c_end,
             USER_CODE_VA_C,
-            USER_STACK_VA_C + PAGE_SIZE as u64,
+            USER_STACK_VA_C,
         );
     }
 
-    // 7. Install priv slots for the three stubs. A↔B carry the slice-2.5
-    //    ping-pong (SRV_T + cross-linked ipc_to); C is the slice-2.6
-    //    kernel-call client (USR_T + ipc_to→SYSTEM + k_call_mask→SYS_GETINFO).
-    // SAFETY: single-threaded boot; install_stub_privs only touches
-    // priv-table slots 16, 17, and 18 sequentially.
+    // 4. Install priv slots — unchanged from slice 2.6.
+    // SAFETY: single-threaded boot; sequential mutable borrows on
+    // priv-table slots 16, 17, 18.
     unsafe { install_stub_privs() };
 
-    // 8. Enqueue all three on the scheduler. They run in FIFO order within
-    //    the same priority band (SRV_Q); the timer preempts after one
-    //    quantum each.
-    // SAFETY: single-threaded boot; sched module's invariants documented
-    // on `enqueue`. No other PROC_TABLE / RUNQ borrows live.
+    // 5. Enqueue all three on the scheduler.
+    // SAFETY: single-threaded boot; no other PROC_TABLE / RUNQ borrows
+    // live at this point.
     unsafe {
         sched::enqueue(STUB_A_PROC_NR);
         sched::enqueue(STUB_B_PROC_NR);
         sched::enqueue(STUB_C_PROC_NR);
     }
+
+    // 6. One-shot diagnostic: dump per-proc (ttbr0_pa, asid) so the
+    //    boot log proves each stub has its own distinct AS.
+    //    SAFETY: single-threaded boot; read-only.
+    unsafe { print_addrspace_summary() };
 }
 
-/// Copy bytes from `[stub_start, stub_end)` into `page` and flush the
-/// I-cache for the range so the upcoming EL0 fetch sees the new code.
+/// Build one stub's address space: allocate L0 + code + stack frames,
+/// copy the stub blob into the code frame, install RX/RW mappings, and
+/// write `(ttbr0_pa, asid)` into the proc slot.
 ///
-/// SAFETY: `stub_start` / `stub_end` must be a valid contiguous range in
-/// the kernel image; `page` must be a 4 KiB-aligned BSS page we hold
-/// exclusively.
-unsafe fn copy_stub_into_page(page: &UserPage, stub_start: *const u8, stub_end: *const u8) {
-    // SAFETY: `stub_end - stub_start` is non-negative by linker layout.
+/// `aspace` is intentionally `mem::forget`-ed at the end: the page-table
+/// tree is now owned by the proc (via its `ttbr0_pa`); the kernel will
+/// only reach into it again via HHDM walks. `AddrSpace::destroy` would
+/// recursively free every L1/L2/L3 frame plus the L0 root, which is
+/// exactly what we don't want.
+///
+/// SAFETY: single-threaded boot; this is the only writer of `nr`'s proc
+/// slot. `stub_start..stub_end` must be a valid contiguous rodata range
+/// in the kernel image; the linker guarantees both.
+unsafe fn build_stub(
+    nr: ProcNr,
+    priv_id: PrivId,
+    id: u8,
+    stub_start: *const u8,
+    stub_end: *const u8,
+    code_va: u64,
+    stack_va: u64,
+) {
+    // Per-proc page-table tree. AddrSpace::new allocates and zeroes the
+    // L0 root via the frame allocator.
+    let mut aspace =
+        AddrSpace::new().expect("AddrSpace::new failed during userland_bootstrap");
+    let ttbr0_pa = aspace.ttbr0_pa;
+
+    // Code frame: allocate, copy stub bytes in via HHDM, flush I-cache,
+    // map RO + EL0-executable.
+    let code_frame = alloc_frame()
+        .expect("code frame alloc failed during userland_bootstrap");
+    // SAFETY: stub_start/stub_end are rodata symbols inside the kernel
+    // image; the new code frame is exclusively ours (just allocated, not
+    // yet mapped into any AS) and HHDM-mapped.
+    unsafe { copy_stub_into_frame(code_frame, stub_start, stub_end) };
+    aspace
+        .map_page(code_va, code_frame.addr(), Prot::RO_CODE)
+        .expect("map_page(code) during userland_bootstrap");
+
+    // Stack frame: zeroed by `alloc_frame`, mapped RW + EL0-no-execute.
+    let stack_frame = alloc_frame()
+        .expect("stack frame alloc failed during userland_bootstrap");
+    aspace
+        .map_page(stack_va, stack_frame.addr(), Prot::RW_DATA)
+        .expect("map_page(stack) during userland_bootstrap");
+
+    // Hand the AddrSpace's root over to the proc slot.
+    // SAFETY: single-threaded boot; this is the only `&mut Proc` borrow
+    // at this nr right now.
+    let asid = unsafe { alloc_asid() };
+    unsafe {
+        let p = proc_slot_mut(nr).expect("stub proc slot in range");
+        populate_stub_slot(
+            p,
+            nr,
+            priv_id,
+            id,
+            code_va,
+            stack_va + PAGE_SIZE as u64,
+            ttbr0_pa,
+            asid,
+        );
+    }
+
+    // The page-table tree is durable via `ttbr0_pa`. Drop the AddrSpace
+    // value without running its (no-op-today, but defensively forget'd)
+    // destructor — leaving `AddrSpace::destroy` reserved for exit/exec
+    // paths that actually want to tear an AS down.
+    core::mem::forget(aspace);
+}
+
+/// Copy `[stub_start, stub_end)` into `frame` (resolved via HHDM) and
+/// flush the I-cache so the upcoming EL0 fetch sees the new bytes.
+///
+/// SAFETY: `frame` must be exclusively owned (not yet mapped anywhere)
+/// and the HHDM mapping for its PA must be live. `stub_start..stub_end`
+/// must be a valid byte range in the kernel image.
+unsafe fn copy_stub_into_frame(
+    frame: Frame,
+    stub_start: *const u8,
+    stub_end: *const u8,
+) {
+    // SAFETY: end >= start by linker layout; offset_from is well-defined
+    // on a single rodata symbol pair.
     let len = unsafe { stub_end.offset_from(stub_start) } as usize;
     assert!(len > 0 && len <= PAGE_SIZE);
-    // SAFETY: caller's invariants — page is a 4 KiB-aligned writable BSS
-    // page and we hold the only mutable reference (single-threaded boot).
+    // SAFETY: caller's invariants hold; we have the sole pointer to this
+    // frame, and HHDM is the only mapping.
     unsafe {
-        let dst = page.0.get() as *mut u8;
+        let dst = phys_to_hhdm(frame.addr()) as *mut u8;
         core::ptr::copy_nonoverlapping(stub_start, dst, len);
-        mmu::flush_icache_range(page.0.get() as u64, len);
+        flush_icache_range(dst as u64, len);
     }
 }
 
-/// Install priv slots for the three slice-2.5/2.6 stubs. Must run after
-/// `proc::init` (so slots 0..=15 are populated) and before
-/// `sched::enqueue` (so the IPC path sees the priv_id when the stubs
-/// first SVC).
+/// Write all per-stub fields into `p`. Extends slice 2.5's helper with
+/// `ttbr0_pa` and `asid` — the rest mirrors slice 2.6.
+fn populate_stub_slot(
+    p: &mut Proc,
+    nr: ProcNr,
+    priv_id: PrivId,
+    id: u8,
+    entry_va: u64,
+    stack_top: u64,
+    ttbr0_pa: u64,
+    asid: u8,
+) {
+    // Name: `id` followed by "-stub\0..." padding. Lets the clock tick
+    // handler print `name[0]` to identify which stub is running.
+    p.name = [0; 16];
+    p.name[0] = id;
+    p.name[1] = b'-';
+    p.name[2] = b's';
+    p.name[3] = b't';
+    p.name[4] = b'u';
+    p.name[5] = b'b';
+
+    p.nr = nr;
+    p.endpoint = boot_endpoint(nr);
+    p.priv_id = Some(priv_id);
+    p.priority = crate::proc::table::SRV_Q;
+    // 5 ticks per quantum = 50 ms at 100 Hz.
+    p.quantum_ms = 5;
+    p.quantum_left = p.quantum_ms as u64;
+
+    // EL0 entry state.
+    p.regs.elr_el1 = entry_va;
+    p.regs.sp_el0 = stack_top;
+    p.regs.spsr_el1 = STUB_SPSR_EL0;
+
+    // Per-proc address space. Stored on the slot; the scheduler reads
+    // both on every EL1 → EL0 transition.
+    p.ttbr0_pa = ttbr0_pa;
+    p.asid = asid;
+
+    // Run-queue link starts cleared — `sched::enqueue` sets it.
+    p.next_ready = None;
+
+    // Mark runnable.
+    p.rts_flags.store(0, Ordering::Relaxed);
+}
+
+/// Install priv slots for A, B, C. Unchanged from slice 2.6.
 ///
-/// SAFETY: single-threaded boot; touches priv-table slots 16, 17, and 18
+/// SAFETY: single-threaded boot; touches priv-table slots 16, 17, 18
 /// sequentially.
 unsafe fn install_stub_privs() {
     // SAFETY: sequential mutable borrow.
     unsafe {
-        install_one_stub_priv(
-            STUB_A_PRIV_ID,
-            STUB_A_PROC_NR,
-            STUB_B_PRIV_ID,
-        );
+        install_one_stub_priv(STUB_A_PRIV_ID, STUB_A_PROC_NR, STUB_B_PRIV_ID);
     }
-    // SAFETY: A's borrow has been dropped before we take B's slot.
+    // SAFETY: A's borrow has been dropped.
     unsafe {
-        install_one_stub_priv(
-            STUB_B_PRIV_ID,
-            STUB_B_PROC_NR,
-            STUB_A_PRIV_ID,
-        );
+        install_one_stub_priv(STUB_B_PRIV_ID, STUB_B_PROC_NR, STUB_A_PRIV_ID);
     }
-    // SAFETY: B's borrow has been dropped before we take C's slot.
+    // SAFETY: B's borrow has been dropped.
     unsafe {
         install_stub_c_priv();
     }
 }
 
-/// Install stub C's priv slot (slice 2.6). Differs from the A/B helper:
-/// trap_mask = USR_T (only SENDREC permitted, matches the eventual
-/// user-process pattern), ipc_to is opened just to SYSTEM's priv slot,
-/// and k_call_mask is opened just to SYS_GETINFO.
+/// Install stub C's priv slot. Differs from the A/B helper: trap_mask =
+/// USR_T (SENDREC only), ipc_to opened just to SYSTEM, k_call_mask
+/// opened just to `SYS_GETINFO`.
 ///
 /// SAFETY: single-threaded boot; mutates only priv-table slot
 /// `STUB_C_PRIV_ID`.
 unsafe fn install_stub_c_priv() {
-    // Resolve SYSTEM's priv_id at runtime — `proc::init` set it from
-    // IMAGE, and hard-coding the slot index here would silently rot if
-    // the IMAGE table is ever reordered.
     let system_priv_id = {
-        // SAFETY: read-only snapshot; no mutable borrow into PROC_TABLE
-        // is live at this point.
+        // SAFETY: read-only snapshot; no live `&mut Proc` here.
         let table = unsafe { proc_table_ref() };
         let idx = proc_index(SYSTEM).expect("SYSTEM in proc table");
-        table[idx].priv_id.expect("SYSTEM priv populated by proc::init")
+        table[idx]
+            .priv_id
+            .expect("SYSTEM priv populated by proc::init")
     };
 
     // SAFETY: priv index in-range; no overlapping reference held.
@@ -382,14 +366,14 @@ unsafe fn install_stub_c_priv() {
 }
 
 /// Set the per-stub priv slot. `peer_priv_id` is the only target the
-/// stub is permitted to send/notify (encoded as a single bit in `ipc_to`).
+/// stub is permitted to send/notify (encoded as a single bit in
+/// `ipc_to`).
 ///
 /// SAFETY: single-threaded boot; mutates only the priv slot at `id`.
 unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId) {
     // SAFETY: priv index in-range; no overlapping reference held.
-    let pr: &mut Priv = unsafe {
-        priv_slot_mut(id).expect("stub priv slot in range")
-    };
+    let pr: &mut Priv =
+        unsafe { priv_slot_mut(id).expect("stub priv slot in range") };
     pr.id = id;
     pr.proc_nr = Some(owner);
     pr.flags = SYS_PROC | BILLABLE | PREEMPTIBLE;
@@ -402,50 +386,27 @@ unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId)
     pr.sig_mgr = boot_endpoint(RS_PROC_NR);
 }
 
-fn populate_stub_slot(
-    p: &mut Proc,
-    nr: ProcNr,
-    priv_id: PrivId,
-    id: u8,
-    entry_va: u64,
-    stack_top: u64,
-) {
-    // Name: `id` followed by "stub\0..." padding. Lets the clock tick
-    // handler print `name[0]` to identify which stub is running, while
-    // `dump_tables` shows a recognizable per-stub string.
-    p.name = [0; 16];
-    p.name[0] = id;
-    p.name[1] = b'-';
-    p.name[2] = b's';
-    p.name[3] = b't';
-    p.name[4] = b'u';
-    p.name[5] = b'b';
-
-    p.nr = nr;
-    p.endpoint = boot_endpoint(nr);
-    p.priv_id = Some(priv_id);
-    p.priority = crate::proc::table::SRV_Q;
-    // 5 ticks per quantum = 50 ms at 100 Hz. Short enough to see frequent
-    // A/B switches in the boot demo, long enough that the do_ipc trace
-    // (one line per 100 SVCs) still gets a few samples per burst.
-    p.quantum_ms = 5;
-    p.quantum_left = p.quantum_ms as u64;
-
-    // EL0 entry state.
-    p.regs.elr_el1 = entry_va;
-    p.regs.sp_el0 = stack_top;
-    p.regs.spsr_el1 = STUB_SPSR_EL0;
-
-    // Run-queue link starts cleared — `sched::enqueue` will set it.
-    p.next_ready = None;
-
-    // Mark runnable.
-    p.rts_flags.store(0, Ordering::Relaxed);
-}
-
-/// Translate a kernel-image VA to PA via Limine's kernel-address response.
-fn kernel_pa_of(va: u64) -> u64 {
-    kernel_va_to_pa(va).expect(
-        "Limine did not populate the kernel-address response — bootloader too old?",
-    )
+/// Print one line per stub showing its `(ttbr0_pa, asid)`. Run once at
+/// the end of `userland_bootstrap`; proves each stub has a distinct
+/// per-proc address space.
+///
+/// SAFETY: single-threaded boot; read-only borrows on proc slots 11/12/13.
+unsafe fn print_addrspace_summary() {
+    use crate::arch::aarch64::uart::Pl011;
+    use core::fmt::Write;
+    let mut uart = Pl011::new();
+    let _ = writeln!(uart);
+    for &nr in &[STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR] {
+        // SAFETY: sequential read-only borrow of the slot; no other
+        // reference held while we read.
+        let p = unsafe { proc_slot_mut(nr).expect("stub slot in range") };
+        let _ = writeln!(
+            uart,
+            "[as] stub {} nr={} ttbr0_pa={:#x} asid={}",
+            p.name[0] as char,
+            p.nr.get(),
+            p.ttbr0_pa,
+            p.asid,
+        );
+    }
 }

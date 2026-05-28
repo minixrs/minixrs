@@ -552,8 +552,7 @@ walking the target proc's page table, VM uses static `[Region; N]`
 per-proc tables (no allocator), stubs A/B/C from Phase 2.5/2.6 migrated
 to per-proc TTBR0 in 3.1b and kept as regression coverage.
 
-- **Slice 3.1a** ◀ ready (branch `feature/phase-3-1a-frame-allocator-addrspace`,
-  pending merge) — Physical frame allocator + addrspace API, kernel-only,
+- **Slice 3.1a** ✓ shipped (PR #9, merged 2026-05-27) — Physical frame allocator + addrspace API, kernel-only,
   no EL0 changes. New `kernel/src/mm/{mod,frame}.rs`: intrusive free-list +
   per-region bump pointers seeded from Limine `MEMMAP_USABLE` entries
   (capacity `MAX_REGIONS = 16`; QEMU virt + Apple Silicon QEMU both fit
@@ -581,15 +580,58 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   prints in order; A↔B ping-pong head trace (`[ipc 1..4]`) and stub C
   SYS_GETINFO carve-out (~726 K SVCs, every line `result=0`) both
   unchanged from slice 2.6; no panic, no `el0_sync_unexpected`.
-- **Slice 3.1b** ◀ next — Per-process TTBR0s + 8-bit ASIDs +
-  minimal page-fault-diagnostic handler. Adds `Proc::ttbr0_pa` and
-  `Proc::asid`, rewrites `userland.rs` to allocate each stub's own
-  AddrSpace from 3.1a's machinery, swaps TTBR0_EL1 (with ASID tag) on
-  every EL1 → EL0 transition, and replaces `el0_sync_unexpected`'s
-  panic for EC=0x20/0x24 with a one-page ESR/FAR/ELR decoder so 3.2's
-  real handler has a tractable scaffold. IPC user-copy still reads
-  via the caller's TTBR0 (single-AS); cross-AS redesign lands in 3.4.
-- **Slice 3.2** — Real `do_page_fault` + `RTS_PAGEFAULT` + kernel-resolved
+- **Slice 3.1b** ◀ ready (branch `feature/phase-3-1b-per-proc-ttbr0`,
+  pending merge) — Per-process TTBR0s + 8-bit ASIDs + minimal
+  page-fault-diagnostic handler. `Proc` gains `ttbr0_pa: u64` and
+  `asid: u8` (placed in a new "MMU state" block between `deliver_msg_vir`
+  and `next_ready`; `Proc::EMPTY` zeroes both — kernel tasks and
+  RTS_NO_PRIV boot servers keep the sentinel). New
+  `kernel/src/arch/aarch64/asid.rs` carries an `UnsafeCell<u8>` counter
+  starting at `FIRST_ASID = 1` (0 reserved for "uninitialized"), with
+  `alloc_asid()` panicking on 8-bit wrap — real rollover deferred to
+  Phase 4 since slice 3.1b only hands out three. `mmu.rs` loses the
+  slice-2.3 monolithic `activate_user_ttbr0` (plus the slice-2.5 static
+  `PageTable` newtype, `map_4k`, `pte_index`, `make_*_desc` const fns —
+  all unused since 3.1a's `AddrSpace` took over) and gains three new
+  helpers: `assert_tcr_el1_ttbr0_ready` now also asserts `TCR_EL1.AS == 0`;
+  `enable_ttbr0_walks_once()` clears `TCR_EL1.EPD0` once at boot
+  without binding any TTBR0; `switch_ttbr0_with_asid(ttbr0_pa, asid)`
+  writes `TTBR0_EL1 = ttbr0_pa | ((asid as u64) << 48)` then issues
+  `isb / tlbi aside1, Xt / dsb ish / isb` — TLBI is ASID-tagged and
+  unconditional (the simpler control flow beats micro-optimizing three
+  ASIDs). `kernel/src/arch/aarch64/userland.rs` is rewritten end-to-end:
+  every static `L0_TABLE` / `L1_TABLE` / `L2_TABLE` / `L3_CODE_TABLE` /
+  `L3_STACK_TABLE` / `USER_CODE_PAGE_*` / `USER_STACK_PAGE_*` and the
+  `kernel_pa_of` helper are gone. Each stub's `build_stub` allocates an
+  `AddrSpace::new()` L0 root, a code frame (stub blob copied in via
+  `mm::phys_to_hhdm` + `mmu::flush_icache_range`), and a stack frame
+  (zeroed by `alloc_frame`), then installs them with `Prot::RO_CODE` /
+  `Prot::RW_DATA`. The resulting `(ttbr0_pa, asid)` is written into the
+  proc slot by an 8-arg `populate_stub_slot`. The `AddrSpace` value is
+  `core::mem::forget`-ed since the page-table tree is now durably owned
+  via `Proc::ttbr0_pa`; only exit/exec paths in later slices will
+  `destroy`. `proc::sched::schedule_next` adds two lines between
+  `set_tpidr_to` and `flush_deliver_msg`: a `debug_assert!(ttbr0_pa != 0
+  && asid != 0)` (kernel tasks would silently inherit the previous
+  TTBR0 otherwise) and a `switch_ttbr0_with_asid` call. The order
+  matters — the message flush writes via the active TTBR0, so the new
+  proc's AS must be live first; cross-AS IPC delivery is still slice
+  3.4's job. `el0_sync_unexpected` in `arch/aarch64/exception.rs`
+  trades its single "EC = …" panic line for a per-EC decoder: EC=0x20
+  prints IFSC + the `fsc_name` mnemonic; EC=0x24 prints DFSC + WnR +
+  ISV. Real recovery (`RTS_PAGEFAULT` + scheduler unblock) still
+  lives in slice 3.2; this slice keeps the `panic!` tail. The
+  slice-3.1a `mm_smoke_test` is removed from `kmain` — three real
+  per-proc AddrSpaces driving the EL0 stubs are the live exercise now.
+  `kernel-shared` is untouched; host-side tests stay at 26 passing.
+  Verified in QEMU over 8 s: boot prints three distinct
+  `[as] stub X nr=N ttbr0_pa=0x... asid=N` lines (A=`0x40000000`/1,
+  B=`0x40007000`/2, C=`0x4000e000`/3 — distinct L0 PAs courtesy of
+  intermediate-table allocations between roots), then 2723 sampled
+  `[ipc N]` traces from A↔B ping-pong, 2710 sampled `[ksys N]` traces
+  from stub C's SYS_GETINFO, all `result=0`. Zero panic lines, zero
+  `el0_sync_unexpected` lines, zero non-zero result codes.
+- **Slice 3.2** ◀ next — Real `do_page_fault` + `RTS_PAGEFAULT` + kernel-resolved
   heap-window fault retry + 4th stub D.
 - **Slice 3.3** — Real `SYS_VMCTL` subcalls (`PT_MAP`, `PT_UNMAP`,
   `CLEAR_PAGEFAULT`, `GET_PAGEFAULT`, `VMINHIBIT_SET/_CLEAR`) exercised
