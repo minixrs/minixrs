@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "b173178fc40d",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-3-1b-per-proc-ttbr0",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "kernel/src/arch/aarch64/mmu.rs",
+    "kernel/src/proc/sched.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b1/73178fc40d/0/metadata.json",
+      "transcript": "/b1/73178fc40d/0/full.jsonl",
+      "content_hash": "/b1/73178fc40d/0/content_hash.txt",
+      "prompt": "/b1/73178fc40d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 322757,
+    "cache_read_tokens": 1653773,
+    "output_tokens": 25789,
+    "api_call_count": 21
+  }
+}
