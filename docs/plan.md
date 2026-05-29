@@ -631,8 +631,7 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   `[ipc N]` traces from A↔B ping-pong, 2710 sampled `[ksys N]` traces
   from stub C's SYS_GETINFO, all `result=0`. Zero panic lines, zero
   `el0_sync_unexpected` lines, zero non-zero result codes.
-- **Slice 3.2** ◀ ready (branch `feature/phase-3-2-page-fault-handler`,
-  pending merge) — Real EL0 page-fault handler + `RTS_PAGEFAULT` +
+- **Slice 3.2** ✓ shipped (PR #11, merged 2026-05-28) — Real EL0 page-fault handler + `RTS_PAGEFAULT` +
   kernel-resolved heap-window faults + 4th stub D. New
   `kernel/src/proc/page_fault.rs` carries arch-neutral `PageFaultState`
   (`addr`/`flags`/`ip`; flag bits `PFF_WRITE`/`PFF_INSTR`/`PFF_PERMISSION`)
@@ -662,10 +661,45 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   frame=0x4001c000, map RW, retry`, then D round-robins; A↔B ping-pong
   (1732 `[ipc]`) and stub C SYS_GETINFO (1720 `[ksys]`) all `result=0`;
   zero panic / `el0_sync_unexpected` lines.
-- **Slice 3.3** ◀ next — Real `SYS_VMCTL` subcalls (`PT_MAP`, `PT_UNMAP`,
-  `CLEAR_PAGEFAULT`, `GET_PAGEFAULT`, `VMINHIBIT_SET/_CLEAR`) exercised
-  from stub D directly (no fake-VM bridge).
-- **Slice 3.4** — Real VM server boots, kernel ELF loader, cross-AS IPC
+- **Slice 3.3** ◀ ready (branch `feature/phase-3-3-sys-vmctl`, pending
+  merge) — Real `SYS_VMCTL` subcalls + stub D self-managing its heap. New
+  `kernel/src/system/do_vmctl.rs` replaces the slice-2.6 `ENOSYS` placeholder
+  with six subcalls: `VMCTL_PT_MAP` (kernel allocates a fresh frame — the
+  frame allocator is kernel-side, unlike MINIX 3's VM-owned pool — maps it
+  into the target's AS via the 3.1a `addrspace::map_page_in`, and returns the
+  PA in the reply), `VMCTL_PT_UNMAP` (clears the PTE via the newly-extracted
+  `addrspace::unmap_page_in` free fn and `free_frame`s the leaf),
+  `VMCTL_CLEAR_PAGEFAULT` / `VMCTL_GET_PAGEFAULT` (clear / read the slice-3.2
+  `RTS_PAGEFAULT` state — exercised cross-process by VM in 3.4),
+  `VMCTL_VMINHIBIT_SET/_CLEAR`. Each subcall names a target by endpoint
+  (`SELF` allowed), resolved `endpoint_proc → proc_index` like `ipc/send.rs`;
+  run-queue transitions use the `sched::rts_set`/`rts_unset` capture-then-
+  borrow-end pattern, and every PTE change is followed by an ASID-tagged
+  `mmu::flush_tlb_asid`. To give `do_vmctl` the whole proc table (it acts on a
+  target, not the caller), `system::kernel_call_dispatch` was refactored to
+  take `(proc_table, priv_table, caller_nr, msg)`, route `SYS_VMCTL` to the
+  table-taking handler, and dispatch the other 13 caller-only calls through a
+  `dispatch_caller_local` helper. `kernel-shared/callnr.rs` gains the six
+  `VMCTL_*` subcall numbers (`1..=6`, 0 reserved), `NR_VMCTL_SUBCALLS = 6`
+  (locked by a const-assert next to the `do_vmctl` match), `VMCTL_PROT_WRITE`
+  / `_EXEC`, and `NR_KERN_CALLS_PHASE3 = 14` (with `NR_KERN_CALLS_PHASE2` kept
+  as a one-slice alias, dropped in 3.4). `user_stub.S`'s stub D is rewritten
+  from the 3.2 fault-on-touch blob into a `VMCTL_PT_MAP` → store → `PT_UNMAP`
+  loop against its own endpoint (heap VA `0x0100_0000`); `userland.rs`'s
+  `install_stub_d_priv` widens D from `trap_mask = TSK_T` to `USR_T` with
+  `ipc_to` opened to SYSTEM and `k_call_mask` granting `SYS_VMCTL`, and D's
+  `heap_window` is set `EMPTY` (D self-manages memory, so the 3.2 kernel-as-VM
+  fast path — kept in `do_page_fault` with no live consumer until 3.4 — is
+  bypassed; a stray D fault now halts loudly). 28 host tests pass (26 + new
+  VMCTL-subcall + phase-alias tests). Verified in QEMU over 8 s: four `[as]`
+  lines (A/B/C/D ttbr0_pa distinct, asid 1–4), head traces
+  `[ksys VMCTL_PT_MAP] proc=D va=0x1000000 pa=0x4001c000 result=0` +
+  matching `PT_UNMAP` (PA stable across the map/free cycle → LIFO free-list
+  reuse, no exhaustion), ~985 sampled `caller=14 call=8` VMCTL dispatches and
+  ~1631 `caller=13 call=0` stub-C `SYS_GETINFO` dispatches all `result=0`,
+  A↔B ping-pong handshake visible at boot (`[ipc 1..4]`); zero panic, zero
+  `el0_sync_unexpected`, zero `[pf]` lines (D never faults).
+- **Slice 3.4** ◀ next — Real VM server boots, kernel ELF loader, cross-AS IPC
   delivery (HHDM-after-walk), kernel-originated `VM_PAGEFAULT` send.
   **Phase 3 milestone reached here.**
 - **Slice 3.5** — VM region tracking (static `[Region; N]` per proc) +
