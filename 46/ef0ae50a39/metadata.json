@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "46ef0ae50a39",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-3-3-sys-vmctl",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel/src/arch/aarch64/addrspace.rs",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/system/do_vmctl.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/46/ef0ae50a39/0/metadata.json",
+      "transcript": "/46/ef0ae50a39/0/full.jsonl",
+      "content_hash": "/46/ef0ae50a39/0/content_hash.txt",
+      "prompt": "/46/ef0ae50a39/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 30677,
+    "cache_creation_tokens": 360504,
+    "cache_read_tokens": 12439274,
+    "output_tokens": 76102,
+    "api_call_count": 73
+  }
+}
