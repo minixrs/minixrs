@@ -31,7 +31,7 @@ enosys_stub!(do_exit);
 enosys_stub!(do_copy);
 enosys_stub!(do_safecopy);
 enosys_stub!(do_irqctl);
-enosys_stub!(do_vmctl);
+// `do_vmctl` is a real handler as of slice 3.3 — see `system::do_vmctl`.
 enosys_stub!(do_schedule);
 enosys_stub!(do_setalarm);
 enosys_stub!(do_times);

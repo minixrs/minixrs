@@ -24,8 +24,15 @@ pub const SYS_TIMES: i32 = KERNEL_CALL + 11;
 pub const SYS_DIAGCTL: i32 = KERNEL_CALL + 12;
 pub const SYS_SETGRANT: i32 = KERNEL_CALL + 13;
 
-/// Number of kernel calls reserved for Phase 2.
-pub const NR_KERN_CALLS_PHASE2: usize = 14;
+/// Number of kernel calls defined through Phase 3. Slice 3.3 adds no new
+/// `SYS_*` (it fills in `SYS_VMCTL`'s subcalls instead), so the count is
+/// unchanged from Phase 2 — the rename just gives `system/mod.rs`'s
+/// arm-coverage const-assert a phase-appropriate name as Phase 3 lands.
+pub const NR_KERN_CALLS_PHASE3: usize = 14;
+
+/// Deprecated alias for [`NR_KERN_CALLS_PHASE3`], retained for one slice so
+/// `proc::table` and the host tests don't churn. Dropped in slice 3.4.
+pub const NR_KERN_CALLS_PHASE2: usize = NR_KERN_CALLS_PHASE3;
 
 /// Size of the privilege-table kernel-call mask, in bits. Sized as a single
 /// `u32` chunk (32 slots) to leave headroom past Phase 2's 14 calls while
@@ -55,6 +62,46 @@ pub const GET_WHOAMI: i32 = 12;
 /// than 16 bytes per slot.
 pub const SYS_GETINFO_NAME_LEN: usize = 16;
 
+// ---------------------------------------------------------------------------
+// `SYS_VMCTL` subcalls.
+//
+// `SYS_VMCTL` mediates all user-space page-table changes: the kernel owns the
+// physical frame allocator and every unsafe PTE write, and VM (slice 3.4)
+// drives policy by issuing these subcalls. The subcall selector lives in the
+// first 4 bytes of the message payload (same convention as `GET_WHOAMI`); the
+// target process is named by an endpoint in the next 4 bytes (`SELF` allowed).
+// Numbers start at 1 so a zeroed payload (subcall 0) is an obvious "invalid".
+// These are MINIX 4-specific — MINIX 3's VMCTL subcall set differs because its
+// frame allocator lives in VM, not the kernel.
+// ---------------------------------------------------------------------------
+
+/// Allocate a fresh zeroed frame and map it at `vaddr` in the target's
+/// address space with the requested protection. The allocated PA is returned
+/// in the reply payload. (The kernel allocates because the frame allocator is
+/// kernel-side; VM supplies only `vaddr` + protection.)
+pub const VMCTL_PT_MAP: i32 = 1;
+/// Unmap `vaddr` in the target's address space and free the backing frame.
+pub const VMCTL_PT_UNMAP: i32 = 2;
+/// Clear the target's pending page fault and make it runnable again.
+pub const VMCTL_CLEAR_PAGEFAULT: i32 = 3;
+/// Read the target's recorded page-fault state (addr/flags/ip) into the reply.
+/// Valid only while the target is blocked on a page fault.
+pub const VMCTL_GET_PAGEFAULT: i32 = 4;
+/// Inhibit scheduling of the target while VM mutates its address space.
+pub const VMCTL_VMINHIBIT_SET: i32 = 5;
+/// Release a prior `VMCTL_VMINHIBIT_SET`.
+pub const VMCTL_VMINHIBIT_CLEAR: i32 = 6;
+
+/// Number of `SYS_VMCTL` subcalls. Locks the dispatch-match coverage in
+/// `system::do_vmctl` via a const-assert.
+pub const NR_VMCTL_SUBCALLS: usize = 6;
+
+// `VMCTL_PT_MAP` protection bits (message payload, `vaddr`-adjacent word).
+/// EL0 may write the mapped page.
+pub const VMCTL_PROT_WRITE: i32 = 1 << 0;
+/// EL0 may execute from the mapped page.
+pub const VMCTL_PROT_EXEC: i32 = 1 << 1;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +129,29 @@ mod tests {
         // Pinned by MINIX 3 include/minix/sysinfo.h; servers / musl wrappers
         // built later in the project depend on this value.
         assert_eq!(GET_WHOAMI, 12);
+    }
+
+    #[test]
+    fn vmctl_subcalls_are_contiguous_from_one() {
+        // Subcall 0 is reserved as "invalid" (a zeroed payload). The six
+        // real subcalls are 1..=6 and distinct; `NR_VMCTL_SUBCALLS` locks
+        // the dispatch coverage in `system::do_vmctl`.
+        let subcalls = [
+            VMCTL_PT_MAP,
+            VMCTL_PT_UNMAP,
+            VMCTL_CLEAR_PAGEFAULT,
+            VMCTL_GET_PAGEFAULT,
+            VMCTL_VMINHIBIT_SET,
+            VMCTL_VMINHIBIT_CLEAR,
+        ];
+        for (i, sc) in subcalls.iter().enumerate() {
+            assert_eq!(*sc, 1 + i as i32);
+        }
+        assert_eq!(subcalls.len(), NR_VMCTL_SUBCALLS);
+    }
+
+    #[test]
+    fn kern_call_phase_alias_matches() {
+        assert_eq!(NR_KERN_CALLS_PHASE2, NR_KERN_CALLS_PHASE3);
     }
 }
