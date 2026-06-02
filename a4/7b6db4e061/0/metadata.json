@@ -1,0 +1,54 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "a47b6db4e061",
+  "session_id": "793d0d5c-8099-4d5d-afb4-5eb68a985f09",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-02T02:22:18.105196Z",
+  "branch": "feature/phase-3-3-sys-vmctl",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "kernel/src/mm/frame.rs",
+    "kernel/src/system/do_vmctl.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "efc35f334406",
+  "token_usage": {
+    "input_tokens": 8373,
+    "cache_creation_tokens": 244211,
+    "cache_read_tokens": 1790785,
+    "output_tokens": 21173,
+    "api_call_count": 27
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-02T02:22:18.096866Z",
+    "agent_lines": 33,
+    "agent_removed": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 33,
+    "total_lines_changed": 34,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 33,
+      "agent_lines_removed": 1
+    }
+  ]
+}
