@@ -17,6 +17,7 @@
 //! [`ipc::send::mini_send`]: crate::ipc
 
 mod do_getinfo;
+mod do_vmctl;
 mod stubs;
 
 use core::fmt::Write;
@@ -24,7 +25,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minix4_kernel_shared::ProcNr;
 use minix4_kernel_shared::callnr::{
-    KERNEL_CALL, NR_KERN_CALLS_PHASE2, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL,
+    KERNEL_CALL, NR_KERN_CALLS_PHASE3, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL,
     SYS_EXEC, SYS_EXIT, SYS_FORK, SYS_GETINFO, SYS_IRQCTL, SYS_PRIVCTL,
     SYS_SAFECOPY, SYS_SCHEDULE, SYS_SETALARM, SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
 };
@@ -103,13 +104,11 @@ pub fn kernel_call_sendrec(
     // than whatever the user scribbled into the request.
     msg.m_source = proc_table[caller_idx].endpoint;
 
-    // Dispatch. proc_table and priv_table are disjoint statics, so
-    // borrowing one slot in each is permitted.
-    let result = {
-        let caller = &mut proc_table[caller_idx];
-        let caller_priv = &priv_table[caller_priv_id.as_usize()];
-        kernel_call_dispatch(caller, caller_priv, &mut msg)
-    };
+    // Dispatch. Most handlers want a single caller slot, but `do_vmctl`
+    // operates on a *target* proc named in the message, so it needs the whole
+    // table — pass the full slices and let the dispatcher hand each handler
+    // what it needs.
+    let result = kernel_call_dispatch(proc_table, priv_table, caller_nr, &mut msg);
 
     // Build the reply.
     msg.m_source = system_endpoint();
@@ -134,28 +133,52 @@ pub fn kernel_call_sendrec(
 /// Per-call dispatcher.
 ///
 /// Steps: range-check `m_type - KERNEL_CALL`, gate against
-/// `Priv::k_call_mask`, then match on `m_type` to invoke the handler. Returns
-/// the result code that becomes the reply's `m_type`.
+/// `Priv::k_call_mask`, then route to the handler. Returns the result code
+/// that becomes the reply's `m_type`.
+///
+/// `SYS_VMCTL` acts on a *target* proc named in the message, so it takes the
+/// whole `proc_table` + `caller_nr`. Every other handler acts only on the
+/// caller, so it gets a single caller slot re-borrowed inside its arm (see
+/// [`dispatch_caller_local`]).
 fn kernel_call_dispatch(
-    caller: &mut Proc,
-    caller_priv: &Priv,
+    proc_table: &mut [Proc; N_PROC_SLOTS],
+    priv_table: &[Priv; NR_SYS_PROCS],
+    caller_nr: ProcNr,
     msg: &mut Message,
 ) -> i32 {
+    let caller_idx = proc_index(caller_nr).expect("caller in proc table");
+    let caller_priv_id = proc_table[caller_idx]
+        .priv_id
+        .expect("caller priv populated");
+
     let call_idx = msg.m_type - KERNEL_CALL;
     if call_idx < 0 || (call_idx as usize) >= NR_SYS_CALLS {
         return EBADREQUEST;
     }
     let call_idx = call_idx as usize;
 
-    if !get_call_bit(&caller_priv.k_call_mask, call_idx) {
+    if !get_call_bit(&priv_table[caller_priv_id.as_usize()].k_call_mask, call_idx) {
         return ECALLDENIED;
     }
 
-    // Match must cover every SYS_* defined in callnr.rs. The const assert
-    // locks the arm count — adding a new SYS_* without a new arm here is a
-    // compile error.
+    if msg.m_type == SYS_VMCTL {
+        return do_vmctl::do_vmctl(proc_table, caller_nr, msg);
+    }
+
+    // proc_table and priv_table are disjoint statics, so borrowing one slot
+    // in each is permitted.
+    let caller = &mut proc_table[caller_idx];
+    let caller_priv = &priv_table[caller_priv_id.as_usize()];
+    dispatch_caller_local(caller, caller_priv, msg)
+}
+
+/// Dispatch the caller-only kernel calls (everything except `SYS_VMCTL`).
+///
+/// The const assert locks the arm count — adding a new `SYS_*` without a new
+/// arm here is a compile error.
+fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Message) -> i32 {
     const _: () = assert!(
-        NR_KERN_CALLS_PHASE2 == 14,
+        NR_KERN_CALLS_PHASE3 == 14,
         "expand kernel_call_dispatch when a new SYS_* lands",
     );
     match msg.m_type {
@@ -167,7 +190,7 @@ fn kernel_call_dispatch(
         SYS_COPY => stubs::do_copy(caller, caller_priv, msg),
         SYS_SAFECOPY => stubs::do_safecopy(caller, caller_priv, msg),
         SYS_IRQCTL => stubs::do_irqctl(caller, caller_priv, msg),
-        SYS_VMCTL => stubs::do_vmctl(caller, caller_priv, msg),
+        // SYS_VMCTL is handled in `kernel_call_dispatch` (needs the table).
         SYS_SCHEDULE => stubs::do_schedule(caller, caller_priv, msg),
         SYS_SETALARM => stubs::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
