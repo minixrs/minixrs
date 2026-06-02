@@ -12,6 +12,19 @@
 //! process's fault. Resolution mirrors `ipc/send.rs`: `endpoint_proc` →
 //! `proc_index`, with the `SELF` sentinel mapped to the caller.
 //!
+//! ## Trust model
+//!
+//! There is no *per-target* authorization here: any caller that reaches this
+//! handler may name any process (a kernel task slot — negative `ProcNr` —
+//! included) and mutate its page tables, fault state, and run-queue status.
+//! The single gate is `Priv::k_call_mask` granting `SYS_VMCTL`, checked in
+//! `kernel_call_dispatch` before we run. This is the deliberate MINIX 3
+//! mechanism/policy split: `SYS_VMCTL` is privileged and the VM server (3.4)
+//! is its sole intended holder — VM is trusted to target only processes it
+//! legitimately manages, exactly as MINIX 3 trusts its VM. If a future slice
+//! hands `SYS_VMCTL` to a less-trusted process, target authorization must be
+//! added before that lands.
+//!
 //! ## Message payload layout (offsets within `Message::payload`)
 //!
 //! | offset  | field            | direction | subcalls                     |
@@ -68,6 +81,9 @@ pub(super) fn do_vmctl(
 ) -> i32 {
     let subcall = read_i32(msg, 0);
     let target_e: Endpoint = read_i32(msg, 4);
+    // No per-target authorization — the caller is trusted via `k_call_mask`
+    // (see the "Trust model" note above). `target_nr` may be any slot,
+    // including a kernel task; `proc_index` only range-checks it.
     let target_nr = if target_e == SELF {
         caller_nr
     } else {

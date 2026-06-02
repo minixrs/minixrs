@@ -179,6 +179,21 @@ pub fn alloc_frame() -> Option<Frame> {
         a.free_head = next;
         a.allocs += 1;
         let pa = hhdm_vaddr_to_pa(node as u64);
+        // Zero on the way out, same contract as the bump path below. A
+        // free-list frame still holds the previous owner's bytes, and callers
+        // depend on a clean frame: `addrspace::ensure_next_table` builds
+        // intermediate page tables expecting all-invalid entries, and
+        // `VMCTL_PT_MAP` hands the frame straight to EL0. Without this, a
+        // reused frame would seed page tables with garbage PTEs and leak one
+        // address space's data into another. `next` is already captured above,
+        // so wiping the intrusive node here is fine.
+        // SAFETY: HHDM covers this PA (Limine base revision 2 blanket-maps
+        // [0, 4 GiB)), the frame is exclusively ours now, and HHDM is cacheable
+        // normal memory — no MMIO side-channel that would require
+        // `write_volatile`.
+        unsafe {
+            ptr::write_bytes(crate::mm::phys_to_hhdm(pa), 0, FRAME_SIZE);
+        }
         return Some(Frame::from_addr(pa));
     }
 
@@ -188,7 +203,8 @@ pub fn alloc_frame() -> Option<Frame> {
             let pa = r.next_free_pa;
             r.next_free_pa += FRAME_SIZE as u64;
             a.allocs += 1;
-            // Zero the frame on first hand-out. Page-table walkers expect
+            // Zero before hand-out, same as the free-list path above, so every
+            // frame `alloc_frame` returns is clean. Page-table walkers expect
             // intermediate tables to start all-invalid, and zero pages are
             // what user-mode brk/mmap expects too. Cost: one 4 KiB memset,
             // amortized over the frame's lifetime.
