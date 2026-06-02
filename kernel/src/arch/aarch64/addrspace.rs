@@ -1,8 +1,8 @@
-// `Prot::RO_CODE` / `Prot::RO_DATA` and `AddrSpace::unmap_page` are part of
-// the API surface that slice 3.1b's per-proc TTBR0 wiring and slice 3.3's
-// `SYS_VMCTL` subcalls will consume; 3.1a's smoke test only exercises
-// `Prot::RW_DATA` + `map_page`. Surfacing them now keeps the API stable
-// across the two slices.
+// `Prot::RO_DATA` and `AddrSpace::{walk_pt, destroy}` are part of the API
+// surface that later Phase 3 slices consume (region tracking, exec/exit
+// teardown); 3.1a's smoke test and 3.3's `VMCTL_PT_MAP`/`PT_UNMAP` exercise
+// `Prot::RW_DATA`, `map_page_in`, and `unmap_page_in`. Surfacing the rest now
+// keeps the API stable across slices.
 #![allow(dead_code)]
 
 //! Per-process aarch64 address space.
@@ -103,19 +103,7 @@ impl AddrSpace {
     /// pruning keeps `unmap_page` O(walk) and matches what real MINIX 3
     /// does (lazy pruning at exec/exit time).
     pub fn unmap_page(&mut self, va: u64) -> Option<u64> {
-        check_va(va).ok()?;
-        let l0 = self.ttbr0_pa;
-        let l1 = next_table(l0, pte_index(va, 0))?;
-        let l2 = next_table(l1, pte_index(va, 1))?;
-        let l3 = next_table(l2, pte_index(va, 2))?;
-        let l3_table = table_mut(l3);
-        let idx = pte_index(va, 3);
-        let pte = l3_table[idx];
-        if pte & PTE_VALID == 0 {
-            return None;
-        }
-        l3_table[idx] = 0;
-        Some(pte & PA_MASK)
+        unmap_page_in(self.ttbr0_pa, va)
     }
 
     /// Walk the page table to find the PA backing `va`, or `None` if `va`
@@ -180,6 +168,31 @@ pub fn map_page_in(ttbr0_pa: u64, va: u64, pa: u64, prot: Prot) -> Result<(), Ma
     }
     l3_table[idx] = make_page_desc(pa, prot_attrs(prot));
     Ok(())
+}
+
+/// Clear the leaf PTE at `va` in the page-table tree rooted at `ttbr0_pa`,
+/// returning `Some(pa)` of the page that was mapped or `None` if `va` had no
+/// leaf PTE.
+///
+/// This is the body of [`AddrSpace::unmap_page`], exposed as a free function
+/// for the same reason as [`map_page_in`]: slice-3.3's `VMCTL_PT_UNMAP` clears
+/// a PTE in a proc's *live* tree given only the `ttbr0_pa` from its
+/// [`Proc`](crate::proc::Proc) slot. Intermediate L1/L2/L3 tables are left in
+/// place (lazy pruning happens at [`AddrSpace::destroy`]); the freed PA is the
+/// caller's to `free_frame` if appropriate.
+pub fn unmap_page_in(ttbr0_pa: u64, va: u64) -> Option<u64> {
+    check_va(va).ok()?;
+    let l1 = next_table(ttbr0_pa, pte_index(va, 0))?;
+    let l2 = next_table(l1, pte_index(va, 1))?;
+    let l3 = next_table(l2, pte_index(va, 2))?;
+    let l3_table = table_mut(l3);
+    let idx = pte_index(va, 3);
+    let pte = l3_table[idx];
+    if pte & PTE_VALID == 0 {
+        return None;
+    }
+    l3_table[idx] = 0;
+    Some(pte & PA_MASK)
 }
 
 /// Mask selecting the PA bits of a descriptor (47:12).
