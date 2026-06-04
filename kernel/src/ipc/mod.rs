@@ -284,6 +284,22 @@ pub fn flush_deliver_msg(p: &mut Proc) {
     p.misc_flags &= !MF_DELIVERMSG;
 }
 
+/// Kernel-originated page-fault notification: send `VM_PAGEFAULT` to the VM
+/// server on behalf of `faulting_nr`. Called from the EL1 page-fault handler
+/// (`arch::aarch64::exception::do_page_fault`) after it has recorded the fault
+/// state and set `RTS_PAGEFAULT` on the faulter.
+///
+/// Materializes the proc-table slice here (the page-fault handler otherwise
+/// works through `current_proc_mut`), keeping the "only `ipc` materializes the
+/// table for the primitives" discipline intact.
+pub fn send_pagefault_to_vm(faulting_nr: ProcNr, far: u64, flags: u32) {
+    // SAFETY: EL1 page-fault context — single-threaded, DAIF.I masked. The
+    // record/`rts_set` borrow in `do_page_fault` has already ended, so no other
+    // PROC_TABLE reference is live.
+    let proc_table = unsafe { proc_table_mut_slice() };
+    send::mini_pf_send(proc_table, faulting_nr, far, flags);
+}
+
 /// SVC-tail shim. `trap.S` calls this between `do_ipc` and
 /// `el1_return_to_user`; it picks the next runnable proc (which may be
 /// the same caller, may be a higher-priority receiver that just

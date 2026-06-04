@@ -29,7 +29,7 @@
 
 use core::sync::atomic::Ordering;
 
-use minix4_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO, SYS_VMCTL};
+use minix4_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
 use minix4_kernel_shared::com::{RS_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint};
 use minix4_kernel_shared::{PrivId, ProcNr};
 
@@ -38,7 +38,7 @@ use crate::arch::aarch64::asid::alloc_asid;
 use crate::arch::aarch64::mmu::{self, PAGE_SIZE, flush_icache_range};
 use crate::mm::{Frame, alloc_frame, phys_to_hhdm};
 use crate::proc::bitmap::{set_call_bit, set_sys_bit};
-use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, USR_T};
+use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, TSK_T, USR_T};
 use crate::proc::sched;
 use crate::proc::table::{priv_slot_mut, proc_index, proc_slot_mut, proc_table_ref};
 use crate::proc::{HeapWindow, Priv, Proc};
@@ -185,9 +185,9 @@ pub unsafe fn userland_bootstrap() {
             &_user_stub_d_end,
             USER_CODE_VA_D,
             USER_STACK_VA_D,
-            // D self-manages its heap via SYS_VMCTL and must never hit the
-            // kernel-as-VM fast path. EMPTY means any stray fault halts loudly
-            // (the desired signal) rather than being silently resolved.
+            // D faults on first touch of its heap page; the kernel routes the
+            // fault to the VM server (slice 3.4b). `heap_window` is unused now
+            // — the slice-3.2 kernel-as-VM fast path is gone — so EMPTY.
             HeapWindow::EMPTY,
         );
     }
@@ -481,34 +481,23 @@ unsafe fn install_stub_c_priv() {
     pr.sig_mgr = boot_endpoint(RS_PROC_NR);
 }
 
-/// Install stub D's priv slot (slice 3.3). D now self-manages its heap by
-/// issuing `SYS_VMCTL` against itself, so — like stub C — it gets
-/// `trap_mask = USR_T` (SENDREC only) and `ipc_to` opened just to SYSTEM, but
-/// its `k_call_mask` grants `SYS_VMCTL` instead of `SYS_GETINFO`.
+/// Install stub D's priv slot (slice 3.4b). D reverts to a pure fault-on-touch
+/// demo: it touches an unmapped heap page and the kernel routes the fault to
+/// the VM server. D issues no IPC and no kernel calls, so it gets
+/// `trap_mask = TSK_T` with empty `ipc_to` / `k_call_mask`.
 ///
 /// SAFETY: single-threaded boot; mutates only priv-table slot
 /// `STUB_D_PRIV_ID`.
 unsafe fn install_stub_d_priv() {
-    let system_priv_id = {
-        // SAFETY: read-only snapshot; no live `&mut Proc` here.
-        let table = unsafe { proc_table_ref() };
-        let idx = proc_index(SYSTEM).expect("SYSTEM in proc table");
-        table[idx]
-            .priv_id
-            .expect("SYSTEM priv populated by proc::init")
-    };
-
     // SAFETY: priv index in-range; no overlapping reference held.
     let pr: &mut Priv =
         unsafe { priv_slot_mut(STUB_D_PRIV_ID).expect("stub D priv slot in range") };
     pr.id = STUB_D_PRIV_ID;
     pr.proc_nr = Some(STUB_D_PROC_NR);
     pr.flags = SYS_PROC | BILLABLE | PREEMPTIBLE;
-    pr.trap_mask = USR_T;
+    pr.trap_mask = TSK_T;
     pr.ipc_to.fill(0);
-    set_sys_bit(&mut pr.ipc_to, system_priv_id);
     pr.k_call_mask.fill(0);
-    set_call_bit(&mut pr.k_call_mask, (SYS_VMCTL - KERNEL_CALL) as usize);
     pr.notify_pending.fill(0);
     pr.asyn_pending.fill(0);
     pr.sig_mgr = boot_endpoint(RS_PROC_NR);
