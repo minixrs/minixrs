@@ -11,6 +11,8 @@
 #[cfg(target_os = "none")]
 mod arch;
 #[cfg(target_os = "none")]
+mod boot_image;
+#[cfg(target_os = "none")]
 mod clock;
 #[cfg(target_os = "none")]
 mod ipc;

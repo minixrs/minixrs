@@ -661,8 +661,8 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   frame=0x4001c000, map RW, retry`, then D round-robins; A↔B ping-pong
   (1732 `[ipc]`) and stub C SYS_GETINFO (1720 `[ksys]`) all `result=0`;
   zero panic / `el0_sync_unexpected` lines.
-- **Slice 3.3** ◀ ready (branch `feature/phase-3-3-sys-vmctl`, pending
-  merge) — Real `SYS_VMCTL` subcalls + stub D self-managing its heap. New
+- **Slice 3.3** ✓ shipped (PR #12, merged 2026-06-01) — Real `SYS_VMCTL`
+  subcalls + stub D self-managing its heap. New
   `kernel/src/system/do_vmctl.rs` replaces the slice-2.6 `ENOSYS` placeholder
   with six subcalls: `VMCTL_PT_MAP` (kernel allocates a fresh frame — the
   frame allocator is kernel-side, unlike MINIX 3's VM-owned pool — maps it
