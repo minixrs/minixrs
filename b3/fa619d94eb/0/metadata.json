@@ -1,0 +1,62 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "b3fa619d94eb",
+  "session_id": "5f81f066-fdf5-4562-a109-e4b3da4cec21",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-04T20:27:14.976879Z",
+  "branch": "feature/phase-3-4a-vm-elf-loader",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/plan.md",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/boot_image/elf.rs",
+    "kernel/src/boot_image/mod.rs",
+    "kernel/src/main.rs",
+    "minix-ipc/src/lib.rs",
+    "servers/vm/Cargo.toml",
+    "servers/vm/src/main.rs",
+    "servers/vm/user.ld"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "6c6b89ac4e97",
+  "token_usage": {
+    "input_tokens": 37460,
+    "cache_creation_tokens": 490532,
+    "cache_read_tokens": 10086188,
+    "output_tokens": 88225,
+    "api_call_count": 55
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-04T20:27:14.961055Z",
+    "agent_lines": 533,
+    "agent_removed": 7,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 533,
+    "total_lines_changed": 540,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 533,
+      "agent_lines_removed": 7
+    }
+  ]
+}
