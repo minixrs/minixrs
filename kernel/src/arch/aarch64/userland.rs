@@ -30,7 +30,7 @@
 use core::sync::atomic::Ordering;
 
 use minix4_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO, SYS_VMCTL};
-use minix4_kernel_shared::com::{RS_PROC_NR, SYSTEM, boot_endpoint};
+use minix4_kernel_shared::com::{RS_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint};
 use minix4_kernel_shared::{PrivId, ProcNr};
 
 use crate::arch::aarch64::addrspace::{AddrSpace, Prot};
@@ -102,6 +102,11 @@ unsafe extern "C" {
     static _user_stub_d_end: u8;
 }
 
+/// VA at which the VM server's stack page is mapped. Distinct from VM's ELF
+/// segments (loaded from `0x0010_0000` up by `servers/vm/user.ld`) and from
+/// every EL0 stub VA.
+const VM_STACK_VA: u64 = 0x0020_0000; // 2 MiB
+
 // ----- Bootstrap ----------------------------------------------------------
 
 /// Build three per-process address spaces (one per EL0 stub), populate
@@ -130,6 +135,12 @@ pub unsafe fn userland_bootstrap() {
     //    context switch via `proc::sched::schedule_next`.
     // SAFETY: DAIF still masked from Limine handoff; single-threaded boot.
     unsafe { mmu::enable_ttbr0_walks_once() };
+
+    // 2.5. Load the real VM server (slice 3.4) before the stubs so it takes
+    //      ASID 1 and is enqueued first. Its `RECEIVE(ANY)` blocks immediately
+    //      (no senders yet), leaving the run queue free for the band-8 stubs.
+    // SAFETY: single-threaded boot; sole writer of VM's proc slot + allocator.
+    unsafe { vm_bootstrap() };
 
     // 3. Build each stub. Sequential calls — each build_stub allocates
     //    fresh frames + a fresh AddrSpace and writes its proc slot.
@@ -200,6 +211,69 @@ pub unsafe fn userland_bootstrap() {
     //    boot log proves each stub has its own distinct AS.
     //    SAFETY: single-threaded boot; read-only.
     unsafe { print_addrspace_summary() };
+}
+
+/// Load the embedded VM server ELF into a fresh address space, prime its
+/// entry/stack registers, and make it runnable.
+///
+/// Unlike the hand-coded stubs (which use ad-hoc proc/priv slots), VM occupies
+/// its *real* boot slot `VM_PROC_NR`: `proc::init` → `init_boot_image` already
+/// populated VM's name, priority, endpoint, and privilege slot (`trap_mask =
+/// SRV_T` → RECEIVE ANY + SEND to any active slot; `k_call_mask` covering
+/// `SYS_VMCTL`). So this fills in only the address space + EL0 entry state and
+/// clears the boot `RTS_NO_PRIV` block. No `install_*_priv` helper is needed.
+///
+/// The `AddrSpace` is `mem::forget`-ed for the same reason as [`build_stub`]:
+/// the page-table tree is now owned via `Proc::ttbr0_pa`.
+///
+/// SAFETY: single-threaded boot; the only writer of VM's proc slot and the
+/// frame allocator here. Must run after `mm::init_from_limine_memmap` and
+/// before `sched::run`.
+unsafe fn vm_bootstrap() {
+    use crate::arch::aarch64::uart::Pl011;
+    use core::fmt::Write;
+
+    let mut aspace = AddrSpace::new().expect("VM AddrSpace::new failed");
+    let ttbr0_pa = aspace.ttbr0_pa;
+
+    let entry = crate::boot_image::elf::load_into(crate::boot_image::VM_ELF, &mut aspace)
+        .expect("VM ELF load failed");
+
+    // Stack: one zeroed RW page; SP starts at its top.
+    let stack_frame = alloc_frame().expect("VM stack frame alloc failed");
+    aspace
+        .map_page(VM_STACK_VA, stack_frame.addr(), Prot::RW_DATA)
+        .expect("map_page(VM stack) failed");
+
+    let asid = unsafe { alloc_asid() };
+
+    // SAFETY: single-threaded boot; sole borrow of VM's slot.
+    unsafe {
+        let p = proc_slot_mut(VM_PROC_NR).expect("VM proc slot in range");
+        p.regs.elr_el1 = entry;
+        p.regs.sp_el0 = VM_STACK_VA + PAGE_SIZE as u64;
+        p.regs.spsr_el1 = STUB_SPSR_EL0;
+        p.ttbr0_pa = ttbr0_pa;
+        p.asid = asid;
+        p.next_ready = None;
+        // Clear the boot RTS_NO_PRIV: VM now has an address space and can run.
+        p.rts_flags.store(0, Ordering::Relaxed);
+
+        let _ = writeln!(
+            Pl011::new(),
+            "[as] vm nr={} ttbr0_pa={:#x} asid={} entry={:#x}",
+            p.nr.get(),
+            p.ttbr0_pa,
+            p.asid,
+            entry,
+        );
+    }
+
+    // The page-table tree is durable via `ttbr0_pa`; don't run `destroy`.
+    core::mem::forget(aspace);
+
+    // SAFETY: single-threaded boot; no other PROC_TABLE / RUNQ borrow is live.
+    unsafe { sched::enqueue(VM_PROC_NR) };
 }
 
 /// Build one stub's address space: allocate L0 + code + stack frames,

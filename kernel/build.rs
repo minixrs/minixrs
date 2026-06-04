@@ -59,10 +59,72 @@ fn main() {
                 println!("cargo:rustc-link-arg={}", obj.display());
             }
             println!("cargo:rerun-if-changed=src/arch/aarch64/linker.ld");
+
+            // Build the VM server as a freestanding EL0 ELF and embed it
+            // (slice 3.4). `boot_image::VM_ELF` is `include_bytes!(env!(...))`.
+            build_vm_server(&out_dir);
         }
         "x86_64" => {
             // Phase 8 territory -- nothing to assemble yet.
         }
         other => panic!("unsupported target arch: {other}"),
     }
+}
+
+/// Build the VM server crate for the aarch64 EL0 user target and tell rustc
+/// where the resulting ELF is, so `boot_image::VM_ELF` can `include_bytes!` it.
+///
+/// We reuse the builtin `aarch64-unknown-none` triple but must NOT inherit the
+/// kernel's linker script: the workspace `.cargo/config.toml` forces
+/// `-Tkernel/.../linker.ld` on that triple via `rustflags`. We override it with
+/// `CARGO_ENCODED_RUSTFLAGS` (highest-precedence; replaces config rustflags
+/// entirely) pointing at `servers/vm/user.ld`, and isolate the build in a
+/// separate `CARGO_TARGET_DIR` so nesting cargo inside this build script does
+/// not deadlock on the outer kernel build's target-dir lock.
+fn build_vm_server(out_dir: &std::path::Path) {
+    let manifest = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR unset"),
+    );
+    let workspace = manifest.parent().expect("kernel manifest has no parent");
+    let vm_dir = workspace.join("servers/vm");
+    let user_ld = vm_dir.join("user.ld");
+    let vm_target_dir = out_dir.join("vm-target");
+
+    // Rebuild the kernel (and re-embed) whenever the VM crate or the IPC
+    // library it links against changes.
+    for path in [
+        vm_dir.join("src/main.rs"),
+        user_ld.clone(),
+        vm_dir.join("Cargo.toml"),
+        workspace.join("minix-ipc/src/lib.rs"),
+    ] {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+
+    // `-C link-arg=-T<user.ld>`, encoded with the \x1f separator cargo expects.
+    let encoded_rustflags = format!("-Clink-arg=-T{}", user_ld.display());
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = Command::new(cargo)
+        .current_dir(workspace)
+        .args([
+            "build",
+            "-p",
+            "minix4-vm",
+            "--target",
+            "aarch64-unknown-none",
+            "--release",
+        ])
+        .env("CARGO_TARGET_DIR", &vm_target_dir)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags)
+        .status()
+        .expect("failed to spawn cargo for minix4-vm");
+    if !status.success() {
+        panic!("building minix4-vm (VM server ELF) failed");
+    }
+
+    let elf = vm_target_dir.join("aarch64-unknown-none/release/minix4-vm");
+    assert!(elf.exists(), "VM ELF missing at {}", elf.display());
+    println!("cargo:rustc-env=VM_ELF_PATH={}", elf.display());
 }
