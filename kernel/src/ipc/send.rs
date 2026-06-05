@@ -6,10 +6,12 @@
 //! The non-blocking variant returns `ENOTREADY` instead of queueing.
 
 use minix4_kernel_shared::ProcNr;
-use minix4_kernel_shared::com::NR_SYS_PROCS;
+use minix4_kernel_shared::callnr::VM_PAGEFAULT;
+use minix4_kernel_shared::com::{NR_SYS_PROCS, VM_PROC_NR};
 use minix4_kernel_shared::endpoint::{Endpoint, endpoint_proc};
 use minix4_kernel_shared::error::{EBADSRCDST, ECALLDENIED, ELOCKED, ENOTREADY, OK};
 use minix4_kernel_shared::ipc_const::SEND;
+use minix4_kernel_shared::message::Message;
 
 use crate::ipc::deadlock::deadlock_check;
 use crate::ipc::message::copy_msg_from_user;
@@ -111,6 +113,78 @@ pub fn mini_send(
 
     enqueue_on_caller_q(proc_table, dst_idx, caller_nr);
     OK
+}
+
+/// Kernel-originated SEND of a `VM_PAGEFAULT` message to the VM server on a
+/// faulting process's behalf (slice 3.4).
+///
+/// Unlike [`mini_send`] there is no user buffer and no caller running an SVC:
+/// the kernel constructs the message, and the *faulting* process plays the role
+/// of the (already-blocked) sender. The faulter is expected to already carry
+/// `RTS_PAGEFAULT` (set by `do_page_fault`); we additionally mark it
+/// `RTS_SENDING` only when VM can't receive immediately, so that when VM later
+/// picks it off the `caller_q` ([`super::receive::mini_receive`]'s
+/// `walk_caller_q` clears `RTS_SENDING`) the lingering `RTS_PAGEFAULT` keeps it
+/// blocked until `VMCTL_CLEAR_PAGEFAULT`.
+///
+/// No `ipc_to`/permission check — the send is kernel-originated, not a user
+/// trap. No deadlock check either: the faulter is already blocked on a fault
+/// and VM is its sink, so the SEND↔RECV cycle the detector hunts for can't form.
+///
+/// `m_source` identifies the faulter; the payload carries the fault address
+/// (`0..8`, u64) and fault flags (`8..12`, u32) so VM needs no `GET_PAGEFAULT`
+/// round-trip to resolve.
+pub fn mini_pf_send(
+    proc_table: &mut [Proc; N_PROC_SLOTS],
+    faulting_nr: ProcNr,
+    far: u64,
+    flags: u32,
+) {
+    // Both lookups are boot-time invariants: `do_page_fault` has already
+    // blocked the faulter on RTS_PAGEFAULT before calling us, so a silent
+    // bailout here would strand it blocked forever with no diagnostic. Halt
+    // loudly instead (CLAUDE.md: hard assert for invariants that would
+    // otherwise silently corrupt — here, liveness).
+    let fault_idx = proc_index(faulting_nr).expect("mini_pf_send: faulter not in proc table");
+    let vm_idx = proc_index(VM_PROC_NR).expect("mini_pf_send: VM server not in proc table");
+
+    let fault_endpoint = proc_table[fault_idx].endpoint;
+    let vm_endpoint = proc_table[vm_idx].endpoint;
+
+    let mut msg = Message {
+        m_source: fault_endpoint,
+        m_type: VM_PAGEFAULT,
+        payload: [0u8; 96],
+    };
+    msg.payload[0..8].copy_from_slice(&far.to_ne_bytes());
+    msg.payload[8..12].copy_from_slice(&flags.to_ne_bytes());
+
+    // Immediate delivery: VM is receive-blocked and would accept us.
+    {
+        let vm = &mut proc_table[vm_idx];
+        if will_receive(vm, fault_endpoint) {
+            vm.deliver_msg = msg;
+            vm.misc_flags |= MF_DELIVERMSG;
+            vm.misc_flags &= !MF_REPLY_PEND;
+            // SAFETY: single-threaded EL1 page-fault context; no other borrow
+            // into `proc_table` is live.
+            unsafe { sched::rts_unset(vm, RTS_RECEIVING) };
+            return;
+        }
+    }
+
+    // VM busy: queue the faulter as a blocked sender on VM's caller_q.
+    {
+        let caller = &mut proc_table[fault_idx];
+        caller.send_msg = msg;
+        caller.sendto_e = vm_endpoint;
+        caller.q_link = None;
+        // RTS_PAGEFAULT is already set, so the faulter is already off the run
+        // queue; rts_set just OR-s in RTS_SENDING (won't double-dequeue).
+        // SAFETY: single-threaded EL1 page-fault context.
+        unsafe { sched::rts_set(caller, RTS_SENDING) };
+    }
+    enqueue_on_caller_q(proc_table, vm_idx, faulting_nr);
 }
 
 /// Append `nr` to the tail of the `caller_q` rooted at `proc_table[dst_idx]`.

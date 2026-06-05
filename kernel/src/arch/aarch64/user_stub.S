@@ -17,11 +17,12 @@
  *   a loop. The kernel dispatcher writes endpoint, priv-flags, init-flags,
  *   and name back into the payload; the reply's m_type is OK (0).
  *
- *   Stub D — SYS_VMCTL client (slice 3.3): self-manages a heap page at
- *   0x0100_0000 by issuing VMCTL_PT_MAP / (store) / VMCTL_PT_UNMAP against
- *   its own endpoint in a loop. Exercises the kernel's PT_MAP/PT_UNMAP
- *   subcalls and cycles the frame allocator. (Slice 3.2's on-demand
- *   page-fault path is bypassed — D maps before it touches.)
+ *   Stub D — page-fault demo (slice 3.4b): touches an unmapped heap page at
+ *   0x0100_0000 in a loop. The first store faults; the kernel routes a
+ *   VM_PAGEFAULT to the user-space VM server, which maps the page via
+ *   SYS_VMCTL and clears D's fault, after which the store retries and
+ *   succeeds. Later iterations hit the now-mapped page with no further
+ *   faults. D issues no SVC of its own.
  *
  * Each stub carves its 104-byte Message buffer out of [SP_EL0 - 104,
  * SP_EL0). SP stays 16-byte aligned (104 rounds to nothing modulo 16;
@@ -41,13 +42,8 @@
     .equ ENDPOINT_A,   11
     .equ ENDPOINT_B,   12
     .equ ENDPOINT_SYS, 0x7FFE              // boot_endpoint(SYSTEM)
-    .equ ENDPOINT_D,   14                  // boot_endpoint(stub D); D targets itself
     .equ SYS_GETINFO,  0x600               // KERNEL_CALL + 0
-    .equ SYS_VMCTL,    0x608               // KERNEL_CALL + 8
     .equ GET_WHOAMI,   12
-    .equ VMCTL_PT_MAP,   1                 // SYS_VMCTL subcall: alloc+map a page
-    .equ VMCTL_PT_UNMAP, 2                 // SYS_VMCTL subcall: unmap+free a page
-    .equ VMCTL_PROT_WRITE, 1               // PT_MAP prot bit: EL0 writable
     .equ MSG_SIZE,     104                 // sizeof(Message); fits in `mov` imm12
 
 /* ---- Stub A: sender ----------------------------------------------------- */
@@ -129,18 +125,15 @@ _user_stub_c_start:
 _user_stub_c_end:
     .size _user_stub_c_start, _user_stub_c_end - _user_stub_c_start
 
-/* ---- Stub D: SYS_VMCTL client (slice 3.3) ------------------------------ */
+/* ---- Stub D: page-fault demo (slice 3.4b) ------------------------------ */
 
 /*
- * Stub D self-manages a single heap page at 0x0100_0000 via SYS_VMCTL,
- * targeting itself (ENDPOINT_D). Each loop iteration:
- *   1. VMCTL_PT_MAP  — kernel allocs a fresh frame, maps it RW, returns its PA.
- *   2. store to the page — must NOT fault (it's mapped now).
- *   3. VMCTL_PT_UNMAP — kernel clears the PTE and frees the frame.
- * The map/unmap cycle also stresses the 3.1a frame allocator's free-list
- * (the LIFO list hands the same frame back each iteration, so no exhaustion).
- * D never relies on the slice-3.2 kernel-as-VM heap window (its proc slot's
- * heap_window is EMPTY); a stray fault would halt loudly.
+ * Stub D touches an unmapped heap page at 0x0100_0000 in a loop. The first
+ * store faults (translation); the kernel records the fault, blocks D on
+ * RTS_PAGEFAULT, and sends VM_PAGEFAULT to the user-space VM server. VM maps
+ * the page (SYS_VMCTL(VMCTL_PT_MAP)) and clears the fault
+ * (VMCTL_CLEAR_PAGEFAULT); D's store then retries and succeeds. Every later
+ * iteration writes the now-mapped page with no fault. D issues no SVC.
  */
 
     .section .rodata.user_stub_d, "a", %progbits
@@ -151,39 +144,8 @@ _user_stub_d_start:
     movz    x20, #0x0100, lsl #16              // x20 = 0x0100_0000 (heap VA)
     mov     x19, #0                            // persistent counter
 1:
-    // --- VMCTL_PT_MAP(target=D, vaddr=x20, prot=WRITE) ---
-    sub     x9, sp, #MSG_SIZE
-    str     wzr, [x9, #0]                      // m_source — kernel overwrites
-    mov     w10, #SYS_VMCTL
-    str     w10, [x9, #4]                      // m_type
-    mov     w10, #VMCTL_PT_MAP
-    str     w10, [x9, #8]                      // payload[0]  subcall
-    mov     w10, #ENDPOINT_D
-    str     w10, [x9, #12]                     // payload[4]  target endpoint
-    str     x20, [x9, #16]                     // payload[8]  vaddr (u64)
-    mov     w10, #VMCTL_PROT_WRITE
-    str     w10, [x9, #24]                     // payload[16] prot bits
-    mov     x0, #ENDPOINT_SYS
-    mov     x1, #SENDREC
-    mov     x2, x9
-    svc     #0
-    // --- access the now-mapped page (no fault) ---
-    str     x19, [x20]
+    str     x19, [x20]                         // 1st iter faults → kernel→VM maps it
     add     x19, x19, #1
-    // --- VMCTL_PT_UNMAP(target=D, vaddr=x20) ---
-    sub     x9, sp, #MSG_SIZE
-    str     wzr, [x9, #0]
-    mov     w10, #SYS_VMCTL
-    str     w10, [x9, #4]
-    mov     w10, #VMCTL_PT_UNMAP
-    str     w10, [x9, #8]                      // payload[0]  subcall
-    mov     w10, #ENDPOINT_D
-    str     w10, [x9, #12]                     // payload[4]  target endpoint
-    str     x20, [x9, #16]                     // payload[8]  vaddr (u64)
-    mov     x0, #ENDPOINT_SYS
-    mov     x1, #SENDREC
-    mov     x2, x9
-    svc     #0
     b       1b
     .global _user_stub_d_end
 _user_stub_d_end:
