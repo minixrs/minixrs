@@ -699,10 +699,35 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   ~1631 `caller=13 call=0` stub-C `SYS_GETINFO` dispatches all `result=0`,
   A↔B ping-pong handshake visible at boot (`[ipc 1..4]`); zero panic, zero
   `el0_sync_unexpected`, zero `[pf]` lines (D never faults).
-- **Slice 3.4** ◀ next — Real VM server boots, kernel ELF loader, cross-AS IPC
-  delivery (HHDM-after-walk), kernel-originated `VM_PAGEFAULT` send.
-  **Phase 3 milestone reached here.**
-- **Slice 3.5** — VM region tracking (static `[Region; N]` per proc) +
+- **Slice 3.4** ◀ ready (split into two PRs; 3.4a shipped PR #13, merged
+  2026-06-04; 3.4b on branch `feature/phase-3-4b-vm-pagefault`, pending merge)
+  — Real VM server + kernel-originated `VM_PAGEFAULT` send. **3.4a** stood up
+  the user-space build toolchain and ELF loader: `minix-ipc` SVC stubs, a
+  freestanding `servers/vm` ELF (`user.ld`, base `0x10_0000`) built by
+  `kernel/build.rs` (separate `CARGO_TARGET_DIR`, `CARGO_ENCODED_RUSTFLAGS`
+  linker-script override) and embedded via `include_bytes!`, a minimal
+  ET_EXEC/AArch64 loader in `kernel/src/boot_image/elf.rs`, and
+  `userland::vm_bootstrap` loading VM into its real `VM_PROC_NR=7` slot (no
+  priv install — `init_boot_image` already grants `SRV_T` + `SYS_VMCTL`). VM
+  ran a `RECEIVE(ANY)` stub. **3.4b** made it functional: new
+  `kernel-shared` `VM_PAGEFAULT` request number (`0xC00`) and dropped the
+  `NR_KERN_CALLS_PHASE2` alias; new `ipc::send::mini_pf_send` — a
+  kernel-originated SEND that models the faulting proc as a blocked sender on
+  VM's `caller_q` (so the lingering `RTS_PAGEFAULT` keeps it blocked through
+  the `RTS_SENDING` clear until `VMCTL_CLEAR_PAGEFAULT`); `do_page_fault`
+  rewritten to record + block + `send_pagefault_to_vm` instead of the
+  slice-3.2 inline heap-window resolve (permission faults still halt); the VM
+  server's real loop resolves each `VM_PAGEFAULT` via
+  `SYS_VMCTL(VMCTL_PT_MAP)` + `VMCTL_CLEAR_PAGEFAULT`; stub D reverted to a
+  pure fault-on-touch demo (`trap_mask = TSK_T`, no IPC). The cross-AS
+  user-copy rewrite the original plan listed was **deferred** to Phase 4:
+  `schedule_next` flushes `MF_DELIVERMSG` *after* the TTBR0 switch, so every
+  3.4 user-buffer copy already runs under the correct live TTBR0. Verified in
+  QEMU: `[as] vm nr=7 asid=1`; one `[pf] proc=D far=0x1000000 flags=0x1 → VM`
+  → `[ksys VMCTL_PT_MAP] proc=D pa=0x40023000 result=0` round-trip → D runs
+  91 ticks with no re-fault; A/B ping-pong + C `SYS_GETINFO` intact, zero
+  nonzero results, no panic. **Phase 3 milestone reached.**
+- **Slice 3.5** ◀ next — VM region tracking (static `[Region; N]` per proc) +
   `VM_BRK`.
 - **Slice 3.6** — `VM_MMAP` / `VM_MUNMAP` + Phase 3 doc/CLAUDE.md cleanup.
 

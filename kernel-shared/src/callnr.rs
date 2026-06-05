@@ -30,16 +30,12 @@ pub const SYS_SETGRANT: i32 = KERNEL_CALL + 13;
 /// arm-coverage const-assert a phase-appropriate name as Phase 3 lands.
 pub const NR_KERN_CALLS_PHASE3: usize = 14;
 
-/// Deprecated alias for [`NR_KERN_CALLS_PHASE3`], retained for one slice so
-/// `proc::table` and the host tests don't churn. Dropped in slice 3.4.
-pub const NR_KERN_CALLS_PHASE2: usize = NR_KERN_CALLS_PHASE3;
-
 /// Size of the privilege-table kernel-call mask, in bits. Sized as a single
 /// `u32` chunk (32 slots) to leave headroom past Phase 2's 14 calls while
 /// keeping the bitmap a single word per privilege slot.
 pub const NR_SYS_CALLS: usize = 32;
 
-const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS_PHASE2);
+const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS_PHASE3);
 const _: () = assert!(NR_SYS_CALLS % 32 == 0);
 
 // ---------------------------------------------------------------------------
@@ -102,6 +98,25 @@ pub const VMCTL_PROT_WRITE: i32 = 1 << 0;
 /// EL0 may execute from the mapped page.
 pub const VMCTL_PROT_EXEC: i32 = 1 << 1;
 
+// ---------------------------------------------------------------------------
+// VM server request numbers — `m_type` values for messages addressed to VM.
+//
+// These are *server IPC requests*, not kernel calls, so they live in their own
+// range distinct from `KERNEL_CALL` (`0x600`). The kernel originates
+// `VM_PAGEFAULT` on a faulting process's behalf (slice 3.4); later slices add
+// `VM_BRK` / `VM_MMAP`. Numbering is MINIX 4-specific (MINIX 3's VM request set
+// differs because its frame allocator lives in VM, not the kernel).
+// ---------------------------------------------------------------------------
+
+/// Base for VM server request `m_type` values.
+pub const VM_RQ_BASE: i32 = 0xC00;
+
+/// Kernel → VM: a process page-faulted. `m_source` identifies the faulting
+/// process; the payload carries the fault address (`0..8`, u64) and fault
+/// flags (`8..12`, u32). VM resolves it via `SYS_VMCTL(VMCTL_PT_MAP)` +
+/// `SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT)`.
+pub const VM_PAGEFAULT: i32 = VM_RQ_BASE;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,7 +131,7 @@ mod tests {
         for (i, call) in calls.iter().enumerate() {
             assert_eq!(*call, KERNEL_CALL + i as i32);
         }
-        assert_eq!(calls.len(), NR_KERN_CALLS_PHASE2);
+        assert_eq!(calls.len(), NR_KERN_CALLS_PHASE3);
     }
 
     #[test]
@@ -151,7 +166,12 @@ mod tests {
     }
 
     #[test]
-    fn kern_call_phase_alias_matches() {
-        assert_eq!(NR_KERN_CALLS_PHASE2, NR_KERN_CALLS_PHASE3);
+    fn vm_pagefault_distinct_from_kernel_calls_and_notify() {
+        // VM requests must not collide with the KERNEL_CALL range, the IPC
+        // NOTIFY_MESSAGE marker, or any SYS_* number — a server dispatcher
+        // keys on m_type and a collision would misroute.
+        assert_eq!(VM_PAGEFAULT, VM_RQ_BASE);
+        assert!(VM_PAGEFAULT > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+        assert_ne!(VM_PAGEFAULT, crate::ipc_const::NOTIFY_MESSAGE);
     }
 }
