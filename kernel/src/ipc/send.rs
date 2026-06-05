@@ -140,12 +140,13 @@ pub fn mini_pf_send(
     far: u64,
     flags: u32,
 ) {
-    let Some(fault_idx) = proc_index(faulting_nr) else {
-        return;
-    };
-    let Some(vm_idx) = proc_index(VM_PROC_NR) else {
-        return;
-    };
+    // Both lookups are boot-time invariants: `do_page_fault` has already
+    // blocked the faulter on RTS_PAGEFAULT before calling us, so a silent
+    // bailout here would strand it blocked forever with no diagnostic. Halt
+    // loudly instead (CLAUDE.md: hard assert for invariants that would
+    // otherwise silently corrupt — here, liveness).
+    let fault_idx = proc_index(faulting_nr).expect("mini_pf_send: faulter not in proc table");
+    let vm_idx = proc_index(VM_PROC_NR).expect("mini_pf_send: VM server not in proc table");
 
     let fault_endpoint = proc_table[fault_idx].endpoint;
     let vm_endpoint = proc_table[vm_idx].endpoint;
