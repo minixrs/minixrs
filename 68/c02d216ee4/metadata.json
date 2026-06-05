@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "68c02d216ee4",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-3-4b-vm-pagefault",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "kernel/src/ipc/send.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/68/c02d216ee4/0/metadata.json",
+      "transcript": "/68/c02d216ee4/0/full.jsonl",
+      "content_hash": "/68/c02d216ee4/0/content_hash.txt",
+      "prompt": "/68/c02d216ee4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 8097,
+    "cache_creation_tokens": 200642,
+    "cache_read_tokens": 1044077,
+    "output_tokens": 13768,
+    "api_call_count": 18
+  }
+}
