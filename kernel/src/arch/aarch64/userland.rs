@@ -38,7 +38,7 @@ use crate::arch::aarch64::asid::alloc_asid;
 use crate::arch::aarch64::mmu::{self, PAGE_SIZE, flush_icache_range};
 use crate::mm::{Frame, alloc_frame, phys_to_hhdm};
 use crate::proc::bitmap::{set_call_bit, set_sys_bit};
-use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, TSK_T, USR_T};
+use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
 use crate::proc::table::{priv_slot_mut, proc_index, proc_slot_mut, proc_table_ref};
 use crate::proc::{HeapWindow, Priv, Proc};
@@ -66,8 +66,9 @@ pub const USER_CODE_VA_D: u64 = 0x0043_0000;
 pub const USER_STACK_VA_D: u64 = 0x0083_0000;
 
 // Stub D's heap VA (`0x0100_0000`) lives only in `user_stub.S`'s stub D blob
-// now: D maps/unmaps it itself via `SYS_VMCTL`, so the kernel needs no
-// heap-window constant for it (slice 3.2's kernel-as-VM window is bypassed).
+// and in the VM server's `region::HEAP_BASE` (slice 3.5): D issues `VM_BRK` to
+// grow its heap, then touches it. The kernel needs no heap-window constant —
+// faults route to VM, which gates them on its per-proc region table.
 
 /// First proc-table slot beyond the boot image — `ProcNr(11)`.
 const STUB_A_PROC_NR: ProcNr = ProcNr::new(11);
@@ -185,9 +186,9 @@ pub unsafe fn userland_bootstrap() {
             &_user_stub_d_end,
             USER_CODE_VA_D,
             USER_STACK_VA_D,
-            // D faults on first touch of its heap page; the kernel routes the
-            // fault to the VM server (slice 3.4b). `heap_window` is unused now
-            // — the slice-3.2 kernel-as-VM fast path is gone — so EMPTY.
+            // D issues `VM_BRK` to grow its heap, then touches it (slice 3.5).
+            // Faults route to the VM server, which gates them on its region
+            // table. The kernel `heap_window` fast path stays unused, so EMPTY.
             HeapWindow::EMPTY,
         );
     }
@@ -481,26 +482,56 @@ unsafe fn install_stub_c_priv() {
     pr.sig_mgr = boot_endpoint(RS_PROC_NR);
 }
 
-/// Install stub D's priv slot (slice 3.4b). D reverts to a pure fault-on-touch
-/// demo: it touches an unmapped heap page and the kernel routes the fault to
-/// the VM server. D issues no IPC and no kernel calls, so it gets
-/// `trap_mask = TSK_T` with empty `ipc_to` / `k_call_mask`.
+/// Install stub D's priv slot (slice 3.5). D now drives `brk`: it issues
+/// `VM_BRK` SENDRECs to the VM server, then touches the grown heap. So D gets
+/// `trap_mask = USR_T` (SENDREC only, like stub C) with `ipc_to` opened to
+/// VM's priv slot. `k_call_mask` stays empty — D never calls the kernel
+/// directly; it talks to VM, and its page faults reach VM via the kernel
+/// (`mini_pf_send`, which performs no permission check).
 ///
-/// SAFETY: single-threaded boot; mutates only priv-table slot
-/// `STUB_D_PRIV_ID`.
+/// VM's own `ipc_to` was filled by `init_boot_image` only for the active boot
+/// priv slots `[0, n_active)` (≈ 0..15); stub D's slot is 19, so VM cannot
+/// reply to D's SENDREC out of the box. This helper also opens that reverse
+/// direction (VM → D) as a separate, sequential priv-slot borrow.
+///
+/// SAFETY: single-threaded boot; mutates priv-table slots `STUB_D_PRIV_ID`
+/// and VM's slot, one mutable borrow at a time.
 unsafe fn install_stub_d_priv() {
+    // Resolve VM's priv id from a read-only snapshot (mirrors stub C resolving
+    // SYSTEM). No live `&mut Proc`/`&mut Priv` is held here.
+    let vm_priv_id = {
+        let table = unsafe { proc_table_ref() };
+        let idx = proc_index(VM_PROC_NR).expect("VM in proc table");
+        table[idx]
+            .priv_id
+            .expect("VM priv populated by proc::init")
+    };
+
+    // Stub D's own priv slot: SENDREC to VM, nothing else.
     // SAFETY: priv index in-range; no overlapping reference held.
-    let pr: &mut Priv =
-        unsafe { priv_slot_mut(STUB_D_PRIV_ID).expect("stub D priv slot in range") };
-    pr.id = STUB_D_PRIV_ID;
-    pr.proc_nr = Some(STUB_D_PROC_NR);
-    pr.flags = SYS_PROC | BILLABLE | PREEMPTIBLE;
-    pr.trap_mask = TSK_T;
-    pr.ipc_to.fill(0);
-    pr.k_call_mask.fill(0);
-    pr.notify_pending.fill(0);
-    pr.asyn_pending.fill(0);
-    pr.sig_mgr = boot_endpoint(RS_PROC_NR);
+    {
+        let pr: &mut Priv =
+            unsafe { priv_slot_mut(STUB_D_PRIV_ID).expect("stub D priv slot in range") };
+        pr.id = STUB_D_PRIV_ID;
+        pr.proc_nr = Some(STUB_D_PROC_NR);
+        pr.flags = SYS_PROC | BILLABLE | PREEMPTIBLE;
+        pr.trap_mask = USR_T;
+        pr.ipc_to.fill(0);
+        set_sys_bit(&mut pr.ipc_to, vm_priv_id);
+        pr.k_call_mask.fill(0);
+        pr.notify_pending.fill(0);
+        pr.asyn_pending.fill(0);
+        pr.sig_mgr = boot_endpoint(RS_PROC_NR);
+    }
+
+    // Open VM → D so VM can reply to D's SENDREC. Separate borrow: D's `&mut
+    // Priv` above has been dropped.
+    // SAFETY: priv index in-range; no overlapping reference held.
+    {
+        let vm_pr: &mut Priv =
+            unsafe { priv_slot_mut(vm_priv_id).expect("VM priv slot in range") };
+        set_sys_bit(&mut vm_pr.ipc_to, STUB_D_PRIV_ID);
+    }
 }
 
 /// Set the per-stub priv slot. `peer_priv_id` is the only target the

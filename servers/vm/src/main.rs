@@ -5,7 +5,7 @@
 //! embedded into the kernel image by `kernel/build.rs`, and loaded into its
 //! own per-process AddrSpace at boot by `arch::aarch64::userland::vm_bootstrap`.
 //!
-//! Slice 3.4b makes it functional: a `RECEIVE(ANY)` loop that resolves page
+//! Slice 3.4b made it functional: a `RECEIVE(ANY)` loop that resolves page
 //! faults. When an EL0 process faults on an unmapped page, the kernel records
 //! the fault, blocks the faulter on `RTS_PAGEFAULT`, and sends VM a
 //! `VM_PAGEFAULT` message (`m_source` = faulter, payload = fault addr/flags).
@@ -13,19 +13,25 @@
 //! unblocks it via `SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT)`. No `alloc` crate — the
 //! kernel owns the frame allocator; VM only drives policy.
 //!
-//! Region tracking, `VM_BRK`, and `VM_MMAP` arrive in slices 3.5/3.6; for now
-//! every fault is resolved with a fresh writable page.
+//! Slice 3.5 adds memory to VM: a per-process [`region`] table and a `VM_BRK`
+//! request that grows a process's heap region. Page faults are now satisfied
+//! only when the address lies inside a known region; out-of-region faults take
+//! a SIGSEGV path (logged, faulter left blocked — real signals are Phase 4).
+//! `VM_MMAP` arrives in slice 3.6.
 
 #![no_std]
 #![no_main]
 
-use minix4_ipc::{ipc_receive, ipc_sendrec};
+mod region;
+
+use minix4_ipc::{ipc_receive, ipc_send, ipc_sendrec};
 use minix4_kernel_shared::Message;
 use minix4_kernel_shared::callnr::{
-    SYS_VMCTL, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE, VMCTL_PT_MAP,
+    SYS_VMCTL, VM_BRK, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE, VMCTL_PT_MAP,
 };
 use minix4_kernel_shared::com::{SYSTEM, boot_endpoint};
-use minix4_kernel_shared::endpoint::{ANY, Endpoint};
+use minix4_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
+use minix4_kernel_shared::error::OK;
 
 /// aarch64 4 KiB page size — VM only needs to page-align fault addresses.
 const PAGE_SIZE: u64 = 4096;
@@ -49,21 +55,35 @@ fn main() -> ! {
         if ipc_receive(ANY, &mut msg) != 0 {
             continue;
         }
-        if msg.m_type == VM_PAGEFAULT {
-            handle_pagefault(system, msg.m_source, rd_u64(&msg, 0));
+        match msg.m_type {
+            VM_PAGEFAULT => handle_pagefault(system, msg.m_source, rd_u64(&msg, 0)),
+            VM_BRK => handle_brk(&mut msg),
+            // Unknown request: drop it. VM_MMAP arrives in slice 3.6.
+            _ => {}
         }
-        // Other request types (VM_BRK / VM_MMAP) arrive in 3.5/3.6.
     }
 }
 
-/// Resolve a page fault for `faulting_e` at `far`: map a fresh writable page,
-/// then clear the kernel-recorded fault so the faulter retries and proceeds.
+/// Resolve a page fault for `faulting_e` at `far`.
+///
+/// Slice 3.5 gates this on the faulter's [`region`] table: only faults inside a
+/// known region (today, the heap) are satisfied. A fault outside every region
+/// is a SIGSEGV — VM returns without mapping or clearing, leaving the faulter
+/// blocked on `RTS_PAGEFAULT` (the only "kill" available until PM + signals in
+/// Phase 4). VM cannot print from EL0, so this path is silent; the symptom is a
+/// process that stops making progress.
 fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
+    let nr = endpoint_proc(faulting_e).get();
+    if !region::contains(nr, far) {
+        // SIGSEGV: unmapped access outside any region. Leave it blocked.
+        return;
+    }
+
     let page = far & !(PAGE_SIZE - 1);
 
     // SYS_VMCTL(VMCTL_PT_MAP, target=faulting_e, vaddr=page, prot=WRITE).
-    // The kernel allocates + maps the frame; we ignore the returned PA (region
-    // tracking that would record it lands in slice 3.5).
+    // The kernel allocates + maps the frame; we ignore the returned PA — the
+    // region table records the VA range, and the kernel owns the frames.
     let mut m = Message { m_source: 0, m_type: SYS_VMCTL, payload: [0u8; 96] };
     wr_i32(&mut m, 0, VMCTL_PT_MAP);
     wr_i32(&mut m, 4, faulting_e);
@@ -76,6 +96,29 @@ fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     wr_i32(&mut m, 0, VMCTL_CLEAR_PAGEFAULT);
     wr_i32(&mut m, 4, faulting_e);
     let _ = ipc_sendrec(system, &mut m);
+}
+
+/// Handle a `VM_BRK` request: set the caller's program break, growing or
+/// creating its heap region. No frames are mapped here — pages fault in lazily
+/// and are then satisfied by [`handle_pagefault`] via the region check. Reply
+/// to the caller (it issued a SENDREC) with `m_type = OK` and the resulting
+/// break in payload `0..8`, or the negative error in `m_type`.
+fn handle_brk(msg: &mut Message) {
+    let caller_e = msg.m_source;
+    let nr = endpoint_proc(caller_e).get();
+    let new_break = rd_u64(msg, 0);
+
+    let reply_type = match region::set_brk(nr, new_break) {
+        Ok(brk) => {
+            wr_u64(msg, 0, brk);
+            OK
+        }
+        Err(e) => e,
+    };
+
+    msg.m_type = reply_type;
+    msg.m_source = 0; // kernel overwrites on delivery
+    let _ = ipc_send(caller_e, msg);
 }
 
 // Native-endian payload accessors, mirroring the kernel's `do_vmctl` reads.
