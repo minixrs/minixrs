@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `Priv`-table bitmap helpers.
 //!
 //! `Priv` carries several `[u32; N]` bitmaps in two flavors:
@@ -18,7 +20,7 @@
 //! slice-2.5 hardening contract (`set_sys_bit` was tightened in PR #6 so
 //! a stale or bogus id can't take the kernel down).
 
-use minix4_kernel_shared::PrivId;
+use minixrs_kernel_shared::PrivId;
 
 /// Set bit `id` in a sysproc-indexed bitmap (the same encoding MINIX 3
 /// uses for `s_ipc_to`, `s_notify_pending`, `s_asyn_pending`).

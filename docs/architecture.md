@@ -1,8 +1,8 @@
-# MINIX 4 System Architecture
+# minix.rs System Architecture
 
 ## Overview
 
-MINIX 4 is a microkernel operating system written in Rust, designed as a learning OS for
+minix.rs is a microkernel operating system written in Rust, designed as a learning OS for
 people familiar with MINIX 3 and Andrew Tanenbaum's *Operating Systems: Design and
 Implementation*. It preserves MINIX 3's core architectural principles -- message-passing IPC,
 user-space servers, user-space drivers, and fine-grained privilege control -- while targeting
@@ -41,7 +41,7 @@ runs as separate user-space processes that communicate by sending messages throu
          |  IPC messages (SEND/RECEIVE/SENDREC/NOTIFY)
          v
 +------------------------------------------------------------------+
-|                     MINIX 4 Microkernel (Rust)                   |
+|                     minix.rs Microkernel (Rust)                   |
 |  IPC | Scheduling | Interrupt dispatch | Memory protection       |
 |  Kernel calls (SYS_*) for privileged servers                     |
 +------------------------------------------------------------------+
@@ -54,7 +54,7 @@ runs as separate user-space processes that communicate by sending messages throu
 
 ### Relation to MINIX 3
 
-MINIX 4 preserves MINIX 3's system call interface and server model. A developer familiar
+minix.rs preserves MINIX 3's system call interface and server model. A developer familiar
 with MINIX 3 will recognize:
 
 - The same IPC primitives (SEND, RECEIVE, SENDREC, NOTIFY, SENDNB, SENDA)
@@ -66,7 +66,7 @@ with MINIX 3 will recognize:
 
 What's different:
 
-| Aspect | MINIX 3 | MINIX 4 |
+| Aspect | MINIX 3 | minix.rs |
 |--------|---------|---------|
 | Kernel language | C | Rust |
 | Target architectures | i386, ARM (earm) | aarch64, x86_64 |
@@ -74,7 +74,7 @@ What's different:
 | C library | NetBSD libc (modified) | musl-libc fork |
 | Userland | NetBSD commands | Custom minimal (Rust) |
 | Build system | NetBSD make | Cargo workspace + make (musl) |
-| License | Mix (BSD + GPL in userland) | BSD-2-Clause only |
+| License | Mix (BSD + GPL in userland) | BSD-3-Clause only |
 | IPC linked lists | Raw C pointers | Table indices (`Option<ProcNr>`) |
 | Message types | Opaque unions (m1i1, m2l1) | Named Rust structs |
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-MINIX 4 uses a hybrid build system:
+minix.rs uses a hybrid build system:
 - **Cargo workspace** for all Rust crates (kernel, servers, drivers, userland)
 - **Make** for the musl-libc fork (C cross-compilation)
 - **Shell scripts** in `tools/` for disk image creation and QEMU launch
@@ -25,13 +25,13 @@ make -C external/limine
 # stages an ESP directory at target/esp/, drops Limine + the kernel ELF in,
 # and boots qemu-system-aarch64 with QEMU's directory-as-FAT helper -- no
 # disk-image scripting needed for Phase 1.
-cargo run -p minix4-kernel --target aarch64-unknown-none --release
+cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 ```
 
 Expected serial output:
 
 ```
-MINIX 4 booting on aarch64
+minix.rs booting on aarch64
 HHDM offset: 0xffff000000000000
 ```
 
@@ -43,7 +43,7 @@ The kernel then halts in a `wfe` loop. Exit QEMU with `Ctrl-A x`.
 locations (homebrew QEMU, `/usr/share/edk2-aarch64`, AAVMF). Override with:
 
 ```sh
-QEMU_EFI_AARCH64=/path/to/QEMU_EFI.fd cargo run -p minix4-kernel ...
+QEMU_EFI_AARCH64=/path/to/QEMU_EFI.fd cargo run -p minixrs-kernel ...
 ```
 
 ## Cargo Workspace
@@ -100,13 +100,13 @@ Example kernel target spec:
 
 ```sh
 # Build kernel
-cargo build -p minix4-kernel --target aarch64-unknown-none --release
+cargo build -p minixrs-kernel --target aarch64-unknown-none --release
 
 # Build a specific server
-cargo build -p minix4-pm --target aarch64-unknown-none --release
+cargo build -p minixrs-pm --target aarch64-unknown-none --release
 
 # Build all servers
-cargo build --workspace --exclude minix4-kernel --target aarch64-unknown-none --release
+cargo build --workspace --exclude minixrs-kernel --target aarch64-unknown-none --release
 
 # Alias (defined in .cargo/config.toml)
 cargo kernel-aarch64
@@ -165,17 +165,17 @@ Output: `libc.a`, `crt1.o`, `crti.o`, `crtn.o` installed to the sysroot.
 # Build all boot modules, then pack
 cargo build --workspace --exclude kernel --release
 tools/mkbootimage \
-    target/aarch64-unknown-none/release/minix4-ds \
-    target/aarch64-unknown-none/release/minix4-rs \
-    target/aarch64-unknown-none/release/minix4-pm \
-    target/aarch64-unknown-none/release/minix4-sched \
-    target/aarch64-unknown-none/release/minix4-vfs \
-    target/aarch64-unknown-none/release/minix4-memory \
-    target/aarch64-unknown-none/release/minix4-virtio-console \
-    target/aarch64-unknown-none/release/minix4-vm \
-    target/aarch64-unknown-none/release/minix4-pfs \
-    target/aarch64-unknown-none/release/minix4-mfs \
-    target/aarch64-unknown-none/release/minix4-init \
+    target/aarch64-unknown-none/release/minixrs-ds \
+    target/aarch64-unknown-none/release/minixrs-rs \
+    target/aarch64-unknown-none/release/minixrs-pm \
+    target/aarch64-unknown-none/release/minixrs-sched \
+    target/aarch64-unknown-none/release/minixrs-vfs \
+    target/aarch64-unknown-none/release/minixrs-memory \
+    target/aarch64-unknown-none/release/minixrs-virtio-console \
+    target/aarch64-unknown-none/release/minixrs-vm \
+    target/aarch64-unknown-none/release/minixrs-pfs \
+    target/aarch64-unknown-none/release/minixrs-mfs \
+    target/aarch64-unknown-none/release/minixrs-init \
     -o boot_image.bin
 ```
 
@@ -211,7 +211,7 @@ The boot image is then linked into the kernel:
 qemu-system-aarch64 \
     -M virt -cpu cortex-a72 -m 256M \
     -bios "${OVMF:?Set OVMF to path to UEFI firmware (e.g. edk2-aarch64-code.fd)}" \
-    -drive file=minix4.img,format=raw,if=virtio \
+    -drive file=minixrs.img,format=raw,if=virtio \
     -device virtio-net-device \
     -serial stdio \
     -no-reboot \
@@ -224,7 +224,7 @@ qemu-system-aarch64 \
 #!/bin/sh
 qemu-system-x86_64 \
     -m 256M \
-    -drive file=minix4-x86_64.img,format=raw,if=virtio \
+    -drive file=minixrs-x86_64.img,format=raw,if=virtio \
     -device virtio-net-pci \
     -serial stdio \
     -no-reboot \

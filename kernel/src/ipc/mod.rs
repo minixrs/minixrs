@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! IPC subsystem — the heart of the MINIX microkernel.
 //!
 //! Slice 2.5 lights up the real IPC engine. `do_ipc` is the single SVC
@@ -31,10 +33,10 @@ pub(crate) use message::{copy_msg_from_user, copy_msg_to_user};
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use minix4_kernel_shared::ProcNr;
-use minix4_kernel_shared::endpoint::{ANY, Endpoint};
-use minix4_kernel_shared::error::{EBADCALL, ECALLDENIED, ETRAPDENIED, OK};
-use minix4_kernel_shared::ipc_const::{
+use minixrs_kernel_shared::ProcNr;
+use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
+use minixrs_kernel_shared::error::{EBADCALL, ECALLDENIED, ETRAPDENIED, OK};
+use minixrs_kernel_shared::ipc_const::{
     NOTIFY, RECEIVE, SEND, SENDA, SENDNB, SENDREC,
 };
 
@@ -317,4 +319,4 @@ pub extern "C" fn el1_svc_tail() {
 // Re-exported / locally needed `kernel_shared` items.
 // ---------------------------------------------------------------------------
 
-use minix4_kernel_shared::com::NR_SYS_PROCS;
+use minixrs_kernel_shared::com::NR_SYS_PROCS;

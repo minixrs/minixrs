@@ -1,5 +1,5 @@
 [package]
-name = "minix4-sh"
+name = "minixrs-sh"
 version = "0.1.0"
 edition = "2024"
 

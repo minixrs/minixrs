@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Minimal PL011 UART driver for early kernel output.
 //!
 //! Targets the QEMU `virt` machine, where the PL011 MMIO base is fixed at

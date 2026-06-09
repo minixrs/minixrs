@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `SYS_VMCTL` — kernel-mediated page-table control.
 //!
-//! MINIX 4 keeps every unsafe PTE write and the physical frame allocator in
+//! minix.rs keeps every unsafe PTE write and the physical frame allocator in
 //! the kernel; the user-space VM server (slice 3.4) drives paging *policy* by
 //! issuing the subcalls implemented here. This mirrors MINIX 3's split of
 //! mechanism (kernel) from policy (VM) while moving frame ownership kernel-side
@@ -46,15 +48,15 @@
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use minix4_kernel_shared::ProcNr;
-use minix4_kernel_shared::callnr::{
+use minixrs_kernel_shared::ProcNr;
+use minixrs_kernel_shared::callnr::{
     NR_VMCTL_SUBCALLS, VMCTL_CLEAR_PAGEFAULT, VMCTL_GET_PAGEFAULT, VMCTL_PROT_EXEC,
     VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP, VMCTL_VMINHIBIT_CLEAR,
     VMCTL_VMINHIBIT_SET,
 };
-use minix4_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
-use minix4_kernel_shared::error::{EINVAL, ENOMEM, OK};
-use minix4_kernel_shared::message::Message;
+use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
+use minixrs_kernel_shared::error::{EINVAL, ENOMEM, OK};
+use minixrs_kernel_shared::message::Message;
 
 use crate::arch::aarch64::addrspace::{MapError, Prot, map_page_in, unmap_page_in};
 use crate::arch::aarch64::mmu;

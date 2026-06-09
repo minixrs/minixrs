@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Kernel-call dispatch — the `SYSTEM` task's role.
 //!
 //! In MINIX 3, `SYSTEM` is a kernel pseudo-task: it has a proc-table slot but
@@ -8,7 +10,7 @@
 //! actually blocks on a receiver; SYSTEM's `IMAGE` entry exists only so that
 //! the endpoint encodes to a valid `ProcNr`.
 //!
-//! MINIX 4 inherits exactly that shape. [`ipc::dispatch`] detects
+//! minix.rs inherits exactly that shape. [`ipc::dispatch`] detects
 //! `src_dst_e == boot_endpoint(SYSTEM)` in the SENDREC arm and diverts here
 //! instead of calling [`ipc::send::mini_send`]; the rest of the IPC engine is
 //! untouched.
@@ -23,16 +25,16 @@ mod stubs;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use minix4_kernel_shared::ProcNr;
-use minix4_kernel_shared::callnr::{
+use minixrs_kernel_shared::ProcNr;
+use minixrs_kernel_shared::callnr::{
     KERNEL_CALL, NR_KERN_CALLS_PHASE3, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL,
     SYS_EXEC, SYS_EXIT, SYS_FORK, SYS_GETINFO, SYS_IRQCTL, SYS_PRIVCTL,
     SYS_SAFECOPY, SYS_SCHEDULE, SYS_SETALARM, SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
 };
-use minix4_kernel_shared::com::{NR_SYS_PROCS, SYSTEM, boot_endpoint};
-use minix4_kernel_shared::endpoint::Endpoint;
-use minix4_kernel_shared::error::{EBADREQUEST, ECALLDENIED, OK};
-use minix4_kernel_shared::message::Message;
+use minixrs_kernel_shared::com::{NR_SYS_PROCS, SYSTEM, boot_endpoint};
+use minixrs_kernel_shared::endpoint::Endpoint;
+use minixrs_kernel_shared::error::{EBADREQUEST, ECALLDENIED, OK};
+use minixrs_kernel_shared::message::Message;
 
 use crate::ipc::{copy_msg_from_user, copy_msg_to_user};
 use crate::proc::bitmap::{get_call_bit, get_sys_bit};

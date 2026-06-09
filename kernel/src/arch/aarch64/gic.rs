@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Minimal GICv3 driver for QEMU `virt` (cortex-a72).
 //!
 //! Targets the GICv3 distributor + redistributor + CPU-interface (system

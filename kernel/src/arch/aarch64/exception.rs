@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Exception vector installation and the Phase 1 panic-on-trap handler.
 //!
 //! The vector table itself lives in `vectors.S` (16 ARMv8 vectors, each

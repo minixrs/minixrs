@@ -1,12 +1,12 @@
-# MINIX 3 to MINIX 4 Mapping
+# MINIX 3 to minix.rs Mapping
 
-This table maps MINIX 3 source files and concepts to their MINIX 4 equivalents.
+This table maps MINIX 3 source files and concepts to their minix.rs equivalents.
 Use this if you're coming from the MINIX 3 codebase or the Tanenbaum book and want
-to find where things live in MINIX 4.
+to find where things live in minix.rs.
 
 ## Kernel
 
-| MINIX 3 | MINIX 4 | Notes |
+| MINIX 3 | minix.rs | Notes |
 |---------|---------|-------|
 | `kernel/proc.c` (mini_send) | `kernel/src/ipc/send.rs` | Same algorithm, Rust |
 | `kernel/proc.c` (mini_receive) | `kernel/src/ipc/receive.rs` | Same algorithm |
@@ -32,7 +32,7 @@ to find where things live in MINIX 4.
 
 ## Shared Headers
 
-| MINIX 3 | MINIX 4 | Notes |
+| MINIX 3 | minix.rs | Notes |
 |---------|---------|-------|
 | `include/minix/ipc.h` | `kernel-shared/src/message.rs` | Message struct |
 | `include/minix/ipcconst.h` | `kernel-shared/src/ipc_const.rs` | SEND, RECEIVE, etc. |
@@ -43,7 +43,7 @@ to find where things live in MINIX 4.
 
 ## Libraries
 
-| MINIX 3 | MINIX 4 | Notes |
+| MINIX 3 | minix.rs | Notes |
 |---------|---------|-------|
 | `lib/libsys/sef.c` | `server-rt/src/sef.rs` | SEF framework |
 | `lib/libsys/sef_init.c` | `server-rt/src/init.rs` | Init callbacks |
@@ -60,7 +60,7 @@ to find where things live in MINIX 4.
 
 ## Servers
 
-| MINIX 3 | MINIX 4 | Notes |
+| MINIX 3 | minix.rs | Notes |
 |---------|---------|-------|
 | `servers/pm/main.c` | `servers/pm/src/main.rs` | PM main loop |
 | `servers/pm/forkexit.c` | `servers/pm/src/fork.rs` | fork/exit handlers |
@@ -85,7 +85,7 @@ to find where things live in MINIX 4.
 
 ## Drivers
 
-| MINIX 3 | MINIX 4 | Notes |
+| MINIX 3 | minix.rs | Notes |
 |---------|---------|-------|
 | `drivers/storage/virtio_blk/` | `drivers/virtio-blk/` | VirtIO block |
 | `drivers/storage/memory/` | `drivers/memory/` | /dev/null, ramdisk |
@@ -94,14 +94,14 @@ to find where things live in MINIX 4.
 
 ## File Systems
 
-| MINIX 3 | MINIX 4 | Notes |
+| MINIX 3 | minix.rs | Notes |
 |---------|---------|-------|
 | `servers/mfs/` or `minix/fs/mfs/` | `fs/mfs/` | MINIX File System |
 | `servers/pfs/` | `fs/pfs/` | Pipe File System |
 
 ## Build System
 
-| MINIX 3 | MINIX 4 | Notes |
+| MINIX 3 | minix.rs | Notes |
 |---------|---------|-------|
 | `build.sh` | `Cargo.toml` (workspace) | Root build config |
 | NetBSD Makefiles | Cargo + tools/ scripts | Build orchestration |
@@ -109,7 +109,7 @@ to find where things live in MINIX 4.
 
 ## Concepts Unchanged
 
-These MINIX 3 concepts carry over directly to MINIX 4:
+These MINIX 3 concepts carry over directly to minix.rs:
 
 - Message-passing IPC with fixed-size messages
 - Six IPC primitives (SEND, RECEIVE, SENDREC, NOTIFY, SENDNB, SENDA)
@@ -125,7 +125,7 @@ These MINIX 3 concepts carry over directly to MINIX 4:
 
 ## Concepts Changed
 
-| MINIX 3 | MINIX 4 | Why |
+| MINIX 3 | minix.rs | Why |
 |---------|---------|-----|
 | Raw C pointers for IPC queues | `Option<ProcNr>` indices | Memory safety |
 | `m1i1`/`m2l1` message fields | Named typed structs | Readability |

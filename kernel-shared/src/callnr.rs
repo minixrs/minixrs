@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Kernel-call numbers — the `m_type` values for `SENDREC`s addressed to the
 //! `SYSTEM` task.
 //!
@@ -52,7 +54,7 @@ const _: () = assert!(NR_SYS_CALLS % 32 == 0);
 /// the request message in-place; on return `m_type == OK`.
 pub const GET_WHOAMI: i32 = 12;
 
-/// Length of the `name` field in the `GET_WHOAMI` reply payload. MINIX 4 uses
+/// Length of the `name` field in the `GET_WHOAMI` reply payload. minix.rs uses
 /// the kernel's own `PROC_NAME_LEN` here rather than MINIX 3's 44-byte field —
 /// the name is only used for debug/log output and the kernel never stores more
 /// than 16 bytes per slot.
@@ -67,7 +69,7 @@ pub const SYS_GETINFO_NAME_LEN: usize = 16;
 // first 4 bytes of the message payload (same convention as `GET_WHOAMI`); the
 // target process is named by an endpoint in the next 4 bytes (`SELF` allowed).
 // Numbers start at 1 so a zeroed payload (subcall 0) is an obvious "invalid".
-// These are MINIX 4-specific — MINIX 3's VMCTL subcall set differs because its
+// These are minix.rs-specific — MINIX 3's VMCTL subcall set differs because its
 // frame allocator lives in VM, not the kernel.
 // ---------------------------------------------------------------------------
 
@@ -104,7 +106,7 @@ pub const VMCTL_PROT_EXEC: i32 = 1 << 1;
 // These are *server IPC requests*, not kernel calls, so they live in their own
 // range distinct from `KERNEL_CALL` (`0x600`). The kernel originates
 // `VM_PAGEFAULT` on a faulting process's behalf (slice 3.4); later slices add
-// `VM_BRK` / `VM_MMAP`. Numbering is MINIX 4-specific (MINIX 3's VM request set
+// `VM_BRK` / `VM_MMAP`. Numbering is minix.rs-specific (MINIX 3's VM request set
 // differs because its frame allocator lives in VM, not the kernel).
 // ---------------------------------------------------------------------------
 

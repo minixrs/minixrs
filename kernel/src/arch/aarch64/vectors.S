@@ -1,5 +1,7 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+/* Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors */
 /*
- * MINIX 4 aarch64 exception vector table.
+ * minix.rs aarch64 exception vector table.
  *
  * Layout per ARMv8 ARM D1.10: 16 entries of 128 bytes each, table aligned
  * to 2 KiB. Four groups of four entries:

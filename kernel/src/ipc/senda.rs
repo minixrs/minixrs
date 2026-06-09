@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `SENDA` — asynchronous send (table-based).
 //!
 //! Stub for slice 2.5. The full implementation (walking an `asynmsg_t`
@@ -9,9 +11,9 @@
 //! to a later slice keeps slice 2.5 focused on the two-stub ping-pong
 //! milestone.
 
-use minix4_kernel_shared::ProcNr;
-use minix4_kernel_shared::com::NR_SYS_PROCS;
-use minix4_kernel_shared::error::ENOSYS;
+use minixrs_kernel_shared::ProcNr;
+use minixrs_kernel_shared::com::NR_SYS_PROCS;
+use minixrs_kernel_shared::error::ENOSYS;
 
 use crate::proc::table::N_PROC_SLOTS;
 use crate::proc::{Priv, Proc};

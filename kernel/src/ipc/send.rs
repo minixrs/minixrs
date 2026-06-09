@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `SEND` / `SENDNB` — synchronous (and non-blocking) send.
 //!
 //! Translation of MINIX 3 `kernel/proc.c:880 mini_send()`. The blocking
@@ -5,13 +7,13 @@
 //! the caller on the destination's `caller_q` via the `q_link` chain.
 //! The non-blocking variant returns `ENOTREADY` instead of queueing.
 
-use minix4_kernel_shared::ProcNr;
-use minix4_kernel_shared::callnr::VM_PAGEFAULT;
-use minix4_kernel_shared::com::{NR_SYS_PROCS, VM_PROC_NR};
-use minix4_kernel_shared::endpoint::{Endpoint, endpoint_proc};
-use minix4_kernel_shared::error::{EBADSRCDST, ECALLDENIED, ELOCKED, ENOTREADY, OK};
-use minix4_kernel_shared::ipc_const::SEND;
-use minix4_kernel_shared::message::Message;
+use minixrs_kernel_shared::ProcNr;
+use minixrs_kernel_shared::callnr::VM_PAGEFAULT;
+use minixrs_kernel_shared::com::{NR_SYS_PROCS, VM_PROC_NR};
+use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
+use minixrs_kernel_shared::error::{EBADSRCDST, ECALLDENIED, ELOCKED, ENOTREADY, OK};
+use minixrs_kernel_shared::ipc_const::SEND;
+use minixrs_kernel_shared::message::Message;
 
 use crate::ipc::deadlock::deadlock_check;
 use crate::ipc::message::copy_msg_from_user;

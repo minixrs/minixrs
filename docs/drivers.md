@@ -2,7 +2,7 @@
 
 ## Overview
 
-In MINIX 4, device drivers are user-space processes. They communicate with the kernel
+In minix.rs, device drivers are user-space processes. They communicate with the kernel
 (for interrupts and I/O access) and with VFS (for device protocols) via IPC messages.
 This isolation means a buggy driver cannot corrupt kernel memory or crash the system --
 at worst, its own process dies and RS restarts it.
@@ -75,7 +75,7 @@ interrupt and re-enables it. This prevents interrupt storms from crashing the sy
 
 ## VirtIO Drivers
 
-MINIX 4 targets QEMU, so the primary drivers use VirtIO:
+minix.rs targets QEMU, so the primary drivers use VirtIO:
 
 ### VirtIO Transport
 

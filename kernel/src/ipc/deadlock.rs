@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Cyclic-dependency detection for IPC blocking.
 //!
 //! Translation of MINIX 3 `kernel/proc.c:713 deadlock()`. When a caller is
@@ -10,8 +12,8 @@
 
 use core::sync::atomic::Ordering;
 
-use minix4_kernel_shared::ProcNr;
-use minix4_kernel_shared::endpoint::{Endpoint, endpoint_proc};
+use minixrs_kernel_shared::ProcNr;
+use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
 
 use crate::proc::Proc;
 use crate::proc::flags::{RTS_RECEIVING, RTS_SENDING};
@@ -21,7 +23,7 @@ use crate::proc::table::{N_PROC_SLOTS, proc_index};
 /// `function` would create a cyclic dependency that is NOT the legal
 /// size-2 SEND ↔ RECEIVE pair.
 ///
-/// `function` must be `SEND` or `RECEIVE` (the only callers in MINIX 4 —
+/// `function` must be `SEND` or `RECEIVE` (the only callers in minix.rs —
 /// MINIX 3's NOTIFY/SENDNB paths don't invoke the deadlock check). The
 /// "function << 2" trick maps each value onto its corresponding RTS bit:
 /// `SEND(1) << 2 = RTS_SENDING(4)`, `RECEIVE(2) << 2 = RTS_RECEIVING(8)`.
