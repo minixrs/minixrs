@@ -19,8 +19,12 @@
 //! a SIGSEGV path (logged, faulter left blocked — real signals are Phase 4).
 //! `VM_MMAP` arrives in slice 3.6.
 
-#![no_std]
-#![no_main]
+// Freestanding for the real (bare-metal) build, but a normal host binary under
+// `cargo test` so `region`'s logic gets host-runnable unit tests. The test
+// harness needs `std` and its own entry point, so `no_std`/`no_main` and the
+// `_start` shim below are all gated to `not(test)`.
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
 
 mod region;
 
@@ -136,6 +140,8 @@ fn wr_u64(m: &mut Message, off: usize, v: u64) {
     m.payload[off..off + 8].copy_from_slice(&v.to_ne_bytes());
 }
 
+// The freestanding panic handler; under `cargo test` std supplies its own.
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
