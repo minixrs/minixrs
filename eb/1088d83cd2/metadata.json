@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "eb1088d83cd2",
+  "strategy": "manual-commit",
+  "branch": "chore/rebrand-minixrs",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/ipc.md",
+    "docs/minix3-mapping.md",
+    "kernel-shared/src/message.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/eb/1088d83cd2/0/metadata.json",
+      "transcript": "/eb/1088d83cd2/0/full.jsonl",
+      "content_hash": "/eb/1088d83cd2/0/content_hash.txt",
+      "prompt": "/eb/1088d83cd2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 290,
+    "cache_creation_tokens": 14212,
+    "cache_read_tokens": 1729026,
+    "output_tokens": 9592,
+    "api_call_count": 16
+  }
+}

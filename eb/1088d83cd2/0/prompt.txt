@@ -1,0 +1,5 @@
+push it and open the PR
+
+---
+
+On the references in the docs back to minix 3 are there references to 64 messages or a 64 bit minix 3?  If so we need to add that something to point out that the 64 bit version or minix 3 was just a prototype since minix 3 only shipped 32 bit
