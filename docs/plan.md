@@ -699,8 +699,8 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   ~1631 `caller=13 call=0` stub-C `SYS_GETINFO` dispatches all `result=0`,
   A↔B ping-pong handshake visible at boot (`[ipc 1..4]`); zero panic, zero
   `el0_sync_unexpected`, zero `[pf]` lines (D never faults).
-- **Slice 3.4** ◀ ready (split into two PRs; 3.4a shipped PR #13, merged
-  2026-06-04; 3.4b on branch `feature/phase-3-4b-vm-pagefault`, pending merge)
+- **Slice 3.4** ✓ shipped (two PRs; 3.4a PR #13, merged 2026-06-04; 3.4b
+  PR #14, merged 2026-06-04)
   — Real VM server + kernel-originated `VM_PAGEFAULT` send. **3.4a** stood up
   the user-space build toolchain and ELF loader: `minix-ipc` SVC stubs, a
   freestanding `servers/vm` ELF (`user.ld`, base `0x10_0000`) built by
@@ -727,9 +727,26 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   → `[ksys VMCTL_PT_MAP] proc=D pa=0x40023000 result=0` round-trip → D runs
   91 ticks with no re-fault; A/B ping-pong + C `SYS_GETINFO` intact, zero
   nonzero results, no panic. **Phase 3 milestone reached.**
-- **Slice 3.5** ◀ next — VM region tracking (static `[Region; N]` per proc) +
-  `VM_BRK`.
-- **Slice 3.6** — `VM_MMAP` / `VM_MUNMAP` + Phase 3 doc/CLAUDE.md cleanup.
+- **Slice 3.5** ◀ ready (branch `feature/phase-3-5-vm-brk`, pending merge) — VM
+  region tracking + `VM_BRK`. New `servers/vm/src/region.rs`: a static
+  `[ClientRegions; 16]` table (`UnsafeCell` newtype, keyed by proc number;
+  `MAX_REGIONS = 4`) with `HEAP_BASE = 0x0100_0000`, `set_brk` (find-or-create
+  the Heap region, page-align the new break) and `contains` (region lookup for
+  the fault path). The VM server's receive loop dispatches `VM_BRK` to a
+  `handle_brk` that replies to the SENDREC caller with the resulting break, and
+  `handle_pagefault` now gates `VMCTL_PT_MAP` on `region::contains` — faults
+  outside every region take a silent SIGSEGV path (faulter left blocked on
+  `RTS_PAGEFAULT`; real signals are Phase 4). `kernel-shared/callnr.rs` gains
+  `VM_BRK = VM_RQ_BASE + 1` (`0xC01`) + a host test. Stub D rewritten from a
+  fault-on-touch blob into a brk client: `VM_BRK(0x0100_4000)` → touch page 0 →
+  `VM_BRK(0x0100_8000)` → touch page 1 (only in range after the grow) → loop;
+  `install_stub_d_priv` widened from `trap_mask = TSK_T` to `USR_T` with
+  `ipc_to` opened to VM, and VM's `ipc_to` opened back to D (its priv slot 19 is
+  past the `[0, n_active)` boot fill, so VM couldn't otherwise reply). Verified
+  in QEMU: `[pf] proc=D far=0x1000000` + `far=0x1004000`, two
+  `[ksys VMCTL_PT_MAP] proc=D va=0x1000000`/`va=0x1004000` `result=0`, then D
+  round-robins with no re-fault; A↔B + C intact, no panic / `el0_sync_unexpected`.
+- **Slice 3.6** ◀ next — `VM_MMAP` / `VM_MUNMAP` + Phase 3 doc/CLAUDE.md cleanup.
 
 Aggregate scope (Phase 3 as a whole):
 

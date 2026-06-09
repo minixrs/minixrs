@@ -117,6 +117,13 @@ pub const VM_RQ_BASE: i32 = 0xC00;
 /// `SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT)`.
 pub const VM_PAGEFAULT: i32 = VM_RQ_BASE;
 
+/// EL0 → VM: set the caller's program break to `new_break` (payload `0..8`,
+/// u64). VM grows or creates the caller's heap region to `[HEAP_BASE,
+/// new_break)`; pages fault in lazily on first touch (no eager mapping). The
+/// reply carries `m_type = OK` and the resulting break in payload `0..8`, or a
+/// negative error in `m_type`. (slice 3.5)
+pub const VM_BRK: i32 = VM_RQ_BASE + 1;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +180,16 @@ mod tests {
         assert_eq!(VM_PAGEFAULT, VM_RQ_BASE);
         assert!(VM_PAGEFAULT > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
         assert_ne!(VM_PAGEFAULT, crate::ipc_const::NOTIFY_MESSAGE);
+    }
+
+    #[test]
+    fn vm_brk_follows_pagefault_in_request_range() {
+        // VM_BRK is the second VM server request, contiguous after VM_PAGEFAULT.
+        // It must stay distinct from the page-fault request, the KERNEL_CALL
+        // range, and the NOTIFY marker so VM's m_type dispatcher can't misroute.
+        assert_eq!(VM_BRK, VM_RQ_BASE + 1);
+        assert_ne!(VM_BRK, VM_PAGEFAULT);
+        assert!(VM_BRK > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+        assert_ne!(VM_BRK, crate::ipc_const::NOTIFY_MESSAGE);
     }
 }
