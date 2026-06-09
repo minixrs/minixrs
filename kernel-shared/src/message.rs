@@ -6,6 +6,12 @@
 //! for `__x86_64__` (see `include/minix/ipc.h`). Both x86_64 and aarch64 ports
 //! of minix.rs adopt the same size so that the message is ABI-portable.
 //!
+//! Note: MINIX 3 only ever shipped as a 32-bit OS (i386, and 32-bit ARM). The
+//! `__x86_64__` layout we anchor on exists in the MINIX 3 source tree, but a
+//! working 64-bit MINIX 3 was never an upstream release — it was a personal
+//! prototype by this project's author. We treat the 104-byte layout as an ABI
+//! *reference*, not a shipped 64-bit MINIX 3.
+//!
 //! The struct is explicitly 8-aligned. MINIX 3's `message` is a union over
 //! sub-structs containing `uint64_t` fields, so its native alignment is 8.
 //! minix.rs expresses `payload` as `[u8; 96]` for now, but future typed
