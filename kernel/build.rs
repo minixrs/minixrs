@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // Assembles the per-arch entry path and exception vectors into the kernel.
 //
 // .S files go through clang (cross-targeted at the kernel triple) and the
@@ -110,7 +112,7 @@ fn build_vm_server(out_dir: &std::path::Path) {
         .args([
             "build",
             "-p",
-            "minix4-vm",
+            "minixrs-vm",
             "--target",
             "aarch64-unknown-none",
             "--release",
@@ -119,12 +121,12 @@ fn build_vm_server(out_dir: &std::path::Path) {
         .env_remove("RUSTFLAGS")
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags)
         .status()
-        .expect("failed to spawn cargo for minix4-vm");
+        .expect("failed to spawn cargo for minixrs-vm");
     if !status.success() {
-        panic!("building minix4-vm (VM server ELF) failed");
+        panic!("building minixrs-vm (VM server ELF) failed");
     }
 
-    let elf = vm_target_dir.join("aarch64-unknown-none/release/minix4-vm");
+    let elf = vm_target_dir.join("aarch64-unknown-none/release/minixrs-vm");
     assert!(elf.exists(), "VM ELF missing at {}", elf.display());
     println!("cargo:rustc-env=VM_ELF_PATH={}", elf.display());
 }

@@ -5,7 +5,7 @@
 # Cargo invokes this with the kernel ELF path as $1. We build a tiny ESP
 # directory tree on the fly and hand it to QEMU's `-drive file=fat:rw:DIR`
 # helper, which exposes the directory as a FAT32 filesystem. That avoids
-# needing parted/mtools/hdiutil to land a "MINIX 4 booting" banner.
+# needing parted/mtools/hdiutil to land a "minix.rs booting" banner.
 #
 # Override the UEFI firmware location with QEMU_EFI_AARCH64=/path/to/fw.fd.
 

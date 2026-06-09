@@ -1,7 +1,7 @@
 # external/limine/Makefile
 #
 # Downloads the Limine bootloader binary distribution at a pinned commit on
-# the v9.x-binary branch and extracts the artifacts MINIX 4 needs:
+# the v9.x-binary branch and extracts the artifacts minix.rs needs:
 #   - BOOTAA64.EFI   aarch64 UEFI bootloader binary
 #   - limine.h       protocol header (reference; Rust bindings live in kernel/)
 #

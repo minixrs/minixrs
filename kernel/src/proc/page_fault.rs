@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // `PageFaultState`'s fields are write-only in slice 3.2 (the handler records
 // them); slice 3.3's `SYS_VMCTL(VMCTL_GET_PAGEFAULT)` is the first reader.
 #![allow(dead_code)]

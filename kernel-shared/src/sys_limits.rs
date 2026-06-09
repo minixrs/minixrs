@@ -1,8 +1,10 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Per-privilege-slot limits enforced by the kernel.
 //!
 //! These bound the I/O ranges, IRQ lines, and memory ranges a single
 //! privileged process may hold. MINIX 3's caps are larger
-//! (`NR_IO_RANGE = 64`, `NR_IRQ = 16`, `NR_MEM_RANGE = 20`); MINIX 4 starts
+//! (`NR_IO_RANGE = 64`, `NR_IRQ = 16`, `NR_MEM_RANGE = 20`); minix.rs starts
 //! smaller because no slice yet exercises them, and the smaller caps keep
 //! the `Priv` struct compact while the privilege table is statically
 //! allocated. Resize as servers and drivers come online.

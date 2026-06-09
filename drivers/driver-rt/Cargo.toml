@@ -1,8 +1,8 @@
 [package]
-name = "minix4-driver-rt"
+name = "minixrs-driver-rt"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-minix4-kernel-shared = { path = "../../kernel-shared" }
-minix4-ipc = { path = "../../minix-ipc" }
+minixrs-kernel-shared = { path = "../../kernel-shared" }
+minixrs-ipc = { path = "../../minix-ipc" }

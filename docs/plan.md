@@ -1,8 +1,8 @@
-# MINIX 4: Implementation Plan
+# minix.rs: Implementation Plan
 
 ## Context
 
-Build MINIX 4 as a learning OS that preserves MINIX 3's microkernel architecture -- message-passing IPC, user-space servers (PM, VFS, VM, RS, DS, SCHED), user-space drivers, and fine-grained privilege control -- but with a greenfield Rust kernel targeting modern 64-bit platforms (x86_64, aarch64) under QEMU/VirtIO. Someone familiar with MINIX 3 or the Tanenbaum book should recognize the concepts immediately.
+Build minix.rs as a learning OS that preserves MINIX 3's microkernel architecture -- message-passing IPC, user-space servers (PM, VFS, VM, RS, DS, SCHED), user-space drivers, and fine-grained privilege control -- but with a greenfield Rust kernel targeting modern 64-bit platforms (x86_64, aarch64) under QEMU/VirtIO. Someone familiar with MINIX 3 or the Tanenbaum book should recognize the concepts immediately.
 
 **Key constraints:**
 - BSD/MIT licensing only (no GPL)
@@ -37,7 +37,7 @@ Build MINIX 4 as a learning OS that preserves MINIX 3's microkernel architecture
          |  IPC messages (SEND/RECEIVE/SENDREC/NOTIFY)
          v
 +------------------------------------------------------------------+
-|                     MINIX 4 Microkernel (Rust)                   |
+|                     minix.rs Microkernel (Rust)                   |
 |  IPC | Scheduling | Interrupt dispatch | Memory protection       |
 |  Kernel calls (SYS_*) for privileged servers                     |
 +------------------------------------------------------------------+
@@ -54,11 +54,11 @@ Build MINIX 4 as a learning OS that preserves MINIX 3's microkernel architecture
 ## Repository Structure
 
 ```
-minix-4/
+minixrs/
   Cargo.toml                    # Workspace root
   rust-toolchain.toml           # Pinned nightly
   .cargo/config.toml            # Per-target flags, linker scripts
-  LICENSE                       # BSD-2-Clause
+  LICENSE                       # BSD-3-Clause
 
   kernel/                       # Rust microkernel (no_std, no_main)
     Cargo.toml
@@ -382,7 +382,7 @@ Boot modules are packed into the kernel ELF as a `.boot_image` section (MXBI hea
 
 Full documentation and project scaffolding so future contributors have complete context.
 
-**Deliverables:** `docs/` directory with architecture, IPC, syscall catalog, servers, boot, drivers, musl, memory layout, build, and MINIX 3 mapping documentation. Cargo workspace with all crate placeholders. CLAUDE.md, LICENSE (BSD-2-Clause).
+**Deliverables:** `docs/` directory with architecture, IPC, syscall catalog, servers, boot, drivers, musl, memory layout, build, and MINIX 3 mapping documentation. Cargo workspace with all crate placeholders. CLAUDE.md, LICENSE (BSD-3-Clause).
 
 **Milestone:** `docs/` is comprehensive enough to start coding Phase 1 without re-exploring MINIX 3.
 
@@ -394,7 +394,7 @@ Full documentation and project scaffolding so future contributors have complete 
 - PL011 UART driver at `kernel/src/arch/aarch64/uart.rs` with `core::fmt::Write` adapter; MMIO base is HHDM-relative (Limine base revision 2 keeps the [0, 4 GiB) blanket map covering PL011)
 - aarch64 exception vector table (`vectors.S` + `exception.rs`); any unexpected trap routes through `exception_entry` and panics with a decoded ESR_EL1/ELR_EL1/FAR_EL1 dump
 - `tools/qemu-run.sh` is the cargo runner: stages an ESP under `target/esp/`, auto-detects edk2 firmware, boots with `qemu-system-aarch64 -M virt` via `-drive file=fat:rw:...`
-- **Milestone:** `cargo run -p minix4-kernel --target aarch64-unknown-none --release` boots through UEFI + Limine, prints `MINIX 4 booting on aarch64` + HHDM offset, then halts in `wfe`. Exception path verified by injecting a deliberate fault and observing a clean panic dump.
+- **Milestone:** `cargo run -p minixrs-kernel --target aarch64-unknown-none --release` boots through UEFI + Limine, prints `minix.rs booting on aarch64` + HHDM offset, then halts in `wfe`. Exception path verified by injecting a deliberate fault and observing a clean panic dump.
 
 ### Phase 2: Kernel IPC + Scheduling (the heart of MINIX)
 
@@ -504,7 +504,7 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   a new `SYS_*` without a new arm is a compile error.
   `kernel-shared/callnr.rs` gains `GET_WHOAMI = 12` (matches MINIX 3
   `include/minix/sysinfo.h`) and `SYS_GETINFO_NAME_LEN = 16` (kernel's
-  `PROC_NAME_LEN`; deviates from MINIX 3's 44 B because MINIX 4 never
+  `PROC_NAME_LEN`; deviates from MINIX 3's 44 B because minix.rs never
   stores more than 16 B per slot). `user_stub.S` gains a third
   `.rodata.user_stub_c` blob — SENDREC to `ENDPOINT_SYS` (`0x7FFE` =
   `boot_endpoint(SYSTEM)`) with `m_type = SYS_GETINFO` and
@@ -779,7 +779,7 @@ Aggregate scope (Phase 3 as a whole):
 - `fs/pfs/`: Pipe File System
 - `drivers/memory/`: /dev/null, /dev/zero, ramdisk
 - initramfs for early boot before disk driver
-- **Milestone:** C "Hello World" compiled against musl runs on MINIX 4
+- **Milestone:** C "Hello World" compiled against musl runs on minix.rs
 
 ### Phase 6: VirtIO Drivers
 
@@ -803,7 +803,7 @@ Aggregate scope (Phase 3 as a whole):
 - `musl/src/minix/_ipc_x86_64.S`
 - VirtIO PCI transport
 - `tools/qemu-run-x86_64.sh`
-- **Milestone:** Same MINIX 4 boots on `qemu-system-x86_64`
+- **Milestone:** Same minix.rs boots on `qemu-system-x86_64`
 
 ### Phase 9: Documentation + Polish
 
@@ -849,7 +849,7 @@ QEMU flags for aarch64 dev:
 ```
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
   -serial stdio -no-reboot -d int,cpu_reset -D qemu.log \
-  -drive file=minix4.img,format=raw,if=virtio \
+  -drive file=minixrs.img,format=raw,if=virtio \
   -device virtio-net-device
 ```
 GDB: add `-s -S` then `rust-gdb -ex "target remote :1234"`

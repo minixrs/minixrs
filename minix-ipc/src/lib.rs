@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! User-space IPC library.
 //!
 //! Thin wrappers over the kernel's SVC trap, used by system servers (VM in
@@ -18,8 +20,8 @@
 
 #![no_std]
 
-use minix4_kernel_shared::ipc_const::{RECEIVE, SEND, SENDREC};
-use minix4_kernel_shared::{Endpoint, Message};
+use minixrs_kernel_shared::ipc_const::{RECEIVE, SEND, SENDREC};
+use minixrs_kernel_shared::{Endpoint, Message};
 
 /// Blocking send: block until `dest` accepts the message in `msg`.
 #[inline]

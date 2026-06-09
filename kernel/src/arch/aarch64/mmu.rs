@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Minimal MMU helpers for the slice-2.3 EL0 stub task.
 //!
 //! Slice 2.3 needs exactly two user mappings — one code page and one stack

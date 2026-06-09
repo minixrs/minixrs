@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `RECEIVE` — synchronous receive.
 //!
 //! Translation of MINIX 3 `kernel/proc.c:977 mini_receive()`. Searches in
@@ -9,11 +11,11 @@
 
 use core::sync::atomic::Ordering;
 
-use minix4_kernel_shared::ProcNr;
-use minix4_kernel_shared::com::NR_SYS_PROCS;
-use minix4_kernel_shared::endpoint::{ANY, Endpoint};
-use minix4_kernel_shared::error::{EBADSRCDST, ELOCKED, ENOTREADY, OK};
-use minix4_kernel_shared::ipc_const::RECEIVE;
+use minixrs_kernel_shared::ProcNr;
+use minixrs_kernel_shared::com::NR_SYS_PROCS;
+use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
+use minixrs_kernel_shared::error::{EBADSRCDST, ELOCKED, ENOTREADY, OK};
+use minixrs_kernel_shared::ipc_const::RECEIVE;
 
 use crate::ipc::deadlock::deadlock_check;
 use crate::ipc::notify::build_notify_message;

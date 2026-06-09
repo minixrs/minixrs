@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Formatted UART dump of the populated process and privilege tables.
 //!
 //! The slice-2.2 milestone: after `proc::init()`, the kernel writes this
@@ -155,7 +157,7 @@ impl<'a> fmt::Display for NameDecoder<'a> {
     }
 }
 
-struct PrivIdDisplay(Option<minix4_kernel_shared::PrivId>);
+struct PrivIdDisplay(Option<minixrs_kernel_shared::PrivId>);
 
 impl fmt::Display for PrivIdDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

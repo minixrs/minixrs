@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // REGS_*_OFFSET constants are the canonical source for the mirrored `.equ`
 // directives in trap.S; they're consumed by assembly, not by Rust callers,
 // so the dead-code lint would otherwise fire. The size + align asserts at

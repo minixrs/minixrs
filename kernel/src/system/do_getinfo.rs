@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `SYS_GETINFO` — kernel-state introspection.
 //!
 //! The request sub-type lives in the first 4 bytes of the message payload
@@ -6,9 +8,9 @@
 //! sends an unsupported request gets a recognizable error rather than a
 //! silently-zeroed reply.
 
-use minix4_kernel_shared::callnr::{GET_WHOAMI, SYS_GETINFO_NAME_LEN};
-use minix4_kernel_shared::error::{EINVAL, OK};
-use minix4_kernel_shared::message::Message;
+use minixrs_kernel_shared::callnr::{GET_WHOAMI, SYS_GETINFO_NAME_LEN};
+use minixrs_kernel_shared::error::{EINVAL, OK};
+use minixrs_kernel_shared::message::Message;
 
 use crate::proc::proc_struct::PROC_NAME_LEN;
 use crate::proc::{Priv, Proc};

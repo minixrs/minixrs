@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `SYS_*` ENOSYS placeholders.
 //!
 //! Phase 2 ships the dispatch surface and one working handler (`SYS_GETINFO`).
@@ -7,8 +9,8 @@
 //! the canonical MINIX 3 `do_*` name so the eventual real implementation
 //! can replace it without touching the dispatch table.
 
-use minix4_kernel_shared::error::ENOSYS;
-use minix4_kernel_shared::message::Message;
+use minixrs_kernel_shared::error::ENOSYS;
+use minixrs_kernel_shared::message::Message;
 
 use crate::proc::{Priv, Proc};
 

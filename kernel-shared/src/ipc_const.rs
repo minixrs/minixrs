@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! IPC primitive numbers — values that go in `r1`/`x16` on the IPC trap.
 //!
 //! Matches MINIX 3 `include/minix/ipcconst.h`. The numbering is shared

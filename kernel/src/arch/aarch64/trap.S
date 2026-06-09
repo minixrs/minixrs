@@ -1,5 +1,7 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+/* Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors */
 /*
- * MINIX 4 aarch64 EL0 → EL1 trap entry + eret stub.
+ * minix.rs aarch64 EL0 → EL1 trap entry + eret stub.
  *
  * Used for:
  *   - EL0 SVC traps (vector slot 8). `vectors.S` branches here unconditionally
