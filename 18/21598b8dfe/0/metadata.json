@@ -1,0 +1,54 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "1821598b8dfe",
+  "session_id": "0fe004f4-8464-4d29-aa7c-4eb08c12a87f",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-09T02:55:37.816351Z",
+  "branch": "feature/phase-3-5-vm-brk",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "servers/vm/src/main.rs",
+    "servers/vm/src/region.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "4076add4d1d3",
+  "token_usage": {
+    "input_tokens": 8236,
+    "cache_creation_tokens": 213980,
+    "cache_read_tokens": 1306728,
+    "output_tokens": 23829,
+    "api_call_count": 22
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-09T02:55:37.809352Z",
+    "agent_lines": 154,
+    "agent_removed": 29,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 154,
+    "total_lines_changed": 183,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 154,
+      "agent_lines_removed": 29
+    }
+  ]
+}

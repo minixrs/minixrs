@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "1821598b8dfe",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-3-5-vm-brk",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "servers/vm/src/main.rs",
+    "servers/vm/src/region.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/18/21598b8dfe/0/metadata.json",
+      "transcript": "/18/21598b8dfe/0/full.jsonl",
+      "content_hash": "/18/21598b8dfe/0/content_hash.txt",
+      "prompt": "/18/21598b8dfe/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 8236,
+    "cache_creation_tokens": 213980,
+    "cache_read_tokens": 1306728,
+    "output_tokens": 23829,
+    "api_call_count": 22
+  }
+}
