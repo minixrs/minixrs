@@ -27,6 +27,17 @@ Total: 104 bytes.
 The payload is 96 bytes on x86_64 (per MINIX 3's `_IPC_PAYLOAD_SIZE`). In minix.rs
 we use 88 bytes usable after alignment padding, keeping the total at 104 bytes.
 
+> **Note on the "64-bit MINIX 3" reference.** MINIX 3 only ever shipped as a
+> 32-bit operating system (i386, and later 32-bit ARM on the BeagleBone). Its
+> source tree does carry x86_64 ABI definitions — including the `__x86_64__`
+> branch of `include/minix/ipc.h` that fixes `sizeof(message) == 104` — but the
+> upstream project never released a working 64-bit MINIX 3. A **functioning
+> 64-bit MINIX 3 prototype was a personal effort by this project's author (Kevin
+> Barnard), separate from the upstream MINIX 3 project**. minix.rs takes that
+> 104-byte layout as its ABI reference point, but is itself a clean, 64-bit-only
+> implementation. When the docs say minix.rs "preserves the original ABI," that
+> means tracking those source-tree definitions, not a shipped 64-bit MINIX 3.
+
 The fixed message size is a deliberate design choice:
 - Messages are copied by the kernel, so fixed size makes the copy fast and predictable
 - No dynamic allocation in the IPC path

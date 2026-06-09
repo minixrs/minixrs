@@ -4,6 +4,12 @@ This table maps MINIX 3 source files and concepts to their minix.rs equivalents.
 Use this if you're coming from the MINIX 3 codebase or the Tanenbaum book and want
 to find where things live in minix.rs.
 
+> Some rows reference 64-bit paths in the MINIX 3 tree (e.g.
+> `lib/libc/arch/x86_64/`). MINIX 3 shipped only as a 32-bit OS; a working 64-bit
+> MINIX 3 was a personal prototype by this project's author, not an upstream
+> release. We cite these as an ABI/source reference only. See
+> [ipc.md](ipc.md#payload-size) for details.
+
 ## Kernel
 
 | MINIX 3 | minix.rs | Notes |
