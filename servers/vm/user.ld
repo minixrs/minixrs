@@ -1,5 +1,5 @@
 /*
- * MINIX 4 user-space linker script (aarch64 EL0 servers).
+ * minix.rs user-space linker script (aarch64 EL0 servers).
  *
  * Produces a static ET_EXEC ELF that the kernel's minimal loader
  * (`kernel/src/boot_image/elf.rs`) maps segment-by-segment into a fresh

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `NOTIFY` — non-blocking notification.
 //!
 //! Translation of MINIX 3 `kernel/proc.c:1132 mini_notify()`. Never
@@ -10,11 +12,11 @@
 
 use core::sync::atomic::Ordering;
 
-use minix4_kernel_shared::com::NR_SYS_PROCS;
-use minix4_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
-use minix4_kernel_shared::error::{EBADSRCDST, ECALLDENIED, OK};
-use minix4_kernel_shared::ipc_const::NOTIFY_MESSAGE;
-use minix4_kernel_shared::message::Message;
+use minixrs_kernel_shared::com::NR_SYS_PROCS;
+use minixrs_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
+use minixrs_kernel_shared::error::{EBADSRCDST, ECALLDENIED, OK};
+use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
+use minixrs_kernel_shared::message::Message;
 
 use crate::proc::bitmap::{get_sys_bit, set_sys_bit};
 use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND, RTS_RECEIVING, RTS_SENDING};
@@ -48,7 +50,7 @@ pub(crate) fn build_notify_message(dst: &mut Proc, source_e: Endpoint) {
 pub fn mini_notify(
     proc_table: &mut [Proc; N_PROC_SLOTS],
     priv_table: &mut [Priv; NR_SYS_PROCS],
-    caller_nr: minix4_kernel_shared::ProcNr,
+    caller_nr: minixrs_kernel_shared::ProcNr,
     dst_e: Endpoint,
 ) -> i32 {
     // TODO(phase 3+): okendpt-style (gen, slot) validation — stale

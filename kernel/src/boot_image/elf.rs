@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Minimal static aarch64 ELF64 loader.
 //!
 //! Just enough to bring up the VM server (slice 3.4): parse the ELF header,

@@ -1,5 +1,5 @@
 [package]
-name = "minix4-coreutils"
+name = "minixrs-coreutils"
 version = "0.1.0"
 edition = "2024"
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Process counts and well-known endpoints.
 //!
 //! Kernel tasks (`ASYNCM`, `IDLE`, `CLOCK`, `SYSTEM`, `HARDWARE`) live at
@@ -38,9 +40,9 @@ pub const HARDWARE: ProcNr = ProcNr::new(-1);
 // ---------------------------------------------------------------------------
 // Well-known user-space servers — generation 0 at boot.
 //
-// MINIX 4 boot image: renumbered contiguously from 0. Differs from MINIX
+// minix.rs boot image: renumbered contiguously from 0. Differs from MINIX
 // 3, which scatters slots (no slot 7) and places SCHED at 4. LOG is not
-// statically slotted in MINIX 4 — RS spawns it on demand.
+// statically slotted in minix.rs — RS spawns it on demand.
 // ---------------------------------------------------------------------------
 
 pub const PM_PROC_NR: ProcNr = ProcNr::new(0);

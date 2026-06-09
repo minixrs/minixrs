@@ -1,19 +1,21 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Fixed-size IPC message.
 //!
 //! The 104-byte layout matches MINIX 3's `sizeof(message) == 104` assertion
 //! for `__x86_64__` (see `include/minix/ipc.h`). Both x86_64 and aarch64 ports
-//! of MINIX 4 adopt the same size so that the message is ABI-portable.
+//! of minix.rs adopt the same size so that the message is ABI-portable.
 //!
 //! The struct is explicitly 8-aligned. MINIX 3's `message` is a union over
 //! sub-structs containing `uint64_t` fields, so its native alignment is 8.
-//! MINIX 4 expresses `payload` as `[u8; 96]` for now, but future typed
+//! minix.rs expresses `payload` as `[u8; 96]` for now, but future typed
 //! accessor structs (slice 2.5) will overlay payload regions that contain
 //! `u64` fields. Forcing the message itself to 8-align guarantees those
 //! overlays are 8-aligned relative to the message base — required for
 //! strict-alignment loads on aarch64.
 //!
 //! Typed access — MINIX 3 had a union over many `mess_*` payload variants
-//! (`m1i1`, `m2l1`, etc.). MINIX 4 will eventually expose strongly-typed
+//! (`m1i1`, `m2l1`, etc.). minix.rs will eventually expose strongly-typed
 //! accessor structs per call (e.g., `as_vfs_read()`), but those live in the
 //! servers/userland crates so the kernel doesn't pull in every protocol
 //! definition. For now, `payload` is a raw byte array that callers

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Slice-3.1b userland bootstrap: per-process address spaces with 8-bit
 //! ARMv8 ASIDs.
 //!
@@ -29,9 +31,9 @@
 
 use core::sync::atomic::Ordering;
 
-use minix4_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
-use minix4_kernel_shared::com::{RS_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint};
-use minix4_kernel_shared::{PrivId, ProcNr};
+use minixrs_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
+use minixrs_kernel_shared::com::{RS_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint};
+use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use crate::arch::aarch64::addrspace::{AddrSpace, Prot};
 use crate::arch::aarch64::asid::alloc_asid;

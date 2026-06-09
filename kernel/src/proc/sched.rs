@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Priority-banded round-robin scheduler.
 //!
 //! Slice 2.4 grows `proc::sched` from the slice-2.3 stub (one fixed
@@ -19,7 +21,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use minix4_kernel_shared::ProcNr;
+use minixrs_kernel_shared::ProcNr;
 
 use crate::arch::ArchRegisterFrame;
 use crate::proc::Proc;

@@ -24,7 +24,7 @@ Total: 104 bytes.
 
 ### Payload Size
 
-The payload is 96 bytes on x86_64 (per MINIX 3's `_IPC_PAYLOAD_SIZE`). In MINIX 4
+The payload is 96 bytes on x86_64 (per MINIX 3's `_IPC_PAYLOAD_SIZE`). In minix.rs
 we use 88 bytes usable after alignment padding, keeping the total at 104 bytes.
 
 The fixed message size is a deliberate design choice:
@@ -57,7 +57,7 @@ impl Message {
 ### MINIX 3 Comparison
 
 MINIX 3 uses opaque field names like `m1i1`, `m2l1`, `m3p1` in its legacy message
-variants, plus newer typed variants like `mess_lc_vfs_creat`. MINIX 4 uses only named
+variants, plus newer typed variants like `mess_lc_vfs_creat`. minix.rs uses only named
 typed structs -- e.g., `MsgVfsRead { fd, buf, count }` -- making the protocol
 self-documenting.
 

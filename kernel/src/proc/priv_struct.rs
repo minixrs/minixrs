@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // IoRange/MemRange fields and several constants are forward declarations for
 // slice 2.6 (kernel-call dispatch) — they are written by `proc::init` and read
 // once slices 2.5/2.6 wire up IPC and `SYS_*` handlers.
@@ -14,11 +16,11 @@
 
 use arrayvec::ArrayVec;
 
-use minix4_kernel_shared::callnr::NR_SYS_CALLS;
-use minix4_kernel_shared::com::NR_SYS_PROCS;
-use minix4_kernel_shared::endpoint::{Endpoint, NONE};
-use minix4_kernel_shared::sys_limits::{NR_IO_RANGE, NR_IRQ, NR_MEM_RANGE};
-use minix4_kernel_shared::{PrivId, ProcNr};
+use minixrs_kernel_shared::callnr::NR_SYS_CALLS;
+use minixrs_kernel_shared::com::NR_SYS_PROCS;
+use minixrs_kernel_shared::endpoint::{Endpoint, NONE};
+use minixrs_kernel_shared::sys_limits::{NR_IO_RANGE, NR_IRQ, NR_MEM_RANGE};
+use minixrs_kernel_shared::{PrivId, ProcNr};
 
 /// Number of `u32` chunks needed to cover `NR_SYS_PROCS` bits.
 pub const IPC_MAP_CHUNKS: usize = NR_SYS_PROCS / 32;

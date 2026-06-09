@@ -1,6 +1,6 @@
 # Limine (vendored)
 
-MINIX 4 uses the [Limine](https://github.com/limine-bootloader/limine) bootloader
+minix.rs uses the [Limine](https://github.com/limine-bootloader/limine) bootloader
 (BSD Zero Clause License).
 
 Run `make` here to download a pinned upstream commit and extract:

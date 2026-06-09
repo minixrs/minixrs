@@ -1,6 +1,6 @@
-# MINIX 4 System Servers
+# minix.rs System Servers
 
-MINIX 4 inherits the microkernel architecture of MINIX 3: the kernel handles only interrupts,
+minix.rs inherits the microkernel architecture of MINIX 3: the kernel handles only interrupts,
 IPC, and scheduling primitives, while all OS services run as independent user-space processes
 that communicate via message passing. This document describes each system server, the SEF
 framework they share, and the boot order that brings the system up.
@@ -299,7 +299,7 @@ before they reach the server's own dispatch:
 
 ## Server Message Loop Pattern
 
-Every MINIX 4 server follows the same canonical structure:
+Every minix.rs server follows the same canonical structure:
 
 ```rust
 fn main() {

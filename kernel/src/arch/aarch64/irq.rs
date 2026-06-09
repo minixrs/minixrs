@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! aarch64 IRQ dispatcher.
 //!
 //! Called from the assembly entry stub `el0_64_irq_entry` (`interrupt.S`)

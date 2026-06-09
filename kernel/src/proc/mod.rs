@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Process and privilege tables.
 //!
 //! Slice 2.2 ships the type and storage shells: `Proc`, `Priv`, the static

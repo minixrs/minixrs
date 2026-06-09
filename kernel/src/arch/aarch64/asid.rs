@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! 8-bit ARMv8 ASID allocator.
 //!
 //! TTBR0_EL1 carries an ASID in bits [55:48] when TCR_EL1.AS = 0 (Limine's

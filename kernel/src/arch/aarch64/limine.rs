@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // `kernel_physical_base` / `kernel_virtual_base` are convenience accessors on
 // the kernel-address response; slice 2.3 only consumes `kernel_va_to_pa`,
 // but the bases are part of the API surface Phase 3's VM server will need.

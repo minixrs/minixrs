@@ -1,4 +1,6 @@
-// MINIX 4 Microkernel
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
+// minix.rs Microkernel
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
@@ -49,7 +51,7 @@ extern "C" fn kmain() -> ! {
     arch::init();
 
     let mut con = uart::Uart::new();
-    let _ = writeln!(con, "MINIX 4 booting on aarch64");
+    let _ = writeln!(con, "minix.rs booting on aarch64");
 
     if arch::limine_base_revision_supported() {
         let _ = writeln!(con, "HHDM offset: {hhdm:#018x}");

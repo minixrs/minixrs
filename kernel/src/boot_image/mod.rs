@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Embedded boot-image modules and their loader.
 //!
 //! Slice 3.4 embeds a single user-space server — the VM server — directly in

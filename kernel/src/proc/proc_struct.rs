@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Process-table entry.
 //!
 //! Mirrors MINIX 3 `kernel/proc.h`'s `struct proc`, with simplifications:
@@ -8,9 +10,9 @@
 
 use core::sync::atomic::AtomicU32;
 
-use minix4_kernel_shared::endpoint::{Endpoint, NONE};
-use minix4_kernel_shared::message::Message;
-use minix4_kernel_shared::{PrivId, ProcNr};
+use minixrs_kernel_shared::endpoint::{Endpoint, NONE};
+use minixrs_kernel_shared::message::Message;
+use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use crate::arch::ArchRegisterFrame;
 

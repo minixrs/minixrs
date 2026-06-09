@@ -1,6 +1,6 @@
-# MINIX 4 System Call Catalog
+# minix.rs System Call Catalog
 
-This document provides a complete catalog of all system calls in MINIX 4, organized by
+This document provides a complete catalog of all system calls in minix.rs, organized by
 the server or kernel task that handles them. MINIX uses a microkernel architecture where
 system calls are implemented as IPC messages to user-space servers, not as direct kernel
 traps (with the exception of kernel calls used by privileged servers).
@@ -119,7 +119,7 @@ extensions for the Reincarnation Server (RS) and service management infrastructu
 **Total call slots:** NR_VFS_CALLS = 64
 
 The Virtual File System server handles file I/O, directory operations, mount management,
-and (in MINIX 4) BSD-style socket operations.
+and (in minix.rs) BSD-style socket operations.
 
 | Call               | Number | POSIX Equivalent     | Description                                                  |
 |--------------------|--------|----------------------|--------------------------------------------------------------|
@@ -289,7 +289,7 @@ other processes.
 ## MINIX 3 Source References
 
 The call numbers and definitions in this catalog are derived from the following MINIX 3
-source files, which serve as the authoritative reference for the MINIX 4 system call
+source files, which serve as the authoritative reference for the minix.rs system call
 interface:
 
 | File                                        | Purpose                                            |

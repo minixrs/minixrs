@@ -1,5 +1,7 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+/* Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors */
 /*
- * MINIX 4 aarch64 kernel entry point.
+ * minix.rs aarch64 kernel entry point.
  *
  * Limine has already:
  *   - placed the CPU in EL1 with the MMU enabled and translation tables set up,

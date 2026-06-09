@@ -1,4 +1,6 @@
-//! Types and constants shared between the MINIX 4 microkernel, system servers,
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
+//! Types and constants shared between the minix.rs microkernel, system servers,
 //! drivers, and the user-space `minix-ipc` library.
 //!
 //! Everything in this crate is `#![no_std]` and must remain so. Behaviour
