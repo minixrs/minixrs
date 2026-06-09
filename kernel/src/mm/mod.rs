@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Kernel memory management — physical frame allocator and the address-space
 //! API live here. Slice 3.1a introduces both; Phase 2.x code did not need
 //! either (page tables were static `.bss` arrays shared across all stubs).

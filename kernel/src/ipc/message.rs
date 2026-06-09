@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! User-memory IPC message copies.
 //!
 //! Each `mini_send` / `mini_receive` / `mini_notify` handler accepts a
@@ -19,8 +21,8 @@
 //! VM server replaces this entire helper with a fault-recovering
 //! `copy_from_user` once per-process page tables exist.
 
-use minix4_kernel_shared::error::EFAULT;
-use minix4_kernel_shared::message::Message;
+use minixrs_kernel_shared::error::EFAULT;
+use minixrs_kernel_shared::message::Message;
 
 /// One past the highest user VA reachable through TTBR0. Limine programs
 /// `TCR_EL1.T0SZ = 16`, giving a 48-bit user VA space (`[0, 2^48)`); the

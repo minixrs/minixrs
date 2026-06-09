@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! MINIX-style negative errno codes.
 //!
 //! Subset needed by Phase 2; more added as servers come online. Values match

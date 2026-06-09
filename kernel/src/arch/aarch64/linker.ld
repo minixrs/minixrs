@@ -1,5 +1,5 @@
 /*
- * MINIX 4 aarch64 kernel linker script
+ * minix.rs aarch64 kernel linker script
  *
  * Higher-half kernel placed at 0xffffffff80000000 -- matches docs/memory-layout.md
  * and Limine's default aarch64 kernel base. The Limine bootloader scans the ELF

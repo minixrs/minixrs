@@ -2,7 +2,7 @@
 
 ## Bootloader: Limine
 
-MINIX 4 uses the [Limine](https://github.com/limine-bootloader/limine) bootloader (BSD-licensed).
+minix.rs uses the [Limine](https://github.com/limine-bootloader/limine) bootloader (BSD-licensed).
 Limine handles all the complexity of firmware initialization, CPU mode transitions, and initial
 page table setup, allowing the kernel to start in a clean 64-bit environment.
 
@@ -55,7 +55,7 @@ kmain() (kernel/src/main.rs)
   |     - Memory map -> KernelInfo.memmap[]
   |     - HHDM offset -> KernelInfo.hhdm_offset
   |  2. Initialize PL011 UART (QEMU virt: 0x0900_0000)
-  |     - Print "MINIX 4 booting on aarch64"
+  |     - Print "minix.rs booting on aarch64"
   |  3. Initialize kernel heap (bump allocator -> slab)
   |  4. Unpack embedded boot image -> module_list[]
   |  5. arch_init():
@@ -186,7 +186,7 @@ binaries. Boot modules (slots 0-11) are loaded from the embedded boot image.
 ```
 timeout: 3
 
-/MINIX 4
+/minix.rs
     protocol: limine
     kernel_path: boot():/boot/kernel
     kernel_cmdline: rootdevname=c0d0p1
@@ -202,7 +202,7 @@ The kernel is the only file Limine needs to load. Boot modules are embedded in t
 qemu-system-aarch64 \
     -M virt -cpu cortex-a72 -m 256M \
     -bios /path/to/OVMF_AARCH64.fd \     # UEFI firmware
-    -drive file=minix4.img,format=raw,if=virtio \
+    -drive file=minixrs.img,format=raw,if=virtio \
     -device virtio-net-device \
     -serial stdio \
     -no-reboot
@@ -213,7 +213,7 @@ qemu-system-aarch64 \
 ```sh
 qemu-system-x86_64 \
     -m 256M \
-    -drive file=minix4.img,format=raw,if=virtio \
+    -drive file=minixrs.img,format=raw,if=virtio \
     -device virtio-net-pci \
     -serial stdio \
     -no-reboot

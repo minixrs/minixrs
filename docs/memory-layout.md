@@ -64,7 +64,7 @@ With `-m 256M`, RAM is at `0x4000_0000` to `0x4FFF_FFFF`.
 
 ### Translation Tables (aarch64)
 
-MINIX 4 uses 4KB granule with 4-level translation:
+minix.rs uses 4KB granule with 4-level translation:
 
 | Level | Bits | Entries | Maps |
 |-------|------|---------|------|

@@ -1,10 +1,10 @@
 [package]
-name = "minix4-kernel"
+name = "minixrs-kernel"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-minix4-kernel-shared = { path = "../kernel-shared" }
+minixrs-kernel-shared = { path = "../kernel-shared" }
 arrayvec = { version = "0.7", default-features = false }
 
 [build-dependencies]

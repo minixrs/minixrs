@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // Many of these constants are defined now so that the slice-2.5 IPC code and
 // slice-2.6 kernel-call dispatch can land without churning this module
 // again. They become live as later slices consume them.
@@ -13,11 +15,11 @@
 //! of these constants belong on the IPC wire — userspace never sees them —
 //! so they live in the kernel crate rather than in `kernel-shared`.
 //!
-//! MINIX 4 drops a few MINIX 3 flags that are not relevant to the port:
+//! minix.rs drops a few MINIX 3 flags that are not relevant to the port:
 //! `LU_SYS_PROC` (no live update), `MF_FLUSH_TLB` / `MF_SPROF_SEEN` (no SMP,
 //! no profiling), `MF_SC_*` (no syscall tracing).
 
-use minix4_kernel_shared::ipc_const::{RECEIVE, SENDREC};
+use minixrs_kernel_shared::ipc_const::{RECEIVE, SENDREC};
 
 // ---------------------------------------------------------------------------
 // Run-time state flags (`Proc::rts_flags`).

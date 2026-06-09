@@ -24,8 +24,19 @@ Total: 104 bytes.
 
 ### Payload Size
 
-The payload is 96 bytes on x86_64 (per MINIX 3's `_IPC_PAYLOAD_SIZE`). In MINIX 4
+The payload is 96 bytes on x86_64 (per MINIX 3's `_IPC_PAYLOAD_SIZE`). In minix.rs
 we use 88 bytes usable after alignment padding, keeping the total at 104 bytes.
+
+> **Note on the "64-bit MINIX 3" reference.** MINIX 3 only ever shipped as a
+> 32-bit operating system (i386, and later 32-bit ARM on the BeagleBone). Its
+> source tree does carry x86_64 ABI definitions — including the `__x86_64__`
+> branch of `include/minix/ipc.h` that fixes `sizeof(message) == 104` — but the
+> upstream project never released a working 64-bit MINIX 3. A **functioning
+> 64-bit MINIX 3 prototype was a personal effort by this project's author (Kevin
+> Barnard), separate from the upstream MINIX 3 project**. minix.rs takes that
+> 104-byte layout as its ABI reference point, but is itself a clean, 64-bit-only
+> implementation. When the docs say minix.rs "preserves the original ABI," that
+> means tracking those source-tree definitions, not a shipped 64-bit MINIX 3.
 
 The fixed message size is a deliberate design choice:
 - Messages are copied by the kernel, so fixed size makes the copy fast and predictable
@@ -57,7 +68,7 @@ impl Message {
 ### MINIX 3 Comparison
 
 MINIX 3 uses opaque field names like `m1i1`, `m2l1`, `m3p1` in its legacy message
-variants, plus newer typed variants like `mess_lc_vfs_creat`. MINIX 4 uses only named
+variants, plus newer typed variants like `mess_lc_vfs_creat`. minix.rs uses only named
 typed structs -- e.g., `MsgVfsRead { fd, buf, count }` -- making the protocol
 self-documenting.
 

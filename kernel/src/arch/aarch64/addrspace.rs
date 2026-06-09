@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // `Prot::RO_DATA` and `AddrSpace::{walk_pt, destroy}` are part of the API
 // surface that later Phase 3 slices consume (region tracking, exec/exit
 // teardown); 3.1a's smoke test and 3.3's `VMCTL_PT_MAP`/`PT_UNMAP` exercise

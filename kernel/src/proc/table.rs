@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Static process and privilege tables, plus the boot-image table that
 //! drives initial population.
 //!
@@ -9,13 +11,13 @@
 
 use core::cell::UnsafeCell;
 
-use minix4_kernel_shared::callnr::NR_KERN_CALLS_PHASE3;
-use minix4_kernel_shared::com::{
+use minixrs_kernel_shared::callnr::NR_KERN_CALLS_PHASE3;
+use minixrs_kernel_shared::com::{
     ASYNCM, CLOCK, DS_PROC_NR, HARDWARE, IDLE, INIT_PROC_NR, MEM_PROC_NR, MFS_PROC_NR,
     NR_BOOT_PROCS, NR_PROCS, NR_SYS_PROCS, NR_TASKS, PFS_PROC_NR, PM_PROC_NR, RS_PROC_NR,
     SCHED_PROC_NR, SYSTEM, TTY_PROC_NR, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
 };
-use minix4_kernel_shared::{PrivId, ProcNr};
+use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use super::flags::{
     BILLABLE, CSK_T, PREEMPTIBLE, ROOT_SYS_PROC, RTS_NO_PRIV, SRV_T, SYS_PROC, TSK_T,

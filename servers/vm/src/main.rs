@@ -1,4 +1,6 @@
-//! MINIX 4 VM (virtual memory) server.
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
+//! minix.rs VM (virtual memory) server.
 //!
 //! The first *real* user-space process (introduced in slice 3.4a as a build
 //! milestone). Built as a freestanding aarch64 ELF (see `servers/vm/user.ld`),
@@ -28,14 +30,14 @@
 
 mod region;
 
-use minix4_ipc::{ipc_receive, ipc_send, ipc_sendrec};
-use minix4_kernel_shared::Message;
-use minix4_kernel_shared::callnr::{
+use minixrs_ipc::{ipc_receive, ipc_send, ipc_sendrec};
+use minixrs_kernel_shared::Message;
+use minixrs_kernel_shared::callnr::{
     SYS_VMCTL, VM_BRK, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE, VMCTL_PT_MAP,
 };
-use minix4_kernel_shared::com::{SYSTEM, boot_endpoint};
-use minix4_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
-use minix4_kernel_shared::error::OK;
+use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
+use minixrs_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
+use minixrs_kernel_shared::error::OK;
 
 /// aarch64 4 KiB page size — VM only needs to page-align fault addresses.
 const PAGE_SIZE: u64 = 4096;

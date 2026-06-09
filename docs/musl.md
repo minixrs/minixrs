@@ -2,7 +2,7 @@
 
 ## Overview
 
-MINIX 4 uses a fork of [musl-libc](https://musl.libc.org/) (v1.2.5, MIT license) as its C library.
+minix.rs uses a fork of [musl-libc](https://musl.libc.org/) (v1.2.5, MIT license) as its C library.
 The fork replaces musl's Linux syscall layer with MINIX message-passing IPC, so that standard
 POSIX functions like `open()`, `read()`, `fork()` route through MINIX servers instead of Linux
 system calls.
@@ -22,7 +22,7 @@ read(fd, buf, n)
   -> return
 ```
 
-**MINIX 4 musl (fork):**
+**minix.rs musl (fork):**
 ```
 read(fd, buf, n)
   -> construct Message { m_type: VFS_READ, fd, buf_ptr, count }
@@ -89,7 +89,7 @@ The musl fork needs C headers for the MINIX message types, endpoint constants, a
 numbers. These are generated from the `kernel-shared` Rust crate using `cbindgen`:
 
 ```sh
-cbindgen --config cbindgen.toml --crate minix4-kernel-shared \
+cbindgen --config cbindgen.toml --crate minixrs-kernel-shared \
     --output musl/include/minix/kernel_shared.h
 ```
 
@@ -204,13 +204,13 @@ int open(const char *path, int flags, ...)
 
 ## Cross-Compilation
 
-### Building musl for MINIX 4 aarch64
+### Building musl for minix.rs aarch64
 
 ```sh
 cd musl/
 CC=clang --target=aarch64-unknown-none \
   CFLAGS="-nostdinc -I../kernel-shared/include/generated" \
-  ./configure --prefix=/opt/minix4-sysroot/usr \
+  ./configure --prefix=/opt/minixrs-sysroot/usr \
               --target=aarch64-minix
 make -j$(nproc)
 make install
@@ -229,7 +229,7 @@ The `libc` Rust crate can link against musl by setting:
 [target.aarch64-minix-user]
 linker = "clang"
 rustflags = [
-    "-C", "link-arg=--sysroot=/opt/minix4-sysroot",
+    "-C", "link-arg=--sysroot=/opt/minixrs-sysroot",
     "-C", "link-arg=-nostdlib",
 ]
 ```

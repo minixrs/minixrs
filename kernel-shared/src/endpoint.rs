@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Endpoints and generation-aware proc-number encoding.
 //!
 //! An `Endpoint` is the kernel's name for a process. It encodes both the
@@ -7,7 +9,7 @@
 //!
 //! Mirrors MINIX 3 `include/minix/type.h` (`typedef int endpoint_t`) and
 //! `include/minix/endpoint.h` (the `_ENDPOINT(g, n)` / `_ENDPOINT_P(e)` /
-//! `_ENDPOINT_G(e)` macros), with one deliberate ABI deviation: MINIX 4
+//! `_ENDPOINT_G(e)` macros), with one deliberate ABI deviation: minix.rs
 //! uses sign-extension of the low `ENDPOINT_GEN_SHIFT` bits to recover
 //! negative task slots, rather than MINIX 3's `MAX_NR_TASKS` offset-bias
 //! trick. The consequence is that `make_endpoint(0, p) != p` for negative

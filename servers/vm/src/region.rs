@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Per-process memory regions tracked by the VM server (slice 3.5).
 //!
 //! VM is the user-space authority on what virtual addresses a process may
@@ -22,7 +24,7 @@
 
 use core::cell::UnsafeCell;
 
-use minix4_kernel_shared::error::EINVAL;
+use minixrs_kernel_shared::error::EINVAL;
 
 /// Fixed heap origin. Until PM supplies a real per-process memory layout
 /// (Phase 4), VM and stub D agree on this VA by convention: `brk` grows the

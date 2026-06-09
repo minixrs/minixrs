@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! ARM Generic Timer driver (virtual timer / CNTV).
 //!
 //! Slice 2.4 uses the EL1 virtual timer as the preemption tick source. It

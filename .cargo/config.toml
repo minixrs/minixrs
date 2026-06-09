@@ -1,4 +1,4 @@
-# Cargo configuration for MINIX 4
+# Cargo configuration for minix.rs
 #
 # The kernel builds with a custom target spec (no_std, no_main, kernel code model).
 # Servers and userland build with a freestanding user-space target.
@@ -16,5 +16,5 @@ rustflags = ["-C", "link-arg=-Tkernel/src/arch/x86_64/linker.ld"]
 
 # Aliases for common development commands
 [alias]
-kernel-aarch64 = "build -p minix4-kernel --target aarch64-unknown-none --release"
-kernel-x86_64 = "build -p minix4-kernel --target x86_64-unknown-none --release"
+kernel-aarch64 = "build -p minixrs-kernel --target aarch64-unknown-none --release"
+kernel-x86_64 = "build -p minixrs-kernel --target x86_64-unknown-none --release"
