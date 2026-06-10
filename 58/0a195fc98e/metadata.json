@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "580a195fc98e",
+  "strategy": "manual-commit",
+  "branch": "chore/bump-checkout-action",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/docs.yml",
+    ".github/workflows/release.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/58/0a195fc98e/0/metadata.json",
+      "transcript": "/58/0a195fc98e/0/full.jsonl",
+      "content_hash": "/58/0a195fc98e/0/content_hash.txt",
+      "prompt": "/58/0a195fc98e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 884,
+    "cache_creation_tokens": 29978,
+    "cache_read_tokens": 4484901,
+    "output_tokens": 27320,
+    "api_call_count": 33
+  }
+}

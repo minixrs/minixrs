@@ -1,0 +1,29 @@
+How do I get the CARGO TOKEN
+
+---
+
+I created it under the repo go ahead and test
+
+---
+
+Can we change the owner to the org?
+
+---
+
+My local login has change owner so we should be able to go that route once we create an owners team to to GH
+
+---
+
+option a
+
+---
+
+Leave both in place
+
+---
+
+One other thing on this I noticed the tag was not signed is it possible to sign a tag?
+
+---
+
+Go ahead and fix the checkout action as well
