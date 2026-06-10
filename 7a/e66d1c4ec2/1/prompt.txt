@@ -1,0 +1,9 @@
+Go ahead and setup everything to publish as a crate with the base being minixrs.  Do we need to publish the member crates if so that would be minixrs-kernel etc
+
+---
+
+Add the toolchain toml as well with a note about keeping it updated with nightly
+
+---
+
+yes go ahead
