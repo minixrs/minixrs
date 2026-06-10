@@ -1,0 +1,84 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "580a195fc98e",
+  "session_id": "ed528c1b-2f4b-46b5-a3b7-fe761cbaa4d6",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-10T05:20:03.024156Z",
+  "branch": "chore/bump-checkout-action",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/docs.yml",
+    ".github/workflows/release.yml"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "5cd6f62d7c19",
+  "checkpoint_transcript_start": 419,
+  "transcript_lines_at_start": 419,
+  "token_usage": {
+    "input_tokens": 884,
+    "cache_creation_tokens": 29978,
+    "cache_read_tokens": 4484901,
+    "output_tokens": 27320,
+    "api_call_count": 33
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01RibZ387VA7iuANw6oD5QEk",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "5cd6f62d7c19",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 376,
+        "end": 377,
+        "entry_ids": [
+          "e66de9bb-1ac7-4560-b7b3-cf2f19661cc9"
+        ],
+        "tool_use_id": "toolu_01RibZ387VA7iuANw6oD5QEk"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01RibZ387VA7iuANw6oD5QEk"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 11
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-10T05:20:03.011989Z",
+    "agent_lines": 10,
+    "agent_removed": 10,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 10,
+    "total_lines_changed": 20,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
