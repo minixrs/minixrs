@@ -22,13 +22,11 @@ use crate::proc::{Priv, Proc};
 const _: () = assert!(PROC_NAME_LEN == SYS_GETINFO_NAME_LEN);
 
 /// `SYS_GETINFO` entry point. Dispatches by request sub-type.
-pub(super) fn do_getinfo(
-    caller: &mut Proc,
-    caller_priv: &Priv,
-    msg: &mut Message,
-) -> i32 {
+pub(super) fn do_getinfo(caller: &mut Proc, caller_priv: &Priv, msg: &mut Message) -> i32 {
     let request = i32::from_ne_bytes(
-        msg.payload[0..4].try_into().expect("payload is at least 4 bytes"),
+        msg.payload[0..4]
+            .try_into()
+            .expect("payload is at least 4 bytes"),
     );
     match request {
         GET_WHOAMI => fill_whoami(caller, caller_priv, msg),

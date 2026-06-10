@@ -16,11 +16,7 @@ use crate::proc::{Priv, Proc};
 
 macro_rules! enosys_stub {
     ($name:ident) => {
-        pub(super) fn $name(
-            _caller: &mut Proc,
-            _caller_priv: &Priv,
-            _msg: &mut Message,
-        ) -> i32 {
+        pub(super) fn $name(_caller: &mut Proc, _caller_priv: &Priv, _msg: &mut Message) -> i32 {
             ENOSYS
         }
     };

@@ -48,6 +48,25 @@ cargo kernel-x86_64
 cargo test -p minixrs-kernel-shared
 ```
 
+## CI
+
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Seven gates run in
+parallel — `fmt`, `clippy`, `audit` (cargo-audit), `deny` (cargo-deny, config in `deny.toml`),
+`geiger`, `miri`, `coverage` (cargo-llvm-cov → `lcov.info`) — then a `sonar` job feeds the LCOV
+report to SonarQube Cloud (org `minixrs`, project `minixrs_minixrs`, config in
+`sonar-project.properties`). The Sonar scan auto-detects PR vs branch: PRs get decoration, `main`
+pushes refresh the whole-project picture.
+
+- `geiger` and `miri` are **advisory** (`continue-on-error`); the rest block. miri only covers the
+  two host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm`) — `minix-ipc` has inline asm
+- Before pushing, the blocking gates must be green: `cargo fmt --all --check` and
+  `cargo clippy --workspace --all-targets -- -D warnings`. Run `cargo fmt --all` to fix formatting
+- The toolchain is **pinned to a dated nightly** in `rust-toolchain.toml` (bare `nightly` let new
+  lints/fmt rules break CI with no code change); bump it deliberately, not incidentally
+- `Cargo.lock` **is committed** (so audit/deny are reproducible) — do not re-add it to `.gitignore`
+- Third-party actions are pinned to full commit SHAs with `# vN` comments; keep that when editing
+- SonarCloud needs the `SONAR_TOKEN` repo secret and Automatic Analysis disabled (CI-based instead)
+
 ## Architecture
 
 See `docs/architecture.md` for the full system design. Key concepts:

@@ -57,7 +57,11 @@ struct Region {
 }
 
 impl Region {
-    const EMPTY: Self = Self { start: 0, end: 0, kind: Kind::Unused };
+    const EMPTY: Self = Self {
+        start: 0,
+        end: 0,
+        kind: Kind::Unused,
+    };
 
     fn contains(&self, addr: u64) -> bool {
         self.kind != Kind::Unused && addr >= self.start && addr < self.end
@@ -71,7 +75,9 @@ struct ClientRegions {
 }
 
 impl ClientRegions {
-    const EMPTY: Self = Self { regions: [Region::EMPTY; MAX_REGIONS] };
+    const EMPTY: Self = Self {
+        regions: [Region::EMPTY; MAX_REGIONS],
+    };
 
     /// True if `addr` falls inside one of this client's regions.
     fn contains(&self, addr: u64) -> bool {
@@ -103,7 +109,11 @@ impl ClientRegions {
         // Otherwise claim a free slot for a fresh heap region.
         for r in self.regions.iter_mut() {
             if r.kind == Kind::Unused {
-                *r = Region { start: HEAP_BASE, end, kind: Kind::Heap };
+                *r = Region {
+                    start: HEAP_BASE,
+                    end,
+                    kind: Kind::Heap,
+                };
                 return Ok(end);
             }
         }
@@ -121,8 +131,7 @@ struct RegionTable(UnsafeCell<[ClientRegions; MAX_CLIENTS]>);
 // loop, so there is never concurrent access.
 unsafe impl Sync for RegionTable {}
 
-static TABLE: RegionTable =
-    RegionTable(UnsafeCell::new([ClientRegions::EMPTY; MAX_CLIENTS]));
+static TABLE: RegionTable = RegionTable(UnsafeCell::new([ClientRegions::EMPTY; MAX_CLIENTS]));
 
 /// In-range proc number → table index, or `None` if `nr` is a kernel task
 /// (negative) or past the boot cap.
@@ -234,7 +243,7 @@ mod tests {
         assert_eq!(c.set_brk(u64::MAX), Err(EINVAL));
         assert_eq!(c.set_brk(u64::MAX - (PAGE_SIZE - 2)), Err(EINVAL));
         // The largest break that still aligns without overflow succeeds.
-        let max_ok = u64::MAX & !(PAGE_SIZE - 1);
+        let max_ok = !(PAGE_SIZE - 1);
         assert_eq!(c.set_brk(max_ok), Ok(max_ok));
     }
 

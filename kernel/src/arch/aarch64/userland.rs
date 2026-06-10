@@ -304,14 +304,12 @@ unsafe fn build_stub(
 ) {
     // Per-proc page-table tree. AddrSpace::new allocates and zeroes the
     // L0 root via the frame allocator.
-    let mut aspace =
-        AddrSpace::new().expect("AddrSpace::new failed during userland_bootstrap");
+    let mut aspace = AddrSpace::new().expect("AddrSpace::new failed during userland_bootstrap");
     let ttbr0_pa = aspace.ttbr0_pa;
 
     // Code frame: allocate, copy stub bytes in via HHDM, flush I-cache,
     // map RO + EL0-executable.
-    let code_frame = alloc_frame()
-        .expect("code frame alloc failed during userland_bootstrap");
+    let code_frame = alloc_frame().expect("code frame alloc failed during userland_bootstrap");
     // SAFETY: stub_start/stub_end are rodata symbols inside the kernel
     // image; the new code frame is exclusively ours (just allocated, not
     // yet mapped into any AS) and HHDM-mapped.
@@ -321,8 +319,7 @@ unsafe fn build_stub(
         .expect("map_page(code) during userland_bootstrap");
 
     // Stack frame: zeroed by `alloc_frame`, mapped RW + EL0-no-execute.
-    let stack_frame = alloc_frame()
-        .expect("stack frame alloc failed during userland_bootstrap");
+    let stack_frame = alloc_frame().expect("stack frame alloc failed during userland_bootstrap");
     aspace
         .map_page(stack_va, stack_frame.addr(), Prot::RW_DATA)
         .expect("map_page(stack) during userland_bootstrap");
@@ -359,11 +356,7 @@ unsafe fn build_stub(
 /// SAFETY: `frame` must be exclusively owned (not yet mapped anywhere)
 /// and the HHDM mapping for its PA must be live. `stub_start..stub_end`
 /// must be a valid byte range in the kernel image.
-unsafe fn copy_stub_into_frame(
-    frame: Frame,
-    stub_start: *const u8,
-    stub_end: *const u8,
-) {
+unsafe fn copy_stub_into_frame(frame: Frame, stub_start: *const u8, stub_end: *const u8) {
     // SAFETY: end >= start by linker layout; offset_from is well-defined
     // on a single rodata symbol pair.
     let len = unsafe { stub_end.offset_from(stub_start) } as usize;
@@ -504,9 +497,7 @@ unsafe fn install_stub_d_priv() {
     let vm_priv_id = {
         let table = unsafe { proc_table_ref() };
         let idx = proc_index(VM_PROC_NR).expect("VM in proc table");
-        table[idx]
-            .priv_id
-            .expect("VM priv populated by proc::init")
+        table[idx].priv_id.expect("VM priv populated by proc::init")
     };
 
     // Stub D's own priv slot: SENDREC to VM, nothing else.
@@ -530,8 +521,7 @@ unsafe fn install_stub_d_priv() {
     // Priv` above has been dropped.
     // SAFETY: priv index in-range; no overlapping reference held.
     {
-        let vm_pr: &mut Priv =
-            unsafe { priv_slot_mut(vm_priv_id).expect("VM priv slot in range") };
+        let vm_pr: &mut Priv = unsafe { priv_slot_mut(vm_priv_id).expect("VM priv slot in range") };
         set_sys_bit(&mut vm_pr.ipc_to, STUB_D_PRIV_ID);
     }
 }
@@ -543,8 +533,7 @@ unsafe fn install_stub_d_priv() {
 /// SAFETY: single-threaded boot; mutates only the priv slot at `id`.
 unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId) {
     // SAFETY: priv index in-range; no overlapping reference held.
-    let pr: &mut Priv =
-        unsafe { priv_slot_mut(id).expect("stub priv slot in range") };
+    let pr: &mut Priv = unsafe { priv_slot_mut(id).expect("stub priv slot in range") };
     pr.id = id;
     pr.proc_nr = Some(owner);
     pr.flags = SYS_PROC | BILLABLE | PREEMPTIBLE;
@@ -567,7 +556,12 @@ unsafe fn print_addrspace_summary() {
     use core::fmt::Write;
     let mut uart = Pl011::new();
     let _ = writeln!(uart);
-    for &nr in &[STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR, STUB_D_PROC_NR] {
+    for &nr in &[
+        STUB_A_PROC_NR,
+        STUB_B_PROC_NR,
+        STUB_C_PROC_NR,
+        STUB_D_PROC_NR,
+    ] {
         // SAFETY: sequential read-only borrow of the slot; no other
         // reference held while we read.
         let p = unsafe { proc_slot_mut(nr).expect("stub slot in range") };

@@ -61,7 +61,11 @@ mod tests {
 
     #[test]
     fn message_payload_offset_is_8() {
-        let m = Message { m_source: 0, m_type: 0, payload: [0; 96] };
+        let m = Message {
+            m_source: 0,
+            m_type: 0,
+            payload: [0; 96],
+        };
         let base = &m as *const _ as usize;
         let payload = m.payload.as_ptr() as usize;
         assert_eq!(payload - base, 8);

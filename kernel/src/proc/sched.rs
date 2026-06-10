@@ -107,9 +107,8 @@ pub unsafe fn enqueue(nr: ProcNr) {
         }
         Some(prev_tail) => {
             // SAFETY: prev_tail was in the queue, so its slot is valid.
-            let tail_p = unsafe {
-                proc_slot_mut(prev_tail).expect("enqueue: prev tail out of range")
-            };
+            let tail_p =
+                unsafe { proc_slot_mut(prev_tail).expect("enqueue: prev tail out of range") };
             tail_p.next_ready = Some(nr);
         }
     }
@@ -124,7 +123,9 @@ pub unsafe fn enqueue(nr: ProcNr) {
 /// mutable reference into `PROC_TABLE` or `RUNQ` may be live.
 pub unsafe fn dequeue(nr: ProcNr) {
     let prio = unsafe {
-        proc_slot_mut(nr).expect("dequeue: nr out of range").priority as usize
+        proc_slot_mut(nr)
+            .expect("dequeue: nr out of range")
+            .priority as usize
     };
     // SAFETY: RUNQ is a distinct static from PROC_TABLE.
     let runq = unsafe { &mut *RUNQ.0.get() };
@@ -135,13 +136,17 @@ pub unsafe fn dequeue(nr: ProcNr) {
         // SAFETY: c was on the queue, so its slot is valid; no other live
         // reference into c's slot exists here.
         let next_after_c = unsafe {
-            proc_slot_mut(c).expect("dequeue: c out of range").next_ready
+            proc_slot_mut(c)
+                .expect("dequeue: c out of range")
+                .next_ready
         };
         if c == nr {
             // Clear the dequeued node's link.
             // SAFETY: same — single live reference at a time.
             unsafe {
-                proc_slot_mut(c).expect("dequeue: c out of range").next_ready = None;
+                proc_slot_mut(c)
+                    .expect("dequeue: c out of range")
+                    .next_ready = None;
             }
             match prev {
                 None => runq.head[prio] = next_after_c,
@@ -296,10 +301,7 @@ pub unsafe fn schedule_next() {
             next.ttbr0_pa,
             next.asid,
         );
-        crate::arch::aarch64::mmu::switch_ttbr0_with_asid(
-            next.ttbr0_pa,
-            next.asid,
-        );
+        crate::arch::aarch64::mmu::switch_ttbr0_with_asid(next.ttbr0_pa, next.asid);
         crate::ipc::flush_deliver_msg(next);
     }
 }

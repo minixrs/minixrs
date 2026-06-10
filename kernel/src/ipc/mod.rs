@@ -36,16 +36,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
 use minixrs_kernel_shared::error::{EBADCALL, ECALLDENIED, ETRAPDENIED, OK};
-use minixrs_kernel_shared::ipc_const::{
-    NOTIFY, RECEIVE, SEND, SENDA, SENDNB, SENDREC,
-};
+use minixrs_kernel_shared::ipc_const::{NOTIFY, RECEIVE, SEND, SENDA, SENDNB, SENDREC};
 
 use crate::arch::ArchRegisterFrame;
 use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND};
 use crate::proc::sched::{self, CURRENT_PROC_NR};
-use crate::proc::table::{
-    N_PROC_SLOTS, priv_table_mut_slice, proc_index, proc_table_mut_slice,
-};
+use crate::proc::table::{N_PROC_SLOTS, priv_table_mut_slice, proc_index, proc_table_mut_slice};
 use crate::proc::{Priv, Proc};
 use crate::uart::Uart;
 
@@ -178,13 +174,9 @@ fn dispatch(
             // MINIX 3 `proc.c::do_ipc` does the same divert — SYSTEM has no
             // scheduler context, so a real send would block forever.
             if src_dst_e == crate::system::system_endpoint() {
-                crate::system::kernel_call_sendrec(
-                    proc_table, priv_table, caller_nr, user_msg_va,
-                )
+                crate::system::kernel_call_sendrec(proc_table, priv_table, caller_nr, user_msg_va)
             } else {
-                do_sendrec(
-                    proc_table, priv_table, caller_nr, src_dst_e, user_msg_va,
-                )
+                do_sendrec(proc_table, priv_table, caller_nr, src_dst_e, user_msg_va)
             }
         }),
         NOTIFY => trap_gate(trap_mask, NOTIFY, || {
