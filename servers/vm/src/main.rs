@@ -56,7 +56,11 @@ pub extern "C" fn _start() -> ! {
 
 fn main() -> ! {
     let system = boot_endpoint(SYSTEM);
-    let mut msg = Message { m_source: 0, m_type: 0, payload: [0u8; 96] };
+    let mut msg = Message {
+        m_source: 0,
+        m_type: 0,
+        payload: [0u8; 96],
+    };
     loop {
         if ipc_receive(ANY, &mut msg) != 0 {
             continue;
@@ -90,7 +94,11 @@ fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     // SYS_VMCTL(VMCTL_PT_MAP, target=faulting_e, vaddr=page, prot=WRITE).
     // The kernel allocates + maps the frame; we ignore the returned PA — the
     // region table records the VA range, and the kernel owns the frames.
-    let mut m = Message { m_source: 0, m_type: SYS_VMCTL, payload: [0u8; 96] };
+    let mut m = Message {
+        m_source: 0,
+        m_type: SYS_VMCTL,
+        payload: [0u8; 96],
+    };
     wr_i32(&mut m, 0, VMCTL_PT_MAP);
     wr_i32(&mut m, 4, faulting_e);
     wr_u64(&mut m, 8, page);
@@ -98,7 +106,11 @@ fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     let _ = ipc_sendrec(system, &mut m);
 
     // SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT, target=faulting_e) — unblock the faulter.
-    let mut m = Message { m_source: 0, m_type: SYS_VMCTL, payload: [0u8; 96] };
+    let mut m = Message {
+        m_source: 0,
+        m_type: SYS_VMCTL,
+        payload: [0u8; 96],
+    };
     wr_i32(&mut m, 0, VMCTL_CLEAR_PAGEFAULT);
     wr_i32(&mut m, 4, faulting_e);
     let _ = ipc_sendrec(system, &mut m);

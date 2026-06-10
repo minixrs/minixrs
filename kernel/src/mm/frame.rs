@@ -50,7 +50,10 @@ impl Frame {
     /// — non-aligned values are rejected at construction so downstream
     /// callers can rely on `frame.addr()` returning an aligned PA.
     pub const fn from_addr(pa: u64) -> Self {
-        assert!(pa & (FRAME_SIZE as u64 - 1) == 0, "Frame::from_addr: PA not 4 KiB aligned");
+        assert!(
+            pa & (FRAME_SIZE as u64 - 1) == 0,
+            "Frame::from_addr: PA not 4 KiB aligned"
+        );
         Self(pa >> 12)
     }
 
@@ -120,8 +123,7 @@ static ALLOC: AllocatorCell = AllocatorCell(UnsafeCell::new(Allocator {
 /// SAFETY: must be called exactly once, single-threaded, after
 /// [`crate::mm::set_hhdm_offset`].
 pub unsafe fn init_from_limine_memmap() {
-    let entries =
-        memmap_entries().expect("Limine did not populate the memmap response");
+    let entries = memmap_entries().expect("Limine did not populate the memmap response");
 
     // SAFETY: single-threaded boot, single writer.
     let a = unsafe { &mut *ALLOC.0.get() };
@@ -256,7 +258,10 @@ pub fn free_frame(frame: Frame) {
             break;
         }
     }
-    assert!(in_range, "free_frame: PA {pa:#x} is outside all USABLE regions");
+    assert!(
+        in_range,
+        "free_frame: PA {pa:#x} is outside all USABLE regions"
+    );
 
     // Push onto the free list via HHDM.
     let vaddr = crate::mm::phys_to_hhdm(pa) as *mut FreeNode;

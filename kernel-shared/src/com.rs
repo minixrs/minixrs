@@ -85,8 +85,16 @@ mod tests {
     #[test]
     fn server_endpoints_distinct_and_nonnegative() {
         let servers = [
-            PM_PROC_NR, VFS_PROC_NR, RS_PROC_NR, MEM_PROC_NR, TTY_PROC_NR,
-            DS_PROC_NR, MFS_PROC_NR, VM_PROC_NR, PFS_PROC_NR, SCHED_PROC_NR,
+            PM_PROC_NR,
+            VFS_PROC_NR,
+            RS_PROC_NR,
+            MEM_PROC_NR,
+            TTY_PROC_NR,
+            DS_PROC_NR,
+            MFS_PROC_NR,
+            VM_PROC_NR,
+            PFS_PROC_NR,
+            SCHED_PROC_NR,
             INIT_PROC_NR,
         ];
         for &p in &servers {
