@@ -71,7 +71,16 @@ jobs:
       - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
         with:
           tool: cargo-geiger
-      - run: cargo geiger --workspace
+      # cargo-geiger rejects the virtual workspace root, so scan each member
+      # package individually. The report is advisory, so a per-crate failure
+      # (e.g. a no_std crate geiger can't build on host) must not abort the sweep.
+      - name: Scan unsafe usage per package
+        run: |
+          for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
+            echo "::group::geiger $pkg"
+            cargo geiger --package "$pkg" || echo "geiger failed for $pkg (advisory)"
+            echo "::endgroup::"
+          done
 
   miri:
     name: miri (advisory)

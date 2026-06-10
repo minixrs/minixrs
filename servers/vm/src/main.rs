@@ -44,6 +44,10 @@ const PAGE_SIZE: u64 = 4096;
 
 /// ELF entry point. The kernel primes `SP_EL0` before `eret`, so `_start`
 /// can dive straight into Rust without setting up a stack itself.
+// Gate the whole shim to `not(test)`: under `cargo test` the crate links as a
+// normal host executable, and an exported `_start` would collide with the C
+// runtime's `_start` (a hard "duplicate symbol" error on the GNU/Linux linker).
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 // `.text._start` is an ELF section name; gate it to the bare-metal target so
 // `cargo check --workspace` on a Mach-O host (which rejects the specifier)
@@ -54,6 +58,9 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
+// Only `_start` calls `main`; under `cargo test` `_start` is gone, so `main`
+// (and the message helpers it alone reaches) would read as dead code.
+#[cfg_attr(test, allow(dead_code))]
 fn main() -> ! {
     let system = boot_endpoint(SYSTEM);
     let mut msg = Message {
