@@ -1,0 +1,12 @@
+[book]
+title = "minix.rs"
+description = "MINIX 3, in Rust, for the 64-bit era"
+authors = ["Kevin Barnard and minix.rs Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+site-url = "/minixrs/"
+git-repository-url = "https://github.com/minixrs/minixrs"
+edit-url-template = "https://github.com/minixrs/minixrs/edit/main/book/{path}"
+default-theme = "navy"
