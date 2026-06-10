@@ -1,0 +1,39 @@
+setup mdBook for this project with a rule to build that to github pages on merge to main
+
+---
+
+Keep docs alone for now.  Change the path-filter to book/** current docs will go away as we create true documentation based on the source code and not on the files we used to bootstrap the project
+
+---
+
+Yes go ahead
+
+---
+
+yes
+
+---
+
+Sonarcloud raised a security concern
+
+---
+
+<task-notification>
+<task-id>bwspjdvyy</task-id>
+<summary>Monitor event: "SonarCloud quality gate re-check on PR #18"</summary>
+<event>SonarCloud Code Analysis: SUCCESS</event>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bwspjdvyy</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/953f21d7-2beb-4460-a5c6-8a65fcd6b7aa/tasks/bwspjdvyy.output</output-file>
+<status>completed</status>
+<summary>Monitor "SonarCloud quality gate re-check on PR #18" stream ended</summary>
+</task-notification>
+
+---
+
+merge

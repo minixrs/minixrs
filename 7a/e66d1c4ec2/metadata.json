@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "7ae66d1c4ec2",
+  "strategy": "manual-commit",
+  "branch": "chore/crates-io-publishing",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "rust-toolchain.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7a/e66d1c4ec2/0/metadata.json",
+      "transcript": "/7a/e66d1c4ec2/0/full.jsonl",
+      "content_hash": "/7a/e66d1c4ec2/0/content_hash.txt",
+      "prompt": "/7a/e66d1c4ec2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 15285,
+    "cache_creation_tokens": 181177,
+    "cache_read_tokens": 3941064,
+    "output_tokens": 34802,
+    "api_call_count": 54
+  }
+}
