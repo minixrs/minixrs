@@ -1,0 +1,13 @@
+setup mdBook for this project with a rule to build that to github pages on merge to main
+
+---
+
+Keep docs alone for now.  Change the path-filter to book/** current docs will go away as we create true documentation based on the source code and not on the files we used to bootstrap the project
+
+---
+
+Yes go ahead
+
+---
+
+yes
