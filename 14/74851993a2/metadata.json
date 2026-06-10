@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "1474851993a2",
+  "strategy": "manual-commit",
+  "branch": "chore/mdbook-pages",
+  "checkpoints_count": 2,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/14/74851993a2/0/metadata.json",
+      "transcript": "/14/74851993a2/0/full.jsonl",
+      "content_hash": "/14/74851993a2/0/content_hash.txt",
+      "prompt": "/14/74851993a2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 15138,
+    "cache_creation_tokens": 175072,
+    "cache_read_tokens": 3031531,
+    "output_tokens": 32322,
+    "api_call_count": 45
+  }
+}
