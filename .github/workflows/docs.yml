@@ -1,0 +1,53 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - book/**
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - book/**
+      - .github/workflows/docs.yml
+
+# Allow only one concurrent Pages deployment per ref; never cancel an in-flight
+# deploy (a half-applied Pages publish can leave the live site inconsistent).
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MDBOOK_VERSION: "0.5.3"
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+        with:
+          tool: mdbook@${{ env.MDBOOK_VERSION }}
+      - run: mdbook build book
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: book/book
+
+  deploy:
+    name: deploy
+    needs: build
+    # Publish only from main, and only on push (never from PRs).
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
