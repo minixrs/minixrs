@@ -116,4 +116,12 @@ See `docs/architecture.md` for the full system design. Key concepts:
 
 ## Documentation
 
+Canonical docs are an **mdBook in `book/`** (content under `book/src/`, TOC in
+`book/src/SUMMARY.md`), published to GitHub Pages on push to `main` via
+`.github/workflows/docs.yml` (path-filtered to `book/**`; mdBook pinned to 0.5.3; Pages
+actions SHA-pinned like `ci.yml`). Write new documentation there, derived from source —
+the `docs/*.md` files are legacy bootstrap notes being retired (with `docs/plan.md` still
+the live slice tracker, below). Build locally with `mdbook build book`; output `book/book/`
+is gitignored.
+
 `docs/plan.md` tracks slice status with three markers: `◀ next` (unstarted), `◀ ready (branch ..., pending merge)` (implemented but unmerged), `✓ shipped (PR #N, merged YYYY-MM-DD)` (merged). Flip the previous slice forward and slide `◀ next` ahead as part of each slice's PR. When opening a new slice PR, also reconcile any older `◀ ready` markers against `git log` — stale "pending merge" labels on already-merged PRs accumulate otherwise.

@@ -6,3 +6,4 @@
 *.log
 .idea/
 .claude/settings.local.json
+book/book/
