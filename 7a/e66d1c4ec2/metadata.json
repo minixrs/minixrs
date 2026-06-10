@@ -3,9 +3,38 @@
   "checkpoint_id": "7ae66d1c4ec2",
   "strategy": "manual-commit",
   "branch": "chore/crates-io-publishing",
-  "checkpoints_count": 5,
+  "checkpoints_count": 8,
   "files_touched": [
-    "rust-toolchain.toml"
+    ".github/workflows/release.yml",
+    "CLAUDE.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "RELEASING.md",
+    "drivers/driver-rt/Cargo.toml",
+    "drivers/memory/Cargo.toml",
+    "drivers/virtio-blk/Cargo.toml",
+    "drivers/virtio-console/Cargo.toml",
+    "drivers/virtio-net/Cargo.toml",
+    "fs/mfs/Cargo.toml",
+    "fs/pfs/Cargo.toml",
+    "kernel-shared/Cargo.toml",
+    "kernel/Cargo.toml",
+    "minix-ipc/Cargo.toml",
+    "minixrs/Cargo.toml",
+    "minixrs/README.md",
+    "minixrs/src/lib.rs",
+    "rust-toolchain.toml",
+    "server-rt/Cargo.toml",
+    "servers/ds/Cargo.toml",
+    "servers/pm/Cargo.toml",
+    "servers/rs/Cargo.toml",
+    "servers/sched/Cargo.toml",
+    "servers/vfs/Cargo.toml",
+    "servers/vm/Cargo.toml",
+    "userland/coreutils/Cargo.toml",
+    "userland/init/Cargo.toml",
+    "userland/sh/Cargo.toml"
   ],
   "sessions": [
     {
@@ -13,13 +42,19 @@
       "transcript": "/7a/e66d1c4ec2/0/full.jsonl",
       "content_hash": "/7a/e66d1c4ec2/0/content_hash.txt",
       "prompt": "/7a/e66d1c4ec2/0/prompt.txt"
+    },
+    {
+      "metadata": "/7a/e66d1c4ec2/1/metadata.json",
+      "transcript": "/7a/e66d1c4ec2/1/full.jsonl",
+      "content_hash": "/7a/e66d1c4ec2/1/content_hash.txt",
+      "prompt": "/7a/e66d1c4ec2/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 15285,
-    "cache_creation_tokens": 181177,
-    "cache_read_tokens": 3941064,
-    "output_tokens": 34802,
-    "api_call_count": 54
+    "input_tokens": 25300,
+    "cache_creation_tokens": 566921,
+    "cache_read_tokens": 8092041,
+    "output_tokens": 79846,
+    "api_call_count": 106
   }
 }
