@@ -17,9 +17,6 @@ concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 env:
   MDBOOK_VERSION: "0.5.3"
 
@@ -27,6 +24,8 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
