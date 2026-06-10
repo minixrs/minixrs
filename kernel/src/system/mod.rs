@@ -27,9 +27,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::{
-    KERNEL_CALL, NR_KERN_CALLS_PHASE3, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL,
-    SYS_EXEC, SYS_EXIT, SYS_FORK, SYS_GETINFO, SYS_IRQCTL, SYS_PRIVCTL,
-    SYS_SAFECOPY, SYS_SCHEDULE, SYS_SETALARM, SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
+    KERNEL_CALL, NR_KERN_CALLS_PHASE3, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL, SYS_EXEC, SYS_EXIT,
+    SYS_FORK, SYS_GETINFO, SYS_IRQCTL, SYS_PRIVCTL, SYS_SAFECOPY, SYS_SCHEDULE, SYS_SETALARM,
+    SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
 };
 use minixrs_kernel_shared::com::{NR_SYS_PROCS, SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;

@@ -190,11 +190,7 @@ pub fn mini_pf_send(
 }
 
 /// Append `nr` to the tail of the `caller_q` rooted at `proc_table[dst_idx]`.
-fn enqueue_on_caller_q(
-    proc_table: &mut [Proc; N_PROC_SLOTS],
-    dst_idx: usize,
-    nr: ProcNr,
-) {
+fn enqueue_on_caller_q(proc_table: &mut [Proc; N_PROC_SLOTS], dst_idx: usize, nr: ProcNr) {
     match proc_table[dst_idx].caller_q {
         None => {
             proc_table[dst_idx].caller_q = Some(nr);
@@ -215,4 +211,3 @@ fn enqueue_on_caller_q(
         }
     }
 }
-

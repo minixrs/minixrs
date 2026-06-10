@@ -26,8 +26,8 @@
 //! TTBR0_EL1; until then, AddrSpaces are passive data structures.
 
 use crate::arch::aarch64::mmu::{
-    ATTR_IDX_NORMAL, PAGE_SHIFT, PTE_AF, PTE_AP_RO_EL0, PTE_AP_RW_EL0, PTE_PXN,
-    PTE_SH_INNER, PTE_TABLE, PTE_UXN, PTE_VALID, PTES_PER_LEVEL, pte_attr_idx,
+    ATTR_IDX_NORMAL, PAGE_SHIFT, PTE_AF, PTE_AP_RO_EL0, PTE_AP_RW_EL0, PTE_PXN, PTE_SH_INNER,
+    PTE_TABLE, PTE_UXN, PTE_VALID, PTES_PER_LEVEL, pte_attr_idx,
 };
 use crate::mm::{FRAME_SIZE, Frame, alloc_frame, free_frame, phys_to_hhdm};
 
@@ -43,13 +43,26 @@ pub struct Prot {
 }
 
 impl Prot {
-    pub const RO_CODE: Self = Self { writable: false, executable: true };
-    pub const RW_DATA: Self = Self { writable: true, executable: false };
-    pub const RO_DATA: Self = Self { writable: false, executable: false };
+    pub const RO_CODE: Self = Self {
+        writable: false,
+        executable: true,
+    };
+    pub const RW_DATA: Self = Self {
+        writable: true,
+        executable: false,
+    };
+    pub const RO_DATA: Self = Self {
+        writable: false,
+        executable: false,
+    };
 }
 
 fn prot_attrs(prot: Prot) -> u64 {
-    let ap = if prot.writable { PTE_AP_RW_EL0 } else { PTE_AP_RO_EL0 };
+    let ap = if prot.writable {
+        PTE_AP_RW_EL0
+    } else {
+        PTE_AP_RO_EL0
+    };
     let uxn = if prot.executable { 0 } else { PTE_UXN };
     PTE_AF | PTE_SH_INNER | ap | PTE_PXN | uxn | pte_attr_idx(ATTR_IDX_NORMAL)
 }
@@ -82,7 +95,9 @@ impl AddrSpace {
     pub fn new() -> Result<Self, MapError> {
         let l0 = alloc_frame().ok_or(MapError::OutOfMemory)?;
         // `alloc_frame` zeroes the frame, so the L0 starts all-invalid.
-        Ok(Self { ttbr0_pa: l0.addr() })
+        Ok(Self {
+            ttbr0_pa: l0.addr(),
+        })
     }
 
     /// Install a single 4 KiB mapping `va → pa` with the given permissions.

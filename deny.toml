@@ -1,0 +1,30 @@
+# cargo-deny configuration for minix.rs
+# See https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+version = 2
+# Fail on dependencies pulled from a yanked crates.io version.
+yanked = "deny"
+
+[licenses]
+version = 2
+# minix.rs is BSD-3-Clause and avoids GPL code. Allow the project license plus
+# the permissive licenses used by current dependencies (arrayvec, cc, shlex).
+allow = [
+    "BSD-3-Clause",
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Surface duplicate dependency versions without failing the build.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Only allow crates from crates.io / known sources.
+unknown-registry = "deny"
+unknown-git = "deny"

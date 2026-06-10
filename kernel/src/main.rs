@@ -56,10 +56,7 @@ extern "C" fn kmain() -> ! {
     if arch::limine_base_revision_supported() {
         let _ = writeln!(con, "HHDM offset: {hhdm:#018x}");
     } else {
-        let _ = writeln!(
-            con,
-            "Limine base revision unsupported (loader is too old)"
-        );
+        let _ = writeln!(con, "Limine base revision unsupported (loader is too old)");
     }
 
     proc::init();

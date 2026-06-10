@@ -52,10 +52,33 @@ mod tests {
     #[test]
     fn all_errors_are_negative() {
         for &e in &[
-            EGENERIC, EPERM, ENOENT, ESRCH, EINTR, EIO, ENXIO, E2BIG, ENOEXEC,
-            EBADF, ECHILD, EAGAIN, ENOMEM, EACCES, EFAULT, EINVAL, EDEADLK,
-            ENOSYS, ELOCKED, EBADCALL, EBADSRCDST, ECALLDENIED, EDEADSRCDST,
-            ENOTREADY, EBADREQUEST, ETRAPDENIED, EDONTREPLY,
+            EGENERIC,
+            EPERM,
+            ENOENT,
+            ESRCH,
+            EINTR,
+            EIO,
+            ENXIO,
+            E2BIG,
+            ENOEXEC,
+            EBADF,
+            ECHILD,
+            EAGAIN,
+            ENOMEM,
+            EACCES,
+            EFAULT,
+            EINVAL,
+            EDEADLK,
+            ENOSYS,
+            ELOCKED,
+            EBADCALL,
+            EBADSRCDST,
+            ECALLDENIED,
+            EDEADSRCDST,
+            ENOTREADY,
+            EBADREQUEST,
+            ETRAPDENIED,
+            EDONTREPLY,
         ] {
             assert!(e < 0, "errno {e} should be negative");
         }

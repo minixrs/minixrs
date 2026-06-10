@@ -180,8 +180,7 @@ impl Iterator for MemmapIter {
         // SAFETY: `idx < count`; Limine's `entries[idx]` points at a valid
         // entry. Entries live for the kernel's lifetime — bootloader memory
         // for them is in BOOTLOADER_RECLAIMABLE, but we never reclaim it.
-        let entry: &'static MemmapEntry =
-            unsafe { &*(*self.entries.add(self.idx as usize)) };
+        let entry: &'static MemmapEntry = unsafe { &*(*self.entries.add(self.idx as usize)) };
         self.idx += 1;
         Some(entry)
     }
@@ -275,8 +274,7 @@ static KERNEL_ADDRESS_REQUEST: KernelAddressRequest = KernelAddressRequest {
 };
 
 fn kernel_address_response() -> Option<&'static KernelAddressResponse> {
-    let p = KERNEL_ADDRESS_REQUEST.response.load(Ordering::Relaxed)
-        as *const KernelAddressResponse;
+    let p = KERNEL_ADDRESS_REQUEST.response.load(Ordering::Relaxed) as *const KernelAddressResponse;
     if p.is_null() {
         return None;
     }
@@ -303,5 +301,8 @@ pub fn kernel_virtual_base() -> Option<u64> {
 /// future user-space mappings) require their own translation.
 pub fn kernel_va_to_pa(va: u64) -> Option<u64> {
     let r = kernel_address_response()?;
-    Some(va.wrapping_sub(r.virtual_base).wrapping_add(r.physical_base))
+    Some(
+        va.wrapping_sub(r.virtual_base)
+            .wrapping_add(r.physical_base),
+    )
 }

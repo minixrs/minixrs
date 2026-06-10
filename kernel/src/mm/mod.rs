@@ -19,7 +19,7 @@
 
 pub mod frame;
 
-pub use frame::{Frame, FRAME_SIZE, alloc_frame, free_frame, init_from_limine_memmap};
+pub use frame::{FRAME_SIZE, Frame, alloc_frame, free_frame, init_from_limine_memmap};
 
 use core::cell::UnsafeCell;
 

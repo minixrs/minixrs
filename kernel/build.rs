@@ -24,8 +24,7 @@ fn main() {
         return;
     }
 
-    let arch =
-        std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH unset");
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH unset");
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR unset"));
 
     match arch.as_str() {
@@ -84,9 +83,8 @@ fn main() {
 /// separate `CARGO_TARGET_DIR` so nesting cargo inside this build script does
 /// not deadlock on the outer kernel build's target-dir lock.
 fn build_vm_server(out_dir: &std::path::Path) {
-    let manifest = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR unset"),
-    );
+    let manifest =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR unset"));
     let workspace = manifest.parent().expect("kernel manifest has no parent");
     let vm_dir = workspace.join("servers/vm");
     let user_ld = vm_dir.join("user.ld");

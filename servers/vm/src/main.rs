@@ -44,6 +44,10 @@ const PAGE_SIZE: u64 = 4096;
 
 /// ELF entry point. The kernel primes `SP_EL0` before `eret`, so `_start`
 /// can dive straight into Rust without setting up a stack itself.
+// Gate the whole shim to `not(test)`: under `cargo test` the crate links as a
+// normal host executable, and an exported `_start` would collide with the C
+// runtime's `_start` (a hard "duplicate symbol" error on the GNU/Linux linker).
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 // `.text._start` is an ELF section name; gate it to the bare-metal target so
 // `cargo check --workspace` on a Mach-O host (which rejects the specifier)
@@ -54,9 +58,16 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
+// Only `_start` calls `main`; under `cargo test` `_start` is gone, so `main`
+// (and the message helpers it alone reaches) would read as dead code.
+#[cfg_attr(test, allow(dead_code))]
 fn main() -> ! {
     let system = boot_endpoint(SYSTEM);
-    let mut msg = Message { m_source: 0, m_type: 0, payload: [0u8; 96] };
+    let mut msg = Message {
+        m_source: 0,
+        m_type: 0,
+        payload: [0u8; 96],
+    };
     loop {
         if ipc_receive(ANY, &mut msg) != 0 {
             continue;
@@ -90,7 +101,11 @@ fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     // SYS_VMCTL(VMCTL_PT_MAP, target=faulting_e, vaddr=page, prot=WRITE).
     // The kernel allocates + maps the frame; we ignore the returned PA — the
     // region table records the VA range, and the kernel owns the frames.
-    let mut m = Message { m_source: 0, m_type: SYS_VMCTL, payload: [0u8; 96] };
+    let mut m = Message {
+        m_source: 0,
+        m_type: SYS_VMCTL,
+        payload: [0u8; 96],
+    };
     wr_i32(&mut m, 0, VMCTL_PT_MAP);
     wr_i32(&mut m, 4, faulting_e);
     wr_u64(&mut m, 8, page);
@@ -98,7 +113,11 @@ fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     let _ = ipc_sendrec(system, &mut m);
 
     // SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT, target=faulting_e) — unblock the faulter.
-    let mut m = Message { m_source: 0, m_type: SYS_VMCTL, payload: [0u8; 96] };
+    let mut m = Message {
+        m_source: 0,
+        m_type: SYS_VMCTL,
+        payload: [0u8; 96],
+    };
     wr_i32(&mut m, 0, VMCTL_CLEAR_PAGEFAULT);
     wr_i32(&mut m, 4, faulting_e);
     let _ = ipc_sendrec(system, &mut m);
