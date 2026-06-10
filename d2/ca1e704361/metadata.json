@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "d2ca1e704361",
+  "strategy": "manual-commit",
+  "branch": "chore/ci-sonarcloud",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "servers/vm/src/main.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d2/ca1e704361/0/metadata.json",
+      "transcript": "/d2/ca1e704361/0/full.jsonl",
+      "content_hash": "/d2/ca1e704361/0/content_hash.txt",
+      "prompt": "/d2/ca1e704361/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 421,
+    "cache_creation_tokens": 27244,
+    "cache_read_tokens": 1930204,
+    "output_tokens": 18711,
+    "api_call_count": 17
+  }
+}
