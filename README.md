@@ -1,5 +1,8 @@
 # minix.rs
 
+[![crates.io](https://img.shields.io/crates/v/minixrs.svg)](https://crates.io/crates/minixrs)
+[![docs.rs](https://docs.rs/minixrs/badge.svg)](https://docs.rs/minixrs)
+
 > **MINIX 3, in Rust, for the 64-bit era**
 
 A 64-bit-only reimplementation of MINIX 3 in Rust, preserving the original ABI.
@@ -38,6 +41,15 @@ cargo test -p minixrs-kernel-shared
 
 See [`docs/`](docs/) for the full architecture, IPC model, syscall catalog, boot
 flow, and implementation plan.
+
+## Crates
+
+The reusable libraries are published to crates.io under the
+[`minixrs`](https://crates.io/crates/minixrs) umbrella crate, which re-exports
+`minixrs-kernel-shared`, `minixrs-ipc`, `minixrs-server-rt`, and
+`minixrs-driver-rt`. The kernel, servers, drivers, and userland programs are
+freestanding binaries and are not published. See [RELEASING.md](RELEASING.md)
+for how a release is cut.
 
 ## License
 

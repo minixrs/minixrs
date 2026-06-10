@@ -1,4 +1,8 @@
+# Pinned to a dated nightly so new lints/fmt rules can't break CI with no code
+# change. Keep it current: bump deliberately to a recent nightly (not bare
+# `nightly`), then run `cargo fmt --all --check`, `cargo clippy --workspace
+# --all-targets -- -D warnings`, and a QEMU boot before committing the bump.
 [toolchain]
 channel = "nightly-2026-05-18"
-components = ["rust-src", "rustfmt", "clippy", "llvm-tools"]
+components = ["rust-src", "rustfmt", "clippy", "llvm-tools", "rust-analyzer"]
 targets = ["aarch64-unknown-none", "x86_64-unknown-none"]

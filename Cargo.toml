@@ -21,6 +21,7 @@ members = [
     "userland/init",
     "userland/sh",
     "userland/coreutils",
+    "minixrs",
 ]
 
 [workspace.package]
@@ -28,6 +29,8 @@ version = "0.1.0"
 edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/minixrs/minixrs"
+homepage = "https://github.com/minixrs/minixrs"
+authors = ["Kevin Barnard and minix.rs Contributors"]
 
 [profile.release]
 opt-level = 's'
