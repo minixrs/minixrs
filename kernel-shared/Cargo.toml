@@ -1,7 +1,13 @@
 [package]
 name = "minixrs-kernel-shared"
-version = "0.1.0"
-edition = "2024"
-license = "BSD-3-Clause"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Shared MINIX ABI types for minix.rs: IPC message layout, server endpoints, and call numbers used by the kernel and user space."
+keywords = ["minix", "microkernel", "ipc", "abi", "no-std"]
+categories = ["no-std", "os"]
 
 [dependencies]

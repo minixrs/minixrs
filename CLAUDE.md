@@ -66,6 +66,16 @@ pushes refresh the whole-project picture.
 - `Cargo.lock` **is committed** (so audit/deny are reproducible) — do not re-add it to `.gitignore`
 - Third-party actions are pinned to full commit SHAs with `# vN` comments; keep that when editing
 - SonarCloud needs the `SONAR_TOKEN` repo secret and Automatic Analysis disabled (CI-based instead)
+- **Publishing:** `.github/workflows/release.yml` runs on a `v*` tag push and `cargo publish`es the
+  five library crates to crates.io in dependency order (`minixrs-kernel-shared` → `minixrs-ipc` →
+  `minixrs-server-rt` → `minixrs-driver-rt` → `minixrs` facade). All other members carry
+  `publish = false` (freestanding binaries, unbuildable on registry infra). Needs the
+  `CARGO_REGISTRY_TOKEN` repo secret. Bottom-up order is mandatory — crates.io forbids `path`-only
+  deps, so the libs' path deps carry an explicit `version`. Verify locally with
+  `cargo package -p minixrs-kernel-shared -p minixrs-ipc -p minixrs-server-rt -p minixrs-driver-rt
+  -p minixrs` (verify-builds against packaged siblings) — `cargo publish --dry-run` resolves deps
+  against the registry so it can't chain, and `cargo package --workspace` aborts on the
+  `publish = false` binaries. See `RELEASING.md`
 
 ## Architecture
 
