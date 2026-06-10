@@ -1,0 +1,59 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "48f7d4fc7fb8",
+  "strategy": "manual-commit",
+  "branch": "chore/ci-sonarcloud",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    ".gitignore",
+    "Cargo.lock",
+    "deny.toml",
+    "kernel-shared/src/callnr.rs",
+    "kernel-shared/src/com.rs",
+    "kernel-shared/src/error.rs",
+    "kernel-shared/src/ipc_const.rs",
+    "kernel-shared/src/message.rs",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/addrspace.rs",
+    "kernel/src/arch/aarch64/exception.rs",
+    "kernel/src/arch/aarch64/gic.rs",
+    "kernel/src/arch/aarch64/limine.rs",
+    "kernel/src/arch/aarch64/mod.rs",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/boot_image/elf.rs",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/ipc/receive.rs",
+    "kernel/src/ipc/send.rs",
+    "kernel/src/main.rs",
+    "kernel/src/mm/frame.rs",
+    "kernel/src/mm/mod.rs",
+    "kernel/src/proc/dump.rs",
+    "kernel/src/proc/page_fault.rs",
+    "kernel/src/proc/sched.rs",
+    "kernel/src/proc/table.rs",
+    "kernel/src/system/do_getinfo.rs",
+    "kernel/src/system/do_vmctl.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs",
+    "rust-toolchain.toml",
+    "servers/vm/src/main.rs",
+    "servers/vm/src/region.rs",
+    "sonar-project.properties"
+  ],
+  "sessions": [
+    {
+      "metadata": "/48/f7d4fc7fb8/0/metadata.json",
+      "transcript": "/48/f7d4fc7fb8/0/full.jsonl",
+      "content_hash": "/48/f7d4fc7fb8/0/content_hash.txt",
+      "prompt": "/48/f7d4fc7fb8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 10752,
+    "cache_creation_tokens": 183938,
+    "cache_read_tokens": 2730546,
+    "output_tokens": 37914,
+    "api_call_count": 38
+  }
+}

@@ -1,0 +1,1 @@
+create a github action that does parallel checks of clippy, fmt, audit, deny, geiger, miri, coverage and then runs sonarcloud for this project.  The check should run as part of a check for the PR and then run on the main branch to update sonar's picture of the entire project

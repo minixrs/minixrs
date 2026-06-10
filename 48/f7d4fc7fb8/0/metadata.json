@@ -1,0 +1,87 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "48f7d4fc7fb8",
+  "session_id": "955012e2-4bfb-4e3c-a300-32347f9e5e97",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-10T02:05:28.300317Z",
+  "branch": "chore/ci-sonarcloud",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    ".gitignore",
+    "Cargo.lock",
+    "deny.toml",
+    "kernel-shared/src/callnr.rs",
+    "kernel-shared/src/com.rs",
+    "kernel-shared/src/error.rs",
+    "kernel-shared/src/ipc_const.rs",
+    "kernel-shared/src/message.rs",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/addrspace.rs",
+    "kernel/src/arch/aarch64/exception.rs",
+    "kernel/src/arch/aarch64/gic.rs",
+    "kernel/src/arch/aarch64/limine.rs",
+    "kernel/src/arch/aarch64/mod.rs",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/boot_image/elf.rs",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/ipc/receive.rs",
+    "kernel/src/ipc/send.rs",
+    "kernel/src/main.rs",
+    "kernel/src/mm/frame.rs",
+    "kernel/src/mm/mod.rs",
+    "kernel/src/proc/dump.rs",
+    "kernel/src/proc/page_fault.rs",
+    "kernel/src/proc/sched.rs",
+    "kernel/src/proc/table.rs",
+    "kernel/src/system/do_getinfo.rs",
+    "kernel/src/system/do_vmctl.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs",
+    "rust-toolchain.toml",
+    "servers/vm/src/main.rs",
+    "servers/vm/src/region.rs",
+    "sonar-project.properties"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "7240bf324584",
+  "token_usage": {
+    "input_tokens": 10752,
+    "cache_creation_tokens": 183938,
+    "cache_read_tokens": 2730546,
+    "output_tokens": 37914,
+    "api_call_count": 38
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-10T02:05:28.292763Z",
+    "agent_lines": 722,
+    "agent_removed": 176,
+    "human_added": 19,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 741,
+    "total_lines_changed": 917,
+    "agent_percentage": 97.92802617230099,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 722,
+      "agent_lines_removed": 176
+    }
+  ]
+}
