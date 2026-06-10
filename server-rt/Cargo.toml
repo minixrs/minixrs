@@ -1,9 +1,15 @@
 [package]
 name = "minixrs-server-rt"
-version = "0.1.0"
-edition = "2024"
-license = "BSD-3-Clause"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Server runtime / SEF framework for minix.rs system servers (PM, VFS, RS, DS, SCHED, file systems)."
+keywords = ["minix", "microkernel", "server", "sef", "no-std"]
+categories = ["no-std", "os"]
 
 [dependencies]
-minixrs-kernel-shared = { path = "../kernel-shared" }
-minixrs-ipc = { path = "../minix-ipc" }
+minixrs-kernel-shared = { path = "../kernel-shared", version = "0.1.0" }
+minixrs-ipc = { path = "../minix-ipc", version = "0.1.0" }

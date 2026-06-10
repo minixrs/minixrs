@@ -25,6 +25,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "minixrs"
+version = "0.1.0"
+dependencies = [
+ "minixrs-driver-rt",
+ "minixrs-ipc",
+ "minixrs-kernel-shared",
+ "minixrs-server-rt",
+]
+
+[[package]]
 name = "minixrs-coreutils"
 version = "0.1.0"
 

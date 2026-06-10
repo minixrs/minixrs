@@ -1,0 +1,18 @@
+[package]
+name = "minixrs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "MINIX 3, reimplemented in Rust for the 64-bit era — umbrella crate re-exporting the reusable minix.rs libraries."
+keywords = ["minix", "microkernel", "os", "kernel", "no-std"]
+categories = ["no-std", "os"]
+readme = "README.md"
+
+[dependencies]
+minixrs-kernel-shared = { path = "../kernel-shared", version = "0.1.0" }
+minixrs-ipc = { path = "../minix-ipc", version = "0.1.0" }
+minixrs-server-rt = { path = "../server-rt", version = "0.1.0" }
+minixrs-driver-rt = { path = "../drivers/driver-rt", version = "0.1.0" }
