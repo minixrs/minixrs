@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. new push to a PR branch).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  geiger:
+    name: cargo-geiger (advisory)
+    runs-on: ubuntu-latest
+    # Advisory: cargo-geiger frequently fails to build on bleeding-edge nightly /
+    # edition 2024, so a tooling breakage must not red-X the PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+        with:
+          tool: cargo-geiger
+      # cargo-geiger rejects the virtual workspace root, so scan each member
+      # package individually. The report is advisory, so a per-crate failure
+      # (e.g. a no_std crate geiger can't build on host) must not abort the sweep.
+      - name: Scan unsafe usage per package
+        run: |
+          for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
+            echo "::group::geiger $pkg"
+            cargo geiger --package "$pkg" || echo "geiger failed for $pkg (advisory)"
+            echo "::endgroup::"
+          done
+
+  miri:
+    name: miri (advisory)
+    runs-on: ubuntu-latest
+    # Advisory: miri may be unavailable for the very latest nightly, and only the
+    # two pure crates below are testable under it (minix-ipc uses inline asm).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install pinned toolchain + miri
+        run: |
+          rustup show
+          rustup component add miri
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo miri test -p minixrs-kernel-shared -p minixrs-vm
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate LCOV coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lcov
+          path: lcov.info
+          if-no-files-found: error
+
+  sonar:
+    name: SonarCloud
+    runs-on: ubuntu-latest
+    needs: coverage
+    # SONAR_TOKEN is not exposed to PRs from forks; skip there instead of failing.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history so SonarCloud can attribute issues to commits/authors.
+          fetch-depth: 0
+      - name: Download coverage report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: lcov
+          path: .
+      - name: SonarQube Cloud scan
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io

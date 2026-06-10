@@ -41,7 +41,11 @@ pub struct PageFaultState {
 }
 
 impl PageFaultState {
-    pub const EMPTY: Self = Self { addr: 0, flags: 0, ip: 0 };
+    pub const EMPTY: Self = Self {
+        addr: 0,
+        flags: 0,
+        ip: 0,
+    };
 }
 
 /// Half-open virtual-address range `[start, end)` the kernel will resolve

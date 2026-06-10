@@ -81,9 +81,7 @@ fn rd_u32(b: &[u8], off: usize) -> Result<u32, ElfError> {
 
 fn rd_u64(b: &[u8], off: usize) -> Result<u64, ElfError> {
     b.get(off..off + 8)
-        .map(|s| {
-            u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
-        })
+        .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
         .ok_or(ElfError::Truncated)
 }
 
@@ -151,7 +149,11 @@ fn load_segment(
         return Err(ElfError::Misaligned);
     }
     // The file region must actually be present in the embedded image.
-    if p_offset.checked_add(p_filesz).map(|e| e > elf.len()).unwrap_or(true) {
+    if p_offset
+        .checked_add(p_filesz)
+        .map(|e| e > elf.len())
+        .unwrap_or(true)
+    {
         return Err(ElfError::Truncated);
     }
 

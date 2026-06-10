@@ -38,7 +38,7 @@ pub const NR_KERN_CALLS_PHASE3: usize = 14;
 pub const NR_SYS_CALLS: usize = 32;
 
 const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS_PHASE3);
-const _: () = assert!(NR_SYS_CALLS % 32 == 0);
+const _: () = assert!(NR_SYS_CALLS.is_multiple_of(32));
 
 // ---------------------------------------------------------------------------
 // `SYS_GETINFO` request sub-types.
@@ -133,9 +133,20 @@ mod tests {
     #[test]
     fn calls_are_contiguous_from_base() {
         let calls = [
-            SYS_GETINFO, SYS_PRIVCTL, SYS_FORK, SYS_EXEC, SYS_EXIT,
-            SYS_COPY, SYS_SAFECOPY, SYS_IRQCTL, SYS_VMCTL, SYS_SCHEDULE,
-            SYS_SETALARM, SYS_TIMES, SYS_DIAGCTL, SYS_SETGRANT,
+            SYS_GETINFO,
+            SYS_PRIVCTL,
+            SYS_FORK,
+            SYS_EXEC,
+            SYS_EXIT,
+            SYS_COPY,
+            SYS_SAFECOPY,
+            SYS_IRQCTL,
+            SYS_VMCTL,
+            SYS_SCHEDULE,
+            SYS_SETALARM,
+            SYS_TIMES,
+            SYS_DIAGCTL,
+            SYS_SETGRANT,
         ];
         for (i, call) in calls.iter().enumerate() {
             assert_eq!(*call, KERNEL_CALL + i as i32);

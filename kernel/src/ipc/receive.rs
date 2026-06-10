@@ -19,9 +19,7 @@ use minixrs_kernel_shared::ipc_const::RECEIVE;
 
 use crate::ipc::deadlock::deadlock_check;
 use crate::ipc::notify::build_notify_message;
-use crate::proc::flags::{
-    MF_DELIVERMSG, MF_REPLY_PEND, RTS_RECEIVING, RTS_SENDING,
-};
+use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND, RTS_RECEIVING, RTS_SENDING};
 use crate::proc::priv_struct::IPC_MAP_CHUNKS;
 use crate::proc::table::{N_PROC_SLOTS, proc_index};
 use crate::proc::{Priv, Proc, sched};
@@ -64,8 +62,7 @@ pub fn mini_receive(
 
     if !in_mid_sendrec {
         // 1. Pending notification?
-        if let Some(sender_e) =
-            take_pending_notification(proc_table, priv_table, caller_idx, src_e)
+        if let Some(sender_e) = take_pending_notification(proc_table, priv_table, caller_idx, src_e)
         {
             let caller = &mut proc_table[caller_idx];
             build_notify_message(caller, sender_e);
@@ -114,8 +111,7 @@ fn take_pending_notification(
 
     // Snapshot the caller's notify_pending bitmap so the lookup loop can
     // read other priv_table slots without holding a mutable borrow.
-    let pending_snapshot: [u32; IPC_MAP_CHUNKS] =
-        priv_table[caller_priv_idx].notify_pending;
+    let pending_snapshot: [u32; IPC_MAP_CHUNKS] = priv_table[caller_priv_idx].notify_pending;
 
     // TODO(slice 2.6+): when src_e != ANY, resolve priv_id directly
     // (endpoint → proc_index → priv_id) and test that single bit, rather
@@ -132,8 +128,7 @@ fn take_pending_notification(
                         let sender_e = proc_table[sender_idx].endpoint;
                         if src_e == ANY || src_e == sender_e {
                             // Clear bit and return.
-                            priv_table[caller_priv_idx].notify_pending[chunk_idx] &=
-                                !(1u32 << bit);
+                            priv_table[caller_priv_idx].notify_pending[chunk_idx] &= !(1u32 << bit);
                             return Some(sender_e);
                         }
                     }

@@ -51,8 +51,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::{
     NR_VMCTL_SUBCALLS, VMCTL_CLEAR_PAGEFAULT, VMCTL_GET_PAGEFAULT, VMCTL_PROT_EXEC,
-    VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP, VMCTL_VMINHIBIT_CLEAR,
-    VMCTL_VMINHIBIT_SET,
+    VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP, VMCTL_VMINHIBIT_CLEAR, VMCTL_VMINHIBIT_SET,
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
 use minixrs_kernel_shared::error::{EINVAL, ENOMEM, OK};
@@ -252,12 +251,20 @@ fn set_vminhibit(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, set: 
 
 #[inline]
 fn read_i32(msg: &Message, off: usize) -> i32 {
-    i32::from_ne_bytes(msg.payload[off..off + 4].try_into().expect("payload in range"))
+    i32::from_ne_bytes(
+        msg.payload[off..off + 4]
+            .try_into()
+            .expect("payload in range"),
+    )
 }
 
 #[inline]
 fn read_u64(msg: &Message, off: usize) -> u64 {
-    u64::from_ne_bytes(msg.payload[off..off + 8].try_into().expect("payload in range"))
+    u64::from_ne_bytes(
+        msg.payload[off..off + 8]
+            .try_into()
+            .expect("payload in range"),
+    )
 }
 
 #[inline]

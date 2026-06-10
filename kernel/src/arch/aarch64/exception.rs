@@ -92,26 +92,15 @@ extern "C" fn el0_sync_unexpected(esr: u64, elr: u64, far: u64) -> ! {
         0x20 => {
             // Instruction abort, lower EL. ISS[5:0] = IFSC.
             let ifsc = iss & 0x3F;
-            let _ = writeln!(
-                uart,
-                "!!! EL0 instruction abort (translation/permission)"
-            );
-            let _ = writeln!(
-                uart,
-                "    IFSC = {:#04x} ({})",
-                ifsc,
-                fsc_name(ifsc)
-            );
+            let _ = writeln!(uart, "!!! EL0 instruction abort (translation/permission)");
+            let _ = writeln!(uart, "    IFSC = {:#04x} ({})", ifsc, fsc_name(ifsc));
         }
         0x24 => {
             // Data abort, lower EL. ISS[5:0]=DFSC, ISS[6]=WnR, ISS[24]=ISV.
             let dfsc = iss & 0x3F;
             let wnr = (iss >> 6) & 1;
             let isv = (iss >> 24) & 1;
-            let _ = writeln!(
-                uart,
-                "!!! EL0 data abort (translation/permission)"
-            );
+            let _ = writeln!(uart, "!!! EL0 data abort (translation/permission)");
             let _ = writeln!(
                 uart,
                 "    DFSC = {:#04x} ({})  WnR = {}  ISV = {}",
@@ -198,7 +187,11 @@ extern "C" fn do_page_fault(esr: u64, elr: u64, far: u64) {
         // SAFETY: exception context — single-threaded, DAIF.I masked. The
         // faulting proc is CURRENT and not otherwise borrowed.
         let p = unsafe { sched::current_proc_mut() }.expect("page fault: no current proc");
-        p.page_fault_state = PageFaultState { addr: far, flags, ip: elr };
+        p.page_fault_state = PageFaultState {
+            addr: far,
+            flags,
+            ip: elr,
+        };
         faulting_nr = p.nr;
         name = p.name[0];
         // SAFETY: rts_set captures `nr` then ends its &mut Proc borrow before

@@ -33,7 +33,15 @@ mod tests {
 
     #[test]
     fn all_primitives_distinct() {
-        let all = [SEND, RECEIVE, SENDREC, NOTIFY, SENDNB, SENDA, MINIX_KERNINFO];
+        let all = [
+            SEND,
+            RECEIVE,
+            SENDREC,
+            NOTIFY,
+            SENDNB,
+            SENDA,
+            MINIX_KERNINFO,
+        ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(a, b, "duplicate primitive number {a}");

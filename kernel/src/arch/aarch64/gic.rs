@@ -90,9 +90,8 @@ fn gicr_sgi() -> usize {
 /// SAFETY: callable only on the boot CPU during single-threaded boot, with
 /// IRQs masked at PSTATE.DAIF. `limine::hhdm_offset` must return `Some`.
 pub unsafe fn init() {
-    let hhdm = limine::hhdm_offset()
-        .expect("GICv3 init: Limine did not provide HHDM offset")
-        as usize;
+    let hhdm =
+        limine::hhdm_offset().expect("GICv3 init: Limine did not provide HHDM offset") as usize;
     GICD_VBASE.store(hhdm + GICD_PHYS_BASE, Ordering::Release);
     GICR_VBASE.store(hhdm + GICR_PHYS_BASE, Ordering::Release);
 

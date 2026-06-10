@@ -14,7 +14,7 @@ pub mod userland;
 
 pub use context::ArchRegisterFrame;
 pub use uart::Pl011 as Uart;
-pub use uart::{set_base as set_uart_base, PL011_PHYS_BASE};
+pub use uart::{PL011_PHYS_BASE, set_base as set_uart_base};
 pub use userland::userland_bootstrap;
 
 pub fn init() {

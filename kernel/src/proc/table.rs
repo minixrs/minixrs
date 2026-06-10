@@ -20,8 +20,7 @@ use minixrs_kernel_shared::com::{
 use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use super::flags::{
-    BILLABLE, CSK_T, PREEMPTIBLE, ROOT_SYS_PROC, RTS_NO_PRIV, SRV_T, SYS_PROC, TSK_T,
-    VM_SYS_PROC,
+    BILLABLE, CSK_T, PREEMPTIBLE, ROOT_SYS_PROC, RTS_NO_PRIV, SRV_T, SYS_PROC, TSK_T, VM_SYS_PROC,
 };
 use super::priv_struct::{IPC_MAP_CHUNKS, K_CALL_MASK_CHUNKS, Priv};
 use super::proc_struct::{PROC_NAME_LEN, Proc};
@@ -65,12 +64,10 @@ struct PrivStorage(UnsafeCell<[Priv; NR_SYS_PROCS]>);
 // SAFETY: same single-threaded invariant as ProcStorage.
 unsafe impl Sync for PrivStorage {}
 
-static PROC_TABLE: ProcStorage = ProcStorage(UnsafeCell::new(
-    [const { Proc::EMPTY }; N_PROC_SLOTS],
-));
-static PRIV_TABLE: PrivStorage = PrivStorage(UnsafeCell::new(
-    [const { Priv::EMPTY }; NR_SYS_PROCS],
-));
+static PROC_TABLE: ProcStorage =
+    ProcStorage(UnsafeCell::new([const { Proc::EMPTY }; N_PROC_SLOTS]));
+static PRIV_TABLE: PrivStorage =
+    PrivStorage(UnsafeCell::new([const { Priv::EMPTY }; NR_SYS_PROCS]));
 
 /// Map a [`ProcNr`] to its index in the process table.
 ///
@@ -112,24 +109,151 @@ const _: () = assert!(N_IMAGE == 16);
 
 static IMAGE: [BootEntry; N_IMAGE] = [
     // --- Kernel tasks (always runnable) -----------------------------------
-    BootEntry { nr: ASYNCM,   name: b"asyncm",   priv_flags: SYS_PROC,            trap_mask: TSK_T, priority: TASK_Q, quantum_ms: 0, runnable: true },
-    BootEntry { nr: IDLE,     name: b"idle",     priv_flags: SYS_PROC | BILLABLE, trap_mask: TSK_T, priority: IDLE_Q, quantum_ms: 0, runnable: true },
-    BootEntry { nr: CLOCK,    name: b"clock",    priv_flags: SYS_PROC,            trap_mask: CSK_T, priority: TASK_Q, quantum_ms: 0, runnable: true },
-    BootEntry { nr: SYSTEM,   name: b"system",   priv_flags: SYS_PROC,            trap_mask: CSK_T, priority: TASK_Q, quantum_ms: 0, runnable: true },
-    BootEntry { nr: HARDWARE, name: b"hardware", priv_flags: SYS_PROC,            trap_mask: TSK_T, priority: TASK_Q, quantum_ms: 0, runnable: true },
-
+    BootEntry {
+        nr: ASYNCM,
+        name: b"asyncm",
+        priv_flags: SYS_PROC,
+        trap_mask: TSK_T,
+        priority: TASK_Q,
+        quantum_ms: 0,
+        runnable: true,
+    },
+    BootEntry {
+        nr: IDLE,
+        name: b"idle",
+        priv_flags: SYS_PROC | BILLABLE,
+        trap_mask: TSK_T,
+        priority: IDLE_Q,
+        quantum_ms: 0,
+        runnable: true,
+    },
+    BootEntry {
+        nr: CLOCK,
+        name: b"clock",
+        priv_flags: SYS_PROC,
+        trap_mask: CSK_T,
+        priority: TASK_Q,
+        quantum_ms: 0,
+        runnable: true,
+    },
+    BootEntry {
+        nr: SYSTEM,
+        name: b"system",
+        priv_flags: SYS_PROC,
+        trap_mask: CSK_T,
+        priority: TASK_Q,
+        quantum_ms: 0,
+        runnable: true,
+    },
+    BootEntry {
+        nr: HARDWARE,
+        name: b"hardware",
+        priv_flags: SYS_PROC,
+        trap_mask: TSK_T,
+        priority: TASK_Q,
+        quantum_ms: 0,
+        runnable: true,
+    },
     // --- Boot servers (blocked on RTS_NO_PRIV until slice 2.6 loads ELFs) -
-    BootEntry { nr: PM_PROC_NR,    name: b"pm",    priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: SRV_Q,  quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: VFS_PROC_NR,   name: b"vfs",   priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: SRV_Q,  quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: RS_PROC_NR,    name: b"rs",    priv_flags: SYS_PROC | PREEMPTIBLE | ROOT_SYS_PROC, trap_mask: SRV_T, priority: RS_Q,   quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: MEM_PROC_NR,   name: b"memory",priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: SRV_Q,  quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: TTY_PROC_NR,   name: b"tty",   priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: SRV_Q,  quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: DS_PROC_NR,    name: b"ds",    priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: SRV_Q,  quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: MFS_PROC_NR,   name: b"mfs",   priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: SRV_Q,  quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: VM_PROC_NR,    name: b"vm",    priv_flags: SYS_PROC | PREEMPTIBLE | VM_SYS_PROC,   trap_mask: SRV_T, priority: VM_Q,   quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: PFS_PROC_NR,   name: b"pfs",   priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: SRV_Q,  quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: SCHED_PROC_NR, name: b"sched", priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: SRV_Q,  quantum_ms: SRV_QUANTUM_MS, runnable: false },
-    BootEntry { nr: INIT_PROC_NR,  name: b"init",  priv_flags: SYS_PROC | PREEMPTIBLE,                 trap_mask: SRV_T, priority: INIT_Q, quantum_ms: SRV_QUANTUM_MS, runnable: false },
+    BootEntry {
+        nr: PM_PROC_NR,
+        name: b"pm",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: VFS_PROC_NR,
+        name: b"vfs",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: RS_PROC_NR,
+        name: b"rs",
+        priv_flags: SYS_PROC | PREEMPTIBLE | ROOT_SYS_PROC,
+        trap_mask: SRV_T,
+        priority: RS_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: MEM_PROC_NR,
+        name: b"memory",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: TTY_PROC_NR,
+        name: b"tty",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: DS_PROC_NR,
+        name: b"ds",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: MFS_PROC_NR,
+        name: b"mfs",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: VM_PROC_NR,
+        name: b"vm",
+        priv_flags: SYS_PROC | PREEMPTIBLE | VM_SYS_PROC,
+        trap_mask: SRV_T,
+        priority: VM_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: PFS_PROC_NR,
+        name: b"pfs",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: SCHED_PROC_NR,
+        name: b"sched",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: INIT_PROC_NR,
+        name: b"init",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: INIT_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -219,8 +343,7 @@ fn init_empty_slots() {
 
     for i in 0..NR_SYS_PROCS {
         // SAFETY: index in-range; single-threaded boot context.
-        let pr = unsafe { priv_slot_mut(PrivId::new(i as u16)) }
-            .expect("priv index in range");
+        let pr = unsafe { priv_slot_mut(PrivId::new(i as u16)) }.expect("priv index in range");
         pr.id = PrivId::new(i as u16);
     }
 }
