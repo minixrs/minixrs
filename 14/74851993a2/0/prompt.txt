@@ -11,3 +11,7 @@ Yes go ahead
 ---
 
 yes
+
+---
+
+Sonarcloud raised a security concern
