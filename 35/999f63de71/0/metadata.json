@@ -1,0 +1,116 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "35999f63de71",
+  "session_id": "6c0a277c-a26e-42e5-80de-e4e45b5fce39",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-13T15:22:30.319185Z",
+  "branch": "feature/phase-3-6-vm-mmap",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "CLAUDE.md",
+    "book/src/SUMMARY.md",
+    "book/src/memory/overview.md",
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "servers/vm/src/main.rs",
+    "servers/vm/src/region.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "c1c99e107144",
+  "token_usage": {
+    "input_tokens": 38810,
+    "cache_creation_tokens": 806007,
+    "cache_read_tokens": 12231638,
+    "output_tokens": 61395,
+    "api_call_count": 84
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01MQMM41xgRabLm3yQFpFP7i",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "c1c99e107144",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 415,
+        "end": 416,
+        "entry_ids": [
+          "6ca84f71-f446-4adc-b754-1162f3b6d820"
+        ],
+        "tool_use_id": "toolu_01MQMM41xgRabLm3yQFpFP7i"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01MQMM41xgRabLm3yQFpFP7i"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-13T15:22:30.303925Z",
+    "agent_lines": 544,
+    "agent_removed": 25,
+    "human_added": 5,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 549,
+    "total_lines_changed": 574,
+    "agent_percentage": 99.12891986062718,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 544,
+      "agent_lines_removed": 25
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 544,
+      "agent_lines_removed": 25
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 544,
+      "agent_lines_removed": 25
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 544,
+      "agent_lines_removed": 25
+    }
+  ]
+}

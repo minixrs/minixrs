@@ -1,0 +1,13 @@
+work on the next slice of @docs/plan.md
+
+---
+
+install mdbook locally so I can preview
+
+---
+
+stop the sever
+
+---
+
+commit and create pr
