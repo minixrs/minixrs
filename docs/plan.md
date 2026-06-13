@@ -727,7 +727,7 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   → `[ksys VMCTL_PT_MAP] proc=D pa=0x40023000 result=0` round-trip → D runs
   91 ticks with no re-fault; A/B ping-pong + C `SYS_GETINFO` intact, zero
   nonzero results, no panic. **Phase 3 milestone reached.**
-- **Slice 3.5** ◀ ready (branch `feature/phase-3-5-vm-brk`, pending merge) — VM
+- **Slice 3.5** ✓ shipped (PR #15, merged 2026-06-08) — VM
   region tracking + `VM_BRK`. New `servers/vm/src/region.rs`: a static
   `[ClientRegions; 16]` table (`UnsafeCell` newtype, keyed by proc number;
   `MAX_REGIONS = 4`) with `HEAP_BASE = 0x0100_0000`, `set_brk` (find-or-create
@@ -746,7 +746,38 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   in QEMU: `[pf] proc=D far=0x1000000` + `far=0x1004000`, two
   `[ksys VMCTL_PT_MAP] proc=D va=0x1000000`/`va=0x1004000` `result=0`, then D
   round-robins with no re-fault; A↔B + C intact, no panic / `el0_sync_unexpected`.
-- **Slice 3.6** ◀ next — `VM_MMAP` / `VM_MUNMAP` + Phase 3 doc/CLAUDE.md cleanup.
+- **Slice 3.6** ◀ ready (branch `feature/phase-3-6-vm-mmap`, pending merge) —
+  `VM_MMAP` / `VM_MUNMAP` + Phase 3 doc/CLAUDE.md cleanup. **Phase 3 complete.**
+  `kernel-shared/callnr.rs` gains `VM_MMAP = VM_RQ_BASE + 2` (`0xC02`) and
+  `VM_MUNMAP = VM_RQ_BASE + 3` (`0xC03`) with two host contiguity tests. New in
+  `servers/vm/src/region.rs`: a `Kind::Mmap` region variant and a per-client
+  bump arena (`mmap_next`, seeded to `MMAP_BASE = 0x0200_0000` — a clean 16 MiB
+  above `HEAP_BASE`). `mmap(len)` page-aligns, claims a free `MAX_REGIONS` slot
+  as `Kind::Mmap [mmap_next, +size)`, bumps the pointer, and returns the
+  VM-chosen base (`EINVAL` on zero/overflow len, `ENOMEM` on a full table —
+  like `mmap(NULL, …)`); `munmap(addr, len)` matches the `Mmap` region by base,
+  marks it `Unused`, and returns the page-aligned `[start, min(end, region.end))`
+  sweep range — the `min` cap stops an overstated `len` from freeing heap
+  frames. Ten new host tests cover both. The VM server (`main.rs`) dispatches
+  `VM_MMAP → handle_mmap` (reply chosen base in payload `0..8`) and
+  `VM_MUNMAP → handle_munmap`, which loops `SYS_VMCTL(VMCTL_PT_UNMAP)` over the
+  returned range, ignoring the harmless `EINVAL` a never-faulted page returns.
+  No kernel dispatch, `do_vmctl`, or priv-wiring changes — mmap/munmap ride the
+  same D→VM SENDREC edge `install_stub_d_priv` already opened for brk.
+  `user_stub.S` extends stub D after its brk sequence: `VM_MMAP(0x2000)` →
+  stash the returned base in callee-saved `x22` → touch it (faults once, VM
+  maps it) → `VM_MUNMAP(x22, 0x2000)` → steady loop over the two heap pages only
+  (the mmap page is now unmapped). Docs: a real mdBook *Memory Management*
+  chapter (`book/src/memory/overview.md`) written from source — frame
+  allocator, per-proc `AddrSpace`/TTBR0/ASID, the page-fault → VM flow,
+  `SYS_VMCTL`, and brk/mmap/munmap — plus CLAUDE.md notes on VM region kinds and
+  the `VMCTL_PT_UNMAP`-on-hole behavior. Verified in QEMU over 8 s: five `[as]`
+  lines (A/B/C/D + vm); three `[pf] proc=D` faults (`far=0x1000000`,
+  `0x1004000`, `0x2000000`); three `[ksys VMCTL_PT_MAP] proc=D` (the two heap
+  pages + `va=0x2000000`) and exactly one `[ksys VMCTL_PT_UNMAP] proc=D
+  va=0x2000000` (the second, never-touched mmap page is a silent kernel
+  `EINVAL`); D then round-robins with no re-fault; A↔B ping-pong + C
+  `SYS_GETINFO` intact; zero nonzero results, no panic / `el0_sync_unexpected`.
 
 Aggregate scope (Phase 3 as a whole):
 
