@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "35999f63de71",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-3-6-vm-mmap",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "CLAUDE.md",
+    "book/src/SUMMARY.md",
+    "book/src/memory/overview.md",
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "servers/vm/src/main.rs",
+    "servers/vm/src/region.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/35/999f63de71/0/metadata.json",
+      "transcript": "/35/999f63de71/0/full.jsonl",
+      "content_hash": "/35/999f63de71/0/content_hash.txt",
+      "prompt": "/35/999f63de71/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 38810,
+    "cache_creation_tokens": 806007,
+    "cache_read_tokens": 12231638,
+    "output_tokens": 61395,
+    "api_call_count": 84
+  }
+}
