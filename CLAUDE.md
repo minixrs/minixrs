@@ -123,6 +123,8 @@ See `docs/architecture.md` for the full system design. Key concepts:
 - ELF-only attributes on server crates (`#[unsafe(link_section = ".text._start")]`, etc.) must be `#[cfg_attr(target_os = "none", ...)]`-gated — `cargo check --workspace` also builds servers for the Mach-O host, which rejects ELF section specifiers
 - User-space servers run at EL0 with no console access — they cannot print. Verify server behavior through kernel-side traces (`[pf]` from `do_page_fault`, `[ksys …]` from `do_vmctl`/`system`, `[ipc N]` head-trace from `ipc::dispatch`), never server-side logging
 - `init_boot_image` fills a boot server's `ipc_to` only for active boot priv slots `[0, n_active)` (~0–15). A hand-installed stub in a higher priv slot (16+) that a server must *reply* to needs the reverse `ipc_to` bit opened explicitly — see `install_stub_d_priv` opening VM→D after setting D→VM
+- VM (`servers/vm/`) tracks per-process memory as a static `[ClientRegions; 16]` keyed by proc number (no heap allocator — the kernel owns frames), each region a half-open `[start, end)` tagged `Kind::{Heap, Mmap, Unused}`. A page fault is satisfied only when its address lies inside a region; out-of-region faults are a silent SIGSEGV (faulter left blocked on `RTS_PAGEFAULT` — real signals are Phase 4). `VM_BRK`/`VM_MMAP`/`VM_MUNMAP` all ride the single D→VM SENDREC edge, so adding an mmap client needs no new priv wiring beyond the brk one
+- `SYS_VMCTL(VMCTL_PT_UNMAP)` returns `EINVAL` (no panic, no frame freed) when nothing is mapped at the target VA — so VM's `munmap` can sweep a region page-by-page with `VMCTL_PT_UNMAP` and ignore the never-faulted pages. Keep the unmap sweep capped at the region's own `end` so an overstated `len` can't reach a neighbor's frames
 
 ## Documentation
 
@@ -133,5 +135,10 @@ actions SHA-pinned like `ci.yml`). Write new documentation there, derived from s
 the `docs/*.md` files are legacy bootstrap notes being retired (with `docs/plan.md` still
 the live slice tracker, below). Build locally with `mdbook build book`; output `book/book/`
 is gitignored.
+
+mdBook isn't installed by default. Install the **prebuilt** binary pinned to CI's 0.5.3
+(`cargo install mdbook` compiles slowly from source) — for Apple Silicon:
+`curl -fsSL https://github.com/rust-lang/mdBook/releases/download/v0.5.3/mdbook-v0.5.3-aarch64-apple-darwin.tar.gz | tar xz && mv mdbook ~/.cargo/bin/`.
+Live preview with reload: `mdbook serve book -n 127.0.0.1 -p 3000`.
 
 `docs/plan.md` tracks slice status with three markers: `◀ next` (unstarted), `◀ ready (branch ..., pending merge)` (implemented but unmerged), `✓ shipped (PR #N, merged YYYY-MM-DD)` (merged). Flip the previous slice forward and slide `◀ next` ahead as part of each slice's PR. When opening a new slice PR, also reconcile any older `◀ ready` markers against `git log` — stale "pending merge" labels on already-merged PRs accumulate otherwise.

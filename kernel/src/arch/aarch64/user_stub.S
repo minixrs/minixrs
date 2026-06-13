@@ -48,6 +48,8 @@
     .equ SYS_GETINFO,  0x600               // KERNEL_CALL + 0
     .equ GET_WHOAMI,   12
     .equ VM_BRK,       0xC01               // VM_RQ_BASE + 1
+    .equ VM_MMAP,      0xC02               // VM_RQ_BASE + 2
+    .equ VM_MUNMAP,    0xC03               // VM_RQ_BASE + 3
     .equ MSG_SIZE,     104                 // sizeof(Message); fits in `mov` imm12
 
 /* ---- Stub A: sender ----------------------------------------------------- */
@@ -129,10 +131,10 @@ _user_stub_c_start:
 _user_stub_c_end:
     .size _user_stub_c_start, _user_stub_c_end - _user_stub_c_start
 
-/* ---- Stub D: brk + on-demand paging demo (slice 3.5) ------------------- */
+/* ---- Stub D: brk + mmap/munmap + on-demand paging demo (slices 3.5/3.6) -- */
 
 /*
- * Stub D drives the VM server's region tracking + brk:
+ * Stub D drives the VM server's region tracking, brk, and mmap/munmap:
  *
  *   1. VM_BRK(0x0100_4000): SENDREC to VM. VM creates D's heap region
  *      [0x0100_0000, 0x0100_4000) and replies. No frames are mapped yet.
@@ -144,11 +146,21 @@ _user_stub_c_end:
  *   4. Touch heap page 1 (0x0100_4000): only in range *after* step 3 — faults
  *      once, VM maps it. Had step 3 not grown the heap, this would be an
  *      out-of-region SIGSEGV (VM leaves the faulter blocked).
- *   5. Loop writing both pages, incrementing a counter in x19. No further
- *      faults — the pages stay mapped, so D round-robins like A/B/C.
+ *   5. VM_MMAP(0x2000): SENDREC to VM. VM bump-allocates an anonymous region
+ *      from MMAP_BASE (0x0200_0000) and replies with the chosen base, which D
+ *      stashes in x22.
+ *   6. Touch the mmap page (x22): faults once; VM sees it is in the mmap region
+ *      and maps it, exactly like the heap.
+ *   7. VM_MUNMAP(x22, 0x2000): SENDREC to VM. VM drops the region and unmaps the
+ *      one mapped page (SYS_VMCTL(VMCTL_PT_UNMAP)); the second, never-touched
+ *      page is a harmless EINVAL inside the kernel.
+ *   8. Loop writing the two *heap* pages, incrementing a counter in x19. The
+ *      mmap page is now unmapped, so D must not touch x22 again (that would be
+ *      an out-of-region SIGSEGV). No further faults — D round-robins like A/B/C.
  *
- * x19/x20/x21 are AAPCS callee-saved and survive the SVC (trap.S saves and
- * restores x0..x30). The 104-byte Message is carved from [SP_EL0-104, SP_EL0).
+ * x19/x20/x21/x22 are AAPCS callee-saved and survive the SVC (trap.S saves and
+ * restores x0..x30), so x22 (the mmap base) is still valid for the munmap after
+ * an intervening SVC. The 104-byte Message is carved from [SP_EL0-104, SP_EL0).
  */
 
     .section .rodata.user_stub_d, "a", %progbits
@@ -192,7 +204,38 @@ _user_stub_d_start:
     movk    x21, #0x4000                      // x21 = 0x0100_4000 (heap page 1)
     str     x19, [x21]
 
-    // --- steady loop: write both pages, no further faults ---
+    // --- mmap: request 0x2000 bytes; VM chooses and returns the base ---
+    sub     x9, sp, #MSG_SIZE
+    str     wzr, [x9, #0]                     // m_source — kernel overwrites
+    mov     w10, #VM_MMAP
+    str     w10, [x9, #4]                     // m_type = VM_MMAP
+    mov     x11, #0x2000
+    str     x11, [x9, #8]                     // payload[0..8] = len
+    mov     x0, #ENDPOINT_VM
+    mov     x1, #SENDREC
+    mov     x2, x9
+    svc     #0
+    // Reply landed in the same buffer (SP unchanged); payload[0..8] is the base.
+    ldr     x22, [x9, #8]                     // x22 = mmap base (survives SVC)
+
+    // --- touch the mmap page: faults once, VM maps it (region contains it) ---
+    str     x19, [x22]
+
+    // --- munmap: drop the mmap region and unmap its backing page ---
+    sub     x9, sp, #MSG_SIZE
+    str     wzr, [x9, #0]
+    mov     w10, #VM_MUNMAP
+    str     w10, [x9, #4]                     // m_type = VM_MUNMAP
+    str     x22, [x9, #8]                     // payload[0..8] = base
+    mov     x11, #0x2000
+    str     x11, [x9, #16]                    // payload[8..16] = len
+    mov     x0, #ENDPOINT_VM
+    mov     x1, #SENDREC
+    mov     x2, x9
+    svc     #0
+    // x22's page is now unmapped; the steady loop must touch only the heap pages.
+
+    // --- steady loop: write both heap pages, no further faults ---
 1:
     str     x19, [x20]
     str     x19, [x21]
