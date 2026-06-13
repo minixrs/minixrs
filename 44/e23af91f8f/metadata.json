@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "44e23af91f8f",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-3-6-vm-mmap",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "sonar-project.properties"
+  ],
+  "sessions": [
+    {
+      "metadata": "/44/e23af91f8f/0/metadata.json",
+      "transcript": "/44/e23af91f8f/0/full.jsonl",
+      "content_hash": "/44/e23af91f8f/0/content_hash.txt",
+      "prompt": "/44/e23af91f8f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 282,
+    "cache_creation_tokens": 18305,
+    "cache_read_tokens": 2475411,
+    "output_tokens": 13491,
+    "api_call_count": 12
+  }
+}
