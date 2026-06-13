@@ -172,8 +172,14 @@ impl ClientRegions {
     /// *base*, so an over- or under-stated `len` can never unmap a neighbor; the
     /// returned `end` is additionally capped at the region's own `end` so an
     /// overstated `len` cannot drive the sweep into the heap and free its
-    /// frames. `EINVAL` if no `Mmap` region starts at `addr` or `len` overflows.
+    /// frames. `EINVAL` if `len` is 0, no `Mmap` region starts at `addr`, or
+    /// `len` overflows. Rejecting `len == 0` (as POSIX does, and symmetric with
+    /// [`mmap`](Self::mmap)) avoids dropping a region's tracking while leaving
+    /// its already-faulted-in frames mapped and orphaned.
     fn munmap(&mut self, addr: u64, len: u64) -> Result<(u64, u64), i32> {
+        if len == 0 {
+            return Err(EINVAL);
+        }
         let size = len
             .checked_add(PAGE_SIZE - 1)
             .map(|v| v & !(PAGE_SIZE - 1))
@@ -256,7 +262,7 @@ pub fn mmap(nr: i32, len: u64) -> Result<u64, i32> {
 
 /// Drop process `nr`'s mmap region based at `addr` and return the page-aligned
 /// `[start, end)` range whose backing pages the caller must unmap. `EINVAL` if
-/// `nr` is untrackable or no `Mmap` region starts at `addr`.
+/// `nr` is untrackable, `len` is 0, or no `Mmap` region starts at `addr`.
 pub fn munmap(nr: i32, addr: u64, len: u64) -> Result<(u64, u64), i32> {
     client_mut(nr).ok_or(EINVAL)?.munmap(addr, len)
 }
@@ -435,6 +441,17 @@ mod tests {
         // The heap region survives untouched.
         assert!(c.contains(HEAP_BASE));
         assert_eq!(c.regions.iter().filter(|r| r.kind == Kind::Heap).count(), 1);
+    }
+
+    #[test]
+    fn munmap_zero_len_is_einval_and_keeps_region() {
+        let mut c = ClientRegions::EMPTY;
+        let a = c.mmap(0x1000).unwrap();
+        // len == 0 must not drop the region (which would orphan its mapped
+        // frames); the mapping stays tracked, symmetric with mmap(0) == EINVAL.
+        assert_eq!(c.munmap(a, 0), Err(EINVAL));
+        assert!(c.contains(a));
+        assert_eq!(c.regions.iter().filter(|r| r.kind == Kind::Mmap).count(), 1);
     }
 
     #[test]
