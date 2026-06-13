@@ -188,9 +188,10 @@ pub unsafe fn userland_bootstrap() {
             &_user_stub_d_end,
             USER_CODE_VA_D,
             USER_STACK_VA_D,
-            // D issues `VM_BRK` to grow its heap, then touches it (slice 3.5).
-            // Faults route to the VM server, which gates them on its region
-            // table. The kernel `heap_window` fast path stays unused, so EMPTY.
+            // D issues `VM_BRK` to grow its heap and touches it (slice 3.5),
+            // then `VM_MMAP`/`VM_MUNMAP` an anonymous region (slice 3.6). Faults
+            // route to the VM server, which gates them on its region table. The
+            // kernel `heap_window` fast path stays unused, so EMPTY.
             HeapWindow::EMPTY,
         );
     }
@@ -477,12 +478,14 @@ unsafe fn install_stub_c_priv() {
     pr.sig_mgr = boot_endpoint(RS_PROC_NR);
 }
 
-/// Install stub D's priv slot (slice 3.5). D now drives `brk`: it issues
-/// `VM_BRK` SENDRECs to the VM server, then touches the grown heap. So D gets
-/// `trap_mask = USR_T` (SENDREC only, like stub C) with `ipc_to` opened to
-/// VM's priv slot. `k_call_mask` stays empty — D never calls the kernel
-/// directly; it talks to VM, and its page faults reach VM via the kernel
-/// (`mini_pf_send`, which performs no permission check).
+/// Install stub D's priv slot (slice 3.5/3.6). D drives `brk` and, since slice
+/// 3.6, `mmap`/`munmap`: it issues `VM_BRK` / `VM_MMAP` / `VM_MUNMAP` SENDRECs to
+/// the VM server, then touches the regions it created. All three ride the same
+/// D→VM edge, so D gets `trap_mask = USR_T` (SENDREC only, like stub C) with
+/// `ipc_to` opened to VM's priv slot and nothing else. `k_call_mask` stays
+/// empty — D never calls the kernel directly; it talks to VM, and its page
+/// faults reach VM via the kernel (`mini_pf_send`, which performs no permission
+/// check).
 ///
 /// VM's own `ipc_to` was filled by `init_boot_image` only for the active boot
 /// priv slots `[0, n_active)` (≈ 0..15); stub D's slot is 19, so VM cannot

@@ -24,12 +24,22 @@
 
 use core::cell::UnsafeCell;
 
-use minixrs_kernel_shared::error::EINVAL;
+use minixrs_kernel_shared::error::{EINVAL, ENOMEM};
 
 /// Fixed heap origin. Until PM supplies a real per-process memory layout
 /// (Phase 4), VM and stub D agree on this VA by convention: `brk` grows the
 /// heap as `[HEAP_BASE, new_break)` and stub D writes inside that range.
 pub const HEAP_BASE: u64 = 0x0100_0000;
+
+/// Origin of the per-process anonymous-mmap arena. VM bump-allocates mmap
+/// addresses upward from here, so a mapping never collides with stub D's code
+/// (`0x0043_0000`), stack (`0x0083_0000`), or heap
+/// (`[0x0100_0000, 0x0100_8000)` today). `0x0200_0000` sits a clean 16 MiB above
+/// `HEAP_BASE`, leaving the heap room to grow before it could reach the arena.
+/// The arena itself is bump-only — munmap never returns addresses to it (reuse
+/// waits for Phase 4's real per-process VM layout), so an unbounded mmap loop
+/// would eventually walk off the end; acceptable while only the boot stubs run.
+pub const MMAP_BASE: u64 = 0x0200_0000;
 
 /// aarch64 4 KiB page.
 const PAGE_SIZE: u64 = 4096;
@@ -37,8 +47,8 @@ const PAGE_SIZE: u64 = 4096;
 /// Proc-number range the table can key. Boot procs are `0..=15`.
 const MAX_CLIENTS: usize = 16;
 
-/// Regions tracked per process. One heap today; `mmap` regions (slice 3.6)
-/// reuse the spare slots.
+/// Regions tracked per process: one heap plus a few `mmap` regions in the
+/// spare slots.
 const MAX_REGIONS: usize = 4;
 
 /// What a region is for. `Unused` marks a free slot.
@@ -46,6 +56,7 @@ const MAX_REGIONS: usize = 4;
 pub enum Kind {
     Unused,
     Heap,
+    Mmap,
 }
 
 /// A half-open virtual-address range `[start, end)` and what it backs.
@@ -72,11 +83,16 @@ impl Region {
 #[derive(Copy, Clone)]
 struct ClientRegions {
     regions: [Region; MAX_REGIONS],
+    /// Next free VA for an anonymous mmap. Bump-only: munmap never returns
+    /// addresses here (matches a trivial mmap allocator; reuse waits for
+    /// Phase 4's real VM layout).
+    mmap_next: u64,
 }
 
 impl ClientRegions {
     const EMPTY: Self = Self {
         regions: [Region::EMPTY; MAX_REGIONS],
+        mmap_next: MMAP_BASE,
     };
 
     /// True if `addr` falls inside one of this client's regions.
@@ -115,6 +131,66 @@ impl ClientRegions {
                     kind: Kind::Heap,
                 };
                 return Ok(end);
+            }
+        }
+        Err(EINVAL)
+    }
+
+    /// Allocate an anonymous mmap region of `len` bytes. `len` is rounded up to
+    /// a whole page; the base address is bump-allocated from `mmap_next`.
+    /// Returns the chosen base. Errors: `EINVAL` if `len` is 0 or the round-up /
+    /// bump would overflow `u64`; `ENOMEM` if no region slot is free.
+    fn mmap(&mut self, len: u64) -> Result<u64, i32> {
+        if len == 0 {
+            return Err(EINVAL);
+        }
+        // page_align_up, guarding the round-up add against wraparound.
+        let size = len
+            .checked_add(PAGE_SIZE - 1)
+            .map(|v| v & !(PAGE_SIZE - 1))
+            .ok_or(EINVAL)?;
+        let start = self.mmap_next;
+        let end = start.checked_add(size).ok_or(EINVAL)?;
+
+        for r in self.regions.iter_mut() {
+            if r.kind == Kind::Unused {
+                *r = Region {
+                    start,
+                    end,
+                    kind: Kind::Mmap,
+                };
+                self.mmap_next = end;
+                return Ok(start);
+            }
+        }
+        Err(ENOMEM)
+    }
+
+    /// Unmap the `Mmap` region based at `addr`, marking its slot `Unused` and
+    /// returning the page-aligned `[start, end)` range whose backing pages the
+    /// caller must sweep with `VMCTL_PT_UNMAP`. The match is keyed on the region
+    /// *base*, so an over- or under-stated `len` can never unmap a neighbor; the
+    /// returned `end` is additionally capped at the region's own `end` so an
+    /// overstated `len` cannot drive the sweep into the heap and free its
+    /// frames. `EINVAL` if `len` is 0, no `Mmap` region starts at `addr`, or
+    /// `len` overflows. Rejecting `len == 0` (as POSIX does, and symmetric with
+    /// [`mmap`](Self::mmap)) avoids dropping a region's tracking while leaving
+    /// its already-faulted-in frames mapped and orphaned.
+    fn munmap(&mut self, addr: u64, len: u64) -> Result<(u64, u64), i32> {
+        if len == 0 {
+            return Err(EINVAL);
+        }
+        let size = len
+            .checked_add(PAGE_SIZE - 1)
+            .map(|v| v & !(PAGE_SIZE - 1))
+            .ok_or(EINVAL)?;
+        let end = addr.checked_add(size).ok_or(EINVAL)?;
+
+        for r in self.regions.iter_mut() {
+            if r.kind == Kind::Mmap && r.start == addr {
+                let sweep_end = end.min(r.end);
+                *r = Region::EMPTY;
+                return Ok((addr, sweep_end));
             }
         }
         Err(EINVAL)
@@ -172,6 +248,23 @@ pub fn contains(nr: i32, addr: u64) -> bool {
 /// resolved through [`contains`] in the fault path.
 pub fn set_brk(nr: i32, new_break: u64) -> Result<u64, i32> {
     client_mut(nr).ok_or(EINVAL)?.set_brk(new_break)
+}
+
+/// Allocate an anonymous mmap region of `len` bytes for process `nr`, with VM
+/// choosing the base address. Returns the base on success; `EINVAL` if `nr` is
+/// untrackable or `len` is 0/overflowing; `ENOMEM` if no region slot is free.
+///
+/// No frames are mapped here — pages fault in lazily on first touch and are
+/// resolved through [`contains`] in the fault path.
+pub fn mmap(nr: i32, len: u64) -> Result<u64, i32> {
+    client_mut(nr).ok_or(EINVAL)?.mmap(len)
+}
+
+/// Drop process `nr`'s mmap region based at `addr` and return the page-aligned
+/// `[start, end)` range whose backing pages the caller must unmap. `EINVAL` if
+/// `nr` is untrackable, `len` is 0, or no `Mmap` region starts at `addr`.
+pub fn munmap(nr: i32, addr: u64, len: u64) -> Result<(u64, u64), i32> {
+    client_mut(nr).ok_or(EINVAL)?.munmap(addr, len)
 }
 
 #[cfg(test)]
@@ -264,5 +357,109 @@ mod tests {
         let c = ClientRegions::EMPTY;
         assert!(!c.contains(HEAP_BASE));
         assert!(!c.contains(0));
+    }
+
+    #[test]
+    fn mmap_creates_region_and_returns_base() {
+        let mut c = ClientRegions::EMPTY;
+        let a = c.mmap(0x2000).unwrap();
+        assert_eq!(a, MMAP_BASE);
+        assert!(c.contains(MMAP_BASE));
+        assert!(c.contains(MMAP_BASE + 0x1FFF));
+        // Half-open: the byte at the region end is *past* the mapping.
+        assert!(!c.contains(MMAP_BASE + 0x2000));
+    }
+
+    #[test]
+    fn mmap_rounds_len_up_to_page() {
+        let mut c = ClientRegions::EMPTY;
+        let a = c.mmap(1).unwrap();
+        assert!(c.contains(a + PAGE_SIZE - 1));
+        assert!(!c.contains(a + PAGE_SIZE));
+        // The next mmap starts a full page above, not one byte above.
+        let b = c.mmap(1).unwrap();
+        assert_eq!(b, a + PAGE_SIZE);
+    }
+
+    #[test]
+    fn mmap_bumps_address_each_call() {
+        let mut c = ClientRegions::EMPTY;
+        let a = c.mmap(0x2000).unwrap();
+        let b = c.mmap(0x1000).unwrap();
+        assert_eq!(b, a + 0x2000);
+        assert!(c.contains(a));
+        assert!(c.contains(b));
+    }
+
+    #[test]
+    fn mmap_zero_len_is_einval() {
+        let mut c = ClientRegions::EMPTY;
+        assert_eq!(c.mmap(0), Err(EINVAL));
+    }
+
+    #[test]
+    fn mmap_overflowing_len_is_einval_not_wrap() {
+        let mut c = ClientRegions::EMPTY;
+        assert_eq!(c.mmap(u64::MAX), Err(EINVAL));
+    }
+
+    #[test]
+    fn mmap_enomem_when_no_slot_free() {
+        let mut c = ClientRegions::EMPTY;
+        // MAX_REGIONS slots: fill every one, then the next mmap fails ENOMEM.
+        for _ in 0..MAX_REGIONS {
+            c.mmap(0x1000).unwrap();
+        }
+        assert_eq!(c.mmap(0x1000), Err(ENOMEM));
+    }
+
+    #[test]
+    fn munmap_removes_region_and_returns_range() {
+        let mut c = ClientRegions::EMPTY;
+        let a = c.mmap(0x2000).unwrap();
+        let (start, end) = c.munmap(a, 0x2000).unwrap();
+        assert_eq!((start, end), (a, a + 0x2000));
+        assert!(!c.contains(a));
+        let mmaps = c.regions.iter().filter(|r| r.kind == Kind::Mmap).count();
+        assert_eq!(mmaps, 0);
+    }
+
+    #[test]
+    fn munmap_unknown_addr_is_einval() {
+        let mut c = ClientRegions::EMPTY;
+        assert_eq!(c.munmap(MMAP_BASE, 0x1000), Err(EINVAL)); // nothing mapped
+        let a = c.mmap(0x1000).unwrap();
+        assert_eq!(c.munmap(a + 0x1000, 0x1000), Err(EINVAL)); // wrong base
+    }
+
+    #[test]
+    fn munmap_does_not_touch_heap_region() {
+        let mut c = ClientRegions::EMPTY;
+        c.set_brk(HEAP_BASE + 0x1000).unwrap();
+        let a = c.mmap(0x1000).unwrap();
+        c.munmap(a, 0x1000).unwrap();
+        // The heap region survives untouched.
+        assert!(c.contains(HEAP_BASE));
+        assert_eq!(c.regions.iter().filter(|r| r.kind == Kind::Heap).count(), 1);
+    }
+
+    #[test]
+    fn munmap_zero_len_is_einval_and_keeps_region() {
+        let mut c = ClientRegions::EMPTY;
+        let a = c.mmap(0x1000).unwrap();
+        // len == 0 must not drop the region (which would orphan its mapped
+        // frames); the mapping stays tracked, symmetric with mmap(0) == EINVAL.
+        assert_eq!(c.munmap(a, 0), Err(EINVAL));
+        assert!(c.contains(a));
+        assert_eq!(c.regions.iter().filter(|r| r.kind == Kind::Mmap).count(), 1);
+    }
+
+    #[test]
+    fn munmap_caps_sweep_to_region_end() {
+        let mut c = ClientRegions::EMPTY;
+        let a = c.mmap(0x1000).unwrap();
+        // Caller overstates len; the sweep must not exceed the region's own end.
+        let (start, end) = c.munmap(a, 0x4000).unwrap();
+        assert_eq!((start, end), (a, a + 0x1000));
     }
 }

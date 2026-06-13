@@ -19,7 +19,11 @@
 //! request that grows a process's heap region. Page faults are now satisfied
 //! only when the address lies inside a known region; out-of-region faults take
 //! a SIGSEGV path (logged, faulter left blocked — real signals are Phase 4).
-//! `VM_MMAP` arrives in slice 3.6.
+//!
+//! Slice 3.6 adds `VM_MMAP` / `VM_MUNMAP`: anonymous, VM-chosen regions
+//! bump-allocated from `MMAP_BASE`. `VM_MMAP` records an `Mmap` region (pages
+//! fault in lazily, like the heap); `VM_MUNMAP` drops the region and unmaps each
+//! backing page via `SYS_VMCTL(VMCTL_PT_UNMAP)`.
 
 // Freestanding for the real (bare-metal) build, but a normal host binary under
 // `cargo test` so `region`'s logic gets host-runnable unit tests. The test
@@ -33,7 +37,8 @@ mod region;
 use minixrs_ipc::{ipc_receive, ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    SYS_VMCTL, VM_BRK, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE, VMCTL_PT_MAP,
+    SYS_VMCTL, VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE,
+    VMCTL_PT_MAP, VMCTL_PT_UNMAP,
 };
 use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
@@ -75,7 +80,9 @@ fn main() -> ! {
         match msg.m_type {
             VM_PAGEFAULT => handle_pagefault(system, msg.m_source, rd_u64(&msg, 0)),
             VM_BRK => handle_brk(&mut msg),
-            // Unknown request: drop it. VM_MMAP arrives in slice 3.6.
+            VM_MMAP => handle_mmap(&mut msg),
+            VM_MUNMAP => handle_munmap(system, &mut msg),
+            // Unknown request: drop it.
             _ => {}
         }
     }
@@ -136,6 +143,69 @@ fn handle_brk(msg: &mut Message) {
     let reply_type = match region::set_brk(nr, new_break) {
         Ok(brk) => {
             wr_u64(msg, 0, brk);
+            OK
+        }
+        Err(e) => e,
+    };
+
+    msg.m_type = reply_type;
+    msg.m_source = 0; // kernel overwrites on delivery
+    let _ = ipc_send(caller_e, msg);
+}
+
+/// Handle a `VM_MMAP` request: allocate an anonymous region of `len` bytes
+/// (payload `0..8`), letting VM choose the base address. No frames are mapped
+/// here — pages fault in lazily and are satisfied by [`handle_pagefault`] via
+/// the region check. Reply (the caller issued a SENDREC) with `m_type = OK` and
+/// the chosen base in payload `0..8`, or the negative error in `m_type`.
+fn handle_mmap(msg: &mut Message) {
+    let caller_e = msg.m_source;
+    let nr = endpoint_proc(caller_e).get();
+    let len = rd_u64(msg, 0);
+
+    let reply_type = match region::mmap(nr, len) {
+        Ok(addr) => {
+            wr_u64(msg, 0, addr);
+            OK
+        }
+        Err(e) => e,
+    };
+
+    msg.m_type = reply_type;
+    msg.m_source = 0; // kernel overwrites on delivery
+    let _ = ipc_send(caller_e, msg);
+}
+
+/// Handle a `VM_MUNMAP` request: drop the caller's mmap region based at `addr`
+/// (payload `0..8`) covering `len` bytes (payload `8..16`), then unmap each
+/// backing page. [`region::munmap`] returns the page-aligned `[start, end)`
+/// snapshot to sweep and marks the slot free *before* we touch the page tables,
+/// so the loop runs off owned values, not a re-read of the region. A page that
+/// never faulted in was never mapped, so the kernel returns `EINVAL` for it —
+/// harmless, ignored (same as unmapping a hole). Reply with `m_type = OK`, or
+/// `EINVAL` if no region matched (nothing is unmapped in that case).
+fn handle_munmap(system: Endpoint, msg: &mut Message) {
+    let caller_e = msg.m_source;
+    let nr = endpoint_proc(caller_e).get();
+    let addr = rd_u64(msg, 0);
+    let len = rd_u64(msg, 8);
+
+    let reply_type = match region::munmap(nr, addr, len) {
+        Ok((start, end)) => {
+            let mut page = start;
+            while page < end {
+                let mut m = Message {
+                    m_source: 0,
+                    m_type: SYS_VMCTL,
+                    payload: [0u8; 96],
+                };
+                wr_i32(&mut m, 0, VMCTL_PT_UNMAP);
+                wr_i32(&mut m, 4, caller_e);
+                wr_u64(&mut m, 8, page);
+                // Ignore the result: a never-faulted page is EINVAL, harmless.
+                let _ = ipc_sendrec(system, &mut m);
+                page += PAGE_SIZE;
+            }
             OK
         }
         Err(e) => e,

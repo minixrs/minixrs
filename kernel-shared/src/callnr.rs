@@ -106,7 +106,7 @@ pub const VMCTL_PROT_EXEC: i32 = 1 << 1;
 // These are *server IPC requests*, not kernel calls, so they live in their own
 // range distinct from `KERNEL_CALL` (`0x600`). The kernel originates
 // `VM_PAGEFAULT` on a faulting process's behalf (slice 3.4); later slices add
-// `VM_BRK` / `VM_MMAP`. Numbering is minix.rs-specific (MINIX 3's VM request set
+// `VM_BRK` / `VM_MMAP` / `VM_MUNMAP`. Numbering is minix.rs-specific (MINIX 3's VM request set
 // differs because its frame allocator lives in VM, not the kernel).
 // ---------------------------------------------------------------------------
 
@@ -125,6 +125,24 @@ pub const VM_PAGEFAULT: i32 = VM_RQ_BASE;
 /// reply carries `m_type = OK` and the resulting break in payload `0..8`, or a
 /// negative error in `m_type`. (slice 3.5)
 pub const VM_BRK: i32 = VM_RQ_BASE + 1;
+
+/// EL0 → VM: anonymous mmap. The caller requests `len` bytes (payload `0..8`,
+/// u64); VM page-aligns the length, picks a free VA from the caller's mmap bump
+/// arena, records an `Mmap` region, and replies with the chosen base address in
+/// payload `0..8` and `m_type = OK`. Like `mmap(NULL, len, …)`: VM chooses the
+/// address. Pages fault in lazily on first touch (no eager mapping). On failure
+/// the negative error is in `m_type` (`EINVAL` for a zero or overflowing
+/// length, `ENOMEM` when no region slot is free). (slice 3.6)
+pub const VM_MMAP: i32 = VM_RQ_BASE + 2;
+
+/// EL0 → VM: unmap a prior mmap. The caller passes the base address (payload
+/// `0..8`, u64) and length (payload `8..16`, u64). VM page-aligns the range,
+/// drops the matching `Mmap` region, and unmaps each backing page via
+/// `SYS_VMCTL(VMCTL_PT_UNMAP)` (a never-faulted page returns a harmless
+/// `EINVAL` from the kernel, which VM ignores). The reply carries
+/// `m_type = OK`, or `EINVAL` in `m_type` if no `Mmap` region matches the base
+/// address. (slice 3.6)
+pub const VM_MUNMAP: i32 = VM_RQ_BASE + 3;
 
 #[cfg(test)]
 mod tests {
@@ -204,5 +222,28 @@ mod tests {
         assert_ne!(VM_BRK, VM_PAGEFAULT);
         assert!(VM_BRK > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
         assert_ne!(VM_BRK, crate::ipc_const::NOTIFY_MESSAGE);
+    }
+
+    #[test]
+    fn vm_mmap_follows_brk_in_request_range() {
+        // VM_MMAP is the third VM server request, contiguous after VM_BRK.
+        assert_eq!(VM_MMAP, VM_RQ_BASE + 2);
+        assert_ne!(VM_MMAP, VM_PAGEFAULT);
+        assert_ne!(VM_MMAP, VM_BRK);
+        assert!(VM_MMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+        assert_ne!(VM_MMAP, crate::ipc_const::NOTIFY_MESSAGE);
+    }
+
+    #[test]
+    fn vm_munmap_follows_mmap_in_request_range() {
+        // VM_MUNMAP is the fourth VM server request, contiguous after VM_MMAP.
+        // Each VM request must stay distinct from the others, the KERNEL_CALL
+        // range, and the NOTIFY marker so VM's m_type dispatcher can't misroute.
+        assert_eq!(VM_MUNMAP, VM_RQ_BASE + 3);
+        assert_ne!(VM_MUNMAP, VM_MMAP);
+        assert_ne!(VM_MUNMAP, VM_BRK);
+        assert_ne!(VM_MUNMAP, VM_PAGEFAULT);
+        assert!(VM_MUNMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+        assert_ne!(VM_MUNMAP, crate::ipc_const::NOTIFY_MESSAGE);
     }
 }
