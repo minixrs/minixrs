@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "e54b74aaa375",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-4-1-sef",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "Cargo.lock",
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel/build.rs",
+    "minix-ipc/src/lib.rs",
+    "server-rt/src/init.rs",
+    "server-rt/src/lib.rs",
+    "server-rt/src/sef.rs",
+    "server-rt/src/signal.rs",
+    "servers/vm/Cargo.toml",
+    "servers/vm/src/main.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e5/4b74aaa375/0/metadata.json",
+      "transcript": "/e5/4b74aaa375/0/full.jsonl",
+      "content_hash": "/e5/4b74aaa375/0/content_hash.txt",
+      "prompt": "/e5/4b74aaa375/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 20998,
+    "cache_creation_tokens": 341305,
+    "cache_read_tokens": 11487849,
+    "output_tokens": 85253,
+    "api_call_count": 67
+  }
+}
