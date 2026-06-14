@@ -746,7 +746,7 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
   in QEMU: `[pf] proc=D far=0x1000000` + `far=0x1004000`, two
   `[ksys VMCTL_PT_MAP] proc=D va=0x1000000`/`va=0x1004000` `result=0`, then D
   round-robins with no re-fault; A↔B + C intact, no panic / `el0_sync_unexpected`.
-- **Slice 3.6** ◀ ready (branch `feature/phase-3-6-vm-mmap`, pending merge) —
+- **Slice 3.6** ✓ shipped (PR #21, merged 2026-06-13) —
   `VM_MMAP` / `VM_MUNMAP` + Phase 3 doc/CLAUDE.md cleanup. **Phase 3 complete.**
   `kernel-shared/callnr.rs` gains `VM_MMAP = VM_RQ_BASE + 2` (`0xC02`) and
   `VM_MUNMAP = VM_RQ_BASE + 3` (`0xC03`) with two host contiguity tests. New in
@@ -812,7 +812,8 @@ lists pm/vfs/rs/ds/sched/init with correct priv flags, and `init_boot_image`
 already fills their `ipc_to` / `k_call_mask`, so loading a server needs only an
 ELF + the generalized `load_boot_server` path — no new boot priv wiring.
 
-- **Slice 4.1** ◀ next — `server-rt` SEF framework + migrate VM onto it + finish
+- **Slice 4.1** ◀ ready (branch `feature/phase-4-1-sef`, pending merge) —
+  `server-rt` SEF framework + migrate VM onto it + finish
   `minix-ipc`. Add `ipc_notify` / `ipc_sendnb` (new SVC `primitive` values).
   Build `server-rt`: `sef_startup()` (learn own endpoint/name via
   `SYS_GETINFO(GET_WHOAMI)`, run `init_fresh` callback) and `sef_receive()`
@@ -821,7 +822,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   registration (no heap; minimal subset vs MINIX `lib/libsys/sef.c`). Port
   `servers/vm` to the SEF loop (handlers unchanged) so VM is live regression
   coverage for the framework before any new server depends on it.
-- **Slice 4.2** — Multi-module boot image + DS server + VFS skeletal boot.
+- **Slice 4.2** ◀ next — Multi-module boot image + DS server + VFS skeletal boot.
   Generalize `kernel/build.rs`'s VM build into `build_server(...)` and pack the
   server ELFs into a single `.boot_image` MXBI archive (header table
   `{name, proc_nr, offset, len}`); `boot_image/mod.rs` exposes
