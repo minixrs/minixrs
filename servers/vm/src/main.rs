@@ -24,6 +24,13 @@
 //! bump-allocated from `MMAP_BASE`. `VM_MMAP` records an `Mmap` region (pages
 //! fault in lazily, like the heap); `VM_MUNMAP` drops the region and unmaps each
 //! backing page via `SYS_VMCTL(VMCTL_PT_UNMAP)`.
+//!
+//! Slice 4.1 moves the loop scaffolding onto the SEF framework
+//! ([`minixrs_server_rt`]): `sef_startup` performs the `GET_WHOAMI` handshake
+//! and `sef.receive` filters SEF control messages, replacing the hand-rolled
+//! `RECEIVE(ANY)` loop. The request handlers below are unchanged — VM is the
+//! first real consumer of `server-rt`, proving it before new servers depend
+//! on it.
 
 // Freestanding for the real (bare-metal) build, but a normal host binary under
 // `cargo test` so `region`'s logic gets host-runnable unit tests. The test
@@ -34,15 +41,16 @@
 
 mod region;
 
-use minixrs_ipc::{ipc_receive, ipc_send, ipc_sendrec};
+use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     SYS_VMCTL, VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE,
     VMCTL_PT_MAP, VMCTL_PT_UNMAP,
 };
 use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
-use minixrs_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
+use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
 use minixrs_kernel_shared::error::OK;
+use minixrs_server_rt::{SefConfig, sef_startup};
 
 /// aarch64 4 KiB page size — VM only needs to page-align fault addresses.
 const PAGE_SIZE: u64 = 4096;
@@ -67,6 +75,22 @@ pub extern "C" fn _start() -> ! {
 // (and the message helpers it alone reaches) would read as dead code.
 #[cfg_attr(test, allow(dead_code))]
 fn main() -> ! {
+    // Drive the loop through the SEF framework (slice 4.1): `sef_startup` learns
+    // VM's endpoint/name via SYS_GETINFO(GET_WHOAMI) and `sef.receive` strips
+    // SEF control messages, handing back only application requests. VM has no
+    // init work yet (it will publish its endpoint to DS in slice 4.2) and no
+    // signal handling, so both callbacks are `None`. If the startup handshake
+    // fails there is no recovery and nothing to print from EL0 — park forever.
+    let sef = sef_startup(SefConfig {
+        init_fresh: None,
+        signal_handler: None,
+    })
+    .unwrap_or_else(|_| {
+        loop {
+            core::hint::spin_loop()
+        }
+    });
+
     let system = boot_endpoint(SYSTEM);
     let mut msg = Message {
         m_source: 0,
@@ -74,7 +98,7 @@ fn main() -> ! {
         payload: [0u8; 96],
     };
     loop {
-        if ipc_receive(ANY, &mut msg) != 0 {
+        if sef.receive(&mut msg) != 0 {
             continue;
         }
         match msg.m_type {

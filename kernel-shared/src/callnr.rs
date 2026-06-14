@@ -144,6 +144,44 @@ pub const VM_MMAP: i32 = VM_RQ_BASE + 2;
 /// address. (slice 3.6)
 pub const VM_MUNMAP: i32 = VM_RQ_BASE + 3;
 
+// ---------------------------------------------------------------------------
+// SEF (System Event Framework) control message numbers — `m_type` values the
+// server runtime (`server-rt`) intercepts before handing traffic to a server.
+//
+// These live in their own range distinct from `KERNEL_CALL` (`0x600`) and the
+// VM request range (`VM_RQ_BASE = 0xC00`), and stay below the IPC
+// `NOTIFY_MESSAGE` marker (`0x1000`), so neither a server's `m_type`
+// dispatcher nor the SEF classifier can ever misroute. Numbering is
+// minix.rs-specific (MINIX 3 carries these inside `lib/libsys/sef.c` request
+// types rather than `com.h`).
+//
+// The RS heartbeat ("ping") deliberately gets NO number here: it is delivered
+// as a NOTIFY, so it arrives with `m_type == NOTIFY_MESSAGE` and is keyed on
+// `m_source == RS` instead (see `server-rt`'s `classify`). Do not add a
+// `SEF_PING` — there is no payload room in a NOTIFY to carry one anyway.
+// ---------------------------------------------------------------------------
+
+/// Base for SEF control message `m_type` values.
+pub const SEF_RQ_BASE: i32 = 0xD00;
+
+/// RS → server: run the registered fresh-init callback. (Re-init / live-update
+/// variants are deferred past Phase 4.)
+pub const SEF_INIT: i32 = SEF_RQ_BASE;
+
+/// PM/RS → server: deliver a signal. The signal number is in payload `0..4`
+/// (i32, native-endian); `server-rt` dispatches it to the registered signal
+/// handler.
+pub const SEF_SIGNAL: i32 = SEF_RQ_BASE + 1;
+
+/// Number of SEF control messages defined so far. Locks the classifier's
+/// coverage in `server-rt` the way `NR_VMCTL_SUBCALLS` locks `do_vmctl`.
+pub const NR_SEF_MSGS: usize = 2;
+
+// The SEF range sits strictly above the VM request range (0xC00..0xC03) so a
+// server's `m_type` dispatcher and the SEF classifier can never collide.
+const _: () = assert!(SEF_RQ_BASE > VM_RQ_BASE + 3);
+const _: () = assert!(SEF_RQ_BASE < crate::ipc_const::NOTIFY_MESSAGE);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +283,34 @@ mod tests {
         assert_ne!(VM_MUNMAP, VM_PAGEFAULT);
         assert!(VM_MUNMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
         assert_ne!(VM_MUNMAP, crate::ipc_const::NOTIFY_MESSAGE);
+    }
+
+    #[test]
+    fn sef_msgs_contiguous_from_base() {
+        // SEF control messages are contiguous from SEF_RQ_BASE; NR_SEF_MSGS
+        // locks `server-rt`'s classifier coverage.
+        let msgs = [SEF_INIT, SEF_SIGNAL];
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(*m, SEF_RQ_BASE + i as i32);
+        }
+        assert_eq!(msgs.len(), NR_SEF_MSGS);
+    }
+
+    #[test]
+    fn sef_msgs_distinct_from_vm_kernel_and_notify_ranges() {
+        // Each SEF control message must stay distinct from the VM request
+        // range, the KERNEL_CALL range, and the NOTIFY marker — and below
+        // NOTIFY_MESSAGE — so a server's m_type dispatcher and the SEF
+        // classifier can never collide. (The base-vs-VM-range ordering is
+        // additionally locked by a module-level const-assert.)
+        for m in [SEF_INIT, SEF_SIGNAL] {
+            assert_ne!(m, VM_PAGEFAULT);
+            assert_ne!(m, VM_BRK);
+            assert_ne!(m, VM_MMAP);
+            assert_ne!(m, VM_MUNMAP);
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+            assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
+            assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
+        }
     }
 }
