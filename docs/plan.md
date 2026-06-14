@@ -792,14 +792,100 @@ Aggregate scope (Phase 3 as a whole):
 - **Milestone:** Boot processes each have isolated address spaces; VM
   handles page faults
 
-### Phase 4: Core Servers (PM, VFS, RS, DS, SCHED)
+### Phase 4: Core Servers (PM, VFS, RS, DS, SCHED) + init
 
-- `server-rt`: SEF implementation (startup, receive loop, ping/signal handling)
-- `servers/pm/`: fork, exec, exit, wait, signals, UIDs
-- `servers/vfs/`: File operations routed to FS servers, worker threads
-- `servers/rs/`: Service monitoring, heartbeat, restart-on-crash
-- `servers/ds/`: Key-value publish/subscribe
-- `servers/sched/`: User-space scheduling policy
+Phase 4 is split into 8 PR-sized slices (decomposition tracked in
+`~/.claude/plans/go-ahead-with-phase-dapper-rain.md`). Each slice independently
+builds, boots, and prints observable progress — same cadence as Phases 2–3. The
+Phase 4 milestone ("Full server boot sequence completes; init process starts")
+is satisfied at the end of slice 4.8.
+
+Two scope decisions shape the phase: **exec is real but boot-embedded** (no
+filesystem/musl until Phase 5, so `SYS_EXEC` loads ELF binaries packed into the
+boot-image archive — the same archive that loads the servers — and Phase 5 later
+swaps the source to a VFS file with no PM/kernel rework); and **scheduling moves
+to a real user-space SCHED** by making the kernel scheduler *delegatable* rather
+than replacing it (a per-proc `scheduler` endpoint defaults to kernel-scheduled,
+and on quantum exhaustion the kernel either requeues or notifies the proc's
+user-space scheduler). The boot `IMAGE` in `kernel/src/proc/table.rs` already
+lists pm/vfs/rs/ds/sched/init with correct priv flags, and `init_boot_image`
+already fills their `ipc_to` / `k_call_mask`, so loading a server needs only an
+ELF + the generalized `load_boot_server` path — no new boot priv wiring.
+
+- **Slice 4.1** ◀ next — `server-rt` SEF framework + migrate VM onto it + finish
+  `minix-ipc`. Add `ipc_notify` / `ipc_sendnb` (new SVC `primitive` values).
+  Build `server-rt`: `sef_startup()` (learn own endpoint/name via
+  `SYS_GETINFO(GET_WHOAMI)`, run `init_fresh` callback) and `sef_receive()`
+  (wrap `ipc_receive(ANY, …)`, intercept SEF control messages — ping/signal/init
+  — and return only application messages), with static function-pointer callback
+  registration (no heap; minimal subset vs MINIX `lib/libsys/sef.c`). Port
+  `servers/vm` to the SEF loop (handlers unchanged) so VM is live regression
+  coverage for the framework before any new server depends on it.
+- **Slice 4.2** — Multi-module boot image + DS server + VFS skeletal boot.
+  Generalize `kernel/build.rs`'s VM build into `build_server(...)` and pack the
+  server ELFs into a single `.boot_image` MXBI archive (header table
+  `{name, proc_nr, offset, len}`); `boot_image/mod.rs` exposes
+  `module_by_proc_nr` / `module_by_name` (the latter reused by exec in 4.7).
+  Refactor `userland.rs::vm_bootstrap` into `load_boot_server(proc_nr, elf)` and
+  loop it over the archive. DS: static key→endpoint registry
+  (`DS_PUBLISH`/`DS_RETRIEVE`/`DS_CHECK`), every server publishes its endpoint at
+  init. VFS boots through SEF and registers — no file ops (the PM↔VFS fork/exec
+  work protocol needs FDs and is Phase 5).
+- **Slice 4.3** — Real user-space scheduling (kernel delegatable scheduler +
+  SCHED; optional 4.3a/4.3b split like 3.4). Kernel: `Proc::scheduler` (`NONE` =
+  kernel-scheduled, the boot default); on `RTS_NO_QUANTUM`, requeue if
+  kernel-scheduled else send `SCHEDULING_NO_QUANTUM` to the proc's scheduler
+  (kernel-originated SEND, like 3.4's `mini_pf_send`) and leave it not-runnable;
+  `SYS_SCHEDULE` becomes real and a new `SYS_SCHEDCTL` claims/releases a target
+  (bump to `NR_KERN_CALLS_PHASE4`, one-slice `_PHASE3` alias). SCHED server:
+  `SCHEDULING_START`/`STOP`/`SET_NICE`/`NO_QUANTUM` with a simple drop-a-band
+  policy; flip boot servers to SCHED-scheduled (kernel tasks + SCHED itself stay
+  kernel-scheduled).
+- **Slice 4.4** — RS (reincarnation server) + real `SYS_SETALARM`. Implement the
+  per-proc one-shot alarm off the clock tick (currently ENOSYS). RS (already
+  `ROOT_SYS_PROC` + `sig_mgr`) records the boot servers, arms a periodic alarm,
+  and heartbeats/pings them on each tick; restart-on-crash is minimal (detect +
+  log) in Phase 4.
+- **Slice 4.5** — PM part A: process table + getpid + `SYS_PRIVCTL` + minimal
+  signals. Stand up PM with a static `mproc` table, `getpid`/`getppid`, and a
+  kill path whose default action is terminate (no handlers/sigaction/masks —
+  that's beyond Phase 4). Make `SYS_PRIVCTL` real (set up a target's priv slot;
+  the 4.6 fork path leans on it). This gives the Phase-3 VM "SIGSEGV leaves
+  faulter blocked" path a real consequence (PM terminates the faulter).
+- **Slice 4.6** — PM part B: fork + exit + wait. Kernel `SYS_FORK` (free slot,
+  copy register frame, bump generation, alloc ASID, eager AS copy by walking the
+  parent's TTBR0 + copying each user page via HHDM; CoW deferred) and `SYS_EXIT`
+  (tear down AS via `AddrSpace::destroy`, free slot). Forked user procs share one
+  USER priv slot (MINIX's `static_priv` model) so fork can't exhaust the 64-slot
+  `PRIV_TABLE`. `VM_FORK` clones the parent's `ClientRegions` into the child. PM
+  owns the tree: fork → `SYS_FORK` + `VM_FORK` + `SCHEDULING_START`; exit →
+  zombie + SIGCHLD; `wait`/`waitpid` → reap.
+- **Slice 4.7** — exec: `SYS_EXEC` + PM exec of a boot-embedded binary. Kernel
+  builds a fresh `AddrSpace`, `elf::load_into` the archive module resolved by
+  `module_by_name`, sets a minimal initial user stack, swaps `ttbr0_pa` +
+  destroys the old AS, sets entry/SP. PM's `execve(name)` selects the embedded
+  binary. A tiny freestanding "worker" ELF packed into the archive is the exec
+  target.
+- **Slice 4.8** — init (PID 1) + Phase 4 wrap-up + docs. **Phase 4 complete.**
+  init (a freestanding Rust ELF loaded into `INIT_PROC_NR=10` by the archive)
+  forks children that exec the worker, `wait`s, and respawns in a loop. Retire or
+  demote the A/B/C/D stubs now that init + real procs are the live exercise. Real
+  mdBook *Servers* chapter (`book/src/servers/overview.md`); CLAUDE.md Phase-4
+  conventions; flip every slice marker and write the Phase-4-complete aggregate
+  paragraph.
+
+Aggregate scope (Phase 4 as a whole):
+
+- `minix-ipc`: NOTIFY + SENDNB primitives
+- `server-rt`: SEF startup + receive loop + init/signal callbacks (minimal subset)
+- Multi-module boot-image archive (MXBI) + generalized server loader
+- Kernel calls made real: `SYS_FORK`, `SYS_EXEC`, `SYS_EXIT`, `SYS_PRIVCTL`,
+  `SYS_SCHEDULE`, `SYS_SETALARM`, plus new `SYS_SCHEDCTL` and a minimal signal
+  mechanism; delegatable scheduler (`Proc::scheduler`)
+- Servers (all static-allocation, no heap): DS (endpoint registry), SCHED (real
+  user-space policy), RS (heartbeat monitor), VFS (skeletal boot), PM (process
+  table, fork, exec, exit, wait, getpid, minimal signals)
+- init (PID 1) forking/exec/waiting; embedded "worker" binary as the exec target
 - **Milestone:** Full server boot sequence completes; init process starts
 
 ### Phase 5: musl Fork + File Systems
