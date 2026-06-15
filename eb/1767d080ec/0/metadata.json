@@ -1,0 +1,113 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "eb1767d080ec",
+  "session_id": "2bc6a326-3a21-4cc2-a0f2-ec19f9487dd7",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-15T00:41:13.693099Z",
+  "branch": "feature/phase-4-1-sef",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "server-rt/src/classify.rs",
+    "server-rt/src/lib.rs",
+    "server-rt/src/sef.rs",
+    "sonar-project.properties"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "c5033c9172dd",
+  "token_usage": {
+    "input_tokens": 25680,
+    "cache_creation_tokens": 123997,
+    "cache_read_tokens": 3351849,
+    "output_tokens": 52750,
+    "api_call_count": 34
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-review-2026-06-14T23:46:57.655111Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "2cc20d3fa512",
+      "timestamp": "2026-06-14T23:46:57.655111Z",
+      "native": {
+        "command": "/review"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01DReVnv7wSFEkAmXrh5MCy1",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:test-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "c5033c9172dd",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 79,
+        "end": 80,
+        "entry_ids": [
+          "32ed6759-1c7c-45b6-bea9-6ed1a7e8e3bc"
+        ],
+        "tool_use_id": "toolu_01DReVnv7wSFEkAmXrh5MCy1"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01DReVnv7wSFEkAmXrh5MCy1"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:test-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-15T00:41:13.683803Z",
+    "agent_lines": 184,
+    "agent_removed": 102,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 184,
+    "total_lines_changed": 286,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 184,
+      "agent_lines_removed": 102
+    }
+  ]
+}
