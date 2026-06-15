@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "eb1767d080ec",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-4-1-sef",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "server-rt/src/classify.rs",
+    "server-rt/src/lib.rs",
+    "server-rt/src/sef.rs",
+    "sonar-project.properties"
+  ],
+  "sessions": [
+    {
+      "metadata": "/eb/1767d080ec/0/metadata.json",
+      "transcript": "/eb/1767d080ec/0/full.jsonl",
+      "content_hash": "/eb/1767d080ec/0/content_hash.txt",
+      "prompt": "/eb/1767d080ec/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25680,
+    "cache_creation_tokens": 123997,
+    "cache_read_tokens": 3351849,
+    "output_tokens": 52750,
+    "api_call_count": 34
+  }
+}
