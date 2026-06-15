@@ -31,10 +31,12 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+mod classify;
 mod init;
 mod sef;
 mod signal;
 
+pub use classify::{SefEvent, classify};
 pub use init::SefInitCb;
-pub use sef::{Sef, SefConfig, SefEvent, classify, sef_startup};
+pub use sef::{Sef, SefConfig, sef_startup};
 pub use signal::SefSignalCb;

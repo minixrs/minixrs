@@ -4,54 +4,14 @@
 
 use minixrs_ipc::{ipc_notify, ipc_receive, ipc_sendrec};
 use minixrs_kernel_shared::Message;
-use minixrs_kernel_shared::callnr::{
-    GET_WHOAMI, SEF_INIT, SEF_SIGNAL, SYS_GETINFO, SYS_GETINFO_NAME_LEN,
-};
+use minixrs_kernel_shared::callnr::{GET_WHOAMI, SYS_GETINFO, SYS_GETINFO_NAME_LEN};
 use minixrs_kernel_shared::com::{RS_PROC_NR, SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
 use minixrs_kernel_shared::error::OK;
-use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 
+use crate::classify::{SefEvent, classify};
 use crate::init::SefInitCb;
 use crate::signal::SefSignalCb;
-
-/// Classification of an incoming message: a SEF control event the framework
-/// handles itself, or ordinary application traffic for the server.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum SefEvent {
-    /// RS heartbeat — delivered as a NOTIFY from RS. Reply with a notify back.
-    Ping,
-    /// A signal carrying number `signo` (decoded from `payload[0..4]`).
-    Signal(i32),
-    /// A (re-)init request from RS.
-    Init,
-    /// Not a SEF control message — hand it back to the server.
-    Application,
-}
-
-/// Classify `msg` as a SEF control event or application traffic. Pure (no IPC),
-/// so it is the host-unit-tested core of the framework.
-///
-/// A ping is the only event keyed on the source: NOTIFY carries no payload to
-/// distinguish senders, so an RS-sourced [`NOTIFY_MESSAGE`] is the heartbeat
-/// while any other NOTIFY is application traffic. SEF_SIGNAL / SEF_INIT are
-/// keyed on `m_type` alone, and live in a range (`0xD00`) distinct from every
-/// VM request (`0xC00`), so real server traffic never misclassifies.
-pub fn classify(msg: &Message) -> SefEvent {
-    match msg.m_type {
-        NOTIFY_MESSAGE if msg.m_source == boot_endpoint(RS_PROC_NR) => SefEvent::Ping,
-        SEF_SIGNAL => {
-            let signo = i32::from_ne_bytes(
-                msg.payload[0..4]
-                    .try_into()
-                    .expect("payload is at least 4 bytes"),
-            );
-            SefEvent::Signal(signo)
-        }
-        SEF_INIT => SefEvent::Init,
-        _ => SefEvent::Application,
-    }
-}
 
 /// Callbacks a server registers with the framework at startup. Both are
 /// optional: a server with no init work or no signal handling passes `None`.
@@ -148,6 +108,13 @@ impl Sef {
                     // Acknowledge the RS heartbeat. A deferred notify still
                     // returns OK; any error just means RS re-pings later, so we
                     // ignore the result and wait for the next message.
+                    //
+                    // TODO(phase 4, RS heartbeat): this ack needs the server's
+                    // own `ipc_to` bit for RS to be open (cf. `install_stub_d_priv`
+                    // opening VM→D). Until RS actually pings, that reverse edge is
+                    // unwired, so the ack would return `ECALLDENIED` — harmless
+                    // while the heartbeat is dormant, but the wiring must land
+                    // with the heartbeat or RS will conclude the server is dead.
                     let _ = ipc_notify(boot_endpoint(RS_PROC_NR));
                 }
                 SefEvent::Signal(signo) => {
@@ -158,59 +125,15 @@ impl Sef {
                 SefEvent::Init => {
                     // Fresh init already ran in sef_startup; the minimal
                     // Phase-4 SEF has nothing to do for a re-init request.
+                    //
+                    // TODO(phase 4, RS-driven re-init): nail down the reply
+                    // contract before RS sends this. If RS issues SEF_INIT as a
+                    // SENDREC it blocks until the server replies — this arm would
+                    // then have to send an ack or RS hangs. Nothing sends SEF_INIT
+                    // yet, so swallowing it is correct for now. The same caveat
+                    // applies to a SENDREC-delivered SEF_SIGNAL.
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use minixrs_kernel_shared::callnr::{VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT};
-    use minixrs_kernel_shared::com::{PM_PROC_NR, VM_PROC_NR};
-
-    fn msg(m_source: Endpoint, m_type: i32) -> Message {
-        Message {
-            m_source,
-            m_type,
-            payload: [0u8; 96],
-        }
-    }
-
-    #[test]
-    fn ping_is_notify_from_rs() {
-        let m = msg(boot_endpoint(RS_PROC_NR), NOTIFY_MESSAGE);
-        assert_eq!(classify(&m), SefEvent::Ping);
-    }
-
-    #[test]
-    fn notify_from_non_rs_is_application() {
-        // Same NOTIFY marker, different source — not a heartbeat.
-        let m = msg(boot_endpoint(VM_PROC_NR), NOTIFY_MESSAGE);
-        assert_eq!(classify(&m), SefEvent::Application);
-    }
-
-    #[test]
-    fn vm_requests_are_application() {
-        for t in [VM_PAGEFAULT, VM_BRK, VM_MMAP, VM_MUNMAP] {
-            assert_eq!(
-                classify(&msg(boot_endpoint(VM_PROC_NR), t)),
-                SefEvent::Application,
-            );
-        }
-    }
-
-    #[test]
-    fn sef_signal_decodes_signo() {
-        let mut m = msg(boot_endpoint(PM_PROC_NR), SEF_SIGNAL);
-        m.payload[0..4].copy_from_slice(&9i32.to_ne_bytes());
-        assert_eq!(classify(&m), SefEvent::Signal(9));
-    }
-
-    #[test]
-    fn sef_init_is_init() {
-        let m = msg(boot_endpoint(RS_PROC_NR), SEF_INIT);
-        assert_eq!(classify(&m), SefEvent::Init);
     }
 }
