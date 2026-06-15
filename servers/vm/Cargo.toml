@@ -12,3 +12,4 @@ path = "src/main.rs"
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minix-ipc" }
+minixrs-server-rt = { path = "../../server-rt" }

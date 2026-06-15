@@ -90,13 +90,16 @@ fn build_vm_server(out_dir: &std::path::Path) {
     let user_ld = vm_dir.join("user.ld");
     let vm_target_dir = out_dir.join("vm-target");
 
-    // Rebuild the kernel (and re-embed) whenever the VM crate or the IPC
-    // library it links against changes.
+    // Rebuild the kernel (and re-embed) whenever the VM crate or the libraries
+    // it links against change. `server-rt/src` is listed as a directory so cargo
+    // watches every SEF submodule recursively — otherwise an edit to e.g.
+    // `server-rt/src/sef.rs` would silently run a stale VM ELF.
     for path in [
         vm_dir.join("src/main.rs"),
         user_ld.clone(),
         vm_dir.join("Cargo.toml"),
         workspace.join("minix-ipc/src/lib.rs"),
+        workspace.join("server-rt/src"),
     ] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
