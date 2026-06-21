@@ -5,7 +5,7 @@
 //! The first *real* user-space process (introduced in slice 3.4a as a build
 //! milestone). Built as a freestanding aarch64 ELF (see `servers/vm/user.ld`),
 //! embedded into the kernel image by `kernel/build.rs`, and loaded into its
-//! own per-process AddrSpace at boot by `arch::aarch64::userland::vm_bootstrap`.
+//! own per-process AddrSpace at boot by `arch::aarch64::userland::load_boot_server`.
 //!
 //! Slice 3.4b made it functional: a `RECEIVE(ANY)` loop that resolves page
 //! faults. When an EL0 process faults on an unmapped page, the kernel records
@@ -44,13 +44,13 @@ mod region;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    SYS_VMCTL, VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE,
-    VMCTL_PT_MAP, VMCTL_PT_UNMAP,
+    SYS_GETINFO_NAME_LEN, SYS_VMCTL, VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT,
+    VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP,
 };
 use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
 use minixrs_kernel_shared::error::OK;
-use minixrs_server_rt::{SefConfig, sef_startup};
+use minixrs_server_rt::{SefConfig, sef_publish_to_ds, sef_startup};
 
 /// aarch64 4 KiB page size — VM only needs to page-align fault addresses.
 const PAGE_SIZE: u64 = 4096;
@@ -77,12 +77,12 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     // Drive the loop through the SEF framework (slice 4.1): `sef_startup` learns
     // VM's endpoint/name via SYS_GETINFO(GET_WHOAMI) and `sef.receive` strips
-    // SEF control messages, handing back only application requests. VM has no
-    // init work yet (it will publish its endpoint to DS in slice 4.2) and no
-    // signal handling, so both callbacks are `None`. If the startup handshake
-    // fails there is no recovery and nothing to print from EL0 — park forever.
+    // SEF control messages, handing back only application requests. `vm_init`
+    // (slice 4.2) publishes VM's endpoint to DS so other servers can find it; no
+    // signal handling. If the startup handshake fails there is no recovery and
+    // nothing to print from EL0 — park forever.
     let sef = sef_startup(SefConfig {
-        init_fresh: None,
+        init_fresh: Some(vm_init),
         signal_handler: None,
     })
     .unwrap_or_else(|_| {
@@ -110,6 +110,13 @@ fn main() -> ! {
             _ => {}
         }
     }
+}
+
+/// SEF fresh-init callback: publish VM's endpoint to DS under its name, so other
+/// servers can look VM up by name (slice 4.2). DS registers the caller's
+/// kernel-stamped endpoint, so `_endpoint` from `GET_WHOAMI` is not sent.
+fn vm_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
+    sef_publish_to_ds(name)
 }
 
 /// Resolve a page fault for `faulting_e` at `far`.

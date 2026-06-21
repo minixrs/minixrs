@@ -32,11 +32,13 @@
 #![forbid(unsafe_code)]
 
 mod classify;
+mod ds;
 mod init;
 mod sef;
 mod signal;
 
 pub use classify::{SefEvent, classify};
+pub use ds::sef_publish_to_ds;
 pub use init::SefInitCb;
 pub use sef::{Sef, SefConfig, sef_startup};
 pub use signal::SefSignalCb;

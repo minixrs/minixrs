@@ -5,6 +5,10 @@ edition = "2024"
 license = "BSD-3-Clause"
 publish = false
 
+[[bin]]
+name = "minixrs-vfs"
+path = "src/main.rs"
+
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minix-ipc" }
