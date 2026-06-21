@@ -62,10 +62,12 @@ fn main() -> ! {
     }
 }
 
-/// SEF fresh-init callback: publish VFS's endpoint to DS under its name.
+/// SEF fresh-init callback: publish VFS's endpoint to DS under its name. DS
+/// registers the caller's kernel-stamped endpoint, so `_endpoint` from
+/// `GET_WHOAMI` is not sent.
 #[cfg_attr(test, allow(dead_code))]
-fn vfs_init(endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
-    sef_publish_to_ds(endpoint, name)
+fn vfs_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
+    sef_publish_to_ds(name)
 }
 
 // The freestanding panic handler; under `cargo test` std supplies its own.

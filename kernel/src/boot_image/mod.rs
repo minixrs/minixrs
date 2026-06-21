@@ -61,23 +61,31 @@ impl BootImage {
             HDR_LEN + count * REC_LEN <= bytes.len() && total <= bytes.len(),
             "boot image table out of range"
         );
+        // Each record's payload must lie within the archive. Validate every
+        // record up front so a malformed image fails here with a clear message
+        // instead of an index-OOB panic when a module is later sliced out.
+        for i in 0..count {
+            let rec = HDR_LEN + i * REC_LEN;
+            let offset = rd_u32(bytes, rec + 4) as usize;
+            let len = rd_u32(bytes, rec + 8) as usize;
+            assert!(
+                offset + len <= bytes.len(),
+                "boot image module out of range"
+            );
+        }
         Self { bytes, count }
     }
 
     /// Decode record `i` into `(proc_nr, name, elf)`. The `name` is the
-    /// NUL-trimmed record name; `elf` is the payload subslice.
+    /// NUL-trimmed record name; `proc_nr`/`elf` come from [`proc_and_elf`].
     fn record(&self, i: usize) -> (ProcNr, &'static str, &'static [u8]) {
         let rec = HDR_LEN + i * REC_LEN;
-        let proc_nr = rd_i32(self.bytes, rec);
-        let offset = rd_u32(self.bytes, rec + 4) as usize;
-        let len = rd_u32(self.bytes, rec + 8) as usize;
-
         let name_field = &self.bytes[rec + 12..rec + 12 + NAME_LEN];
         let nul = name_field.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
         let name = core::str::from_utf8(&name_field[..nul]).unwrap_or("");
 
-        let elf = &self.bytes[offset..offset + len];
-        (ProcNr::new(proc_nr), name, elf)
+        let (proc_nr, elf) = proc_and_elf(self.bytes, i);
+        (proc_nr, name, elf)
     }
 
     /// Iterate `(proc_nr, elf)` over every module, in archive (load) order.
@@ -127,14 +135,22 @@ impl Iterator for BootImageIter {
         if self.idx >= self.count {
             return None;
         }
-        // Decode in place rather than building a transient BootImage.
-        let rec = HDR_LEN + self.idx * REC_LEN;
-        let proc_nr = rd_i32(self.bytes, rec);
-        let offset = rd_u32(self.bytes, rec + 4) as usize;
-        let len = rd_u32(self.bytes, rec + 8) as usize;
+        let out = proc_and_elf(self.bytes, self.idx);
         self.idx += 1;
-        Some((ProcNr::new(proc_nr), &self.bytes[offset..offset + len]))
+        Some(out)
     }
+}
+
+/// Decode record `i`'s proc number and ELF payload subslice. Shared by
+/// [`BootImage::record`] and [`BootImageIter`] so the offset/len decode lives in
+/// one place. Panics (via slicing) on a malformed archive, but [`BootImage::get`]
+/// validates every record's bounds up front, so this never trips at runtime.
+fn proc_and_elf(bytes: &'static [u8], i: usize) -> (ProcNr, &'static [u8]) {
+    let rec = HDR_LEN + i * REC_LEN;
+    let proc_nr = rd_i32(bytes, rec);
+    let offset = rd_u32(bytes, rec + 4) as usize;
+    let len = rd_u32(bytes, rec + 8) as usize;
+    (ProcNr::new(proc_nr), &bytes[offset..offset + len])
 }
 
 /// Read a little-endian `u32` at `off`. Panics (via slicing) on a malformed
