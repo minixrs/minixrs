@@ -812,7 +812,7 @@ lists pm/vfs/rs/ds/sched/init with correct priv flags, and `init_boot_image`
 already fills their `ipc_to` / `k_call_mask`, so loading a server needs only an
 ELF + the generalized `load_boot_server` path — no new boot priv wiring.
 
-- **Slice 4.1** ◀ ready (branch `feature/phase-4-1-sef`, pending merge) —
+- **Slice 4.1** ✓ shipped (PR #23, merged 2026-06-14) —
   `server-rt` SEF framework + migrate VM onto it + finish
   `minix-ipc`. Add `ipc_notify` / `ipc_sendnb` (new SVC `primitive` values).
   Build `server-rt`: `sef_startup()` (learn own endpoint/name via
@@ -822,17 +822,43 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   registration (no heap; minimal subset vs MINIX `lib/libsys/sef.c`). Port
   `servers/vm` to the SEF loop (handlers unchanged) so VM is live regression
   coverage for the framework before any new server depends on it.
-- **Slice 4.2** ◀ next — Multi-module boot image + DS server + VFS skeletal boot.
-  Generalize `kernel/build.rs`'s VM build into `build_server(...)` and pack the
-  server ELFs into a single `.boot_image` MXBI archive (header table
-  `{name, proc_nr, offset, len}`); `boot_image/mod.rs` exposes
-  `module_by_proc_nr` / `module_by_name` (the latter reused by exec in 4.7).
-  Refactor `userland.rs::vm_bootstrap` into `load_boot_server(proc_nr, elf)` and
-  loop it over the archive. DS: static key→endpoint registry
-  (`DS_PUBLISH`/`DS_RETRIEVE`/`DS_CHECK`), every server publishes its endpoint at
-  init. VFS boots through SEF and registers — no file ops (the PM↔VFS fork/exec
-  work protocol needs FDs and is Phase 5).
-- **Slice 4.3** — Real user-space scheduling (kernel delegatable scheduler +
+- **Slice 4.2** ◀ ready (branch `feature/phase-4-2-boot-image-ds-vfs`, pending
+  merge) — Multi-module boot image + DS server + VFS skeletal boot.
+  `kernel/build.rs`'s single-VM embed is generalized into `build_server(name,
+  dir, …)` + `pack_mxbi(...)`: it builds each server (VM/DS/VFS) into its own
+  isolated `CARGO_TARGET_DIR`, packs the ELFs into one MXBI archive in `OUT_DIR`
+  (16-byte header `magic "MXBI"/ver/count/total_size` + 32-byte records
+  `{proc_nr:i32, offset:u32, len:u32, name:[u8;20]}` + back-to-back payloads, all
+  LE), and emits `BOOT_IMAGE_PATH` (replacing `VM_ELF_PATH`). `boot_image/mod.rs`
+  becomes a zero-copy `BootImage` view (`include_bytes!` of the archive) exposing
+  `iter()` → `(ProcNr, &[u8])` for the load loop plus `module_by_proc_nr` /
+  `module_by_name` (the latter `#[allow(dead_code)]` until exec in 4.7); the whole
+  module stays `cfg(target_os="none")` so host `cargo check`/`test` (where
+  `BOOT_IMAGE_PATH` is unset) never evaluate the `env!`. `userland.rs::vm_bootstrap`
+  is refactored into `load_boot_server(nr, elf, stack_va)` looped over
+  `BootImage::iter()`; all servers share one `SERVER_STACK_VA` (each has its own
+  TTBR0). No new boot priv wiring — `init_boot_image` already grants DS(5)/VFS(1)/
+  VM(7) `SRV_T` `ipc_to` over `[0, n_active)`. New `kernel-shared/callnr.rs`
+  `DS_RQ_BASE = 0xE00` + `DS_PUBLISH`/`DS_RETRIEVE`/`DS_CHECK` + `NR_DS_REQUESTS`
+  (const-asserted distinct from VM/SEF, below `NOTIFY_MESSAGE`) + host tests. DS
+  (`servers/ds`): a static `[Entry; 16]` name→endpoint registry
+  (`servers/ds/src/registry.rs`, `UnsafeCell` newtype like `vm/region.rs`, pure
+  `publish/retrieve/check` host-tested) driven by a SEF loop; key = 16-byte
+  NUL-padded server name in payload `0..16`, endpoint i32 in `16..20`. DS seeds
+  its *own* entry in-process in `ds_init` (a self-SENDREC would deadlock). VFS
+  (`servers/vfs`): skeletal SEF boot that drops application traffic. A shared
+  `server-rt::sef_publish_to_ds(endpoint, name)` helper (`init_fresh` body for
+  VM + VFS, coverage-excluded with `sef.rs`) marshals `DS_PUBLISH`. Verified in
+  QEMU over 10 s: seven `[as]` lines (vm/ds/vfs asid 1–3, stubs A–D asid 4–7);
+  head `[ipc]` shows VM→SYSTEM + VM→DS publish (DS replies VM), DS→SYSTEM +
+  RECEIVE(ANY) (no DS self-publish), VFS→SYSTEM + VFS→DS publish, then A↔B
+  ping-pong; stub C `SYS_GETINFO` (`[ksys] call=0`) and stub D's three `[pf]`
+  (brk×2 + mmap) resolved by VM (`VMCTL_PT_MAP`×3 + one `VMCTL_PT_UNMAP`) all
+  intact; 3319 `[ipc]` + 3310 `[ksys]` + 3 `[pf]`, every line `result=0`; zero
+  panic / `el0_sync_unexpected`. Host: `cargo test -p minixrs-kernel-shared`
+  (DS callnr) + `-p minixrs-ds` (registry) green; `cargo check --workspace` +
+  clippy `-D warnings` + fmt clean.
+- **Slice 4.3** ◀ next — Real user-space scheduling (kernel delegatable scheduler +
   SCHED; optional 4.3a/4.3b split like 3.4). Kernel: `Proc::scheduler` (`NONE` =
   kernel-scheduled, the boot default); on `RTS_NO_QUANTUM`, requeue if
   kernel-scheduled else send `SCHEDULING_NO_QUANTUM` to the proc's scheduler

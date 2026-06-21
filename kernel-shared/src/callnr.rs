@@ -145,6 +145,54 @@ pub const VM_MMAP: i32 = VM_RQ_BASE + 2;
 pub const VM_MUNMAP: i32 = VM_RQ_BASE + 3;
 
 // ---------------------------------------------------------------------------
+// DS (Data Store) server request numbers — `m_type` values for messages
+// addressed to the DS server.
+//
+// DS is a name→endpoint registry: every server publishes its own endpoint at
+// init (slice 4.2) so others can look each other up without hard-coding boot
+// proc numbers. These are *server IPC requests* like the VM range, so they live
+// in their own range, distinct from `KERNEL_CALL` (`0x600`), the VM request
+// range (`VM_RQ_BASE = 0xC00`), and the SEF control range (`SEF_RQ_BASE =
+// 0xD00`), and stay below the IPC `NOTIFY_MESSAGE` marker (`0x1000`) so neither
+// a server's `m_type` dispatcher nor the SEF classifier can ever misroute.
+//
+// The key (a NUL-padded server name) travels inline in the request payload
+// (`0..SYS_GETINFO_NAME_LEN`); no grants / cross-AS copy are needed because the
+// kernel copies the whole 96-byte payload on delivery. The endpoint value rides
+// in payload `16..20` (i32, native-endian). Numbering is minix.rs-specific.
+// ---------------------------------------------------------------------------
+
+/// Base for DS server request `m_type` values.
+pub const DS_RQ_BASE: i32 = 0xE00;
+
+/// Server → DS: publish `endpoint` (payload `16..20`, i32) under the key in
+/// payload `0..SYS_GETINFO_NAME_LEN`. Re-publishing the same key updates the
+/// stored endpoint. Reply `m_type = OK`, or `EINVAL` (empty key) / `ENOMEM`
+/// (registry full).
+pub const DS_PUBLISH: i32 = DS_RQ_BASE;
+
+/// Client → DS: look up the endpoint for the key in payload `0..NAME_LEN`.
+/// Reply `m_type = OK` with the endpoint in payload `16..20` (i32), or
+/// `ESRCH` if the key is not registered.
+pub const DS_RETRIEVE: i32 = DS_RQ_BASE + 1;
+
+/// Client → DS: test whether the key in payload `0..NAME_LEN` is registered.
+/// Reply `m_type = OK` with a status in payload `16..20` (i32: 1 = present,
+/// 0 = absent) — absence is a status, not an error, so a `CHECK` never aborts
+/// the caller's SENDREC.
+pub const DS_CHECK: i32 = DS_RQ_BASE + 2;
+
+/// Number of DS server requests defined so far. Locks the dispatch-match
+/// coverage in the DS server the way `NR_VMCTL_SUBCALLS` locks `do_vmctl`.
+pub const NR_DS_REQUESTS: usize = 3;
+
+// The DS range sits strictly above the SEF range (0xD00..0xD01) so a server's
+// `m_type` dispatcher and the SEF classifier can never collide, and stays
+// below the NOTIFY marker.
+const _: () = assert!(DS_RQ_BASE > SEF_RQ_BASE + (NR_SEF_MSGS as i32 - 1));
+const _: () = assert!(DS_RQ_BASE + (NR_DS_REQUESTS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
+// ---------------------------------------------------------------------------
 // SEF (System Event Framework) control message numbers — `m_type` values the
 // server runtime (`server-rt`) intercepts before handing traffic to a server.
 //
@@ -283,6 +331,35 @@ mod tests {
         assert_ne!(VM_MUNMAP, VM_PAGEFAULT);
         assert!(VM_MUNMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
         assert_ne!(VM_MUNMAP, crate::ipc_const::NOTIFY_MESSAGE);
+    }
+
+    #[test]
+    fn ds_requests_contiguous_from_base() {
+        // DS requests are contiguous from DS_RQ_BASE; NR_DS_REQUESTS locks the
+        // DS server's dispatch coverage.
+        let reqs = [DS_PUBLISH, DS_RETRIEVE, DS_CHECK];
+        for (i, r) in reqs.iter().enumerate() {
+            assert_eq!(*r, DS_RQ_BASE + i as i32);
+        }
+        assert_eq!(reqs.len(), NR_DS_REQUESTS);
+    }
+
+    #[test]
+    fn ds_requests_distinct_from_other_ranges() {
+        // Each DS request must stay distinct from the VM request range, the SEF
+        // control range, and the KERNEL_CALL range, and below NOTIFY_MESSAGE —
+        // so a server's m_type dispatcher and the SEF classifier never collide.
+        for r in [DS_PUBLISH, DS_RETRIEVE, DS_CHECK] {
+            for vm in [VM_PAGEFAULT, VM_BRK, VM_MMAP, VM_MUNMAP] {
+                assert_ne!(r, vm);
+            }
+            assert_ne!(r, SEF_INIT);
+            assert_ne!(r, SEF_SIGNAL);
+            assert!(r > SEF_RQ_BASE + (NR_SEF_MSGS as i32 - 1));
+            assert!(r > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+            assert_ne!(r, crate::ipc_const::NOTIFY_MESSAGE);
+            assert!(r < crate::ipc_const::NOTIFY_MESSAGE);
+        }
     }
 
     #[test]
