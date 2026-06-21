@@ -1,19 +1,165 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! Embedded boot-image modules and their loader.
+//! Embedded boot-image archive and its loader.
 //!
-//! Slice 3.4 embeds a single user-space server — the VM server — directly in
-//! the kernel image as a rodata `&[u8]` (`kernel/build.rs` builds the VM crate
-//! for the EL0 user target and emits `VM_ELF_PATH`). The bytes land in the
-//! kernel's `.rodata`, which Limine reports under `EXECUTABLE_AND_MODULES`, so
-//! they are never visible to the frame allocator — same model as the hand-coded
-//! EL0 stub blobs in `arch/aarch64/user_stub.S`.
+//! `kernel/build.rs` builds every boot server for the EL0 user target, packs the
+//! resulting ELFs into a single MXBI archive, and emits `BOOT_IMAGE_PATH`. The
+//! archive is embedded here as a rodata `&[u8]` via `include_bytes!`. The bytes
+//! land in the kernel's `.rodata`, which Limine reports under
+//! `EXECUTABLE_AND_MODULES`, so they are never visible to the frame allocator —
+//! same model as the hand-coded EL0 stub blobs in `arch/aarch64/user_stub.S`.
 //!
-//! The multi-module `.boot_image`/MXBI archive sketched in `docs/boot.md` is
-//! deferred until Phase 4 loads PM/VFS/RS/etc.; with one server a plain
-//! `include_bytes!` needs no packer tool or linker section.
+//! Archive layout (slice 4.2; all multi-byte fields little-endian, matching
+//! `build.rs::pack_mxbi`):
+//!
+//! ```text
+//!   16-byte header: magic "MXBI" (u32), version (u32), entry_count (u32), total_size (u32)
+//!   entry_count × 32-byte records: { proc_nr:i32, offset:u32, len:u32, name:[u8;20] }
+//!   then the ELF payloads back-to-back, each at its recorded offset
+//! ```
+//!
+//! [`BootImage`] is a zero-copy view: [`BootImage::iter`] drives the boot loader
+//! (one [`load_boot_server`](crate::arch::aarch64::userland) call per module),
+//! and [`BootImage::module_by_name`] is reused by exec in slice 4.7.
+//!
+//! NOTE: this whole module is gated on `target_os = "none"` in `main.rs`, so
+//! `env!("BOOT_IMAGE_PATH")` is only ever evaluated for the bare-metal build —
+//! host `cargo check`/`cargo test` (where the env var is unset) never compile it.
 
 pub mod elf;
 
-/// The VM server ELF, built and embedded by `build.rs`.
-pub static VM_ELF: &[u8] = include_bytes!(env!("VM_ELF_PATH"));
+use minixrs_kernel_shared::ProcNr;
+
+/// The packed MXBI boot-image archive, built and embedded by `build.rs`.
+static BOOT_IMAGE: &[u8] = include_bytes!(env!("BOOT_IMAGE_PATH"));
+
+/// "MXBI" as a little-endian `u32` (bytes M, X, B, I).
+const MXBI_MAGIC: u32 = 0x4942_584D;
+const MXBI_VERSION: u32 = 1;
+const HDR_LEN: usize = 16;
+const REC_LEN: usize = 32;
+const NAME_LEN: usize = 20;
+
+/// Zero-copy view over the embedded MXBI archive.
+pub struct BootImage {
+    bytes: &'static [u8],
+    count: usize,
+}
+
+impl BootImage {
+    /// Borrow the embedded archive, validating its header. Panics at boot on a
+    /// malformed image — the archive is produced by our own build, so any
+    /// failure is a build bug (same fatal-at-boot policy as [`elf`]).
+    pub fn get() -> Self {
+        let bytes = BOOT_IMAGE;
+        assert!(bytes.len() >= HDR_LEN, "boot image truncated");
+        assert!(rd_u32(bytes, 0) == MXBI_MAGIC, "boot image bad magic");
+        assert!(rd_u32(bytes, 4) == MXBI_VERSION, "boot image bad version");
+        let count = rd_u32(bytes, 8) as usize;
+        let total = rd_u32(bytes, 12) as usize;
+        assert!(
+            HDR_LEN + count * REC_LEN <= bytes.len() && total <= bytes.len(),
+            "boot image table out of range"
+        );
+        // Each record's payload must lie within the archive. Validate every
+        // record up front so a malformed image fails here with a clear message
+        // instead of an index-OOB panic when a module is later sliced out.
+        for i in 0..count {
+            let rec = HDR_LEN + i * REC_LEN;
+            let offset = rd_u32(bytes, rec + 4) as usize;
+            let len = rd_u32(bytes, rec + 8) as usize;
+            assert!(
+                offset + len <= bytes.len(),
+                "boot image module out of range"
+            );
+        }
+        Self { bytes, count }
+    }
+
+    /// Decode record `i` into `(proc_nr, name, elf)`. The `name` is the
+    /// NUL-trimmed record name; `proc_nr`/`elf` come from [`proc_and_elf`].
+    fn record(&self, i: usize) -> (ProcNr, &'static str, &'static [u8]) {
+        let rec = HDR_LEN + i * REC_LEN;
+        let name_field = &self.bytes[rec + 12..rec + 12 + NAME_LEN];
+        let nul = name_field.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
+        let name = core::str::from_utf8(&name_field[..nul]).unwrap_or("");
+
+        let (proc_nr, elf) = proc_and_elf(self.bytes, i);
+        (proc_nr, name, elf)
+    }
+
+    /// Iterate `(proc_nr, elf)` over every module, in archive (load) order.
+    pub fn iter(&self) -> BootImageIter {
+        BootImageIter {
+            bytes: self.bytes,
+            count: self.count,
+            idx: 0,
+        }
+    }
+
+    /// The ELF payload for a boot proc number, or `None`. Symmetric with
+    /// [`module_by_name`](Self::module_by_name).
+    #[allow(dead_code)] // used by later Phase-4 slices (RS restart, exec)
+    pub fn module_by_proc_nr(&self, nr: ProcNr) -> Option<&'static [u8]> {
+        (0..self.count).map(|i| self.record(i)).find_map(
+            |(p, _, elf)| {
+                if p == nr { Some(elf) } else { None }
+            },
+        )
+    }
+
+    /// The ELF payload for a module name (e.g. `"vfs"`), or `None`. Reused by
+    /// exec in slice 4.7 to resolve a boot-embedded binary by name.
+    #[allow(dead_code)] // consumed by slice 4.7 (SYS_EXEC of a boot-embedded binary)
+    pub fn module_by_name(&self, name: &str) -> Option<&'static [u8]> {
+        (0..self.count).map(|i| self.record(i)).find_map(
+            |(_, n, elf)| {
+                if n == name { Some(elf) } else { None }
+            },
+        )
+    }
+}
+
+/// Iterator over `(proc_nr, elf)` for each module. Holds only `'static` copies,
+/// so it does not borrow the [`BootImage`].
+pub struct BootImageIter {
+    bytes: &'static [u8],
+    count: usize,
+    idx: usize,
+}
+
+impl Iterator for BootImageIter {
+    type Item = (ProcNr, &'static [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx >= self.count {
+            return None;
+        }
+        let out = proc_and_elf(self.bytes, self.idx);
+        self.idx += 1;
+        Some(out)
+    }
+}
+
+/// Decode record `i`'s proc number and ELF payload subslice. Shared by
+/// [`BootImage::record`] and [`BootImageIter`] so the offset/len decode lives in
+/// one place. Panics (via slicing) on a malformed archive, but [`BootImage::get`]
+/// validates every record's bounds up front, so this never trips at runtime.
+fn proc_and_elf(bytes: &'static [u8], i: usize) -> (ProcNr, &'static [u8]) {
+    let rec = HDR_LEN + i * REC_LEN;
+    let proc_nr = rd_i32(bytes, rec);
+    let offset = rd_u32(bytes, rec + 4) as usize;
+    let len = rd_u32(bytes, rec + 8) as usize;
+    (ProcNr::new(proc_nr), &bytes[offset..offset + len])
+}
+
+/// Read a little-endian `u32` at `off`. Panics (via slicing) on a malformed
+/// archive — fatal at boot, like [`elf`]'s reads.
+fn rd_u32(b: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes(b[off..off + 4].try_into().expect("u32 in range"))
+}
+
+/// Read a little-endian `i32` at `off`.
+fn rd_i32(b: &[u8], off: usize) -> i32 {
+    i32::from_le_bytes(b[off..off + 4].try_into().expect("i32 in range"))
+}
