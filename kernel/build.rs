@@ -88,11 +88,11 @@ fn build_boot_image(out_dir: &std::path::Path) {
     let workspace = manifest.parent().expect("kernel manifest has no parent");
 
     // Libraries every server links against. Watched once (not per-server) so a
-    // change re-runs build.rs and re-embeds. `server-rt/src` and
-    // `kernel-shared/src` are directories so cargo watches every submodule —
-    // otherwise an edit to e.g. a new DS request number would embed stale ELFs.
+    // change re-runs build.rs and re-embeds. Each is watched as a directory so
+    // cargo covers every submodule recursively — otherwise an edit to e.g. a new
+    // `minix-ipc` module or DS request number would embed stale ELFs.
     for path in [
-        workspace.join("minix-ipc/src/lib.rs"),
+        workspace.join("minix-ipc/src"),
         workspace.join("server-rt/src"),
         workspace.join("kernel-shared/src"),
     ] {

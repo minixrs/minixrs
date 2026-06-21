@@ -158,15 +158,20 @@ pub const VM_MUNMAP: i32 = VM_RQ_BASE + 3;
 //
 // The key (a NUL-padded server name) travels inline in the request payload
 // (`0..SYS_GETINFO_NAME_LEN`); no grants / cross-AS copy are needed because the
-// kernel copies the whole 96-byte payload on delivery. The endpoint value rides
-// in payload `16..20` (i32, native-endian). Numbering is minix.rs-specific.
+// kernel copies the whole 96-byte payload on delivery. An endpoint value rides
+// in payload `16..20` (i32, native-endian) only on `DS_RETRIEVE` replies;
+// `DS_PUBLISH` registers the caller's kernel-stamped `m_source` (a process can
+// only publish itself), so no endpoint is sent in a publish request. Numbering
+// is minix.rs-specific.
 // ---------------------------------------------------------------------------
 
 /// Base for DS server request `m_type` values.
 pub const DS_RQ_BASE: i32 = 0xE00;
 
-/// Server → DS: publish `endpoint` (payload `16..20`, i32) under the key in
-/// payload `0..SYS_GETINFO_NAME_LEN`. Re-publishing the same key updates the
+/// Server → DS: publish the *caller's own* endpoint under the key in payload
+/// `0..SYS_GETINFO_NAME_LEN`. DS records the caller's kernel-stamped `m_source`,
+/// not a value from the payload, so a process can only publish itself and can
+/// never spoof another server's endpoint. Re-publishing the same key updates the
 /// stored endpoint. Reply `m_type = OK`, or `EINVAL` (empty key) / `ENOMEM`
 /// (registry full).
 pub const DS_PUBLISH: i32 = DS_RQ_BASE;

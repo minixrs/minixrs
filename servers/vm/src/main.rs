@@ -5,7 +5,7 @@
 //! The first *real* user-space process (introduced in slice 3.4a as a build
 //! milestone). Built as a freestanding aarch64 ELF (see `servers/vm/user.ld`),
 //! embedded into the kernel image by `kernel/build.rs`, and loaded into its
-//! own per-process AddrSpace at boot by `arch::aarch64::userland::vm_bootstrap`.
+//! own per-process AddrSpace at boot by `arch::aarch64::userland::load_boot_server`.
 //!
 //! Slice 3.4b made it functional: a `RECEIVE(ANY)` loop that resolves page
 //! faults. When an EL0 process faults on an unmapped page, the kernel records
@@ -113,9 +113,10 @@ fn main() -> ! {
 }
 
 /// SEF fresh-init callback: publish VM's endpoint to DS under its name, so other
-/// servers can look VM up by name (slice 4.2).
-fn vm_init(endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
-    sef_publish_to_ds(endpoint, name)
+/// servers can look VM up by name (slice 4.2). DS registers the caller's
+/// kernel-stamped endpoint, so `_endpoint` from `GET_WHOAMI` is not sent.
+fn vm_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
+    sef_publish_to_ds(name)
 }
 
 /// Resolve a page fault for `faulting_e` at `far`.

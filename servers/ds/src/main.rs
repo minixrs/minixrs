@@ -98,15 +98,17 @@ fn ds_init(endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
     registry::publish(name, endpoint)
 }
 
-/// Handle `DS_PUBLISH`: bind the key (payload `0..NAME_LEN`) to the endpoint
-/// (payload `16..20`). Reply to the SENDREC caller with the registry result.
+/// Handle `DS_PUBLISH`: bind the key (payload `0..NAME_LEN`) to the *caller's
+/// own* endpoint. The endpoint registered is the kernel-stamped `m_source`, not
+/// a value from the payload, so a process can only ever publish itself and can
+/// never spoof another server's endpoint under any name. Reply to the SENDREC
+/// caller with the registry result.
 #[cfg_attr(test, allow(dead_code))]
 fn handle_publish(msg: &mut Message) {
     let caller_e = msg.m_source;
     let key = rd_key(msg);
-    let ep = rd_i32(msg, 16);
 
-    msg.m_type = registry::publish(&key, ep);
+    msg.m_type = registry::publish(&key, caller_e);
     msg.m_source = 0; // kernel overwrites on delivery
     let _ = ipc_send(caller_e, msg);
 }
@@ -153,14 +155,10 @@ fn rd_key(m: &Message) -> [u8; SYS_GETINFO_NAME_LEN] {
     k
 }
 
-// Native-endian payload accessors, mirroring the VM server's helpers.
-#[cfg_attr(test, allow(dead_code))]
-fn rd_i32(m: &Message, off: usize) -> i32 {
-    let mut b = [0u8; 4];
-    b.copy_from_slice(&m.payload[off..off + 4]);
-    i32::from_ne_bytes(b)
-}
-
+// Native-endian payload accessor, mirroring the VM server's helpers. Replies
+// (`DS_RETRIEVE` endpoint, `DS_CHECK` status) write an i32 into payload `16..20`;
+// the publish endpoint is taken from the caller's stamped `m_source`, never read
+// from the payload, so there is no matching reader here.
 #[cfg_attr(test, allow(dead_code))]
 fn wr_i32(m: &mut Message, off: usize, v: i32) {
     m.payload[off..off + 4].copy_from_slice(&v.to_ne_bytes());
