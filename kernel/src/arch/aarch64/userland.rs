@@ -105,10 +105,12 @@ unsafe extern "C" {
     static _user_stub_d_end: u8;
 }
 
-/// VA at which the VM server's stack page is mapped. Distinct from VM's ELF
-/// segments (loaded from `0x0010_0000` up by `servers/vm/user.ld`) and from
-/// every EL0 stub VA.
-const VM_STACK_VA: u64 = 0x0020_0000; // 2 MiB
+/// VA at which each boot server's stack page is mapped. Distinct from the server
+/// ELF segments (loaded from `0x0010_0000` up by `servers/*/user.ld`) and from
+/// every EL0 stub VA. Shared across all servers: each has its own per-process
+/// TTBR0, so the same low VA resolves to a distinct frame per server with no
+/// collision (the same reason `user.ld`'s `0x0010_0000` base is shared).
+const SERVER_STACK_VA: u64 = 0x0020_0000; // 2 MiB
 
 // ----- Bootstrap ----------------------------------------------------------
 
@@ -139,11 +141,20 @@ pub unsafe fn userland_bootstrap() {
     // SAFETY: DAIF still masked from Limine handoff; single-threaded boot.
     unsafe { mmu::enable_ttbr0_walks_once() };
 
-    // 2.5. Load the real VM server (slice 3.4) before the stubs so it takes
-    //      ASID 1 and is enqueued first. Its `RECEIVE(ANY)` blocks immediately
-    //      (no senders yet), leaving the run queue free for the band-8 stubs.
-    // SAFETY: single-threaded boot; sole writer of VM's proc slot + allocator.
-    unsafe { vm_bootstrap() };
+    // 2.5. Load every boot server from the embedded MXBI archive (slice 4.2).
+    //      VM is packed first so it takes ASID 1 and is enqueued first; its
+    //      `RECEIVE(ANY)` blocks immediately (no senders yet), leaving the run
+    //      queue free for the band-8 stubs. Each server's proc/priv slot was
+    //      already populated by `proc::init` → `init_boot_image`; this fills in
+    //      the address space + EL0 entry state, clears RTS_NO_PRIV, and enqueues.
+    // SAFETY: single-threaded boot; sole writer of each server's proc slot + the
+    // frame allocator.
+    unsafe {
+        let image = crate::boot_image::BootImage::get();
+        for (nr, elf) in image.iter() {
+            load_boot_server(nr, elf, SERVER_STACK_VA);
+        }
+    }
 
     // 3. Build each stub. Sequential calls — each build_stub allocates
     //    fresh frames + a fresh AddrSpace and writes its proc slot.
@@ -217,55 +228,64 @@ pub unsafe fn userland_bootstrap() {
     unsafe { print_addrspace_summary() };
 }
 
-/// Load the embedded VM server ELF into a fresh address space, prime its
-/// entry/stack registers, and make it runnable.
+/// Load one boot server's ELF (`elf`) into a fresh address space, prime its
+/// entry/stack registers, clear the boot `RTS_NO_PRIV` block, and enqueue it.
+/// Generalizes the slice-3.4 `vm_bootstrap` over the MXBI archive (slice 4.2).
 ///
-/// Unlike the hand-coded stubs (which use ad-hoc proc/priv slots), VM occupies
-/// its *real* boot slot `VM_PROC_NR`: `proc::init` → `init_boot_image` already
-/// populated VM's name, priority, endpoint, and privilege slot (`trap_mask =
-/// SRV_T` → RECEIVE ANY + SEND to any active slot; `k_call_mask` covering
-/// `SYS_VMCTL`). So this fills in only the address space + EL0 entry state and
-/// clears the boot `RTS_NO_PRIV` block. No `install_*_priv` helper is needed.
+/// Unlike the hand-coded stubs (which use ad-hoc proc/priv slots), a boot server
+/// occupies its *real* boot slot `nr`: `proc::init` → `init_boot_image` already
+/// populated its name, priority, endpoint, and privilege slot (`trap_mask =
+/// SRV_T` → RECEIVE ANY + SEND to any active slot; full `k_call_mask`). So this
+/// fills in only the address space + EL0 entry state. No `install_*_priv` helper
+/// is needed.
+///
+/// `stack_va` is shared across servers ([`SERVER_STACK_VA`]); each gets its own
+/// TTBR0, so the same VA maps a distinct frame per server.
 ///
 /// The `AddrSpace` is `mem::forget`-ed for the same reason as [`build_stub`]:
 /// the page-table tree is now owned via `Proc::ttbr0_pa`.
 ///
-/// SAFETY: single-threaded boot; the only writer of VM's proc slot and the
+/// SAFETY: single-threaded boot; the only writer of `nr`'s proc slot and the
 /// frame allocator here. Must run after `mm::init_from_limine_memmap` and
-/// before `sched::run`.
-unsafe fn vm_bootstrap() {
+/// before `sched::run`. `nr` must be a boot server already populated by
+/// `init_boot_image` (blocked on `RTS_NO_PRIV`).
+unsafe fn load_boot_server(nr: ProcNr, elf: &[u8], stack_va: u64) {
     use crate::arch::aarch64::uart::Pl011;
     use core::fmt::Write;
 
-    let mut aspace = AddrSpace::new().expect("VM AddrSpace::new failed");
+    let mut aspace = AddrSpace::new().expect("server AddrSpace::new failed");
     let ttbr0_pa = aspace.ttbr0_pa;
 
-    let entry = crate::boot_image::elf::load_into(crate::boot_image::VM_ELF, &mut aspace)
-        .expect("VM ELF load failed");
+    let entry =
+        crate::boot_image::elf::load_into(elf, &mut aspace).expect("server ELF load failed");
 
     // Stack: one zeroed RW page; SP starts at its top.
-    let stack_frame = alloc_frame().expect("VM stack frame alloc failed");
+    let stack_frame = alloc_frame().expect("server stack frame alloc failed");
     aspace
-        .map_page(VM_STACK_VA, stack_frame.addr(), Prot::RW_DATA)
-        .expect("map_page(VM stack) failed");
+        .map_page(stack_va, stack_frame.addr(), Prot::RW_DATA)
+        .expect("map_page(server stack) failed");
 
     let asid = unsafe { alloc_asid() };
 
-    // SAFETY: single-threaded boot; sole borrow of VM's slot.
+    // SAFETY: single-threaded boot; sole borrow of this server's slot.
     unsafe {
-        let p = proc_slot_mut(VM_PROC_NR).expect("VM proc slot in range");
+        let p = proc_slot_mut(nr).expect("server proc slot in range");
         p.regs.elr_el1 = entry;
-        p.regs.sp_el0 = VM_STACK_VA + PAGE_SIZE as u64;
+        p.regs.sp_el0 = stack_va + PAGE_SIZE as u64;
         p.regs.spsr_el1 = STUB_SPSR_EL0;
         p.ttbr0_pa = ttbr0_pa;
         p.asid = asid;
         p.next_ready = None;
-        // Clear the boot RTS_NO_PRIV: VM now has an address space and can run.
+        // Clear the boot RTS_NO_PRIV: the server now has an address space.
         p.rts_flags.store(0, Ordering::Relaxed);
 
+        let name = core::str::from_utf8(&p.name)
+            .unwrap_or("?")
+            .trim_end_matches('\0');
         let _ = writeln!(
             Pl011::new(),
-            "[as] vm nr={} ttbr0_pa={:#x} asid={} entry={:#x}",
+            "[as] {} nr={} ttbr0_pa={:#x} asid={} entry={:#x}",
+            name,
             p.nr.get(),
             p.ttbr0_pa,
             p.asid,
@@ -277,7 +297,7 @@ unsafe fn vm_bootstrap() {
     core::mem::forget(aspace);
 
     // SAFETY: single-threaded boot; no other PROC_TABLE / RUNQ borrow is live.
-    unsafe { sched::enqueue(VM_PROC_NR) };
+    unsafe { sched::enqueue(nr) };
 }
 
 /// Build one stub's address space: allocate L0 + code + stack frames,
