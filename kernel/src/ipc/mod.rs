@@ -343,38 +343,47 @@ pub fn fire_expired_alarms(now: u64) {
     for idx in 0..N_PROC_SLOTS {
         let at = proc_table[idx].alarm_at;
         if at == 0 {
-            continue;
+            continue; // disarmed slot
         }
         if at > now {
-            if next_earliest == 0 || at < next_earliest {
-                next_earliest = at;
-            }
+            next_earliest = fold_earliest(next_earliest, at); // armed but not yet due
             continue;
         }
-
-        // Due: disarm and deliver.
+        // Due: disarm, deliver the CLOCK notification, trace the fire.
         proc_table[idx].alarm_at = 0;
         notify::deliver_alarm(proc_table, priv_table, idx);
-
-        let n = ALARM_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if n <= ALARM_TRACE_HEAD || n % ALARM_TRACE_EVERY == 0 {
-            let owner = &proc_table[idx];
-            let id = if owner.name[0] != 0 {
-                owner.name[0]
-            } else {
-                b'?'
-            };
-            let mut uart = Uart::new();
-            let _ = writeln!(
-                uart,
-                "[alarm {n}] owner={} nr={} at={now}",
-                id as char,
-                owner.nr.get()
-            );
-        }
+        trace_alarm_fire(proc_table[idx].name[0], proc_table[idx].nr, now);
     }
 
     crate::clock::set_earliest_alarm(next_earliest);
+}
+
+/// Fold one still-armed deadline `at` into the running next-earliest, treating
+/// 0 as "none". Pulled out of [`fire_expired_alarms`] to keep that scan flat.
+fn fold_earliest(current: u64, at: u64) -> u64 {
+    if current == 0 || at < current {
+        at
+    } else {
+        current
+    }
+}
+
+/// Emit the head/modulo-sampled `[alarm N]` fire trace. Bumps the fire counter
+/// and prints only on the head carve-out or every [`ALARM_TRACE_EVERY`]th fire
+/// — kept out of [`fire_expired_alarms`] so its scan stays under the cognitive-
+/// complexity bar.
+fn trace_alarm_fire(name0: u8, nr: ProcNr, now: u64) {
+    let n = ALARM_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if n > ALARM_TRACE_HEAD && n % ALARM_TRACE_EVERY != 0 {
+        return;
+    }
+    let id = if name0 != 0 { name0 } else { b'?' };
+    let _ = writeln!(
+        Uart::new(),
+        "[alarm {n}] owner={} nr={} at={now}",
+        id as char,
+        nr.get()
+    );
 }
 
 /// SVC-tail shim. `trap.S` calls this between `do_ipc` and
