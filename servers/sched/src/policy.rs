@@ -108,6 +108,34 @@ fn record_in(t: &mut [SchedProc; CAP], proc_nr: i32, priority: u8, quantum: i32)
     false
 }
 
+/// Change `proc_nr`'s managed priority, preserving its recorded quantum — the
+/// `SCHEDULING_SET_NICE` path. A renice changes the band only; the time slice is
+/// a per-proc property set at `SCHEDULING_START`, not a function of the nice
+/// value. If `proc_nr` is unseen it is lazily registered at the given priority +
+/// default [`QUANTUM`] (so a renice that precedes a start still takes effect).
+/// Returns the effective quantum to hand `SYS_SCHEDULE`, or `None` only if the
+/// table is full and `proc_nr` is new.
+fn renice_in(t: &mut [SchedProc; CAP], proc_nr: i32, priority: u8) -> Option<i32> {
+    for e in t.iter_mut() {
+        if e.in_use && e.proc_nr == proc_nr {
+            e.priority = priority;
+            return Some(e.quantum);
+        }
+    }
+    for e in t.iter_mut() {
+        if !e.in_use {
+            *e = SchedProc {
+                proc_nr,
+                priority,
+                quantum: QUANTUM,
+                in_use: true,
+            };
+            return Some(QUANTUM);
+        }
+    }
+    None
+}
+
 /// Stop managing `proc_nr` (the `SCHEDULING_STOP` path). No-op if absent.
 fn forget_in(t: &mut [SchedProc; CAP], proc_nr: i32) {
     for e in t.iter_mut() {
@@ -146,6 +174,15 @@ pub fn record(proc_nr: i32, priority: u8, quantum: i32) -> bool {
     // SAFETY: single-mutator invariant (module note).
     let t = unsafe { &mut *TABLE.0.get() };
     record_in(t, proc_nr, priority, quantum)
+}
+
+/// Change `proc_nr`'s priority, preserving its recorded quantum. See
+/// [`renice_in`].
+#[cfg_attr(test, allow(dead_code))]
+pub fn renice(proc_nr: i32, priority: u8) -> Option<i32> {
+    // SAFETY: single-mutator invariant (module note).
+    let t = unsafe { &mut *TABLE.0.get() };
+    renice_in(t, proc_nr, priority)
 }
 
 /// Stop managing `proc_nr`. See [`forget_in`].
@@ -223,5 +260,39 @@ mod tests {
         assert!(!record_in(&mut t, 100, USER_Q, QUANTUM));
         // But an already-managed proc still resolves.
         assert_eq!(schedule_in(&mut t, 0), Some((USER_Q, QUANTUM)));
+    }
+
+    #[test]
+    fn renice_preserves_quantum() {
+        // A proc started with a non-default quantum keeps it across a renice;
+        // only the band changes.
+        let mut t = [SchedProc::EMPTY; CAP];
+        assert!(record_in(&mut t, 9, USER_Q, 20));
+        assert_eq!(renice_in(&mut t, 9, 4), Some(20));
+        assert_eq!(schedule_in(&mut t, 9), Some((4, 20)));
+        let used = t.iter().filter(|e| e.in_use).count();
+        assert_eq!(used, 1, "renice must not consume a second slot");
+    }
+
+    #[test]
+    fn renice_unseen_registers_at_default_quantum() {
+        // A renice before any start lazily registers at the given band + default
+        // quantum.
+        let mut t = [SchedProc::EMPTY; CAP];
+        assert_eq!(renice_in(&mut t, 13, 6), Some(QUANTUM));
+        assert_eq!(schedule_in(&mut t, 13), Some((6, QUANTUM)));
+    }
+
+    #[test]
+    fn renice_full_table_leaves_new_proc_unmanaged() {
+        let mut t = [SchedProc::EMPTY; CAP];
+        for i in 0..CAP as i32 {
+            assert!(record_in(&mut t, i, USER_Q, QUANTUM));
+        }
+        // A new proc has nowhere to go, even via renice.
+        assert_eq!(renice_in(&mut t, 100, 4), None);
+        // An already-managed proc reprioritizes in place, quantum intact.
+        assert_eq!(renice_in(&mut t, 0, 4), Some(QUANTUM));
+        assert_eq!(schedule_in(&mut t, 0), Some((4, QUANTUM)));
     }
 }
