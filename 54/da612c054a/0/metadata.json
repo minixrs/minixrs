@@ -1,0 +1,79 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "54da612c054a",
+  "session_id": "3b0c5992-e99e-4afb-b435-8ed833146a62",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-27T06:17:25.581671Z",
+  "branch": "feature/phase-4-3-sched",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "servers/sched/src/main.rs",
+    "servers/sched/src/policy.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "e320208cf346",
+  "token_usage": {
+    "input_tokens": 11739,
+    "cache_creation_tokens": 272196,
+    "cache_read_tokens": 2079479,
+    "output_tokens": 25392,
+    "api_call_count": 23
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-review-2026-06-27T05:36:58.399343Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "b9f40ba4fa8f",
+      "timestamp": "2026-06-27T05:36:58.399343Z",
+      "native": {
+        "command": "/review"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/review",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-27T06:17:25.570602Z",
+    "agent_lines": 80,
+    "agent_removed": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 80,
+    "total_lines_changed": 88,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 80,
+      "agent_lines_removed": 8
+    }
+  ]
+}
