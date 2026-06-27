@@ -23,13 +23,47 @@ use crate::uart::Uart;
 /// so 1 second of uptime = 100 ticks.
 static UPTIME: AtomicU64 = AtomicU64::new(0);
 
+/// Earliest absolute uptime tick at which any armed per-proc `SYS_SETALARM`
+/// timer is due, or 0 if no alarm is armed (slice 4.4). This is an O(1)
+/// fast-path gate: [`tick`] consults it every tick but only pays the O(N)
+/// proc-table scan in [`crate::ipc::fire_expired_alarms`] when an alarm is
+/// actually due. The source of truth is each [`Proc::alarm_at`]; this is a
+/// cached minimum kept coherent by [`arm_alarm`] (on a new arm) and
+/// [`set_earliest_alarm`] (on a fire that recomputes the remainder).
+///
+/// [`Proc::alarm_at`]: crate::proc::Proc::alarm_at
+static EARLIEST_ALARM: AtomicU64 = AtomicU64::new(0);
+
 /// Read the current monotonic tick count.
 ///
-/// Unused in slice 2.4 — slice 2.5's `clock_timers` / kernel-call alarms
-/// and slice 2.6's `SYS_TIMES` handler are the first real consumers.
-#[allow(dead_code)] // slice 2.5/2.6: kernel-call alarms + SYS_TIMES
+/// Slice 4.4's `SYS_SETALARM` handler (`system::do_setalarm`) is the first
+/// real consumer; slice 4.x's `SYS_TIMES` will be the next.
 pub fn uptime() -> u64 {
     UPTIME.load(Ordering::Relaxed)
+}
+
+/// Record that an alarm is due at absolute tick `at`, folding it into the
+/// [`EARLIEST_ALARM`] fast-path gate (`min`, treating 0 as "none"). Called by
+/// `system::do_setalarm` when a proc arms its timer.
+///
+/// Single-threaded invariant: `do_setalarm` runs in SVC (EL1) context and
+/// `tick` in IRQ context — both DAIF-masked and mutually exclusive — so a
+/// plain load + conditional store needs no compare-exchange.
+pub fn arm_alarm(at: u64) {
+    if at == 0 {
+        return;
+    }
+    let cur = EARLIEST_ALARM.load(Ordering::Relaxed);
+    if cur == 0 || at < cur {
+        EARLIEST_ALARM.store(at, Ordering::Relaxed);
+    }
+}
+
+/// Overwrite the [`EARLIEST_ALARM`] gate with `at` (0 = no alarm armed).
+/// Called by [`crate::ipc::fire_expired_alarms`] after a fire, with the
+/// recomputed minimum of the still-armed timers.
+pub fn set_earliest_alarm(at: u64) {
+    EARLIEST_ALARM.store(at, Ordering::Relaxed);
 }
 
 /// Per-tick handler. Called from the arch IRQ dispatcher on every PPI 27
@@ -40,7 +74,20 @@ pub fn uptime() -> u64 {
 /// stub is the only async writer, so this is upheld by construction in
 /// slice 2.4.
 pub unsafe fn tick() {
-    UPTIME.fetch_add(1, Ordering::Relaxed);
+    let now = UPTIME.fetch_add(1, Ordering::Relaxed) + 1;
+
+    // Per-proc one-shot alarm (slice 4.4). The fast-path gate keeps the common
+    // tick O(1); only when an alarm is actually due do we pay the proc-table
+    // scan + delivery. `fire_expired_alarms` materializes (and drops, on return)
+    // its own PROC_TABLE borrow, so it must run *before* `current_proc_mut`
+    // below — NLL then keeps the two borrows from aliasing.
+    let earliest = EARLIEST_ALARM.load(Ordering::Relaxed);
+    if earliest != 0 && now >= earliest {
+        // Materializes (and drops, on return) its own PROC_TABLE/PRIV_TABLE
+        // borrow; safe to call here because no such borrow is live yet (we have
+        // not taken `current_proc_mut`).
+        crate::ipc::fire_expired_alarms(now);
+    }
 
     // SAFETY: forwarded — IRQ context with no overlapping borrows.
     let Some(cur) = (unsafe { sched::current_proc_mut() }) else {

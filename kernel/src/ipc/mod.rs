@@ -310,6 +310,82 @@ pub fn send_no_quantum(preempted_nr: ProcNr, scheduler_e: Endpoint) {
     send::mini_sched_no_quantum_send(proc_table, preempted_nr, scheduler_e);
 }
 
+/// Cadence of the boot-time alarm-fire trace.
+const ALARM_TRACE_EVERY: u64 = 100;
+/// Leading alarm fires to trace unconditionally (head carve-out), so RS's first
+/// few periodic fires show even though stub C's `SYS_GETINFO` flood dwarfs the
+/// modulo sampler (same reasoning as [`TRACE_HEAD`] / `sched::NOQ_TRACE_HEAD`).
+const ALARM_TRACE_HEAD: u64 = 6;
+/// Count of alarm fires, for the head/modulo trace above.
+static ALARM_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Fire every per-proc one-shot alarm due at or before `now` (slice 4.4).
+///
+/// Called from `clock::tick` *only* when the `EARLIEST_ALARM` fast-path gate
+/// says an alarm is due, so the O(N) proc-table scan is paid rarely. For each
+/// expired [`Proc::alarm_at`] it clears the field, delivers a kernel-originated
+/// `NOTIFY` from `CLOCK` to the owner ([`notify::deliver_alarm`]), and traces
+/// the fire; it then recomputes the minimum of the still-armed deadlines and
+/// writes it back into the clock gate via [`crate::clock::set_earliest_alarm`].
+///
+/// Materializes the proc/priv slices here — same "only `ipc` materializes the
+/// tables for delivery" discipline as [`send_pagefault_to_vm`] /
+/// [`send_no_quantum`].
+///
+/// [`Proc::alarm_at`]: crate::proc::Proc::alarm_at
+pub fn fire_expired_alarms(now: u64) {
+    // SAFETY: IRQ/clock context — single-threaded, DAIF.I masked. `clock::tick`
+    // has taken no PROC_TABLE/PRIV_TABLE borrow before calling us.
+    let proc_table = unsafe { proc_table_mut_slice() };
+    let priv_table = unsafe { priv_table_mut_slice() };
+
+    let mut next_earliest: u64 = 0;
+    for idx in 0..N_PROC_SLOTS {
+        let at = proc_table[idx].alarm_at;
+        if at == 0 {
+            continue; // disarmed slot
+        }
+        if at > now {
+            next_earliest = fold_earliest(next_earliest, at); // armed but not yet due
+            continue;
+        }
+        // Due: disarm, deliver the CLOCK notification, trace the fire.
+        proc_table[idx].alarm_at = 0;
+        notify::deliver_alarm(proc_table, priv_table, idx);
+        trace_alarm_fire(proc_table[idx].name[0], proc_table[idx].nr, now);
+    }
+
+    crate::clock::set_earliest_alarm(next_earliest);
+}
+
+/// Fold one still-armed deadline `at` into the running next-earliest, treating
+/// 0 as "none". Pulled out of [`fire_expired_alarms`] to keep that scan flat.
+fn fold_earliest(current: u64, at: u64) -> u64 {
+    if current == 0 || at < current {
+        at
+    } else {
+        current
+    }
+}
+
+/// Emit the head/modulo-sampled `[alarm N]` fire trace. Bumps the fire counter
+/// and prints only on the head carve-out or every [`ALARM_TRACE_EVERY`]th fire
+/// — kept out of [`fire_expired_alarms`] so its scan stays under the cognitive-
+/// complexity bar.
+fn trace_alarm_fire(name0: u8, nr: ProcNr, now: u64) {
+    let n = ALARM_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if n > ALARM_TRACE_HEAD && n % ALARM_TRACE_EVERY != 0 {
+        return;
+    }
+    let id = if name0 != 0 { name0 } else { b'?' };
+    let _ = writeln!(
+        Uart::new(),
+        "[alarm {n}] owner={} nr={} at={now}",
+        id as char,
+        nr.get()
+    );
+}
+
 /// SVC-tail shim. `trap.S` calls this between `do_ipc` and
 /// `el1_return_to_user`; it picks the next runnable proc (which may be
 /// the same caller, may be a higher-priority receiver that just
