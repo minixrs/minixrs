@@ -39,6 +39,10 @@ cargo kernel-aarch64
 # Redirect to a file when you need to grep tick output -- live tail loses lines.
 # The log interleaves raw single-char tick bytes; grep it with `grep -a`
 # (force text) or matches read as "Binary file matches".
+# QEMU under TCG advances *guest* time slower than wall-clock, so a `timeout N`
+# run reaches far fewer than N x 100 ticks. For time-based features (alarms,
+# quantum/scheduling) read uptime-stamped traces (e.g. `[alarm ... at=N]`) as the
+# real clock, and run 20-25 s to observe several periods.
 timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # Build kernel for x86_64
@@ -61,6 +65,12 @@ pushes refresh the whole-project picture.
   two host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm`) — `minix-ipc` has inline asm
 - Before pushing, the blocking gates must be green: `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings`. Run `cargo fmt --all` to fix formatting
+- The blocking `clippy --workspace` gate runs on the **host** target, where the kernel's real
+  modules are `#[cfg(target_os = "none")]`-gated out — so kernel code is *not* clippy-linted by CI.
+  `cargo clippy -p minixrs-kernel --target aarch64-unknown-none` surfaces those lints, but it
+  currently reports pre-existing ones that ship on `main` (nomem-asm pointers, `manual_is_multiple_of`,
+  interior-mutable-const); don't "fix" them as part of an unrelated slice. `cargo kernel-aarch64` is
+  the real compile gate for kernel code
 - The toolchain is **pinned to a dated nightly** in `rust-toolchain.toml` (bare `nightly` let new
   lints/fmt rules break CI with no code change); bump it deliberately, not incidentally
 - `Cargo.lock` **is committed** (so audit/deny are reproducible) — do not re-add it to `.gitignore`
@@ -118,6 +128,7 @@ See `docs/architecture.md` for the full system design. Key concepts:
 - IPC blocking pairs with the new `sched::rts_set` / `rts_unset` helpers — they capture `nr`, end the `&mut Proc` borrow, then call `enqueue` / `dequeue` so RTS state and the run queue stay in sync. Same NLL-capture pattern slice 2.4 used in `clock::tick`
 - Kernel-call handlers that act on a *target* proc named in the message (e.g. `system::do_vmctl`, `system::do_schedule`'s `do_schedule`/`do_schedctl`) take the whole `&mut [Proc; N_PROC_SLOTS]` slice + `caller_nr`; caller-only handlers (e.g. `do_getinfo`) get a single `&mut Proc` / `&Priv`. `system::kernel_call_dispatch` routes `SYS_VMCTL` / `SYS_SCHEDULE` / `SYS_SCHEDCTL` to the table-taking form (a small `match` before `dispatch_caller_local`) and the rest through `dispatch_caller_local`. Run-queue transitions on a target use the same `sched::rts_set` / `rts_unset` capture-then-borrow-end pattern the IPC primitives use
 - The kernel scheduler is **delegatable** (slice 4.3): `Proc::scheduler == NONE` (the boot default, set by `populate_proc`) means kernel-scheduled — `sched::reschedule` refills the quantum and rotates as before. A non-`NONE` `scheduler` endpoint means SCHED-scheduled: on quantum exhaustion `reschedule` dequeues the proc, leaves `RTS_NO_QUANTUM` set, and sends `SCHEDULING_NO_QUANTUM` to the scheduler via `ipc::send::mini_sched_no_quantum_send` (a `mini_pf_send` clone; wrapper `ipc::send_no_quantum` materializes the proc-table slice like `send_pagefault_to_vm`). The proc stays off the run queue until the scheduler calls real `SYS_SCHEDULE` (`do_schedule` sets priority/quantum + `rts_unset(RTS_NO_QUANTUM)`). Kernel tasks **and SCHED itself stay `NONE`** — a scheduler must not schedule itself. `SYS_SCHEDCTL` claims (`scheduler = caller`) / releases (`SCHEDCTL_FLAG_KERNEL` → `NONE`) a target; the kernel pre-delegates stub C in `userland.rs` as the live demo until PM/RS drive `SCHEDULING_START` (4.5/4.6). SCHED's `SCHEDULING_*` request range is `SCHED_RQ_BASE = 0xF00` (clear of VM `0xC00` / SEF `0xD00` / DS `0xE00`, below `NOTIFY_MESSAGE`)
+- Per-proc one-shot alarms (slice 4.4): `Proc::alarm_at` holds an absolute uptime tick (0 = disarmed); `clock::EARLIEST_ALARM` is an O(1) fast-path gate so `tick()` only pays the O(N) scan in `ipc::fire_expired_alarms` when one is due. Expiry delivers a kernel-originated `NOTIFY` from `CLOCK` via `ipc::notify::deliver_alarm` — **no `ipc_to` check** (kernel-originated, like `mini_pf_send`; `CLOCK`'s `ipc_to` is empty so `mini_notify` would deny it), immediate if the owner is `RECEIVE`-blocked else deferred via `notify_pending` against CLOCK's priv slot. A user-space periodic alarm is a re-arm per fire (RS). `SYS_SETALARM` (now real, caller-local) payload: relative `delta` ticks in `0..8` (0 cancels), reply = previous time-left; no new kernel-shared constants (reuses `NOTIFY_MESSAGE` + `CLOCK`). RS (`servers/rs`) heartbeats peers by `ipc_notify` (peers ack via `server-rt`'s SEF ping); RS keys its alarm on `m_source == boot_endpoint(CLOCK)` (classified `Application`, not the RS-sourced SEF ping)
 - `kernel/build.rs` skips assembly when `CARGO_CFG_TARGET_OS != "none"` so `cargo check --workspace` / `cargo test --workspace` keep working on host. The kernel's real modules are gated by `#[cfg(target_os = "none")]` in `main.rs` regardless
 - `cargo test -p minixrs-kernel` runs zero tests by design — every kernel module is gated on `#[cfg(target_os = "none")]` and host-test infra is not yet built; host-runnable tests live in `kernel-shared`. QEMU is the primary verification for kernel code (`timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release`)
 - `no_std` library crates that host-test via `#![cfg_attr(not(test), no_std)]` get linted in their std test-config too (`clippy --all-targets`): a const-only `assert!(A > B)` trips `assertions_on_constants` (use a module-level `const _: () = assert!(…)` like `callnr.rs`), and a bare `loop {}` in a function present under `test` trips `empty_loop` (use `loop { core::hint::spin_loop() }`; the `#[cfg(not(test))]` panic handler's `loop {}` is exempt because it's absent under test)
