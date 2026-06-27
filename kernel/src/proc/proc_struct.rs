@@ -90,6 +90,17 @@ pub struct Proc {
     /// the VM server's region table.
     pub heap_window: HeapWindow,
 
+    // ----- Scheduling delegation ------------------------------------------
+    /// Endpoint of this proc's user-space scheduler, or [`NONE`] for the
+    /// kernel-scheduled default (slice 4.3). When `NONE`, `sched::reschedule`
+    /// refills the quantum and rotates the proc as it always has; otherwise the
+    /// kernel sends `SCHEDULING_NO_QUANTUM` to this endpoint on quantum
+    /// exhaustion and leaves the proc off the run queue until the scheduler
+    /// re-admits it via `SYS_SCHEDULE`. Mirrors MINIX 3's `p_scheduler`.
+    /// Kernel tasks and SCHED itself stay `NONE` (a scheduler must not schedule
+    /// itself).
+    pub scheduler: Endpoint,
+
     // ----- Run-queue state -------------------------------------------------
     /// Next process in the same priority-band run queue, or `None` if last.
     /// Mirrors MINIX 3's `p_nextready` but as a [`ProcNr`] index per the
@@ -136,6 +147,7 @@ impl Proc {
         asid: 0,
         page_fault_state: PageFaultState::EMPTY,
         heap_window: HeapWindow::EMPTY,
+        scheduler: NONE,
         next_ready: None,
         name: [0; PROC_NAME_LEN],
     };

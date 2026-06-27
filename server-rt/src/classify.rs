@@ -43,8 +43,10 @@ pub enum SefEvent {
 /// - **Init** — `SEF_INIT` from RS alone, which owns server lifecycle.
 ///
 /// SEF control `m_type`s live in a range (`0xD00`) distinct from every VM
-/// request (`0xC00`) and below the NOTIFY marker, so real server traffic never
-/// collides even before the source check.
+/// request (`0xC00`), DS request (`0xE00`), and SCHED request (`0xF00`, incl.
+/// the kernel-originated `SCHEDULING_NO_QUANTUM`), and below the NOTIFY marker,
+/// so real server traffic — including a kernel→SCHED no-quantum message — falls
+/// through to [`SefEvent::Application`] even before the source check.
 pub fn classify(msg: &Message) -> SefEvent {
     let rs = boot_endpoint(RS_PROC_NR);
     let pm = boot_endpoint(PM_PROC_NR);

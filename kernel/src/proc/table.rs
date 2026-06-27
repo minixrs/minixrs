@@ -11,12 +11,13 @@
 
 use core::cell::UnsafeCell;
 
-use minixrs_kernel_shared::callnr::NR_KERN_CALLS_PHASE3;
+use minixrs_kernel_shared::callnr::NR_KERN_CALLS_PHASE4;
 use minixrs_kernel_shared::com::{
     ASYNCM, CLOCK, DS_PROC_NR, HARDWARE, IDLE, INIT_PROC_NR, MEM_PROC_NR, MFS_PROC_NR,
     NR_BOOT_PROCS, NR_PROCS, NR_SYS_PROCS, NR_TASKS, PFS_PROC_NR, PM_PROC_NR, RS_PROC_NR,
     SCHED_PROC_NR, SYSTEM, TTY_PROC_NR, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
 };
+use minixrs_kernel_shared::endpoint::NONE;
 use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use super::flags::{
@@ -372,10 +373,10 @@ fn populate_priv(id: PrivId, entry: &BootEntry, n_active: u16) {
     if entry.trap_mask == SRV_T {
         // SRV_T privs can send to every active slot. Set bits [0, n_active).
         fill_bits(&mut pr.ipc_to, n_active as usize);
-        // SRV_T privs can issue every kernel call defined so far.
-        // TODO(slice 2.6): widen as new kernel calls land — this bound must
-        // track the highest `SYS_*` number, not the Phase-2 count.
-        fill_bits(&mut pr.k_call_mask, NR_KERN_CALLS_PHASE3);
+        // SRV_T privs can issue every kernel call defined so far. This bound
+        // tracks the highest `SYS_*` number; slice 4.3 widened it to admit
+        // `SYS_SCHEDULE` / `SYS_SCHEDCTL` so SCHED may issue them.
+        fill_bits(&mut pr.k_call_mask, NR_KERN_CALLS_PHASE4);
     }
     // Kernel-task slots leave ipc_to and k_call_mask zeroed.
 
@@ -394,6 +395,11 @@ fn populate_proc(priv_id: PrivId, entry: &BootEntry) {
     p.quantum_left = entry.quantum_ms as u64;
     p.endpoint = boot_endpoint(entry.nr);
     p.nr = entry.nr;
+    // Boot procs start kernel-scheduled; a user-space scheduler claims them
+    // later via `SYS_SCHEDCTL` (slice 4.3). `Proc::EMPTY` already zeroes this to
+    // `NONE`, but set it explicitly so a future slot-reuse path can't inherit a
+    // stale scheduler endpoint.
+    p.scheduler = NONE;
 
     // Copy name into the fixed-width field (truncates silently at PROC_NAME_LEN).
     let n = core::cmp::min(entry.name.len(), PROC_NAME_LEN - 1);
