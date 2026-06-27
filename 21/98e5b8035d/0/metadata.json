@@ -1,0 +1,70 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "2198e5b8035d",
+  "session_id": "952d10fe-70b3-45fa-94b6-f968f4eff249",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-27T05:26:54.593407Z",
+  "branch": "feature/phase-4-3-sched",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/ipc/send.rs",
+    "kernel/src/proc/proc_struct.rs",
+    "kernel/src/proc/sched.rs",
+    "kernel/src/proc/table.rs",
+    "kernel/src/system/do_schedule.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs",
+    "server-rt/src/classify.rs",
+    "servers/sched/Cargo.toml",
+    "servers/sched/src/main.rs",
+    "servers/sched/src/policy.rs",
+    "servers/sched/user.ld"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "33588b3825b4",
+  "token_usage": {
+    "input_tokens": 26135,
+    "cache_creation_tokens": 549033,
+    "cache_read_tokens": 25824260,
+    "output_tokens": 166543,
+    "api_call_count": 90
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-27T05:26:54.566669Z",
+    "agent_lines": 1098,
+    "agent_removed": 60,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1098,
+    "total_lines_changed": 1158,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1098,
+      "agent_lines_removed": 60
+    }
+  ]
+}
