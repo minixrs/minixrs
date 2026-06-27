@@ -19,14 +19,27 @@
 //! newtype pattern documented on `ProcStorage` / `PrivStorage`.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::fmt::Write;
+use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
+use minixrs_kernel_shared::endpoint::{Endpoint, NONE};
 
 use crate::arch::ArchRegisterFrame;
 use crate::proc::Proc;
 use crate::proc::flags::RTS_NO_QUANTUM;
 use crate::proc::table::proc_slot_mut;
+use crate::uart::Uart;
+
+/// Leading delegated quantum-exhaust events to trace explicitly, so the boot log
+/// shows the kernel handing a SCHED-scheduled proc to its scheduler. Steady
+/// state is dwarfed by stub C's SYS_GETINFO flood, so without a head carve-out
+/// the modulo-100 `[ksys]` sampler would rarely catch SCHED's re-admit (same
+/// reasoning as `ipc::TRACE_HEAD` and `do_vmctl::VMCTL_TRACE_HEAD`).
+const NOQ_TRACE_HEAD: u64 = 6;
+/// Count of delegated (non-kernel-scheduled) quantum-exhaust events, for the
+/// head trace above.
+static NOQ_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Number of scheduling-priority bands. Matches the constants in
 /// `proc::table` (`TASK_Q = 0`, `IDLE_Q = 15`).
@@ -338,21 +351,60 @@ pub unsafe fn reschedule() {
     let cur_raw = CURRENT_PROC_NR.load(Ordering::Relaxed);
     if cur_raw != NO_PROC {
         let cur_nr = ProcNr::new(cur_raw);
+        // Read the delegation target first, then end the borrow (NLL) so the
+        // dequeue/enqueue/send below can re-borrow `PROC_TABLE`.
         // SAFETY: single-threaded; cur_nr came from CURRENT_PROC_NR.
-        let cur_runnable_after_refill = unsafe {
-            let cur = proc_slot_mut(cur_nr).expect("reschedule: current out of range");
-            cur.quantum_left = cur.quantum_ms as u64;
-            cur.rts_flags.fetch_and(!RTS_NO_QUANTUM, Ordering::Relaxed);
-            cur.rts_flags.load(Ordering::Relaxed) == 0
+        let scheduler_e: Endpoint = unsafe {
+            proc_slot_mut(cur_nr)
+                .expect("reschedule: current out of range")
+                .scheduler
         };
-        // Only rotate runnable cur. If cur is also blocked on something
-        // else (e.g. IPC), `rts_set` already dequeued it — leave it off.
-        if cur_runnable_after_refill {
-            // SAFETY: cur_nr borrow above has been dropped.
-            unsafe {
-                dequeue(cur_nr);
-                enqueue(cur_nr);
+
+        if scheduler_e == NONE {
+            // Kernel-scheduled (the default): refill the quantum, clear
+            // RTS_NO_QUANTUM, and rotate to the tail of the priority band.
+            // SAFETY: single-threaded; cur_nr came from CURRENT_PROC_NR.
+            let cur_runnable_after_refill = unsafe {
+                let cur = proc_slot_mut(cur_nr).expect("reschedule: current out of range");
+                cur.quantum_left = cur.quantum_ms as u64;
+                cur.rts_flags.fetch_and(!RTS_NO_QUANTUM, Ordering::Relaxed);
+                cur.rts_flags.load(Ordering::Relaxed) == 0
+            };
+            // Only rotate runnable cur. If cur is also blocked on something
+            // else (e.g. IPC), `rts_set` already dequeued it — leave it off.
+            if cur_runnable_after_refill {
+                // SAFETY: cur_nr borrow above has been dropped.
+                unsafe {
+                    dequeue(cur_nr);
+                    enqueue(cur_nr);
+                }
             }
+        } else {
+            // Delegated to a user-space scheduler (slice 4.3). `clock::tick`
+            // set RTS_NO_QUANTUM with a bare `fetch_or`, so cur is still on the
+            // run queue and `pick_proc` (which ignores rts_flags) would re-pick
+            // it. Dequeue it explicitly and leave RTS_NO_QUANTUM set — it stays
+            // blocked until the scheduler re-admits it via SYS_SCHEDULE. Do NOT
+            // refill the quantum; the scheduler assigns it.
+            // SAFETY: cur_nr borrow above has been dropped; single-threaded.
+            unsafe { dequeue(cur_nr) };
+
+            let n = NOQ_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= NOQ_TRACE_HEAD {
+                // SAFETY: single-threaded; sequential read-only borrow just for
+                // the trace's identifying byte.
+                let id = unsafe { proc_slot_mut(cur_nr).map(|p| p.name[0]).unwrap_or(b'?') };
+                let _ = writeln!(
+                    Uart::new(),
+                    "[noq {n}] proc={} nr={} -> scheduler={scheduler_e:#x}",
+                    id as char,
+                    cur_nr.get(),
+                );
+            }
+
+            // Notify the scheduler. The wrapper materializes the proc-table
+            // slice (no PROC_TABLE borrow is live here).
+            crate::ipc::send_no_quantum(cur_nr, scheduler_e);
         }
     }
 

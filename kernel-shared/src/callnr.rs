@@ -25,19 +25,34 @@ pub const SYS_SETALARM: i32 = KERNEL_CALL + 10;
 pub const SYS_TIMES: i32 = KERNEL_CALL + 11;
 pub const SYS_DIAGCTL: i32 = KERNEL_CALL + 12;
 pub const SYS_SETGRANT: i32 = KERNEL_CALL + 13;
+/// Scheduler claim/release. A user-space scheduler (SCHED) calls this to take a
+/// target proc under its management (`target.scheduler = caller`) or hand it
+/// back to the kernel scheduler (`SCHEDCTL_FLAG_KERNEL`). Made real in slice 4.3
+/// alongside `SYS_SCHEDULE`; payload layout mirrors `SYS_VMCTL` (flags in
+/// `0..4`, target endpoint in `4..8`).
+pub const SYS_SCHEDCTL: i32 = KERNEL_CALL + 14;
 
-/// Number of kernel calls defined through Phase 3. Slice 3.3 adds no new
-/// `SYS_*` (it fills in `SYS_VMCTL`'s subcalls instead), so the count is
-/// unchanged from Phase 2 — the rename just gives `system/mod.rs`'s
-/// arm-coverage const-assert a phase-appropriate name as Phase 3 lands.
-pub const NR_KERN_CALLS_PHASE3: usize = 14;
+/// `SYS_SCHEDCTL` flag: revert the target to kernel scheduling
+/// (`target.scheduler = NONE`). Absent → the caller claims the target as its
+/// own scheduler. Matches MINIX 3 `SCHEDCTL_FLAG_KERNEL` (`include/minix/com.h`).
+pub const SCHEDCTL_FLAG_KERNEL: i32 = 1 << 0;
+
+/// Number of kernel calls defined through Phase 4. Slice 4.3 makes
+/// `SYS_SCHEDULE` real and adds `SYS_SCHEDCTL`, bringing the count to 15.
+pub const NR_KERN_CALLS_PHASE4: usize = 15;
+
+/// One-slice alias for the previous phase's count, kept so slice 4.3's existing
+/// range guards (the VM/DS/SEF "above the last kernel call" asserts) keep
+/// compiling unchanged. Dropped in slice 4.4, exactly as `_PHASE2` was dropped
+/// one slice after `_PHASE3` landed.
+pub const NR_KERN_CALLS_PHASE3: usize = NR_KERN_CALLS_PHASE4;
 
 /// Size of the privilege-table kernel-call mask, in bits. Sized as a single
-/// `u32` chunk (32 slots) to leave headroom past Phase 2's 14 calls while
+/// `u32` chunk (32 slots) to leave headroom past Phase 4's 15 calls while
 /// keeping the bitmap a single word per privilege slot.
 pub const NR_SYS_CALLS: usize = 32;
 
-const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS_PHASE3);
+const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS_PHASE4);
 const _: () = assert!(NR_SYS_CALLS.is_multiple_of(32));
 
 // ---------------------------------------------------------------------------
@@ -235,6 +250,56 @@ pub const NR_SEF_MSGS: usize = 2;
 const _: () = assert!(SEF_RQ_BASE > VM_RQ_BASE + 3);
 const _: () = assert!(SEF_RQ_BASE < crate::ipc_const::NOTIFY_MESSAGE);
 
+// ---------------------------------------------------------------------------
+// SCHED (scheduler) server request numbers — `m_type` values for messages
+// addressed to the user-space SCHED server (slice 4.3).
+//
+// `SCHEDULING_NO_QUANTUM` is kernel-originated: when a SCHED-scheduled proc
+// exhausts its quantum, the kernel sends it (with `m_source` = the preempted
+// proc, so SCHED knows which proc to reschedule), exactly as it originates
+// `VM_PAGEFAULT` for a faulter. The other three are PM/RS → SCHED requests
+// (claim/release/renice a managed proc). Like the VM/DS ranges these are
+// *server IPC requests*, not kernel calls, so they live in their own range
+// distinct from `KERNEL_CALL` (`0x600`), VM (`0xC00`), SEF (`0xD00`), and DS
+// (`0xE00`), and stay below the IPC `NOTIFY_MESSAGE` marker (`0x1000`) so the
+// SEF classifier (which returns `Application` for them) can never misroute.
+// Numbering is minix.rs-specific (MINIX 3 carries `SCHEDULING_*` in `com.h`).
+// ---------------------------------------------------------------------------
+
+/// Base for SCHED server request `m_type` values.
+pub const SCHED_RQ_BASE: i32 = 0xF00;
+
+/// Kernel → SCHED: the proc identified by `m_source` used up its full quantum.
+/// SCHED applies its policy and re-admits the proc via `SYS_SCHEDULE`. Carries
+/// no payload — `m_source` is the whole request.
+pub const SCHEDULING_NO_QUANTUM: i32 = SCHED_RQ_BASE;
+
+/// PM/RS → SCHED: start scheduling a proc. The target endpoint is in payload
+/// `0..4` (i32), the initial priority in `4..8` (i32), and the quantum (ms) in
+/// `8..12` (i32). SCHED claims the target via `SYS_SCHEDCTL` and assigns the
+/// initial priority/quantum via `SYS_SCHEDULE`. (Driven by PM/RS from slice 4.5+.)
+pub const SCHEDULING_START: i32 = SCHED_RQ_BASE + 1;
+
+/// PM/RS → SCHED: stop scheduling the target (payload `0..4`, i32). SCHED hands
+/// it back to the kernel scheduler via `SYS_SCHEDCTL(SCHEDCTL_FLAG_KERNEL)`.
+pub const SCHEDULING_STOP: i32 = SCHED_RQ_BASE + 2;
+
+/// PM/RS → SCHED: change the target's nice value. Target endpoint in payload
+/// `0..4` (i32), new priority in `4..8` (i32). SCHED records it and applies it
+/// via `SYS_SCHEDULE`.
+pub const SCHEDULING_SET_NICE: i32 = SCHED_RQ_BASE + 3;
+
+/// Number of SCHED server requests defined so far. Locks the dispatch-match
+/// coverage in the SCHED server the way `NR_DS_REQUESTS` locks the DS server.
+pub const NR_SCHED_MSGS: usize = 4;
+
+// The SCHED range sits strictly above the DS range (0xE00..0xE02) and below the
+// NOTIFY marker, so neither a server's `m_type` dispatcher nor the SEF
+// classifier can ever collide with it.
+const _: () = assert!(SCHED_RQ_BASE > DS_RQ_BASE + (NR_DS_REQUESTS as i32 - 1));
+const _: () =
+    assert!(SCHED_RQ_BASE + (NR_SCHED_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,11 +321,12 @@ mod tests {
             SYS_TIMES,
             SYS_DIAGCTL,
             SYS_SETGRANT,
+            SYS_SCHEDCTL,
         ];
         for (i, call) in calls.iter().enumerate() {
             assert_eq!(*call, KERNEL_CALL + i as i32);
         }
-        assert_eq!(calls.len(), NR_KERN_CALLS_PHASE3);
+        assert_eq!(calls.len(), NR_KERN_CALLS_PHASE4);
     }
 
     #[test]
@@ -376,6 +442,62 @@ mod tests {
             assert_eq!(*m, SEF_RQ_BASE + i as i32);
         }
         assert_eq!(msgs.len(), NR_SEF_MSGS);
+    }
+
+    #[test]
+    fn sched_msgs_contiguous_from_base() {
+        // SCHED requests are contiguous from SCHED_RQ_BASE; NR_SCHED_MSGS locks
+        // the SCHED server's dispatch coverage.
+        let msgs = [
+            SCHEDULING_NO_QUANTUM,
+            SCHEDULING_START,
+            SCHEDULING_STOP,
+            SCHEDULING_SET_NICE,
+        ];
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(*m, SCHED_RQ_BASE + i as i32);
+        }
+        assert_eq!(msgs.len(), NR_SCHED_MSGS);
+    }
+
+    #[test]
+    fn sched_msgs_distinct_from_other_ranges() {
+        // Each SCHED request must stay distinct from the VM/DS/SEF request
+        // ranges and the KERNEL_CALL range, and below NOTIFY_MESSAGE — so a
+        // server's m_type dispatcher and the SEF classifier never collide.
+        for m in [
+            SCHEDULING_NO_QUANTUM,
+            SCHEDULING_START,
+            SCHEDULING_STOP,
+            SCHEDULING_SET_NICE,
+        ] {
+            for other in [
+                VM_PAGEFAULT,
+                VM_BRK,
+                VM_MMAP,
+                VM_MUNMAP,
+                DS_PUBLISH,
+                DS_RETRIEVE,
+                DS_CHECK,
+                SEF_INIT,
+                SEF_SIGNAL,
+            ] {
+                assert_ne!(m, other);
+            }
+            assert!(m > DS_RQ_BASE + (NR_DS_REQUESTS as i32 - 1));
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+            assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
+            assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn schedctl_is_last_kernel_call() {
+        // SYS_SCHEDCTL is the new Phase-4 kernel call; the count must include it.
+        assert_eq!(SYS_SCHEDCTL, KERNEL_CALL + 14);
+        assert_eq!(NR_KERN_CALLS_PHASE4, 15);
+        // The one-slice alias mirrors the new count until 4.4 drops it.
+        assert_eq!(NR_KERN_CALLS_PHASE3, NR_KERN_CALLS_PHASE4);
     }
 
     #[test]

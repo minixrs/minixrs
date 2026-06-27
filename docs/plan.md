@@ -822,8 +822,8 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   registration (no heap; minimal subset vs MINIX `lib/libsys/sef.c`). Port
   `servers/vm` to the SEF loop (handlers unchanged) so VM is live regression
   coverage for the framework before any new server depends on it.
-- **Slice 4.2** ◀ ready (branch `feature/phase-4-2-boot-image-ds-vfs`, pending
-  merge) — Multi-module boot image + DS server + VFS skeletal boot.
+- **Slice 4.2** ✓ shipped (PR #24, merged 2026-06-21) — Multi-module boot image
+  + DS server + VFS skeletal boot.
   `kernel/build.rs`'s single-VM embed is generalized into `build_server(name,
   dir, …)` + `pack_mxbi(...)`: it builds each server (VM/DS/VFS) into its own
   isolated `CARGO_TARGET_DIR`, packs the ELFs into one MXBI archive in `OUT_DIR`
@@ -858,17 +858,50 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   panic / `el0_sync_unexpected`. Host: `cargo test -p minixrs-kernel-shared`
   (DS callnr) + `-p minixrs-ds` (registry) green; `cargo check --workspace` +
   clippy `-D warnings` + fmt clean.
-- **Slice 4.3** ◀ next — Real user-space scheduling (kernel delegatable scheduler +
-  SCHED; optional 4.3a/4.3b split like 3.4). Kernel: `Proc::scheduler` (`NONE` =
-  kernel-scheduled, the boot default); on `RTS_NO_QUANTUM`, requeue if
-  kernel-scheduled else send `SCHEDULING_NO_QUANTUM` to the proc's scheduler
-  (kernel-originated SEND, like 3.4's `mini_pf_send`) and leave it not-runnable;
-  `SYS_SCHEDULE` becomes real and a new `SYS_SCHEDCTL` claims/releases a target
-  (bump to `NR_KERN_CALLS_PHASE4`, one-slice `_PHASE3` alias). SCHED server:
-  `SCHEDULING_START`/`STOP`/`SET_NICE`/`NO_QUANTUM` with a simple drop-a-band
-  policy; flip boot servers to SCHED-scheduled (kernel tasks + SCHED itself stay
-  kernel-scheduled).
-- **Slice 4.4** — RS (reincarnation server) + real `SYS_SETALARM`. Implement the
+- **Slice 4.3** ◀ ready (branch `feature/phase-4-3-sched`, pending merge) — Real
+  user-space scheduling: kernel delegatable scheduler + SCHED server (single PR).
+  `Proc` gains `scheduler: Endpoint` (`NONE` = kernel-scheduled, the boot
+  default; `populate_proc` sets it and `Proc::EMPTY` zeroes it to `NONE`).
+  `sched::reschedule` branches on it: `NONE` keeps the slice-2.4 refill+rotate;
+  otherwise it dequeues the preempted proc (which `clock::tick`'s bare `fetch_or`
+  left enqueued), leaves `RTS_NO_QUANTUM` set, and sends `SCHEDULING_NO_QUANTUM`
+  to the scheduler via new `ipc::send::mini_sched_no_quantum_send` (a near-clone
+  of 3.4's `mini_pf_send`, wrapped by `ipc::send_no_quantum` which materializes
+  the proc-table slice like `send_pagefault_to_vm`). `SYS_SCHEDULE` becomes real
+  and a new `SYS_SCHEDCTL` lands (`kernel/src/system/do_schedule.rs`), both
+  target-taking and routed beside `SYS_VMCTL` in `kernel_call_dispatch`:
+  `do_schedule` sets a target's priority/quantum and re-admits it
+  (`rts_unset(RTS_NO_QUANTUM)` if off-queue, else dequeue+enqueue for the band
+  move); `do_schedctl` claims (`scheduler = caller`) or releases
+  (`SCHEDCTL_FLAG_KERNEL` → `NONE`) a target. `kernel-shared/callnr.rs` gains
+  `SYS_SCHEDCTL`, `SCHEDCTL_FLAG_KERNEL`, `NR_KERN_CALLS_PHASE4 = 15` (one-slice
+  `_PHASE3` alias, dropped in 4.4), and a `SCHED_RQ_BASE = 0xF00` range
+  (`SCHEDULING_NO_QUANTUM`/`START`/`STOP`/`SET_NICE`, `NR_SCHED_MSGS = 4`,
+  const-asserted distinct from VM/SEF/DS and below `NOTIFY_MESSAGE`) + host
+  tests; `init_boot_image`'s `k_call_mask` fill widens to `NR_KERN_CALLS_PHASE4`
+  so SCHED may issue the two calls. SCHED (`servers/sched`, server-rt based):
+  SEF loop publishing to DS, handlers for all four `SCHEDULING_*`; the policy is
+  a round-robin quantum refresh at a fixed managed band (`USER_Q = 8`, the
+  boot-server band, so a CPU-bound managed proc round-robins instead of sinking
+  behind the kernel-scheduled stubs) held in a static `[SchedProc; 16]`
+  `UnsafeCell` table (`servers/sched/src/policy.rs`, pure helpers host-tested
+  like `ds/registry.rs`). MINIX-style priority aging (drop a band + periodic
+  `balance_queues` boost) is deferred to 4.4's `SYS_SETALARM` — without the boost,
+  dropping a band would starve the managed proc behind the band-8 stubs.
+  `SCHEDULING_START`/`STOP`/`SET_NICE` are implemented for PM/RS to drive from
+  4.5+; in 4.3 the kernel pre-delegates stub C (`userland.rs` sets its
+  `scheduler = boot_endpoint(SCHED_PROC_NR)`), the live exercise. Added to the
+  MXBI `servers` array in `build.rs` (proc_nr 9). Verified in QEMU over 10 s:
+  eight `[as]` lines (vm/ds/vfs/sched asid 1–4, stubs A–D asid 5–8); SCHED boots
+  through SEF (`[ipc 10/11] caller=9` GET_WHOAMI + DS publish); head traces show
+  the round-trip — `[noq N] proc=C nr=13 -> scheduler=0x9` (kernel delegates) and
+  `[ksys SYS_SCHEDULE] target=C nr=13 prio=8 quantum=5 result=0` (SCHED
+  re-admits); stub C sustains (`[ksys]` `caller=13` to sample 250 800), A↔B
+  ping-pong + D's three `[pf]` (brk×2 + mmap) resolved by VM all intact; every
+  line `result=0`; zero panic / `el0_sync_unexpected`. Host: `cargo test
+  -p minixrs-kernel-shared -p minixrs-sched -p minixrs-server-rt` green; `cargo
+  check --workspace` + clippy `-D warnings` + fmt clean.
+- **Slice 4.4** ◀ next — RS (reincarnation server) + real `SYS_SETALARM`. Implement the
   per-proc one-shot alarm off the clock tick (currently ENOSYS). RS (already
   `ROOT_SYS_PROC` + `sig_mgr`) records the boot servers, arms a periodic alarm,
   and heartbeats/pings them on each tick; restart-on-crash is minimal (detect +
