@@ -102,11 +102,12 @@ fn build_boot_image(out_dir: &std::path::Path) {
     // (cargo package, crate dir, boot proc number). Proc numbers come from
     // `kernel-shared/src/com.rs`; the archive carries them so the loader writes
     // the right proc slot.
-    let servers: [(&str, std::path::PathBuf, i32); 4] = [
+    let servers: [(&str, std::path::PathBuf, i32); 5] = [
         ("minixrs-vm", workspace.join("servers/vm"), 7), // VM_PROC_NR
         ("minixrs-ds", workspace.join("servers/ds"), 5), // DS_PROC_NR
         ("minixrs-vfs", workspace.join("servers/vfs"), 1), // VFS_PROC_NR
         ("minixrs-sched", workspace.join("servers/sched"), 9), // SCHED_PROC_NR
+        ("minixrs-rs", workspace.join("servers/rs"), 2), // RS_PROC_NR
     ];
 
     let mut modules: Vec<(i32, String, Vec<u8>)> = Vec::with_capacity(servers.len());

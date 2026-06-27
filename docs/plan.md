@@ -858,7 +858,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   panic / `el0_sync_unexpected`. Host: `cargo test -p minixrs-kernel-shared`
   (DS callnr) + `-p minixrs-ds` (registry) green; `cargo check --workspace` +
   clippy `-D warnings` + fmt clean.
-- **Slice 4.3** ◀ ready (branch `feature/phase-4-3-sched`, pending merge) — Real
+- **Slice 4.3** ✓ shipped (PR #25, merged 2026-06-27) — Real
   user-space scheduling: kernel delegatable scheduler + SCHED server (single PR).
   `Proc` gains `scheduler: Endpoint` (`NONE` = kernel-scheduled, the boot
   default; `populate_proc` sets it and `Proc::EMPTY` zeroes it to `NONE`).
@@ -901,12 +901,46 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   line `result=0`; zero panic / `el0_sync_unexpected`. Host: `cargo test
   -p minixrs-kernel-shared -p minixrs-sched -p minixrs-server-rt` green; `cargo
   check --workspace` + clippy `-D warnings` + fmt clean.
-- **Slice 4.4** ◀ next — RS (reincarnation server) + real `SYS_SETALARM`. Implement the
-  per-proc one-shot alarm off the clock tick (currently ENOSYS). RS (already
-  `ROOT_SYS_PROC` + `sig_mgr`) records the boot servers, arms a periodic alarm,
-  and heartbeats/pings them on each tick; restart-on-crash is minimal (detect +
-  log) in Phase 4.
-- **Slice 4.5** — PM part A: process table + getpid + `SYS_PRIVCTL` + minimal
+- **Slice 4.4** ◀ ready (branch `feature/phase-4-4-rs-setalarm`, pending merge) —
+  RS (reincarnation server) + real `SYS_SETALARM`. `SYS_SETALARM` replaces its
+  slice-2.6 `ENOSYS` stub with a per-proc one-shot timer: `Proc` gains
+  `alarm_at: u64` (absolute uptime tick, 0 = disarmed; `Proc::EMPTY` zeroes it),
+  and `kernel/src/system/do_setalarm.rs` (caller-local, like the other
+  non-target `SYS_*`) reads a relative `delta` (u64, payload `0..8`), stores
+  `alarm_at = uptime()+delta` (disarms on `delta==0`), and replies the previous
+  timer's remaining ticks. `clock.rs` gains an `EARLIEST_ALARM` fast-path gate
+  (`arm_alarm`/`set_earliest_alarm`) so `tick()` stays O(1) and only pays the
+  O(N) scan when an alarm is actually due; the scan + delivery live in
+  `ipc::fire_expired_alarms` (a kernel-originated-delivery wrapper beside
+  `send_pagefault_to_vm`/`send_no_quantum`), which clears each expired
+  `alarm_at`, calls `ipc::notify::deliver_alarm`, traces `[alarm N]` (head
+  carve-out + modulo, like `TRACE_HEAD`), and recomputes the next-earliest.
+  `deliver_alarm` is a kernel-originated `NOTIFY` from `CLOCK` with **no `ipc_to`
+  check** (CLOCK's bitmap is empty, so routing through `mini_notify` would deny
+  it) — immediate when the owner is `RECEIVE`-blocked, else deferred via
+  `notify_pending` against CLOCK's priv slot (drained by `mini_receive`). No new
+  kernel-shared constants — the alarm reuses `NOTIFY_MESSAGE` + `CLOCK`, and
+  `NR_KERN_CALLS_PHASE4` stays 15. RS (`servers/rs`, server-rt based, already
+  `ROOT_SYS_PROC` + `sig_mgr` with full priv wiring from `init_boot_image`) boots
+  through SEF, publishes to DS, arms a periodic alarm (`ALARM_PERIOD = 100`
+  ticks), and on each fire pings a static peer set (DS/VM/SCHED/VFS via
+  `boot_endpoint`) with `ipc_notify`, tallying acks in a host-tested
+  `servers/rs/src/monitor.rs` (`UnsafeCell` newtype like `sched/policy.rs`);
+  restart-on-crash is detect-only (the `monitor::sweep` dead count — EL0 can't
+  log and exec is a later slice). The RS heartbeat reuses the existing SEF ping
+  (peers ack via `server-rt`'s `sef.receive`); the alarm `NOTIFY` from CLOCK is
+  classified `Application` (source ≠ RS), so RS's loop keys on
+  `m_source == boot_endpoint(CLOCK)`. Added to the MXBI `servers` array in
+  `build.rs` (proc_nr 2); no new boot priv wiring. Verified in QEMU over 25 s:
+  nine `[as]` lines (vm/ds/vfs/sched/rs asid 1–5, stubs A–D asid 6–9); head
+  `[ipc]` shows RS GET_WHOAMI + DS publish (`[ipc 3/4]`), DS reply to RS
+  (`[ipc 10]`), and RS's first heartbeat pings to DS/VM (`[ipc 11/12]`); six
+  periodic `[alarm N] owner=r nr=2 at=100..600` fires; stub D's three `[pf]` →
+  VM, SCHED `[noq]` delegation, and A↔B ping-pong + C `SYS_GETINFO` all intact;
+  every line `result=0`; zero panic / `el0_sync_unexpected`. Host: `cargo test
+  -p minixrs-rs -p minixrs-kernel-shared -p minixrs-server-rt` green; `cargo
+  check --workspace` + clippy `-D warnings` + fmt clean.
+- **Slice 4.5** ◀ next — PM part A: process table + getpid + `SYS_PRIVCTL` + minimal
   signals. Stand up PM with a static `mproc` table, `getpid`/`getppid`, and a
   kill path whose default action is terminate (no handlers/sigaction/masks —
   that's beyond Phase 4). Make `SYS_PRIVCTL` real (set up a target's priv slot;

@@ -32,7 +32,7 @@ enosys_stub!(do_irqctl);
 // `do_vmctl` is a real handler as of slice 3.3 — see `system::do_vmctl`.
 // `do_schedule` / `do_schedctl` are real handlers as of slice 4.3 — see
 // `system::do_schedule`.
-enosys_stub!(do_setalarm);
+// `do_setalarm` is a real handler as of slice 4.4 — see `system::do_setalarm`.
 enosys_stub!(do_times);
 enosys_stub!(do_diagctl);
 enosys_stub!(do_setgrant);

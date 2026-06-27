@@ -12,7 +12,7 @@
 
 use core::sync::atomic::Ordering;
 
-use minixrs_kernel_shared::com::NR_SYS_PROCS;
+use minixrs_kernel_shared::com::{CLOCK, NR_SYS_PROCS};
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
 use minixrs_kernel_shared::error::{EBADSRCDST, ECALLDENIED, OK};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
@@ -99,4 +99,57 @@ pub fn mini_notify(
         caller_priv_id,
     );
     OK
+}
+
+/// Kernel-originated alarm notification (slice 4.4). Deliver a `NOTIFY` from the
+/// `CLOCK` kernel task to the proc at `owner_idx` whose one-shot `SYS_SETALARM`
+/// timer just expired.
+///
+/// Modeled on [`mini_notify`]'s delivery half, with two differences: the source
+/// is `CLOCK` rather than a user caller, and there is **no `ipc_to` permission
+/// check** — the kernel originates the alarm, exactly as
+/// [`super::send::mini_pf_send`] originates a page fault. (Routing through
+/// `mini_notify` would in fact *fail*: `CLOCK`'s `ipc_to` bitmap is empty, since
+/// only `SRV_T` slots get theirs filled at boot.)
+///
+/// Immediate delivery if the owner is `RECEIVE`-blocked and would accept from
+/// `CLOCK`; otherwise the bit is recorded in the owner's `notify_pending`
+/// against CLOCK's priv slot, so the owner's next `RECEIVE` synthesizes the
+/// message via [`super::receive`]'s `take_pending_notification`.
+pub(crate) fn deliver_alarm(
+    proc_table: &mut [Proc; N_PROC_SLOTS],
+    priv_table: &mut [Priv; NR_SYS_PROCS],
+    owner_idx: usize,
+) {
+    // CLOCK is a boot-time kernel task: `proc::init` always populates its slot
+    // (IMAGE index 2) and priv id, so a missing entry is a structural bug — halt
+    // loudly rather than silently drop the alarm.
+    let clock_idx = proc_index(CLOCK).expect("CLOCK in proc table");
+    let clock_e = proc_table[clock_idx].endpoint;
+    let clock_priv_id = proc_table[clock_idx]
+        .priv_id
+        .expect("CLOCK priv populated by proc::init");
+
+    let owner = &mut proc_table[owner_idx];
+    if will_receive(owner, clock_e) && owner.misc_flags & MF_REPLY_PEND == 0 {
+        // Immediate delivery — synthesize the notification and unblock.
+        build_notify_message(owner, clock_e);
+        owner.misc_flags |= MF_DELIVERMSG;
+        // SAFETY: single-threaded IRQ/clock context; the exclusive `owner`
+        // borrow ends (NLL) as `rts_unset` captures `nr`, so no other
+        // PROC_TABLE borrow aliases.
+        unsafe { sched::rts_unset(owner, RTS_RECEIVING) };
+        return;
+    }
+
+    // Deferred — record against CLOCK's priv slot in the owner's bitmap. An
+    // owner with no priv slot has no bitmap, so the alarm is dropped; RS (the
+    // only armer in slice 4.4) always has one, so this can't strand it.
+    let Some(owner_priv_id) = owner.priv_id else {
+        return;
+    };
+    set_sys_bit(
+        &mut priv_table[owner_priv_id.as_usize()].notify_pending,
+        clock_priv_id,
+    );
 }
