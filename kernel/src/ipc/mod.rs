@@ -294,6 +294,22 @@ pub fn send_pagefault_to_vm(faulting_nr: ProcNr, far: u64, flags: u32) {
     send::mini_pf_send(proc_table, faulting_nr, far, flags);
 }
 
+/// Kernel-originated `SCHEDULING_NO_QUANTUM` notification: send it to
+/// `scheduler_e` on behalf of the preempted proc `preempted_nr` (slice 4.3).
+/// Called from `proc::sched::reschedule` after it has dequeued the preempted
+/// proc and left `RTS_NO_QUANTUM` set.
+///
+/// Materializes the proc-table slice here (reschedule otherwise works through
+/// `proc_slot_mut`), keeping the "only `ipc` materializes the table for the
+/// primitives" discipline intact — exactly like [`send_pagefault_to_vm`].
+pub fn send_no_quantum(preempted_nr: ProcNr, scheduler_e: Endpoint) {
+    // SAFETY: IRQ/reschedule context — single-threaded, DAIF.I masked. The
+    // `cur` borrow in `reschedule` has already ended, so no other PROC_TABLE
+    // reference is live.
+    let proc_table = unsafe { proc_table_mut_slice() };
+    send::mini_sched_no_quantum_send(proc_table, preempted_nr, scheduler_e);
+}
+
 /// SVC-tail shim. `trap.S` calls this between `do_ipc` and
 /// `el1_return_to_user`; it picks the next runnable proc (which may be
 /// the same caller, may be a higher-priority receiver that just

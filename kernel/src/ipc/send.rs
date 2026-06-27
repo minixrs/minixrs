@@ -8,7 +8,7 @@
 //! The non-blocking variant returns `ENOTREADY` instead of queueing.
 
 use minixrs_kernel_shared::ProcNr;
-use minixrs_kernel_shared::callnr::VM_PAGEFAULT;
+use minixrs_kernel_shared::callnr::{SCHEDULING_NO_QUANTUM, VM_PAGEFAULT};
 use minixrs_kernel_shared::com::{NR_SYS_PROCS, VM_PROC_NR};
 use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
 use minixrs_kernel_shared::error::{EBADSRCDST, ECALLDENIED, ELOCKED, ENOTREADY, OK};
@@ -187,6 +187,80 @@ pub fn mini_pf_send(
         unsafe { sched::rts_set(caller, RTS_SENDING) };
     }
     enqueue_on_caller_q(proc_table, vm_idx, faulting_nr);
+}
+
+/// Kernel-originated SEND of a `SCHEDULING_NO_QUANTUM` message to a proc's
+/// user-space scheduler when that proc exhausts its quantum (slice 4.3).
+///
+/// The same shape as [`mini_pf_send`]: the kernel constructs the message and
+/// the *preempted* proc plays the role of the (already-blocked) sender. By the
+/// time we are called, `sched::reschedule` has already dequeued the preempted
+/// proc and left `RTS_NO_QUANTUM` set, so it is off the run queue; we additionally
+/// mark it `RTS_SENDING` only when the scheduler can't receive immediately, so
+/// that when the scheduler later picks it off the `caller_q`
+/// ([`super::receive::mini_receive`] clears `RTS_SENDING`) the lingering
+/// `RTS_NO_QUANTUM` keeps it blocked until `SYS_SCHEDULE` re-admits it.
+///
+/// No `ipc_to`/permission check (kernel-originated, not a user trap) and no
+/// deadlock check: the preempted proc is the sink's client, and the scheduler
+/// only ever replies via `SYS_SCHEDULE`, so the SEND↔RECV cycle the detector
+/// hunts for can't form.
+///
+/// `m_source` identifies the preempted proc, so the scheduler knows which proc
+/// to reschedule. The message carries no payload — `m_source` is the whole
+/// request.
+pub fn mini_sched_no_quantum_send(
+    proc_table: &mut [Proc; N_PROC_SLOTS],
+    preempted_nr: ProcNr,
+    scheduler_e: Endpoint,
+) {
+    // Both lookups are invariants: `reschedule` only calls us for a proc whose
+    // `scheduler` is a live endpoint (set by boot pre-delegation or
+    // `SYS_SCHEDCTL`), and it has already blocked the preempted proc off the run
+    // queue. A silent bailout would strand it not-runnable with no diagnostic,
+    // so halt loudly instead (CLAUDE.md: hard assert for a liveness invariant).
+    let preempted_idx =
+        proc_index(preempted_nr).expect("mini_sched_no_quantum_send: preempted proc not in table");
+    let sched_nr = endpoint_proc(scheduler_e);
+    let sched_idx =
+        proc_index(sched_nr).expect("mini_sched_no_quantum_send: scheduler not in proc table");
+
+    let preempted_endpoint = proc_table[preempted_idx].endpoint;
+    let scheduler_endpoint = proc_table[sched_idx].endpoint;
+
+    let msg = Message {
+        m_source: preempted_endpoint,
+        m_type: SCHEDULING_NO_QUANTUM,
+        payload: [0u8; 96],
+    };
+
+    // Immediate delivery: the scheduler is receive-blocked and would accept us.
+    {
+        let sched = &mut proc_table[sched_idx];
+        if will_receive(sched, preempted_endpoint) {
+            sched.deliver_msg = msg;
+            sched.misc_flags |= MF_DELIVERMSG;
+            sched.misc_flags &= !MF_REPLY_PEND;
+            // SAFETY: single-threaded IRQ/reschedule context; no other borrow
+            // into `proc_table` is live.
+            unsafe { sched::rts_unset(sched, RTS_RECEIVING) };
+            return;
+        }
+    }
+
+    // Scheduler busy: queue the preempted proc as a blocked sender on its
+    // caller_q.
+    {
+        let caller = &mut proc_table[preempted_idx];
+        caller.send_msg = msg;
+        caller.sendto_e = scheduler_endpoint;
+        caller.q_link = None;
+        // RTS_NO_QUANTUM is already set, so the preempted proc is already off the
+        // run queue; rts_set just OR-s in RTS_SENDING (won't double-dequeue).
+        // SAFETY: single-threaded IRQ/reschedule context.
+        unsafe { sched::rts_set(caller, RTS_SENDING) };
+    }
+    enqueue_on_caller_q(proc_table, sched_idx, preempted_nr);
 }
 
 /// Append `nr` to the tail of the `caller_q` rooted at `proc_table[dst_idx]`.

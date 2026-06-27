@@ -32,7 +32,7 @@
 use core::sync::atomic::Ordering;
 
 use minixrs_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
-use minixrs_kernel_shared::com::{RS_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint};
+use minixrs_kernel_shared::com::{RS_PROC_NR, SCHED_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use crate::arch::aarch64::addrspace::{AddrSpace, Prot};
@@ -205,6 +205,19 @@ pub unsafe fn userland_bootstrap() {
             // kernel `heap_window` fast path stays unused, so EMPTY.
             HeapWindow::EMPTY,
         );
+    }
+
+    // 3.5. Pre-delegate stub C to the user-space SCHED server (slice 4.3). C is
+    //      a CPU-bound SYS_GETINFO loop, so it regularly exhausts its quantum,
+    //      exercising the kernel → SCHED `SCHEDULING_NO_QUANTUM` → `SYS_SCHEDULE`
+    //      round-trip. Every other proc stays kernel-scheduled (`scheduler ==
+    //      NONE`), including SCHED itself (a scheduler must not schedule itself).
+    //      This stands in for the `SCHEDULING_START` a real RS/PM will issue once
+    //      they exist (slice 4.5/4.6); until then the kernel claims C directly.
+    // SAFETY: single-threaded boot; sole borrow of stub C's slot.
+    unsafe {
+        let p = proc_slot_mut(STUB_C_PROC_NR).expect("stub C proc slot in range");
+        p.scheduler = boot_endpoint(SCHED_PROC_NR);
     }
 
     // 4. Install priv slots — unchanged from slice 2.6.

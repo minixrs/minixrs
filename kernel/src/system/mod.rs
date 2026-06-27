@@ -19,6 +19,7 @@
 //! [`ipc::send::mini_send`]: crate::ipc
 
 mod do_getinfo;
+mod do_schedule;
 mod do_vmctl;
 mod stubs;
 
@@ -27,9 +28,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::{
-    KERNEL_CALL, NR_KERN_CALLS_PHASE3, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL, SYS_EXEC, SYS_EXIT,
-    SYS_FORK, SYS_GETINFO, SYS_IRQCTL, SYS_PRIVCTL, SYS_SAFECOPY, SYS_SCHEDULE, SYS_SETALARM,
-    SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
+    KERNEL_CALL, NR_KERN_CALLS_PHASE4, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL, SYS_EXEC, SYS_EXIT,
+    SYS_FORK, SYS_GETINFO, SYS_IRQCTL, SYS_PRIVCTL, SYS_SAFECOPY, SYS_SCHEDCTL, SYS_SCHEDULE,
+    SYS_SETALARM, SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
 };
 use minixrs_kernel_shared::com::{NR_SYS_PROCS, SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -138,10 +139,10 @@ pub fn kernel_call_sendrec(
 /// `Priv::k_call_mask`, then route to the handler. Returns the result code
 /// that becomes the reply's `m_type`.
 ///
-/// `SYS_VMCTL` acts on a *target* proc named in the message, so it takes the
-/// whole `proc_table` + `caller_nr`. Every other handler acts only on the
-/// caller, so it gets a single caller slot re-borrowed inside its arm (see
-/// [`dispatch_caller_local`]).
+/// `SYS_VMCTL` / `SYS_SCHEDULE` / `SYS_SCHEDCTL` act on a *target* proc named in
+/// the message, so they take the whole `proc_table` + `caller_nr`. Every other
+/// handler acts only on the caller, so it gets a single caller slot re-borrowed
+/// inside its arm (see [`dispatch_caller_local`]).
 fn kernel_call_dispatch(
     proc_table: &mut [Proc; N_PROC_SLOTS],
     priv_table: &[Priv; NR_SYS_PROCS],
@@ -163,8 +164,13 @@ fn kernel_call_dispatch(
         return ECALLDENIED;
     }
 
-    if msg.m_type == SYS_VMCTL {
-        return do_vmctl::do_vmctl(proc_table, caller_nr, msg);
+    // Calls that act on a *target* proc named in the message take the whole
+    // table + caller_nr; route them before the caller-local dispatch.
+    match msg.m_type {
+        SYS_VMCTL => return do_vmctl::do_vmctl(proc_table, caller_nr, msg),
+        SYS_SCHEDULE => return do_schedule::do_schedule(proc_table, caller_nr, msg),
+        SYS_SCHEDCTL => return do_schedule::do_schedctl(proc_table, caller_nr, msg),
+        _ => {}
     }
 
     // proc_table and priv_table are disjoint statics, so borrowing one slot
@@ -180,7 +186,7 @@ fn kernel_call_dispatch(
 /// arm here is a compile error.
 fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Message) -> i32 {
     const _: () = assert!(
-        NR_KERN_CALLS_PHASE3 == 14,
+        NR_KERN_CALLS_PHASE4 == 15,
         "expand kernel_call_dispatch when a new SYS_* lands",
     );
     match msg.m_type {
@@ -192,8 +198,8 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
         SYS_COPY => stubs::do_copy(caller, caller_priv, msg),
         SYS_SAFECOPY => stubs::do_safecopy(caller, caller_priv, msg),
         SYS_IRQCTL => stubs::do_irqctl(caller, caller_priv, msg),
-        // SYS_VMCTL is handled in `kernel_call_dispatch` (needs the table).
-        SYS_SCHEDULE => stubs::do_schedule(caller, caller_priv, msg),
+        // SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL are handled in
+        // `kernel_call_dispatch` (they act on a target proc and need the table).
         SYS_SETALARM => stubs::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
         SYS_DIAGCTL => stubs::do_diagctl(caller, caller_priv, msg),
