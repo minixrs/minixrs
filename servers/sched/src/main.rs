@@ -152,20 +152,21 @@ fn handle_stop(system: Endpoint, msg: &mut Message) {
     reply(caller_e, msg, OK);
 }
 
-/// `SCHEDULING_SET_NICE` (PM/RS → SCHED): change `target`'s priority. Record the
-/// new band and apply it via `SYS_SCHEDULE`. Reply `OK` to the caller.
+/// `SCHEDULING_SET_NICE` (PM/RS → SCHED): change `target`'s band only, preserving
+/// the quantum recorded at `SCHEDULING_START`, and apply it via `SYS_SCHEDULE`.
+/// Reply `OK` to the caller.
 #[cfg_attr(test, allow(dead_code))]
 fn handle_set_nice(system: Endpoint, msg: &mut Message) {
     let caller_e = msg.m_source;
     let target_e: Endpoint = rd_i32(msg, 0);
     let priority = rd_i32(msg, 4);
 
-    policy::record(
-        endpoint_proc(target_e).get(),
-        priority as u8,
-        policy::QUANTUM,
-    );
-    sys_schedule(system, target_e, priority as u8, policy::QUANTUM);
+    // A renice changes the priority band only; `renice` keeps the proc's recorded
+    // quantum (or registers at the default if unseen) and hands back the quantum
+    // to re-schedule with. `None` only when the table is full and the proc is new.
+    if let Some(quantum) = policy::renice(endpoint_proc(target_e).get(), priority as u8) {
+        sys_schedule(system, target_e, priority as u8, quantum);
+    }
 
     reply(caller_e, msg, OK);
 }
