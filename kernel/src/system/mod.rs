@@ -20,6 +20,7 @@
 
 mod do_getinfo;
 mod do_schedule;
+mod do_setalarm;
 mod do_vmctl;
 mod stubs;
 
@@ -200,7 +201,7 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
         SYS_IRQCTL => stubs::do_irqctl(caller, caller_priv, msg),
         // SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL are handled in
         // `kernel_call_dispatch` (they act on a target proc and need the table).
-        SYS_SETALARM => stubs::do_setalarm(caller, caller_priv, msg),
+        SYS_SETALARM => do_setalarm::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
         SYS_DIAGCTL => stubs::do_diagctl(caller, caller_priv, msg),
         SYS_SETGRANT => stubs::do_setgrant(caller, caller_priv, msg),

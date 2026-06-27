@@ -48,6 +48,14 @@ pub struct Proc {
     /// Kernel-mode time consumed (ticks).
     pub sys_time: u64,
 
+    // ----- Timer / alarm state --------------------------------------------
+    /// Absolute uptime tick at which this proc's one-shot `SYS_SETALARM` timer
+    /// fires, or 0 if disarmed. On expiry the clock tick delivers a `NOTIFY`
+    /// from `CLOCK` to this proc and clears the field (slice 4.4). Mirrors the
+    /// per-process kernel-call alarm MINIX 3 hangs off `kernel/clock.c`'s
+    /// `clock_timers`, simplified to a single absolute deadline per proc.
+    pub alarm_at: u64,
+
     // ----- IPC state -------------------------------------------------------
     /// Head of the queue of processes wanting to send to us.
     pub caller_q: Option<ProcNr>,
@@ -128,6 +136,7 @@ impl Proc {
         quantum_left: 0,
         user_time: 0,
         sys_time: 0,
+        alarm_at: 0,
         caller_q: None,
         q_link: None,
         getfrom_e: NONE,
