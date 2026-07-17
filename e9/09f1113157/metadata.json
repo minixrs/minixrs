@@ -6,6 +6,7 @@
   "checkpoints_count": 3,
   "files_touched": [
     ".github/workflows/ci.yml",
+    "CLAUDE.md",
     "docs/plan.md"
   ],
   "sessions": [
@@ -17,10 +18,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 4309,
-    "cache_creation_tokens": 12383,
-    "cache_read_tokens": 2665496,
-    "output_tokens": 7785,
-    "api_call_count": 7
+    "input_tokens": 7,
+    "cache_creation_tokens": 9549,
+    "cache_read_tokens": 1573743,
+    "output_tokens": 4455,
+    "api_call_count": 4
   }
 }
