@@ -69,7 +69,7 @@ pub fn classify(msg: &Message) -> SefEvent {
 mod tests {
     use super::*;
     use minixrs_kernel_shared::callnr::{VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT};
-    use minixrs_kernel_shared::com::VM_PROC_NR;
+    use minixrs_kernel_shared::com::{SYSTEM, VM_PROC_NR};
     use minixrs_kernel_shared::endpoint::Endpoint;
 
     fn msg(m_source: Endpoint, m_type: i32) -> Message {
@@ -96,6 +96,16 @@ mod tests {
     fn notify_from_non_rs_is_application() {
         // Same NOTIFY marker, different source — not a heartbeat.
         let m = msg(boot_endpoint(VM_PROC_NR), NOTIFY_MESSAGE);
+        assert_eq!(classify(&m), SefEvent::Application);
+    }
+
+    #[test]
+    fn notify_from_system_is_application() {
+        // The kernel's ksig wake-up to PM (slice 4.5, `deliver_ksig`) is a
+        // NOTIFY stamped from SYSTEM. It must reach PM's own dispatch as
+        // Application traffic — if the classifier ever swallowed it, PM would
+        // never drain SYS_GETKSIG and every signal would strand.
+        let m = msg(boot_endpoint(SYSTEM), NOTIFY_MESSAGE);
         assert_eq!(classify(&m), SefEvent::Application);
     }
 
