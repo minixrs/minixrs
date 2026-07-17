@@ -1,0 +1,601 @@
+Work on the next slice in @docs/plan.md
+
+---
+
+<task-notification>
+<task-id>aace6e53f05dbedc7</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/e8321dad-1636-468f-9786-0edb06c338b4/tasks/aace6e53f05dbedc7.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore MINIX 3 PM/privctl reference" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything needed. Here is the structured report.
+
+---
+
+# MINIX PM/kernel semantics for the minimal minixrs slice 4.5
+
+Trees: **classic** = `/Users/kevinbarnard/src/learn/rminix/` (book-era, primary), **modern** = `/Users/kevinbarnard/src/learn/minix/minix/` (cited where it differs). Note: the classic tree here is lightly modernized (it has an async PM↔VFS protocol and endpoints), but the conceptual model is the book model.
+
+## 1. PM's mproc table + boot-time init
+
+**Fields** — `/Users/kevinbarnard/src/learn/rminix/servers/pm/mproc.h:9-65`. The minimal-relevant fields:
+- `pid_t mp_pid` (:13) — process id
+- `int mp_parent` (:17) — **index of parent process** (a slot number, not a pid)
+- `endpoint_t mp_endpoint` (:16) — `endpoint: generation + proc_nr` (present in this classic tree)
+- `unsigned mp_flags` (:48) — flag bits
+
+**IN_USE flag &amp; flags** — `mproc.h:67-84`. `#define IN_USE 0x001 /* set when 'mproc' slot in use */`. Also relevant: `ZOMBIE 0x004`, `PRIV_PROC 0x2000` (system process), `DONT_SWAP 0x1000`.
+
+**Slot↔kernel proc number mapping**: mproc is indexed by the same process number as the kernel proc table and FS table — stated in the header comment (`mproc.h:1-6`: "The kernel and file systems have tables that are also indexed by process, with the contents of corresponding slots referring to the same process in all three"). Endpoint is built as `_ENDPOINT(0, proc_nr)`.
+
+**Boot init** — `pm_init()` at `/Users/kevinbarnard/src/learn/rminix/servers/pm/main.c:353-469`:
+- Clears the whole table / timers (`:381-385`).
+- Learns about boot processes by asking the **kernel for a copy of the boot image table**: `sys_getimage(image)` (`:416`), iterating `image[0..NR_BOOT_PROCS]` (`:420`).
+- For each image entry with `proc_nr &gt;= 0` (skips negative-numbered tasks) it fills `rmp = &amp;mproc[ip-&gt;proc_nr]` (`:425`), sets `mp_endpoint = _ENDPOINT(0, ip-&gt;proc_nr)` (`:427`), `mp_parent = RS_PROC_NR` (`:428`).
+- INIT gets `mp_pid = INIT_PID` and `mp_flags |= IN_USE` (`:430-433`); every other (system) process gets `mp_pid = get_free_pid()` and `mp_flags |= IN_USE | DONT_SWAP | PRIV_PROC` (`:436-437`).
+- PM patches itself afterward: `mproc[PM_PROC_NR].mp_pid = PM_PID; mproc[PM_PROC_NR].mp_parent = PM_PROC_NR` (`:463-464`) — PM has no parent.
+
+`PM_PROC_NR = 0` and `PM_PROC_EP = _ENDPOINT(0, PM_PROC_NR)` — `/Users/kevinbarnard/src/learn/rminix/include/minix/com.h:34,51`.
+
+*Modern diff:* same shape; `mproc.h` there also carries scheduling/endpoint fields, and init is split into an `sef_startup`/`do_init` path, but the `sys_getimage` boot-image loop is conceptually identical.
+
+## 2. getpid / getppid
+
+**One call returns both.** `do_getset()` — `/Users/kevinbarnard/src/learn/rminix/servers/pm/getset.c:38-41`:
+```c
+case GETPID:
+    r = mproc[who].mp_pid;                              /* primary result = PID */
+    rmp-&gt;mp_reply.reply_res2 = mproc[rmp-&gt;mp_parent].mp_pid;  /* secondary = PPID */
+```
+So the reply carries **PID as the call's return value (`r`, i.e. `m_type`)** and **PPID in `reply_res2` (== `m2_i1`)**. There is **no separate GETPPID call** in the classic tree.
+
+**Call number**: `GETPID = 20` — `/Users/kevinbarnard/src/learn/rminix/include/minix/callnr.h:22`. (No `GETPPID` define exists; `KILL = 37`, `callnr.h:35`.)
+
+**libc wrappers** both invoke PM (`MM`) with `GETPID` via `_syscall` (a SENDREC to the PM endpoint):
+- `/Users/kevinbarnard/src/learn/rminix/lib/posix/_getpid.c:9` — `return(_syscall(MM, GETPID, &amp;m));` (return value is the PID).
+- `/Users/kevinbarnard/src/learn/rminix/lib/posix/_getppid.c:14-15` — `if (_syscall(MM, GETPID, &amp;m) &lt; 0) ...; return((pid_t) m.m2_i1);` (reads the secondary field = PPID).
+
+*Modern diff* (materially the same design): `PM_GETPID = PM_BASE + 4` (`/Users/kevinbarnard/src/learn/minix/minix/include/minix/callnr.h:17`); `do_get()` returns `r = mproc[who_p].mp_pid` and `rmp-&gt;mp_reply.m_pm_lc_getpid.parent_pid = mproc[rmp-&gt;mp_parent].mp_pid` (`/Users/kevinbarnard/src/learn/minix/minix/servers/pm/getset.c:61-64`) — same "PID in result, PPID in a reply field, one call" pattern, just typed message unions instead of `reply_res2`.
+
+## 3. kill path → default terminate
+
+**do_kill (PM)** — `/Users/kevinbarnard/src/learn/rminix/servers/pm/signal.c:196-201`:
+```c
+PUBLIC int do_kill() { return check_sig(m_in.pid, m_in.sig_nr); }
+```
+**check_sig** — `signal.c:509-559`: validates `signo` (`:522` `if (signo&lt;0||signo&gt;_NSIG) return EINVAL`), resolves target(s) by pid/pgrp, and for each matching in-use process calls `sig_proc(rmp, signo)` (`:559`).
+
+**sig_proc** — `signal.c:377-504`. Disposition logic:
+- traced / ignored / blocked / catch handled first (`:407-477`).
+- **sig2mess** (system processes): `sys_kill(slot, signo)` → the SYS_KILL kernel call, which turns the signal into a notification (`:478-482`).
+- **DEFAULT TERMINATE, no handler**: falls to `doterminate:` (`:484`). If in the default-ignore set it returns; otherwise it records `mp_sigstatus = signo`, optionally dumps core for core-signals, and calls **`pm_exit(rmp, 0, FALSE)`** (`:503`). *No `sys_kill` in the plain terminate case* — termination goes through the exit path, not SYS_KILL.
+
+**Exit path**: `pm_exit()` — `/Users/kevinbarnard/src/learn/rminix/servers/pm/forkexit.c:213-248`. In this classic tree it stops scheduling (`sys_nice(proc_nr, PRIO_STOP)`, `:229`), does accounting, saves exit status, then **defers** the real cleanup by notifying VFS (`mp_fs_call = PM_EXIT_WK; notify(FS_PROC_EP)`, `:246-247`).
+
+The kernel process is actually destroyed when VFS replies: `handle_fs_reply()` case `PM_EXIT_REPLY` — `/Users/kevinbarnard/src/learn/rminix/servers/pm/main.c:265-283` — calls **`sys_exit(proc_nr)`** (`:272`), then frees memory and zombifies.
+
+**The kernel call that destroys the process** is `sys_exit` → `SYS_EXIT` (classic name; modern = `sys_clear`/`SYS_CLEAR`). Wrapper: `/Users/kevinbarnard/src/learn/rminix/lib/syslib/sys_exit.c:6-17` (`_taskcall(SYSTASK, SYS_EXIT, &amp;m)` with `PR_PROC_NR = proc`).
+
+**do_exit (kernel)** — `/Users/kevinbarnard/src/learn/rminix/kernel/system/do_exit.c:17-104`. `do_exit` validates the caller is PM (`:29`) and calls `clear_proc()`. `clear_proc` (`:46-104`):
+- cancels the alarm timer (`:54`), dequeues from scheduler (`:57`);
+- if the dying proc was `SENDING`, removes it from every other proc's `p_caller_q` (`:63-77`);
+- **unblocks receivers**: any proc `RECEIVING` specifically from the dead endpoint has `p_getfrom_e` reset to `NONE` (`:80-86`);
+- releases IRQ hooks (`:88-94`);
+- bumps the generation counter, sets **`rc-&gt;p_rts_flags = SLOT_FREE`** (`:101-102`), and frees the priv slot for system procs (`:103`).
+
+*Modern diff* — same semantics in `do_clear` (`/Users/kevinbarnard/src/learn/minix/minix/kernel/system/do_clear.c:17-78`): `release_address_space`, `clear_endpoint(rc)` (the message-queue/IPC unblock, `:49`), `reset_kernel_timer`, `RTS_SETFLAGS(rc, RTS_SLOT_FREE)` (`:57`), release FPU, free priv slot (`:68`). Param is `m_lsys_krn_sys_clear.endpt`.
+
+**Kernel→PM notification of kernel-detected signals** (summary): the kernel's `cause_sig(proc_nr, sig_nr)` — `/Users/kevinbarnard/src/learn/rminix/kernel/system.c:273-301` — adds the signal to `p_pending`, sets `SIGNALED | SIG_PENDING` on the proc, and does `send_sig(PM_PROC_NR, SIGKSIG)` (`:298`). PM's `ksig_pending()` loop — `/Users/kevinbarnard/src/learn/rminix/servers/pm/signal.c:206-231` — repeatedly calls `sys_getksig(&amp;proc_nr, &amp;sig_map)` (SYS_GETKSIG), dispatches via `handle_ksig` → `check_sig` (`:236-276`), and acknowledges each with `sys_endksig(proc_nr)` (SYS_ENDKSIG). So kernel signals converge on the same `check_sig → sig_proc → pm_exit` terminate path.
+
+## 4. SIGSEGV from a page fault → PM
+
+**Classic (no VM server):** the CPU exception is caught in the kernel exception handler and turned straight into a PM-bound signal via `cause_sig`. `/Users/kevinbarnard/src/learn/rminix/kernel/arch/i386/exception.c`: the exception table maps `"Page fault" → SIGSEGV` (`:42`; also GP fault, stack fault → SIGSEGV, `:40-41`). In `exception()`, when the fault happened in a non-kernel process (`k_reenter==0 &amp;&amp; !iskernelp`), it calls **`cause_sig(proc_nr(saved_proc), ep-&gt;signum)`** (`:67`). Chain: **CPU page fault → kernel `exception()` → `cause_sig(proc, SIGSEGV)` → `send_sig(PM, SIGKSIG)` → PM `ksig_pending`/`check_sig`/`sig_proc` → `pm_exit` → `sys_exit`/clear_proc.**
+
+**Modern (with VM server):** the kernel forwards the page fault to VM; VM's `handle_pagefault()` decides, and when it cannot satisfy the fault it explicitly issues the SYS_KILL kernel call for SIGSEGV: `/Users/kevinbarnard/src/learn/minix/minix/servers/vm/pagefaults.c:102-103, 113-114, 146-147` — `sys_kill(vmp-&gt;vm_endpoint, SIGSEGV)`. That SYS_KILL (from VM, a system process, not PM) runs `cause_sig` in the kernel, again notifying PM via SIGKSIG. So: **page fault → kernel → VM (`do_pagefaults`/`handle_pagefault`) → `sys_kill(ep, SIGSEGV)` → kernel `cause_sig` → PM.** VM does *not* call PM directly; it goes back through the kernel.
+
+## 5. SYS_PRIVCTL (SET_USER vs SET_SYS)
+
+**Classic** `/Users/kevinbarnard/src/learn/rminix/kernel/system/do_privctl.c`. Subcodes (`/Users/kevinbarnard/src/learn/rminix/include/minix/com.h:438-443`): `SYS_PRIV_INIT=1`, `SYS_PRIV_ADD_IO=2`, `SYS_PRIV_ADD_MEM=3`, `SYS_PRIV_ADD_IRQ=4`, `SYS_PRIV_USER=5`. Handler switch at `do_privctl.c:50`.
+
+- Caller must itself be a system process: `if (!(priv(caller_ptr)-&gt;s_flags &amp; SYS_PROC)) return EPERM` (`:45`). Only **RS** (which has full call rights) drives service startup; other system procs can only privctl a process frozen by `NO_PRIV` (`:39-43`, `:53`).
+- **SYS_PRIV_INIT (≈ modern SET_SYS)** — `:52-132`: gives the target its **own** priv slot via `get_priv(rp, SYS_PROC)` (`:59`), copies the caller's priv template (`*priv(rp) = *priv(caller_ptr)`, `:61`), restores its own id/proc_nr, clears pending state, sets `s_trap_mask = FILLED_MASK` and full `s_ipc_to` except the user id (`unset_sys_bit(...s_ipc_to, USER_PRIV_ID)`, `:71-75`), then optionally copies IRQ/IO ranges and `s_call_mask` from a user-supplied `struct priv` (`:93-128`). Finally clears `NO_PRIV` so it can run (`:131`).
+- **SYS_PRIV_USER (≈ modern SET_USER)** — `:134-140`: `get_priv(rp, 0)` then clear `NO_PRIV`. That makes it an ordinary user process sharing the **single global user priv structure**.
+
+**get_priv** — `/Users/kevinbarnard/src/learn/rminix/kernel/system.c:196-218`: `SYS_PROC` → scan for a free slot (`s_proc_nr==NONE &amp;&amp; s_id!=USER_PRIV_ID`), assign it, set `s_flags = SYS_PROC` (`:205-211`). Otherwise → `rc-&gt;p_priv = &amp;priv[USER_PRIV_ID]` (the **shared** slot), `s_flags = 0` (`:212-216`). `USER_PRIV_ID = 0` — `/Users/kevinbarnard/src/learn/rminix/kernel/priv.h:92`.
+
+**struct priv** — `priv.h:28-57`: `s_flags`, `s_trap_mask` (allowed IPC primitives), `s_ipc_from`/`s_ipc_to` (allowed IPC peers, bitmaps over priv ids), `s_call_mask[]` (allowed kernel calls), plus IO/mem/IRQ tables. Flag bits `priv.h:62-68` (`SYS_PROC=0x10`, etc.).
+
+**USER privilege template** — the user process is initialized from the boot image row `INIT` in `/Users/kevinbarnard/src/learn/rminix/kernel/table.c:104`:
+```
+{ INIT_PROC_NR, 0, USR_F, 8, USER_Q, 0, USR_T, USR_M, {0}, "init" },
+```
+Note the **`call_mask` is `{0}`** — user processes have **no kernel calls allowed**. Its trap mask is `USR_T` and its ipc-to mask `USR_M` (very restricted — user procs may only IPC the servers, not arbitrary system procs). `init_boot_call_masks()` (`table.c:121-...`) leaves IDLE/CLOCK/SYSTEM/HARDWARE/**INIT** call masks all-zero (`:128-130`), fills RS's mask completely (`:133`, RS distributes rights), gives PM everything except device I/O (`:136-143`), and grants VFS/drivers a small explicit set (`:146-166`, e.g. `SYS_KILL`, `SYS_EXIT`, copies).
+
+*Modern diff* — `/Users/kevinbarnard/src/learn/minix/minix/include/minix/com.h:342-352` renames/expands: `SYS_PRIV_ALLOW=1`, `SYS_PRIV_DISALLOW=2`, `SYS_PRIV_SET_SYS=3`, `SYS_PRIV_SET_USER=4`, `ADD_IO=5`, `ADD_MEM=6`, `ADD_IRQ=7`, `QUERY_MEM=8`, `YIELD=10` (no `SYS_PRIV_ADD_IPC` in this version). `SYS_PRIV_SET_USER` is a one-liner: `priv(rp) = priv_addr(USER_PRIV_ID)` (`/Users/kevinbarnard/src/learn/minix/minix/kernel/system/do_privctl.c:176-185`) — same "share the global user priv" semantics as classic `get_priv(rp,0)`. `SET_SYS` there allocates static-or-dynamic priv ids and calls `update_priv()`/`fill_sendto_mask()` (`:86-150, 280-353`).
+
+## 6. SYS_KILL kernel call + cause_sig
+
+**do_kill (kernel)** — `/Users/kevinbarnard/src/learn/rminix/kernel/system/do_kill.c:18-44`. Params `SIG_PROC` (target proc nr) and `SIG_NUMBER`. Validation `:32-33` (reject bad proc / kernel targets). Two behaviors (`:35-42`):
+- If the caller is **PM itself** (`m_source == PM_PROC_EP`): deliver directly to a system process via `send_sig(proc_nr, sig_nr)` (the sig2mess/notify route, `:38`).
+- Otherwise (any *other* system process, e.g. VFS/VM/TTY): `cause_sig(proc_nr, sig_nr)` (`:41`) — queue it for PM.
+
+**cause_sig** — `/Users/kevinbarnard/src/learn/rminix/kernel/system.c:273-301`: adds to `p_pending`, and if not already SIGNALED sets `SIGNALED | SIG_PENDING` and `send_sig(PM_PROC_NR, SIGKSIG)` (`:294-299`) so PM's ksig loop picks it up.
+
+**Answer to the design question**: for a normal **kill-with-default-terminate**, PM does **not** route through `SYS_KILL`. `SYS_KILL` is the *inbound* path (userland `kill(2)` → PM `do_kill`; and other servers/kernel → PM via `cause_sig`). Once PM decides the disposition is "terminate", it calls `pm_exit → sys_exit` (modern `sys_clear`), i.e. **`SYS_EXIT`/`SYS_CLEAR` is what actually tears the process down**. PM only uses `sys_kill` (SYS_KILL) for the *sig2mess* case (delivering a signal-as-notification to a system process), `signal.c:479`.
+
+---
+
+## Minimal faithful subset — recommended model for minixrs 4.5
+
+- **mproc table** indexed by proc-number == kernel proc slot: `{ mp_pid, mp_parent (slot index), mp_flags with IN_USE, mp_endpoint }`. Seed it from a boot image (INIT + servers) exactly as `pm_init` does (`main.c:420-464`), with PM self-patched to `pid=PM_PID, parent=self`.
+- **getpid/getppid**: single PM call `GETPID`; return `mp_pid` as the result and `mproc[mp_parent].mp_pid` as a secondary reply field.
+- **kill (default terminate)**: `do_kill → check_sig → sig_proc`; for the no-handler default, `pm_exit → sys_exit/SYS_CLEAR`, whose kernel side sets the slot `SLOT_FREE`, bumps the endpoint generation, and unblocks any process blocked sending-to / receiving-from the dead endpoint (`do_exit.c:63-102` / `do_clear.c:49-57`).
+- **privctl SET_USER**: point the target proc at the single shared `USER_PRIV_ID` priv structure — trap mask + ipc-to restricted to servers, and an **empty kernel `call_mask`** (no kernel calls for user processes).
+
+All citations are absolute paths with line numbers above.</result>
+<usage><subagent_tokens>70260</subagent_tokens><tool_uses>39</tool_uses><duration_ms>309232</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a14b6531fc97a8874</task-id>
+<tool-use-id>toolu_01QWAMGoAns91r3V9bGD5sAv</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/e8321dad-1636-468f-9786-0edb06c338b4/tasks/a14b6531fc97a8874.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore kernel priv/privctl/signal mechanics" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I now have a complete picture. Here is my structured report.
+
+---
+
+# minix.rs — Slice 4.5 Preparation Report (PM part A)
+
+Crates live at the **workspace root**, not under `crates/`. The shared crate is `/Users/kevinbarnard/src/minixrs/kernel-shared/` (package `minixrs-kernel-shared`, imported as `minixrs_kernel_shared`). The kernel is `/Users/kevinbarnard/src/minixrs/kernel/`.
+
+Key status finding up front: **PM is not yet real.** `servers/pm/src/main.rs` is a 6-line `fn main(){ /* TODO */ }`, and `kernel/build.rs:105-111` packs only VM/DS/VFS/SCHED/RS into the boot archive — PM (proc 0) is absent, so its boot slot stays blocked on `RTS_NO_PRIV`. There is **no `mproc` table, no getpid, no terminate/kill path, and `SYS_PRIVCTL` is an `ENOSYS` stub** anywhere in the tree. Slice 4.5 builds all of these.
+
+---
+
+## 1. `kernel-shared` — proc numbers, call numbers, message layout
+
+### com.rs (`kernel-shared/src/com.rs`)
+- Counts: `NR_TASKS=5` (:14), `NR_PROCS=1024` (:16), `NR_SYS_PROCS=64` (:18).
+- Kernel tasks (negative): `ASYNCM=-5, IDLE=-4, CLOCK=-3, SYSTEM=-2, HARDWARE=-1` (:30-38).
+- Servers (gen-0 boot): **`PM_PROC_NR=ProcNr::new(0)`** (:48), `VFS=1, RS=2, MEM=3, TTY=4, DS=5, MFS=6, VM=7, PFS=8, SCHED=9, INIT=10` (:49-58).
+- `NR_BOOT_PROCS = INIT+1 = 11` (:62).
+- **`boot_endpoint(p)`** (:69-71) = `make_endpoint(0, p)` — the const used everywhere to name a boot proc/task; PM's endpoint is `boot_endpoint(PM_PROC_NR)`.
+
+### callnr.rs (`kernel-shared/src/callnr.rs`)
+- `KERNEL_CALL = 0x600` (:11). Calls are contiguous:
+  - `SYS_GETINFO=0x600` (:14), **`SYS_PRIVCTL=0x601`** (:15), `SYS_FORK=0x602`, `SYS_EXEC=0x603`, `SYS_EXIT=0x604`, `SYS_COPY, SYS_SAFECOPY, SYS_IRQCTL, SYS_VMCTL=0x608, SYS_SCHEDULE=0x609, SYS_SETALARM=0x60A, SYS_TIMES, SYS_DIAGCTL, SYS_SETGRANT, SYS_SCHEDCTL=0x60E` (:14-33).
+- **`NR_KERN_CALLS_PHASE4 = 15`** (:42); `NR_KERN_CALLS_PHASE3` is a one-slice alias equal to it (:48). `NR_SYS_CALLS = 32` (:53) — width of `k_call_mask` (one u32 word).
+- `GET_WHOAMI=12` (:70), `SYS_GETINFO_NAME_LEN=16` (:76).
+- Request-range bases (all *server IPC* m_type ranges, distinct from `KERNEL_CALL`, all `&lt; NOTIFY_MESSAGE`):
+  - **VM `VM_RQ_BASE=0xC00`** (:129) — `VM_PAGEFAULT=0xC00`, `VM_BRK, VM_MMAP, VM_MUNMAP` (:135-160).
+  - **SEF `SEF_RQ_BASE=0xD00`** (:233) — `SEF_INIT=0xD00`, **`SEF_SIGNAL=0xD01`** (:237-242), signal number in payload `0..4`.
+  - **DS `DS_RQ_BASE=0xE00`** (:184).
+  - **SCHED `SCHED_RQ_BASE=0xF00`** (:270) — `SCHEDULING_NO_QUANTUM=0xF00` (kernel-originated), `SCHEDULING_START=0xF01`, `SCHEDULING_STOP`, `SCHEDULING_SET_NICE` (:275-290). `SCHEDULING_START` doc (:277-281) explicitly says "Driven by PM/RS from slice 4.5+".
+  - `SCHEDCTL_FLAG_KERNEL = 1&lt;&lt;0` (:38).
+- `NOTIFY_MESSAGE = 0x1000` lives in `ipc_const.rs:28` (with `SEND=1, RECEIVE=2, SENDREC=3, NOTIFY=4, SENDNB=5, SENDA=16`).
+
+### message.rs (`kernel-shared/src/message.rs`)
+```rust
+#[repr(C, align(8))]
+pub struct Message { pub m_source: Endpoint, pub m_type: i32, pub payload: [u8; 96] } // 104 bytes
+```
+(:33-42; `m_source`/`m_type` at offsets 0/4, `payload` at offset 8.) **No typed accessors** — every handler reads/writes payload with `i32::from_ne_bytes(msg.payload[off..off+4])` / `u64::from_ne_bytes(...)` and `copy_from_slice(&amp;v.to_ne_bytes())` (see the `read_i32`/`write_u64` helpers repeated in `do_schedule.rs:173-180`, `do_vmctl.rs:252-278`, `do_setalarm.rs:61-73`).
+
+### endpoint.rs (`kernel-shared/src/endpoint.rs`)
+- `Endpoint = i32` (wire format, :26); `ProcNr(i32)` (:40, `.new/.get/.is_task`), `PrivId(u16)` (:65, `.new/.get/.as_usize`), `SysId` alias of `PrivId` (:88).
+- `ENDPOINT_GEN_SHIFT=15` (:92); `make_endpoint(g,p)` (:115), `endpoint_proc(e)` sign-extends so tasks come back negative (:121-130), `endpoint_gen(e)` (:133-135).
+- Sentinels `ANY`, `NONE`, `SELF` all at gen 0 (:105-112).
+
+---
+
+## 2. Kernel `Proc` / `Priv` structures and statics
+
+### `Proc` (`kernel/src/proc/proc_struct.rs:27-120`)
+Fields relevant to 4.5: `nr: ProcNr`, `endpoint: Endpoint`, `priv_id: Option&lt;PrivId&gt;`, `rts_flags: AtomicU32` (:37), `misc_flags: u32`, `priority: u8`, `quantum_ms/quantum_left`, `user_time/sys_time`, **`alarm_at: u64`** (:57), IPC state (`caller_q/q_link: Option&lt;ProcNr&gt;`, `getfrom_e/sendto_e`, `send_msg/deliver_msg/deliver_msg_vir`), `ttbr0_pa/asid`, `page_fault_state/heap_window`, **`scheduler: Endpoint`** (:110, `NONE`=kernel-scheduled), `next_ready: Option&lt;ProcNr&gt;`, `name: [u8;16]`.
+`Proc::EMPTY` (:127-162) initializes `rts_flags = RTS_SLOT_FREE`, `endpoint = NONE`, `priv_id = None`, `scheduler = NONE`.
+
+### `Priv` (`kernel/src/proc/priv_struct.rs:51-84`)
+```rust
+pub struct Priv {
+    pub id: PrivId, pub proc_nr: Option&lt;ProcNr&gt;, pub flags: u16, pub trap_mask: u16,
+    pub ipc_to: [u32; 2], pub k_call_mask: [u32; 1],
+    pub notify_pending: [u32; 2], pub asyn_pending: [u32; 2],
+    pub sig_mgr: Endpoint,                      // :72 — signal manager endpoint
+    pub io_ranges/mem_ranges/irqs: ArrayVec&lt;…&gt;, pub grant_table: u64, pub grant_entries: u32,
+}
+```
+`IPC_MAP_CHUNKS=2`, `K_CALL_MASK_CHUNKS=1` (:26-28). `Priv::EMPTY` sets `sig_mgr = NONE` (:88-103). Note `sig_mgr` already exists — at boot it is set to RS's endpoint for every slot (see §3).
+
+### Flags (`kernel/src/proc/flags.rs`)
+- RTS (block reasons; runnable iff `rts_flags==0`): `RTS_SLOT_FREE=0x1` (:33), `RTS_PROC_STOP=0x2`, `RTS_SENDING=0x4`, `RTS_RECEIVING=0x8`, `RTS_SIGNALED=0x10`, `RTS_SIG_PENDING=0x20`, `RTS_P_STOP=0x40`, **`RTS_NO_PRIV=0x80`** (:47, "forked sysproc awaiting priv assignment"), `RTS_NO_ENDPOINT=0x100` (:49, "cannot send/receive — no valid endpoint"), `RTS_VMINHIBIT=0x200`, **`RTS_PAGEFAULT=0x400`** (:53), `RTS_VMREQUEST/TARGET`, `RTS_PREEMPTED=0x4000`, **`RTS_NO_QUANTUM=0x8000`**, `RTS_BOOTINHIBIT=0x10000`.
+- Priv flags (:91-111): `PREEMPTIBLE=0x2, BILLABLE=0x4, DYN_PRIV_ID=0x8` (:95, "assigned dynamically, not from boot image"), `SYS_PROC=0x10`, `CHECK_IO_PORT/IRQ/MEM`, `ROOT_SYS_PROC=0x100`, `VM_SYS_PROC=0x200`, `RST_SYS_PROC=0x800`.
+- Trap masks (:118-124): `TSK_T=0`, `CSK_T=1&lt;&lt;RECEIVE`, `USR_T=1&lt;&lt;SENDREC`, **`SRV_T=!0`** (all primitives).
+
+### Statics + accessors (`kernel/src/proc/table.rs`)
+- `N_PROC_SLOTS = NR_TASKS + NR_PROCS = 1029` (:30). Priority bands: `TASK_Q=0, RS_Q=4, VM_Q=4, SRV_Q=8, INIT_Q=8, IDLE_Q=15` (:37-47), `SRV_QUANTUM_MS=200` (:50).
+- `PROC_TABLE: ProcStorage(UnsafeCell&lt;[Proc; N_PROC_SLOTS]&gt;)` and `PRIV_TABLE: PrivStorage(UnsafeCell&lt;[Priv; NR_SYS_PROCS]&gt;)` (:68-71), `#[repr(transparent)]` + `unsafe impl Sync` (single-threaded boot invariant).
+- `proc_index(nr)` (:78-86, adds `NR_TASKS`), `priv_index(id)` (:89-92).
+- Accessors (:266-316): `proc_slot_mut(nr)`, `proc_table_ref()`, **`proc_table_mut_slice()`**, `priv_slot_mut(id)`, `priv_table_ref()`, **`priv_table_mut_slice()`** — all `unsafe`, carrying the single-threaded invariant. Convention (CLAUDE.md:126): only `ipc::do_ipc` materializes the full slices; primitives take explicit `&amp;mut [Proc; N_PROC_SLOTS]`/`&amp;mut [Priv; NR_SYS_PROCS]`.
+- Bitmap helpers (`kernel/src/proc/bitmap.rs`): `set_sys_bit/get_sys_bit(map, PrivId)` (priv-indexed) and `set_call_bit/get_call_bit(map, usize)` (call-indexed); all no-op/false on OOB (:28-63).
+
+---
+
+## 3. `init_boot_image` — how priv/proc slots are assigned at boot
+
+`table.rs::init()` (:327-330) → `init_empty_slots()` (:332-350, gives every slot a valid `(nr, endpoint)` and every priv slot its `id`) → **`init_boot_image()`** (:352-362).
+
+- `IMAGE: [BootEntry; 16]` (:111-258): 5 kernel tasks + 11 boot procs (PM..INIT). Each `BootEntry { nr, name, priv_flags, trap_mask, priority, quantum_ms, runnable }` (:98-106). **PM's entry** (:159-167): `priv_flags = SYS_PROC|PREEMPTIBLE`, `trap_mask = SRV_T`, `priority = SRV_Q`, `runnable = false`.
+- **`n_active = N_IMAGE = 16`** (:355) — the count `populate_priv` uses to fill `ipc_to`.
+- `populate_priv(id, entry, n_active)` (:364-386): priv slot index == IMAGE index (PM → priv slot 5). For `SRV_T` slots it `fill_bits(ipc_to, 16)` (send to priv slots 0..15) and `fill_bits(k_call_mask, NR_KERN_CALLS_PHASE4=15)` (**every kernel call, incl. SYS_PRIVCTL**). **`sig_mgr = boot_endpoint(RS_PROC_NR)`** for every slot (:383).
+- `populate_proc` (:388-412): sets `priv_id`, priority, quantum, endpoint, `scheduler = NONE`, name, and `rts_flags = RTS_NO_PRIV` (boot servers start blocked until an ELF loads).
+
+**Consequence for PM:** its proc slot (0) and priv slot (5, SRV_T, full ipc_to over slots 0-15, full k_call_mask) are already wired by `init_boot_image`. But `ipc_to` covers only priv slots 0..15 — **not** the stub priv slots 16-19. To *signal* a stub (SEF_SIGNAL send) PM would need that reverse edge opened, exactly as `install_stub_d_priv` opens VM→D (see below). A kernel *terminate* of a stub via `SYS_PRIVCTL`/new call needs no ipc_to edge.
+
+### Stub install (`kernel/src/arch/aarch64/userland.rs`)
+- Stub proc nrs: `STUB_A=11, B=12, C=13, D=14` (:76-82); priv ids `A=16, B=17, C=18, D=19` (:86-89).
+- `userland_bootstrap()` (:132-242): loads MXBI servers via `load_boot_server` (:265-314, clears `RTS_NO_PRIV`, enqueues), `build_stub` ×4, pre-delegates stub C to SCHED (`p.scheduler = boot_endpoint(SCHED_PROC_NR)`, :218-221), then `install_stub_privs()` (:463-480).
+- `install_stub_c_priv` (:488-512): `USR_T`, `ipc_to`→SYSTEM only, `k_call_mask`→`SYS_GETINFO` only. `sig_mgr = RS`.
+- **`install_stub_d_priv` (:530-563)**: `USR_T`, `ipc_to`→VM only, empty `k_call_mask`; then **opens the reverse VM→D edge** with a separate `priv_slot_mut(vm_priv_id)` borrow and `set_sys_bit(&amp;mut vm_pr.ipc_to, STUB_D_PRIV_ID)` (:559-562). This is the reference pattern for opening a cross-priv IPC edge (e.g. PM→stub for signal delivery). Stub D (priv 19) is the process that takes the VM SIGSEGV path.
+
+---
+
+## 4. Kernel-call dispatch (`kernel/src/system/mod.rs`)
+
+- `kernel_call_sendrec` (:70-135): the `SENDREC → SYSTEM` fast path. Enforces the same `ipc_to` gate as `mini_send` (:94-99), copies request from user (`copy_msg_from_user`), **stamps `msg.m_source` with the verified caller endpoint** (:109), dispatches, then writes the reply (`m_source = SYSTEM`, `m_type = result`) back to the user buffer, emitting the `[ksys N]` trace (:124-132).
+- `kernel_call_dispatch` (:147-182): range-checks `m_type - KERNEL_CALL` against `NR_SYS_CALLS` (→`EBADREQUEST`), gates on `k_call_mask` via `get_call_bit` (→`ECALLDENIED`), then a **target-taking match** routes `SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL` (:170-175) — these get the whole `&amp;mut [Proc; N_PROC_SLOTS]` + `caller_nr`. Everything else falls to `dispatch_caller_local`.
+- `dispatch_caller_local` (:188-210): const-asserts `NR_KERN_CALLS_PHASE4 == 15` to force a new arm per new call. **`SYS_PRIVCTL =&gt; stubs::do_privctl(caller, caller_priv, msg)`** (:195).
+
+**Current `SYS_PRIVCTL` (`kernel/src/system/stubs.rs:25`):** `enosys_stub!(do_privctl)` → returns `ENOSYS` (:17-23). Signature is caller-local: `fn(_caller: &amp;mut Proc, _caller_priv: &amp;Priv, _msg: &amp;mut Message) -&gt; i32`. **To make it real and act on a *target* named in the message (MINIX `SYS_PRIVCTL` targets another proc), it must move to the target-taking route** — add a `SYS_PRIVCTL =&gt; do_privctl::do_privctl(proc_table, caller_nr, msg)` arm in `kernel_call_dispatch` alongside VMCTL/SCHEDULE (:170-175), taking `&amp;mut [Proc; N_PROC_SLOTS]` (and likely a `&amp;mut [Priv]` — note the current signature passes only `&amp;Priv`; the dispatch call site at :179-181 borrows `priv_table` immutably, so wiring PRIVCTL to mutate priv slots needs the mutable priv slice like `kernel_call_sendrec` holds at :71).
+
+### Pattern references
+
+**`do_schedule.rs`** (target-taking): `do_schedule` (:71-131) and `do_schedctl` (:140-171). Reads target endpoint (`SELF`→caller) at payload `0..4` via `read_i32`, resolves `endpoint_proc → proc_index` (→`EINVAL` if OOB), mutates the slot, then uses the **capture-then-borrow-end** `sched::rts_unset`/`dequeue`/`enqueue` pattern (:104-119). Head-carve trace `[ksys SYS_SCHEDULE]` with `SCHED_TRACE_HEAD=6` (:52-58, :121-129). `do_schedctl` snapshots the caller endpoint before mutably borrowing the target (:159-162) to handle self-targeting.
+
+**`do_setalarm.rs`** (caller-local): `do_setalarm(caller, _priv, msg)` (:38-59) reads `delta` (u64) at payload `0..8`, computes `at = now + delta`, sets `caller.alarm_at`, calls `clock::arm_alarm(at)`, replies with previous remaining ticks at payload `0..8`. `read_u64`/`write_u64` helpers (:61-73). This is the template for a caller-local getpid-style handler if any PM logic were kernel-side (it won't be — getpid lives in PM's mproc table).
+
+**`do_vmctl.rs`** documents the trust model (:17-28): the only gate is `k_call_mask`; a caller reaching the handler may name any target. This is the model `SYS_PRIVCTL` will inherit (PM is the sole intended holder).
+
+---
+
+## 5. Termination mechanics that exist today
+
+**There is no kill/terminate/exit path.** Nothing clears a proc slot, frees a priv slot, or bumps a generation. The building blocks that exist:
+
+- **`sched::rts_set(p, flag)`** (`kernel/src/proc/sched.rs:200-208`): `fetch_or`s the flag; if the proc was runnable it `dequeue`s it. Converse `rts_unset` (:220-228) enqueues when all bits clear. These are the capture-`nr`-then-re-borrow helpers (CLAUDE.md:128).
+- `dequeue(nr)` (:137-184) splices a proc out of its run-queue band; `pick_proc` (:235-239). `schedule_next` (:292-320) installs the next proc's TTBR0/ASID and asserts `ttbr0_pa != 0 &amp;&amp; asid != 0`.
+- **A minimal "terminate"** (default action of the 4.5 kill path) needs, at minimum: `rts_set` a permanent block flag (candidates: `RTS_NO_ENDPOINT=0x100`, `RTS_PROC_STOP=0x2`, or a new terminate flag) so `dequeue` pulls it off the run queue and it never runs again. That already gives "the faulter stops." Fuller teardown (reclaim slot, generation bump for reuse) is slice 4.6 territory.
+- `Proc::EMPTY` (`proc_struct.rs:127-162`, `rts_flags=RTS_SLOT_FREE`) and `populate_proc`/`populate_stub_slot` show what a slot holds; there is **no `clear_slot`/free helper yet**.
+- **`AddrSpace::destroy` DOES exist** (`kernel/src/arch/aarch64/addrspace.rs:149-155`: `free_subtree(ttbr0_pa,0)` + `free_frame(L0)`), but it is **never called at runtime** — every boot server and stub `mem::forget`s its `AddrSpace` (userland.rs:310, :384) precisely so `destroy` won't run. The plan reserves `AddrSpace::destroy` for `SYS_EXIT` teardown in **slice 4.6** (docs/plan.md:963-965). So a 4.5 terminate can leave the AS mapped (just block the proc); AS teardown is explicitly a later slice.
+
+**The consequence 4.5 gives real:** VM's SIGSEGV path (`servers/vm/src/main.rs:130-135`): an out-of-region fault returns without `VMCTL_PT_MAP`/`VMCTL_CLEAR_PAGEFAULT`, leaving the faulter blocked on `RTS_PAGEFAULT` forever. Region check is `region::contains(nr, far)` (:132). Comment at :126-129 literally names the gap: "the only 'kill' available until PM + signals in Phase 4." PM terminating the faulter is the real consequence.
+
+---
+
+## 6. Page-fault path and kernel-originated delivery
+
+- **`do_page_fault`** (`kernel/src/arch/aarch64/exception.rs:148-216`): decodes EC (0x20 instr / 0x24 data abort — else halt via `el0_sync_unexpected`), builds `flags` (`PFF_INSTR/PFF_WRITE/PFF_PERMISSION`), **permission faults halt** (:176-178). Under a tightly-scoped borrow it records `p.page_fault_state = {addr:far, flags, ip:elr}` and `sched::rts_set(p, RTS_PAGEFAULT)` (:186-200), captures `faulting_nr`/`name`, then calls `crate::ipc::send_pagefault_to_vm(faulting_nr, far, flags)` (:208) and prints **`[pf] proc=… far=… flags=… -&gt; VM`** every fault (:210-215).
+- `send_pagefault_to_vm` (`kernel/src/ipc/mod.rs:289-295`) materializes the proc table and calls **`send::mini_pf_send`** (`kernel/src/ipc/send.rs:139-190`): builds `Message { m_source = faulter endpoint, m_type = VM_PAGEFAULT, payload: far@0..8 (u64), flags@8..12 (u32) }`. **No `ipc_to`/permission check and no deadlock check** — kernel-originated (:134-138). If VM `will_receive`, deliver immediately (`deliver_msg`, `MF_DELIVERMSG`, `rts_unset RTS_RECEIVING`); else queue the faulter on VM's `caller_q` with `rts_set RTS_SENDING` (RTS_PAGEFAULT already keeps it blocked).
+- **What VM knows about the faulter:** only `m_source` (the faulter's endpoint). VM does `endpoint_proc(faulting_e).get()` → proc nr (`vm/main.rs:130-131`) and gates on its region table. It can also pull fault addr/flags/ip via `SYS_VMCTL(VMCTL_GET_PAGEFAULT)` (`do_vmctl.rs:218-232`).
+- **Sibling kernel-originated patterns** (all bypass `ipc_to`, same shape PM's signal delivery to a `sig_mgr`/target could mimic):
+  - `notify::deliver_alarm` (`kernel/src/ipc/notify.rs:119-155`): kernel `NOTIFY` from `CLOCK`, no permission check; immediate-deliver-or-set-`notify_pending`.
+  - `send_no_quantum` (`ipc/mod.rs:305-311`) → `mini_sched_no_quantum_send` (`send.rs:212-264`): kernel SEND of `SCHEDULING_NO_QUANTUM` from the preempted proc to its `scheduler`, `m_source` = preempted proc.
+  - `will_receive(dst, src_e)` (`notify.rs:29-36`) and `build_notify_message` (:41-47) are the shared delivery predicates.
+
+---
+
+## 7. Tracing conventions
+
+All traces use an `AtomicU64` counter + a **head carve-out** (first N unconditionally) and/or **modulo sampling**; head carve-out exists because stub C's `SYS_GETINFO` flood would otherwise starve the modulo sampler of rare events.
+
+- **`[ipc N]`** — `ipc/mod.rs::do_ipc` (:113-120). `TRACE_HEAD=12` (:70) + `TRACE_EVERY=100` (:62): `if n &lt;= TRACE_HEAD || n % TRACE_EVERY == 0`.
+- **`[ksys N]`** — `system/mod.rs::kernel_call_sendrec` (:124-132). `KCALL_TRACE_EVERY=100` (:57), modulo only. Plus per-handler head-carve variants: `[ksys SYS_SCHEDULE]` (`do_schedule.rs:121-129`, `SCHED_TRACE_HEAD=6`), `[ksys VMCTL_PT_MAP]`/`[ksys VMCTL_PT_UNMAP]` (`do_vmctl.rs:157-201`, `VMCTL_TRACE_HEAD=6`).
+- **`[alarm N]`** — `ipc/mod.rs::trace_alarm_fire` (:375-387). `ALARM_TRACE_HEAD=6` + `ALARM_TRACE_EVERY=100` (:315-320); prints only on head or modulo (`owner=… nr=… at=…`).
+- **`[noq N]`** — `proc/sched.rs::reschedule` (:392-403). `NOQ_TRACE_HEAD=6` (:39), head-only (delegated quantum-exhaust events are rare).
+- **`[pf]`** — `exception.rs::do_page_fault` (:210-215). **Unsampled** — printed on every fault.
+- **`[as]`** — boot address-space summary: `userland.rs::load_boot_server` (:298-306) and `print_addrspace_summary` (:604-611).
+
+New 4.5 traces (PM lives at EL0 and cannot print) should follow the same kernel-side counter+head/modulo idiom; a `SYS_PRIVCTL` head-carve trace would mirror `do_schedule.rs`'s `SCHED_TRACE_HEAD` block.
+
+---
+
+## Cross-cutting notes for implementing 4.5
+
+- **Wiring PM into boot:** add `("minixrs-pm", workspace.join("servers/pm"), 0)` to the `servers` array in `kernel/build.rs:105-111` (change the array length `5`), and give `servers/pm/src/main.rs` a real SEF-driven body. RS (`servers/rs/src/main.rs`) and VM (`servers/vm/src/main.rs`) are the closest templates: `sef_startup(SefConfig{ init_fresh, signal_handler })` → `sef_publish_to_ds(name)` in init → `loop { sef.receive(&amp;mut msg); match msg.m_type { … } }`. PM's `mproc` table should be a static `UnsafeCell&lt;[…;N]&gt;` newtype like `vm/region.rs` / `ds/registry.rs` (CLAUDE.md:144), with pure logic host-tested and `main.rs` coverage-excluded.
+- **PM is already the signal source the SEF classifier trusts:** `server-rt/src/classify.rs:55` accepts `SEF_SIGNAL` only from `PM` or `RS`. The signal number rides in payload `0..4`; `SefSignalCb = fn(signo: i32)` (`server-rt/src/signal.rs:10`). PM delivering `SEF_SIGNAL` to a server needs that server's `ipc_to` open to PM (reverse-edge pattern of `install_stub_d_priv`).
+- **`SYS_PRIVCTL` real:** MINIX subfunctions (set priv id, allow/init, set traps/ipc-mask, add I/O/IRQ/mem ranges) aren't defined yet — no `PRIVCTL_*` constants exist. You'll add them (likely in `callnr.rs` near the VMCTL subcalls) and a `do_privctl.rs` handler that resolves a target via `endpoint_proc`/`proc_index`, allocates or writes a priv slot via `priv_slot_mut`/`priv_table_mut_slice` (using `DYN_PRIV_ID` for dynamically assigned slots), and fills `ipc_to`/`k_call_mask` via `set_sys_bit`/`set_call_bit`. Route it through the target-taking arm of `kernel_call_dispatch`.
+- **Borrow discipline (CLAUDE.md:115-129):** kernel is `--release` only (`debug_assert!` compiled out — use hard `assert!` for liveness invariants, cf. `mini_pf_send:150-151`); end `&amp;mut Proc` borrows by capturing scalars + NLL before any `rts_set`/`dequeue` re-borrow; IPC lists use `Option&lt;ProcNr&gt;` not pointers.
+- No generation bumping anywhere today — `make_endpoint` is only ever called via `boot_endpoint` (gen 0). Slice 4.6's fork introduces the first non-zero generation.</result>
+<usage><subagent_tokens>168875</subagent_tokens><tool_uses>50</tool_uses><duration_ms>381125</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a20cd00d6b960c7fd</task-id>
+<tool-use-id>toolu_011tqMuNjr93DG5mjAzpNNQY</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/e8321dad-1636-468f-9786-0edb06c338b4/tasks/a20cd00d6b960c7fd.output</output-file>
+<status>completed</status>
+<summary>Agent "Design slice 4.5 implementation plan" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All verification reads are complete. Here is the implementation plan.
+
+# Slice 4.5 implementation plan — PM part A: mproc + getpid + SYS_PRIVCTL + minimal signals
+
+Branch: `feature/phase-4-5-pm-signals` (off `main` @ f90cd6d).
+
+**Corrections to claims in the brief** (verified against source):
+- PR #26 merged **2026-06-27**, not 2026-07-05 (`git log --merges`: `f90cd6d 2026-06-27`).
+- `NR_KERN_CALLS_PHASE3` was *supposed* to be dropped in 4.4 but still exists at `kernel-shared/src/callnr.rs:48` and is used in ~7 test asserts (lines 369, 380, 390, 403, 430, 500, 515). Drop it this slice (replace with `_PHASE4`); it lives only in `callnr.rs`.
+- `kernel_call_dispatch` (kernel/src/system/mod.rs:147-152) takes `priv_table: &amp;[Priv; NR_SYS_PROCS]` **immutably** — `do_kill`'s deferred-notify path writes PM's `notify_pending`, so this parameter must become `&amp;mut`. Not mentioned in the brief; it's a small mechanical change (call site at mod.rs:115 already holds `&amp;mut`).
+- `build_stub` is at userland.rs:329-385 (`populate_stub_slot` 409-457), not ~330-460. All other line references checked out: dispatch const-assert mod.rs:189-192, `populate_priv` fill table.rs:373-380, `deliver_alarm` notify.rs:119-155, stub priv IDs userland.rs:86-89, stub proc nrs 76-82, `install_stub_d_priv` 530-563, VM out-of-region servers/vm/src/main.rs:130-135, build.rs servers array 105-111, miri job ci.yml:85-97, SCHED trace do_schedule.rs:57/121-129, plan.md 4.5 text 943-948.
+- SYSTEM **does** have a priv slot: IMAGE index 3 → PrivId 3 (kernel tasks occupy priv 0-4; PM is index 5 → PrivId 5, confirming the brief). Deferred notify against SYSTEM's slot works with zero changes — `take_pending_notification` (receive.rs:101-141) resolves priv 3 → `SYSTEM` → endpoint `0x7FFE`.
+
+---
+
+## (a) Commit ordering (each step leaves `cargo kernel-aarch64`, `cargo check --workspace`, `cargo test`, fmt, clippy green)
+
+**Commit 1 — kernel-shared constants + dispatch surface (no behavior change).**
+New `signal.rs`; `callnr.rs` gains the three call numbers, `PRIVCTL_SET_USER`, the PM request range, `NR_KERN_CALLS_PHASE4 = 18`, drops the `_PHASE3` alias; `com.rs` gains `STUB_A..E_PROC_NR`. Kernel side: update the `== 15` const-assert to `== 18` and add three temporary `enosys_stub!` arms (`do_kill`, `do_getksig`, `do_endksig`) in `stubs.rs` + `dispatch_caller_local`, so the widened count compiles. Every SRV_T boot server automatically gains the new call bits via `populate_priv`'s `fill_bits(.., NR_KERN_CALLS_PHASE4)`.
+
+**Commit 2 — kernel signal mechanism.**
+`Proc::sig_pending`, `cause_sig`, real `do_kill`/`do_getksig`/`do_endksig` in new `system/do_sig.rs`, `deliver_ksig` in `ipc/notify.rs` (+ `pub(crate)` re-export), `kernel_call_dispatch` priv param `&amp;` → `&amp;mut`, route the three calls in the target-taking match, delete the commit-1 stubs. No callers yet — QEMU output unchanged.
+
+**Commit 3 — SYS_EXIT-lite + real SYS_PRIVCTL + USER priv slot.**
+New `system/do_exit.rs` and `system/do_privctl.rs` (drop both from `stubs.rs`); `table.rs` gains `USER_PRIV_ID` + `populate_user_priv()` (called from `proc::init` after `init_boot_image`) including the PM(priv 5)→USER(priv 20) reverse `ipc_to` bit. QEMU output unchanged.
+
+**Commit 4 — stub E (frozen) + poison D + VM raises SIGSEGV.**
+`user_stub.S` stub E blob + D poison; `userland.rs` frozen-build variant, imports shared stub consts, E VAs, summary; `servers/vm/src/main.rs` calls `SYS_KILL(faulter, SIGSEGV)` on out-of-region. Intermediate QEMU state is safe: PM isn't in the boot image yet, so the ksig NOTIFY defers into PM's `notify_pending` and D stays blocked exactly as pre-4.5; E stays frozen forever. Five `[as] stub` lines, a 4th fatal `[pf]`, one `[ksys SYS_KILL]`, zero panic.
+
+**Commit 5 — PM server + build.rs row + RS peer + classify test.**
+`servers/pm/{Cargo.toml,user.ld,src/main.rs,src/mproc.rs}`; `kernel/build.rs` servers array 5→6; RS `PEERS` 4→5; `server-rt/src/classify.rs` new test; bump `ipc::TRACE_EVERY`'s companion `TRACE_HEAD` 12→24 (kernel/src/ipc/mod.rs:70) so PM's boot SENDRECs land in the head window (6 servers × ~2-4 boot IPCs now exceed 12). Full QEMU verification here.
+
+**Commit 6 — docs + CI.**
+`docs/plan.md` (4.4 → `✓ shipped (PR #26, merged 2026-06-27)`, 4.5 aggregate paragraph + `◀ ready`, move `◀ next` to 4.6, reword the 4.6 bullet — `SYS_EXIT` is now *extended* with AS teardown/slot free, and `SYS_KILL/GETKSIG/ENDKSIG` already exist), CLAUDE.md 4.5 conventions bullet, ci.yml miri job gains `-p minixrs-pm` (advisory). `sonar-project.properties` needs **no change** (pm `main.rs` matches the `servers/**/src/main.rs` glob; `mproc.rs` is measured).
+
+---
+
+## (b) Per-file change list
+
+### kernel-shared
+
+**`kernel-shared/src/signal.rs` (new module, add `pub mod signal;` to lib.rs)**
+```rust
+pub const SIGKILL: i32 = 9;
+pub const SIGSEGV: i32 = 11;
+pub const SIGTERM: i32 = 15;
+pub const NSIG: usize = 32;   // sig_pending is one u32; valid signos 1..NSIG
+```
+POSIX numbers, doc-commented against MINIX 3 `sys/signal.h`; `const _: () = assert!(NSIG &lt;= 32);`.
+
+**`kernel-shared/src/callnr.rs`**
+```rust
+pub const SYS_KILL:    i32 = KERNEL_CALL + 15; // 0x60F
+pub const SYS_GETKSIG: i32 = KERNEL_CALL + 16; // 0x610
+pub const SYS_ENDKSIG: i32 = KERNEL_CALL + 17; // 0x611
+pub const NR_KERN_CALLS_PHASE4: usize = 18;
+// delete NR_KERN_CALLS_PHASE3 (overdue since 4.4); update the 7 test usages
+
+/// SYS_PRIVCTL subcode: install the shared USER priv slot on a frozen target.
+pub const PRIVCTL_SET_USER: i32 = 1;   // 0 stays "invalid zeroed payload"
+
+pub const PM_RQ_BASE: i32 = 0x700;     // free gap below VM 0xC00; 0xF00+ would near NOTIFY
+pub const PM_GETPID: i32 = PM_RQ_BASE;
+pub const NR_PM_MSGS: usize = 1;
+const _: () = assert!(PM_RQ_BASE &gt; KERNEL_CALL + (NR_KERN_CALLS_PHASE4 as i32 - 1));
+const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) &lt; VM_RQ_BASE);
+const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) &lt; crate::ipc_const::NOTIFY_MESSAGE);
+```
+
+**`kernel-shared/src/com.rs`** — Phase-4 demo stub proc numbers (moved from userland.rs:76-82, retired in 4.8; shared because PM's mproc seeds them):
+```rust
+pub const STUB_A_PROC_NR: ProcNr = ProcNr::new(11);
+pub const STUB_B_PROC_NR: ProcNr = ProcNr::new(12);
+pub const STUB_C_PROC_NR: ProcNr = ProcNr::new(13);
+pub const STUB_D_PROC_NR: ProcNr = ProcNr::new(14);
+pub const STUB_E_PROC_NR: ProcNr = ProcNr::new(15);
+pub const NR_STUB_PROCS: usize = 5;
+const _: () = assert!(STUB_A_PROC_NR.get() as usize == NR_BOOT_PROCS);
+```
+
+### kernel
+
+**`kernel/src/proc/proc_struct.rs`** — after `alarm_at`:
+```rust
+/// Pending kernel-signal bitmap (bit n = signal n, 1..NSIG). Set by
+/// `system::do_sig::cause_sig`; drained by SYS_GETKSIG. (slice 4.5)
+pub sig_pending: u32,
+```
+`Proc::EMPTY` gains `sig_pending: 0`. (Note for 4.6: `SYS_FORK` slot-reuse must clear it.)
+
+**`kernel/src/ipc/notify.rs`** — `deliver_ksig`, modeled byte-for-byte on `deliver_alarm` (119-155) with source = SYSTEM, dest = PM:
+```rust
+/// Kernel-originated ksig notification (slice 4.5): NOTIFY from SYSTEM to PM
+/// after cause_sig marks a target. No ipc_to check (kernel-originated; SYSTEM's
+/// bitmap is empty like CLOCK's). Immediate if PM is RECEIVE-blocked, else
+/// deferred via notify_pending against SYSTEM's priv slot (id 3).
+pub(crate) fn deliver_ksig(
+    proc_table: &amp;mut [Proc; N_PROC_SLOTS],
+    priv_table: &amp;mut [Priv; NR_SYS_PROCS],
+)
+```
+Resolves `proc_index(SYSTEM)` / `proc_index(PM_PROC_NR)` with `expect` (boot invariants), then the will_receive / build_notify_message / `rts_unset(RTS_RECEIVING)` vs `set_sys_bit(notify_pending, system_priv_id)` split. Re-export in `ipc/mod.rs`: `pub(crate) use notify::deliver_ksig;` (same pattern as the `message::copy_msg_*` re-export at mod.rs:31). It takes the slices — it must **not** materialize the statics (the dispatch already holds them).
+
+**`kernel/src/system/do_sig.rs` (new)** — payloads native-endian, `read_i32` helper cloned from do_schedule.rs:173-180:
+- `pub(super) fn do_kill(proc_table, priv_table: &amp;mut [Priv; NR_SYS_PROCS], _caller_nr, msg) -&gt; i32` — target endpoint i32 @0..4, signo i32 @4..8. Validate `1 &lt;= signo &lt; NSIG as i32` → `EINVAL`; `proc_index(endpoint_proc(target_e))` → `EINVAL`; slot free (`rts_flags &amp; RTS_SLOT_FREE`) → `EINVAL`. Then `cause_sig` (always; the PM-direct `send_sig` branch is deferred, comment it). Head trace `[ksys SYS_KILL] target=&lt;name0&gt; nr=&lt;n&gt; sig=&lt;signo&gt; -&gt; pm` with `KILL_TRACE_HEAD: u64 = 6` (do_schedule.rs:57 pattern).
+- `fn cause_sig(proc_table, priv_table, target_idx, signo)` — scoped borrow 1: `{ let p = &amp;mut proc_table[target_idx]; p.sig_pending |= 1 &lt;&lt; signo; unsafe { sched::rts_set(p, RTS_SIGNALED | RTS_SIG_PENDING) }; }` (borrow ends per NLL; target already blocked on `RTS_PAGEFAULT` → `was_runnable` false, no double-dequeue). Then `crate::ipc::deliver_ksig(proc_table, priv_table)`. Note in a doc comment: MINIX routes via `priv-&gt;s_sig_mgr`; 4.5 hardcodes PM as the ksig sink per the approved design (RS has no drain loop yet).
+- `pub(super) fn do_getksig(proc_table, _caller_nr, msg) -&gt; i32` — scan `0..N_PROC_SLOTS` for the first proc with `rts_flags &amp; RTS_SIG_PENDING != 0 &amp;&amp; sig_pending != 0` (the `!= 0` guard prevents re-returning a handed-off proc before ENDKSIG). Found: write endpoint i32 @0..4, sigmap u32 @4..8, set `proc_table[idx].sig_pending = 0`, leave RTS flags, head trace. None: write `NONE` endpoint @0..4, return OK. Doc-note the O(N=1029) scan: paid once per NOTIFY drain, fine; MINIX-style cursor arg deferred.
+- `pub(super) fn do_endksig(proc_table, _caller_nr, msg) -&gt; i32` — target @0..4; validate slot; `EINVAL` if `RTS_SIG_PENDING` not set; `unsafe { sched::rts_unset(&amp;mut proc_table[idx], RTS_SIGNALED | RTS_SIG_PENDING) }` — target normally stays blocked via `RTS_PAGEFAULT`/`RTS_PROC_STOP`. Head trace.
+
+**`kernel/src/system/do_exit.rs` (new)** — SYS_EXIT-lite, target-taking:
+- target ep @0..4; validate slot. Scoped borrow: capture `rts`, `sendto_e`, set `alarm_at = 0` (stale `EARLIEST_ALARM` harmless — the next gated scan just finds nothing and recomputes), `unsafe { sched::rts_set(p, RTS_PROC_STOP) }`.
+- If `rts &amp; RTS_SENDING != 0`: unlink from the destination's `caller_q` using the captured `sendto_e` (walk that one chain, splice, clear target's `q_link`) — classic MINIX `clear_proc` (do_exit.c:63-77); no need to sweep all 1029 slots since `sendto_e` names the only queue.
+- Comment: receivers-blocked-on-dead purge + AddrSpace teardown + slot free + generation bump deferred to 4.6.
+- Head trace `[ksys SYS_EXIT] target=&lt;name0&gt; nr=&lt;n&gt; result=0`, `EXIT_TRACE_HEAD = 6`.
+
+**`kernel/src/system/do_privctl.rs` (new)** — target-taking:
+- target ep @0..4, subcode @4..8. Only `PRIVCTL_SET_USER` → else `EINVAL`. Validate slot; require `rts_flags &amp; RTS_NO_PRIV != 0` else `EPERM`. Then `p.priv_id = Some(USER_PRIV_ID);` and `unsafe { sched::rts_unset(p, RTS_NO_PRIV) }` (enqueues — E's only block bit). Head trace `[ksys SYS_PRIVCTL] target=E nr=15 subcode=1 result=0`.
+
+**`kernel/src/system/mod.rs`**
+- `kernel_call_dispatch` signature: `priv_table: &amp;mut [Priv; NR_SYS_PROCS]` (k_call_mask read via shared reborrow, unchanged semantics).
+- Target-taking match grows:
+```rust
+SYS_PRIVCTL =&gt; return do_privctl::do_privctl(proc_table, caller_nr, msg),
+SYS_EXIT    =&gt; return do_exit::do_exit(proc_table, caller_nr, msg),
+SYS_KILL    =&gt; return do_sig::do_kill(proc_table, priv_table, caller_nr, msg),
+SYS_GETKSIG =&gt; return do_sig::do_getksig(proc_table, caller_nr, msg),
+SYS_ENDKSIG =&gt; return do_sig::do_endksig(proc_table, caller_nr, msg),
+```
+- `dispatch_caller_local`: const-assert `NR_KERN_CALLS_PHASE4 == 18`; remove the `SYS_PRIVCTL`/`SYS_EXIT` arms (moved), update the routing comment.
+- `mod do_sig; mod do_exit; mod do_privctl;`; `stubs.rs` drops `do_privctl`/`do_exit`.
+
+**`kernel/src/proc/table.rs`**
+```rust
+/// Shared privilege slot for ordinary user processes (slice 4.5; MINIX's
+/// static USER priv). Stubs use 16..19 (arch::aarch64::userland); 20 is next free.
+pub(crate) const USER_PRIV_ID: PrivId = PrivId::new(20);
+```
+`fn populate_user_priv()` called at the end of `init()`: resolve PM's priv id (IMAGE position of `PM_PROC_NR` — index 5), then one borrow for slot 20 — `proc_nr = None` (shared slot), `flags = PREEMPTIBLE | BILLABLE`, `trap_mask = USR_T`, `ipc_to = {PM's priv bit}`, `k_call_mask` empty, `sig_mgr = boot_endpoint(PM_PROC_NR)` (boot slots keep RS), pending maps cleared — then a second borrow opening PM's `ipc_to` bit 20 (install_stub_d_priv two-borrow pattern, userland.rs:530-563; required because `init_boot_image` fills SRV_T `ipc_to` only for `[0, 16)` — CLAUDE.md line 140).
+
+**`kernel/src/arch/aarch64/user_stub.S`**
+- New constants: `.equ ENDPOINT_PM, 0` and `.equ PM_GETPID, 0x700`.
+- Stub E (`.section .rodata.user_stub_e`): clone of stub C's SENDREC loop (105-132) targeting `ENDPOINT_PM` with `m_type = PM_GETPID`, counter in x19, symbols `_user_stub_e_start/_end`.
+- Stub D poison: replace the unconditional steady loop (239-243) with a 32-iteration countdown (e.g. `mov x23, #32` / `subs/b.ne`), then `str x19, [x22]` — the munmapped page → out-of-region fault → kill chain; trailing park loop after it (unreached when the chain works). Update the "must not touch x22" comments at 158-159 and 236, and extend the step list (136-164) with steps 8-9 describing the deliberate SIGSEGV.
+
+**`kernel/src/arch/aarch64/userland.rs`**
+- Delete local `STUB_*_PROC_NR` (76-82); import all five from `kernel-shared::com`. Keep priv IDs 16-19 local; add `const _: () = assert!(STUB_D_PRIV_ID's 19 &lt; USER_PRIV_ID's 20)`-style comment or assert.
+- `USER_CODE_VA_E: u64 = 0x0044_0000`, `USER_STACK_VA_E: u64 = 0x0084_0000`; extern `_user_stub_e_start/_end`.
+- `build_stub`/`populate_stub_slot`: `priv_id: PrivId` → `priv_id: Option&lt;PrivId&gt;`, new `frozen: bool`; `p.priv_id = priv_id;` and final store `if frozen { RTS_NO_PRIV } else { 0 }`. A-D pass `(Some(id), false)`; E passes `(None, true)`. The AddrSpace **is** built at boot (ttbr0/asid set) — only enqueue + priv are withheld.
+- `userland_bootstrap`: build E after D; step-5 enqueue stays A-D only (comment: E is unfrozen by PM via SYS_PRIVCTL); `print_addrspace_summary` array gains E (5 stub `[as]` lines).
+
+**`kernel/src/ipc/mod.rs`** — `TRACE_HEAD` 12 → 24 (comment: six boot servers' startup SENDRECs now exceed the old window; PM's GET_WHOAMI/DS-publish must show).
+
+**`kernel/build.rs`** — servers array becomes `[( , , ); 6]` with `("minixrs-pm", workspace.join("servers/pm"), 0), // PM_PROC_NR` appended last (PM takes ASID 6, enqueued after RS; keeps VM first per the ASID-1 comment).
+
+### servers / server-rt
+
+**`servers/pm/Cargo.toml`** — add the `[[bin]] name = "minixrs-pm" path = "src/main.rs"` block (sibling convention, ds/Cargo.toml). Deps already correct.
+
+**`servers/pm/user.ld`** — verbatim copy of `servers/rs/user.ld`.
+
+**`servers/pm/src/mproc.rs` (new, pure + host-tested; ds/registry.rs UnsafeCell-newtype pattern, keyed by proc nr like vm/region.rs)**
+```rust
+const NR_MPROCS: usize = 32;              // 0..=15 seeded; headroom for 4.6 fork
+pub const MF_IN_USE: u8 = 1 &lt;&lt; 0;
+pub const MF_PRIV_PROC: u8 = 1 &lt;&lt; 1;      // boot server — kill is EPERM/skip
+pub const MF_DEAD: u8 = 1 &lt;&lt; 2;
+struct MProc { pid: i32, parent_slot: usize, flags: u8, endpoint: i32 }
+pub enum KillAction { Terminate, SkipPrivileged, NotFound }
+
+fn seed_in(t: &amp;mut [MProc; NR_MPROCS]);           // see table below
+fn getpid_in(t: &amp;.., slot: usize) -&gt; Option&lt;(i32 /*pid*/, i32 /*ppid*/)&gt;;
+fn handle_kill_in(t: &amp;mut .., slot: usize) -&gt; KillAction;  // marks MF_DEAD on Terminate
+// thin unsafe wrappers: seed(), getpid(slot), handle_kill(slot)
+```
+Seeding (spelled out where the brief was underspecified): PM slot 0 → pid 0, parent = self; RS slot 2 → parent = PM slot (avoids a self-parented server); every other boot proc incl. INIT → parent = RS slot; slot-order pids: PM=0, INIT=1, slots 1..9 (VFS,RS,MEM,TTY,DS,MFS,VM,PFS,SCHED) = 2..=10; stubs 11..=15 (parent = INIT slot, user procs, no `MF_PRIV_PROC`) = pids 11..=15. Boot procs 0..=10 get `MF_PRIV_PROC`.
+
+**`servers/pm/src/main.rs`** — freestanding gating identical to ds/main.rs (`#![cfg_attr(not(test), no_std/no_main)]`, `_start`, panic handler with `spin_loop`).
+- `pm_init(_endpoint, name)`: `let rc = sef_publish_to_ds(name); if rc != OK { return rc; } mproc::seed(); privctl_set_user(boot_endpoint(SYSTEM), boot_endpoint(STUB_E_PROC_NR))` (SENDREC, m_type `SYS_PRIVCTL`, target @0..4, `PRIVCTL_SET_USER` @4..8; propagate reply m_type). SENDREC from `init_fresh` is fine — self-contained, PM isn't a receive target yet; E just queues on PM's `caller_q` until the loop starts.
+- Receive loop:
+```rust
+match msg.m_type {
+    NOTIFY_MESSAGE if msg.m_source == boot_endpoint(SYSTEM) =&gt; drain_ksigs(system),
+    PM_GETPID =&gt; handle_getpid(&amp;mut msg),
+    _ =&gt; {}   // RS pings are consumed by sef.receive (classify::Ping)
+}
+```
+- `handle_getpid`: `slot = endpoint_proc(msg.m_source).get() as usize`; reply `m_type = pid` (MINIX style, result *is* the pid, ≥0; errors negative → `ESRCH`), ppid i32 @0..4; `ipc_send(caller_e, msg)`.
+- `drain_ksigs(system)`: `loop { SENDREC SYS_GETKSIG; ep = payload i32 @0..4; if ep == NONE { break; } sigmap = u32 @4..8; if sigmap != 0 { match mproc::handle_kill(slot) { Terminate =&gt; sys_exit(system, ep), SkipPrivileged | NotFound =&gt; {} } } sendrec SYS_ENDKSIG(ep);  /* ALWAYS — see gotcha 4 */ }`.
+- Kernel-call helpers `sys_exit`/`sys_endksig`/`sys_getksig`/`privctl_set_user` shaped like rs/main.rs's `sys_setalarm` (150-161).
+
+**`servers/rs/src/main.rs`** — `PEERS: [Endpoint; 5]` adds `boot_endpoint(PM_PROC_NR)` (PM acks automatically via `sef.receive`'s Ping arm; both directions are boot-slot `ipc_to` bits already open).
+
+**`server-rt/src/classify.rs`** — behavior unchanged; add test only (see below).
+
+### docs / CI
+
+- **`docs/plan.md`**: 4.4 marker → `✓ shipped (PR #26, merged 2026-06-27)`; write the 4.5 aggregate paragraph in the house style (constants, mechanism, live demo, QEMU + host evidence) and mark it `◀ ready (branch feature/phase-4-5-pm-signals, pending merge)` pre-merge; `◀ next` moves to 4.6; reword 4.6's "and `SYS_EXIT` (tear down AS…)" to "extends the 4.5 `SYS_EXIT`-lite with AS teardown / slot free / generation bump" and note SYS_KILL/GETKSIG/ENDKSIG exist.
+- **`CLAUDE.md`**: one 4.5 conventions bullet (style of the 4.3/4.4 ones at lines 130-131): sig_pending + cause_sig + NOTIFY-from-SYSTEM-to-PM chain, GETKSIG/ENDKSIG drain contract (always ENDKSIG), SYS_EXIT-lite scope, USER_PRIV_ID 20 + PRIVCTL_SET_USER, PM_RQ_BASE 0x700, frozen-stub pattern.
+- **`.github/workflows/ci.yml`**: miri run line → `cargo miri test -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm` (advisory job; mproc's pure `*_in` tests are miri-clean).
+
+---
+
+## (c) Host-test list
+
+`cargo test -p minixrs-kernel-shared -p minixrs-pm -p minixrs-server-rt` (+ existing `-p minixrs-vm -p minixrs-ds -p minixrs-sched -p minixrs-rs` stay green).
+
+**minixrs-kernel-shared / callnr.rs**
+1. `calls_are_contiguous_from_base` — extend array with `SYS_KILL, SYS_GETKSIG, SYS_ENDKSIG`; `len == NR_KERN_CALLS_PHASE4` (18).
+2. `endksig_is_last_kernel_call` (replaces `schedctl_is_last_kernel_call`) — `SYS_KILL == 0x60F`, `SYS_GETKSIG == 0x610`, `SYS_ENDKSIG == 0x611`, `NR_KERN_CALLS_PHASE4 == 18`.
+3. `pm_msgs_contiguous_from_base` — `PM_GETPID == PM_RQ_BASE`, count locks `NR_PM_MSGS == 1`.
+4. `pm_msgs_distinct_from_other_ranges` — ≠ every VM/SEF/DS/SCHED number, `&gt; KERNEL_CALL + NR_KERN_CALLS_PHASE4 - 1`, `&lt; VM_RQ_BASE`, `&lt; NOTIFY_MESSAGE`, `≠ NOTIFY_MESSAGE`.
+5. `privctl_set_user_is_nonzero` — `PRIVCTL_SET_USER == 1` (zeroed payload stays invalid, VMCTL convention).
+6. Update the 7 asserts that used `NR_KERN_CALLS_PHASE3` → `_PHASE4`.
+
+**minixrs-kernel-shared / signal.rs**
+7. `signal_numbers_match_posix` — SIGKILL 9, SIGSEGV 11, SIGTERM 15.
+8. `signals_fit_pending_bitmap` — each in `1..NSIG`, `NSIG == 32`.
+
+**minixrs-kernel-shared / com.rs**
+9. `stub_procs_contiguous_past_boot_image` — A..E == 11..=15, `STUB_A == NR_BOOT_PROCS`, `E &lt; NR_PROCS`, distinct.
+
+**minixrs-pm / mproc.rs** (all against a local `[MProc; NR_MPROCS]`, `*_in` helpers)
+10. `seed_assigns_boot_pids` — PM (slot 0) pid 0; INIT (slot 10) pid 1; VFS (1)=2, RS (2)=3, VM (7)=8, SCHED (9)=10.
+11. `seed_stub_pids_continue` — slots 11..=15 → pids 11..=15, not `MF_PRIV_PROC`, parent = INIT slot.
+12. `getpid_returns_pid_and_ppid` — PM → (0,0); VM → (8,3) (parent RS pid 3); stub A → (11,1); stub E → (15,1).
+13. `getpid_unknown_slot_is_none` — unseeded slot 16 / out-of-range → `None`.
+14. `kill_priv_proc_is_skipped` — VM slot → `SkipPrivileged`, no `MF_DEAD`.
+15. `kill_user_proc_terminates_and_marks_dead` — stub D slot → `Terminate`, `MF_DEAD` set.
+16. `kill_dead_or_unknown_is_notfound` — second kill on D → `NotFound` (or Skip; pin one); slot 20 → `NotFound`.
+17. `seed_pids_are_unique` — all IN_USE pids distinct.
+
+**minixrs-server-rt / classify.rs**
+18. `notify_from_system_is_application` — `msg(boot_endpoint(SYSTEM), NOTIFY_MESSAGE)` → `SefEvent::Application` (pins PM's ksig-NOTIFY routing through `sef.receive`; source ≠ RS).
+
+---
+
+## (d) QEMU verification checklist
+
+`timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release &gt; /tmp/boot.log 2&gt;&amp;1` (redirect + `grep -a`; run a second 20-25 s pass for alarm/heartbeat cadence).
+
+1. **Eleven `[as]` lines**: six `[as] &lt;name&gt; nr=…` from `load_boot_server` — vm(7)/ds(5)/vfs(1)/sched(9)/rs(2)/**pm(0)**, ASIDs 1-6 — plus five `[as] stub A..E` (ASIDs 7-11). Stub E's line shows a real `ttbr0_pa` even though frozen.
+2. **PM SEF boot**: with `TRACE_HEAD = 24`, head `[ipc N]` lines include `caller=0 call=3 target=0x7ffe` (GET_WHOAMI) and `caller=0 call=3 target=0x5` (DS publish), plus DS's reply `target=0x0`.
+3. **`[ksys SYS_PRIVCTL] target=E nr=15 subcode=1 result=0`** — exactly once (pm_init unfreezes E).
+4. **E's PM_GETPID traffic**: sampled `[ipc N] caller=15 call=3 target=0x0` lines recurring through the run (E loops like C), interleaved with PM reply sends `caller=0 call=1 target=0xf`.
+5. **Stub D**: three resolved `[pf] proc=D` (far=0x1000000, 0x1004000, 0x2000000) then, after munmap + 32 iterations, **one fatal** `[pf] proc=D far=0x2000000` — four `[pf]` total, no more.
+6. **Kill chain, in order**: `[ksys SYS_KILL] target=D nr=14 sig=11` (caller VM) → `[ksys SYS_GETKSIG]` (returns D, map bit 11) → `[ksys SYS_EXIT] target=D nr=14` → `[ksys SYS_ENDKSIG] target=D` → a final `[ksys SYS_GETKSIG]` returning NONE (drain terminates). All head-traced (budget 6 each; these are once-per-boot).
+7. **Post-kill silence from D**: zero `proc=D` lines after the chain; grep for `far=0x100` shows no post-kill heap faults.
+8. **Prior demos intact**: A↔B ping-pong sampled `[ipc]` lines (callers 11/12); stub C `[ksys N] caller=13` flood; `[noq N] proc=C … -&gt; scheduler=0x9` + `[ksys SYS_SCHEDULE] target=C`; periodic `[alarm N] owner=r … at=100..` (~1/s over the long run; RS now pings 5 peers incl. PM — PM acks, RS's dead count stays 0, though that's only host-observable).
+9. **Zero** `!!!`, `panic`, `el0_sync_unexpected` lines; every traced `result=0` except the documented benign paths.
+10. Gates before push: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo kernel-aarch64`, `cargo check --workspace`, full host test set.
+
+---
+
+## (e) Risks / gotchas
+
+1. **Borrow discipline in `cause_sig` (two procs touched)**: target mutation (`sig_pending` + `rts_set`) and PM delivery (`&amp;mut proc_table[pm_idx]` + `&amp;mut priv_table[..]`) must be strictly sequential scoped borrows on the *passed-in slices*. Never call `proc_slot_mut`/`proc_table_mut_slice` inside `do_sig`/`deliver_ksig` — the dispatch already holds the exclusive slices; re-materializing is the two-`&amp;mut`-from-one-`UnsafeCell` UB CLAUDE.md line 126 exists to prevent. `deliver_alarm` (notify.rs:119-155) is the exact template. `rts_set` on the already-`RTS_PAGEFAULT`-blocked D is safe (`was_runnable == false`, no dequeue).
+2. **`kernel_call_dispatch` priv param must go `&amp;mut`** (not in the brief): do_kill's deferred branch writes PM's `notify_pending`. Mechanical — mod.rs:115 already holds `&amp;mut`; the k_call_mask read and `dispatch_caller_local`'s `&amp;Priv` reborrow are unaffected.
+3. **SYSTEM's priv slot exists** — PrivId 3 (IMAGE order asyncm/idle/clock/system/hardware = priv 0-4), populated by `proc::init` with `CSK_T` and empty `ipc_to`. The deferred `notify_pending` path and `take_pending_notification`'s priv→proc→endpoint resolution work unmodified; that empty `ipc_to` is precisely why `deliver_ksig` must bypass `mini_notify` (same reasoning as CLOCK/`deliver_alarm`).
+4. **GETKSIG/ENDKSIG livelock hazard**: `do_getksig` clears `sig_pending` but leaves RTS flags, so its scan **must** require `sig_pending != 0` (not just the RTS bit), and PM **must** ENDKSIG every endpoint GETKSIG returns — including `SkipPrivileged`/`NotFound` targets — or the same proc blocks the drain (or, worse, an un-ENDKSIG'd skipped proc keeps `RTS_SIG_PENDING` forever). Conversely ENDKSIG on a *runnable* target would enqueue it via `rts_unset`; in 4.5 every killed target also carries `RTS_PAGEFAULT` and (post-EXIT) `RTS_PROC_STOP`, so it stays off the queue — keep the EXIT-before-ENDKSIG order in PM.
+5. **Frozen E vs `schedule_next`'s ttbr0 assert** (sched.rs:310-317 + the hard assert in `switch_ttbr0_with_asid`): build E's AddrSpace at boot like every stub — freeze only via `RTS_NO_PRIV` + skipped enqueue + `priv_id = None`. Do not defer AS construction to PRIVCTL time. E is unreachable by `pick_proc` until `rts_unset` enqueues it, by which time ttbr0/asid are long set.
+6. **PM SENDRECs from `init_fresh`**: fine (each SENDREC-to-SYSTEM is synchronous in the caller's EL1 context). Side effect: PRIVCTL enqueues E immediately, and E (band 8) may SENDREC PM before PM reaches `sef.receive` — E simply parks on PM's `caller_q` (E's `ipc_to` is only PM; no cycle, no deadlock). The reply edge needs PM's `ipc_to` bit 20, opened in `populate_user_priv` — forgetting it yields `ECALLDENIED` on PM's reply send and a silently stuck E (symptom: no recurring `caller=15` lines).
+7. **`do_exit` unlink**: use the captured `sendto_e` to walk exactly one `caller_q`, not an all-slot sweep; leave a `// 4.6:` comment for the receivers-blocked-on-dead purge and teardown. Cancel `alarm_at` inside the same scoped borrow as the `rts_set`.
+8. **k_call_mask blast radius**: widening `NR_KERN_CALLS_PHASE4` grants KILL/GETKSIG/ENDKSIG/EXIT/PRIVCTL to *every* SRV_T boot server (table.rs:373-380). That's the existing do_vmctl trust model — restate it in do_sig.rs/do_exit.rs module docs ("PM/VM are the intended holders; per-target authorization before any less-trusted grant").
+9. **Trace hygiene**: all new `[ksys …]` traces are head-only (≤6 lines each, once-per-boot events) — no UART flood; the `TRACE_HEAD` 12→24 bump slightly lengthens early boot output (documented in plan.md's 4.5 paragraph so future greps expect it).
+10. **PM_GETPID reply convention**: `m_type = pid` means PM's own pid-0 reply is indistinguishable from `OK` — deliberate (MINIX result-is-pid, errors negative); document in callnr.rs's PM range comment.
+11. **Stub-const migration**: after moving STUB_* to com.rs, userland.rs keeps priv IDs 16-19 local; PM must use `boot_endpoint(STUB_E_PROC_NR)`, never a literal 15. Add the com.rs const-assert tying `STUB_A == NR_BOOT_PROCS`.
+12. **4.6 seam**: `sig_pending` is not cleared on slot reuse anywhere yet — note in the field's doc comment that `SYS_FORK` (4.6) must zero it, alongside the existing generation-bump TODO.
+
+### Critical Files for Implementation
+- /Users/kevinbarnard/src/minixrs/kernel/src/system/mod.rs (dispatch routing, priv-param change, const-assert)
+- /Users/kevinbarnard/src/minixrs/kernel-shared/src/callnr.rs (call numbers, PM range, PRIVCTL subcode, alias drop)
+- /Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/userland.rs (frozen stub E, shared stub consts, summary/enqueue)
+- /Users/kevinbarnard/src/minixrs/servers/pm/src/main.rs (SEF loop, ksig drain, getpid, privctl unfreeze — plus new sibling mproc.rs)
+- /Users/kevinbarnard/src/minixrs/kernel/src/ipc/notify.rs (deliver_ksig, the kernel→PM notify template)</result>
+<usage><subagent_tokens>206323</subagent_tokens><tool_uses>44</tool_uses><duration_ms>802131</duration_ms></usage>
+</task-notification>
