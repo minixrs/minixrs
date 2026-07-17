@@ -1,0 +1,79 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "e439ecc495a3",
+  "session_id": "e8321dad-1636-468f-9786-0edb06c338b4",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-17T04:45:41.41944Z",
+  "branch": "feature/phase-4-5-pm-signals",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "servers/pm/Cargo.toml",
+    "servers/pm/src/mproc.rs",
+    "servers/pm/src/main.rs",
+    "kernel/build.rs",
+    "kernel/src/ipc/mod.rs",
+    "servers/rs/src/main.rs",
+    "server-rt/src/classify.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "eab71eab8664",
+  "checkpoint_transcript_start": 563,
+  "transcript_lines_at_start": 563,
+  "token_usage": {
+    "input_tokens": 1665,
+    "cache_creation_tokens": 66128,
+    "cache_read_tokens": 12245016,
+    "output_tokens": 46875,
+    "api_call_count": 35
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01EKQaZweod4aaLf4w8Pdn5J",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:executing-plans"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "eab71eab8664",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 180,
+        "end": 181,
+        "entry_ids": [
+          "0c8cab04-b4fb-4a9c-878e-a47324e59f9e"
+        ],
+        "tool_use_id": "toolu_01EKQaZweod4aaLf4w8Pdn5J"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01EKQaZweod4aaLf4w8Pdn5J"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:executing-plans",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-17T04:45:41.393776Z",
+    "agent_lines": 554,
+    "agent_removed": 8,
+    "human_added": 58,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 612,
+    "total_lines_changed": 620,
+    "agent_percentage": 90.64516129032259,
+    "metric_version": 2
+  }
+}
