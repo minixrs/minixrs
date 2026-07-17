@@ -20,8 +20,10 @@ use minixrs_kernel_shared::com::{
 use minixrs_kernel_shared::endpoint::NONE;
 use minixrs_kernel_shared::{PrivId, ProcNr};
 
+use super::bitmap::set_sys_bit;
 use super::flags::{
-    BILLABLE, CSK_T, PREEMPTIBLE, ROOT_SYS_PROC, RTS_NO_PRIV, SRV_T, SYS_PROC, TSK_T, VM_SYS_PROC,
+    BILLABLE, CSK_T, PREEMPTIBLE, ROOT_SYS_PROC, RTS_NO_PRIV, SRV_T, SYS_PROC, TSK_T, USR_T,
+    VM_SYS_PROC,
 };
 use super::priv_struct::{IPC_MAP_CHUNKS, K_CALL_MASK_CHUNKS, Priv};
 use super::proc_struct::{PROC_NAME_LEN, Proc};
@@ -327,6 +329,64 @@ pub(crate) unsafe fn priv_table_mut_slice() -> &'static mut [Priv; NR_SYS_PROCS]
 pub fn init() {
     init_empty_slots();
     init_boot_image();
+    populate_user_priv();
+}
+
+/// Shared privilege slot for ordinary user processes (slice 4.5) — MINIX 3's
+/// single user priv (`USER_PRIV_ID`), minus the dynamic id allocation. The
+/// boot image occupies priv slots `[0, 16)` and the demo stubs are
+/// kernel-installed at 16..=19 (`arch::aarch64::userland`); 20 is the next
+/// free slot. `SYS_PRIVCTL(PRIVCTL_SET_USER)` points a frozen target here,
+/// and the 4.6 fork path hands every forked child this same slot so fork
+/// can't exhaust the 64-slot `PRIV_TABLE`.
+pub(crate) const USER_PRIV_ID: PrivId = PrivId::new(20);
+
+const _: () = assert!((USER_PRIV_ID.get() as usize) < NR_SYS_PROCS);
+
+/// Populate the shared USER priv slot (slice 4.5).
+///
+/// `USR_T` traps (SENDREC only), `ipc_to` open to PM alone, and an *empty*
+/// kernel-call mask — ordinary user processes make no kernel calls (MINIX 3
+/// `table.c` gives the user template a `{0}` call mask). `sig_mgr` is PM:
+/// MINIX makes PM the signal manager for user processes, while the boot
+/// slots keep RS (the system-process manager) from `populate_priv`.
+///
+/// Also opens the reverse PM → USER `ipc_to` bit so PM can reply to a user
+/// proc's SENDREC — `init_boot_image` fills SRV_T bitmaps only for the active
+/// boot slots `[0, n_active)`, the same gap `install_stub_d_priv` closes for
+/// VM → D (as a second, sequential borrow).
+fn populate_user_priv() {
+    let pm_priv_id = {
+        // SAFETY: read-only snapshot; no live `&mut Proc` here.
+        let table = unsafe { proc_table_ref() };
+        let idx = proc_index(PM_PROC_NR).expect("PM in proc table");
+        table[idx].priv_id.expect("PM priv populated by proc::init")
+    };
+
+    {
+        // SAFETY: priv index < NR_SYS_PROCS (const-asserted); single-threaded
+        // boot context; no overlapping reference into PRIV_TABLE held.
+        let pr = unsafe { priv_slot_mut(USER_PRIV_ID) }.expect("USER priv slot in range");
+        pr.id = USER_PRIV_ID;
+        // Shared among every USER-priv proc — no single owning proc.
+        pr.proc_nr = None;
+        pr.flags = PREEMPTIBLE | BILLABLE;
+        pr.trap_mask = USR_T;
+        pr.ipc_to.fill(0);
+        set_sys_bit(&mut pr.ipc_to, pm_priv_id);
+        pr.k_call_mask.fill(0);
+        pr.notify_pending.fill(0);
+        pr.asyn_pending.fill(0);
+        pr.sig_mgr = boot_endpoint(PM_PROC_NR);
+    }
+
+    // Open PM → USER. Separate borrow: the USER slot's `&mut Priv` above has
+    // been dropped.
+    {
+        // SAFETY: priv index in-range; no overlapping reference held.
+        let pm_pr = unsafe { priv_slot_mut(pm_priv_id) }.expect("PM priv slot in range");
+        set_sys_bit(&mut pm_pr.ipc_to, USER_PRIV_ID);
+    }
 }
 
 fn init_empty_slots() {

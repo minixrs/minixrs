@@ -18,7 +18,9 @@
 //! [`ipc::dispatch`]: crate::ipc
 //! [`ipc::send::mini_send`]: crate::ipc
 
+mod do_exit;
 mod do_getinfo;
+mod do_privctl;
 mod do_schedule;
 mod do_setalarm;
 mod do_sig;
@@ -178,6 +180,8 @@ fn kernel_call_dispatch(
         SYS_KILL => return do_sig::do_kill(proc_table, priv_table, caller_nr, msg),
         SYS_GETKSIG => return do_sig::do_getksig(proc_table, caller_nr, msg),
         SYS_ENDKSIG => return do_sig::do_endksig(proc_table, caller_nr, msg),
+        SYS_EXIT => return do_exit::do_exit(proc_table, caller_nr, msg),
+        SYS_PRIVCTL => return do_privctl::do_privctl(proc_table, caller_nr, msg),
         _ => {}
     }
 
@@ -199,14 +203,13 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
     );
     match msg.m_type {
         SYS_GETINFO => do_getinfo::do_getinfo(caller, caller_priv, msg),
-        SYS_PRIVCTL => stubs::do_privctl(caller, caller_priv, msg),
         SYS_FORK => stubs::do_fork(caller, caller_priv, msg),
         SYS_EXEC => stubs::do_exec(caller, caller_priv, msg),
-        SYS_EXIT => stubs::do_exit(caller, caller_priv, msg),
         SYS_COPY => stubs::do_copy(caller, caller_priv, msg),
         SYS_SAFECOPY => stubs::do_safecopy(caller, caller_priv, msg),
         SYS_IRQCTL => stubs::do_irqctl(caller, caller_priv, msg),
-        // SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL are handled in
+        // SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL / SYS_KILL / SYS_GETKSIG /
+        // SYS_ENDKSIG / SYS_EXIT / SYS_PRIVCTL are handled in
         // `kernel_call_dispatch` (they act on a target proc and need the table).
         SYS_SETALARM => do_setalarm::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
