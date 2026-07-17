@@ -21,6 +21,7 @@
 mod do_getinfo;
 mod do_schedule;
 mod do_setalarm;
+mod do_sig;
 mod do_vmctl;
 mod stubs;
 
@@ -140,13 +141,16 @@ pub fn kernel_call_sendrec(
 /// `Priv::k_call_mask`, then route to the handler. Returns the result code
 /// that becomes the reply's `m_type`.
 ///
-/// `SYS_VMCTL` / `SYS_SCHEDULE` / `SYS_SCHEDCTL` act on a *target* proc named in
-/// the message, so they take the whole `proc_table` + `caller_nr`. Every other
-/// handler acts only on the caller, so it gets a single caller slot re-borrowed
-/// inside its arm (see [`dispatch_caller_local`]).
+/// `SYS_VMCTL` / `SYS_SCHEDULE` / `SYS_SCHEDCTL` and the slice-4.5 signal trio
+/// (`SYS_KILL` / `SYS_GETKSIG` / `SYS_ENDKSIG`) act on a *target* proc named in
+/// the message, so they take the whole `proc_table` + `caller_nr` (and
+/// `do_kill` additionally writes PM's `notify_pending`, which is why
+/// `priv_table` is `&mut`). Every other handler acts only on the caller, so it
+/// gets a single caller slot re-borrowed inside its arm (see
+/// [`dispatch_caller_local`]).
 fn kernel_call_dispatch(
     proc_table: &mut [Proc; N_PROC_SLOTS],
-    priv_table: &[Priv; NR_SYS_PROCS],
+    priv_table: &mut [Priv; NR_SYS_PROCS],
     caller_nr: ProcNr,
     msg: &mut Message,
 ) -> i32 {
@@ -171,6 +175,9 @@ fn kernel_call_dispatch(
         SYS_VMCTL => return do_vmctl::do_vmctl(proc_table, caller_nr, msg),
         SYS_SCHEDULE => return do_schedule::do_schedule(proc_table, caller_nr, msg),
         SYS_SCHEDCTL => return do_schedule::do_schedctl(proc_table, caller_nr, msg),
+        SYS_KILL => return do_sig::do_kill(proc_table, priv_table, caller_nr, msg),
+        SYS_GETKSIG => return do_sig::do_getksig(proc_table, caller_nr, msg),
+        SYS_ENDKSIG => return do_sig::do_endksig(proc_table, caller_nr, msg),
         _ => {}
     }
 
@@ -205,9 +212,6 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
         SYS_DIAGCTL => stubs::do_diagctl(caller, caller_priv, msg),
         SYS_SETGRANT => stubs::do_setgrant(caller, caller_priv, msg),
-        SYS_KILL => stubs::do_kill(caller, caller_priv, msg),
-        SYS_GETKSIG => stubs::do_getksig(caller, caller_priv, msg),
-        SYS_ENDKSIG => stubs::do_endksig(caller, caller_priv, msg),
         _ => EBADREQUEST,
     }
 }

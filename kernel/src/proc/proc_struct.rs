@@ -56,6 +56,14 @@ pub struct Proc {
     /// `clock_timers`, simplified to a single absolute deadline per proc.
     pub alarm_at: u64,
 
+    // ----- Signal state ----------------------------------------------------
+    /// Pending kernel-signal bitmap (bit n = signal n, `1..NSIG`). Set by
+    /// `system::do_sig::cause_sig`; handed off (cleared) by `SYS_GETKSIG`,
+    /// with the matching `RTS_SIGNALED`/`RTS_SIG_PENDING` state cleared at
+    /// `SYS_ENDKSIG` (slice 4.5). The 4.6 `SYS_FORK` slot-reuse path must
+    /// zero this alongside the generation bump.
+    pub sig_pending: u32,
+
     // ----- IPC state -------------------------------------------------------
     /// Head of the queue of processes wanting to send to us.
     pub caller_q: Option<ProcNr>,
@@ -137,6 +145,7 @@ impl Proc {
         user_time: 0,
         sys_time: 0,
         alarm_at: 0,
+        sig_pending: 0,
         caller_q: None,
         q_link: None,
         getfrom_e: NONE,

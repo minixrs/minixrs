@@ -29,6 +29,7 @@ mod senda;
 // SENDREC fast path can read/write the request and reply without each
 // caller dragging in `ipc::message` paths directly.
 pub(crate) use message::{copy_msg_from_user, copy_msg_to_user};
+pub(crate) use notify::deliver_ksig;
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
