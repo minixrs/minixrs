@@ -56,6 +56,37 @@
         "label": "Skill: superpowers:executing-plans",
         "default_collapsed": true
       }
+    },
+    {
+      "id": "claude-skill-toolu_013ufNvPcBWeuQrbaRmUPRYo",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "eab71eab8664",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 817,
+        "end": 818,
+        "entry_ids": [
+          "235ea484-e3c0-4632-902a-39b7257e989c"
+        ],
+        "tool_use_id": "toolu_013ufNvPcBWeuQrbaRmUPRYo"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_013ufNvPcBWeuQrbaRmUPRYo"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
     }
   ],
   "session_metrics": {
