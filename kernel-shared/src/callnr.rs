@@ -31,21 +31,33 @@ pub const SYS_SETGRANT: i32 = KERNEL_CALL + 13;
 /// alongside `SYS_SCHEDULE`; payload layout mirrors `SYS_VMCTL` (flags in
 /// `0..4`, target endpoint in `4..8`).
 pub const SYS_SCHEDCTL: i32 = KERNEL_CALL + 14;
+/// Raise a signal on a target proc (slice 4.5). Target endpoint in payload
+/// `0..4` (i32), signal number in `4..8` (i32, `1..NSIG`). The kernel records
+/// the signal in the target's pending bitmap (`cause_sig`) and notifies PM,
+/// which drains via `SYS_GETKSIG` / `SYS_ENDKSIG`. This is the MINIX 3
+/// non-PM-caller semantics (queue toward PM); PM's own direct-delivery branch
+/// (`send_sig` to a system proc) is deferred until a consumer exists.
+pub const SYS_KILL: i32 = KERNEL_CALL + 15;
+/// PM → kernel: fetch the next proc with pending kernel signals (slice 4.5).
+/// Reply payload: target endpoint in `0..4` (i32; `NONE` when nothing is
+/// pending) and the pending-signal bitmap in `4..8` (u32). The kernel hands
+/// the bitmap off (clears `Proc::sig_pending`) but leaves the target's
+/// signal-pending RTS state set until `SYS_ENDKSIG` acknowledges it.
+pub const SYS_GETKSIG: i32 = KERNEL_CALL + 16;
+/// PM → kernel: signal processing for the target (payload `0..4`, i32) is
+/// complete — clear its signal-pending RTS state (slice 4.5).
+pub const SYS_ENDKSIG: i32 = KERNEL_CALL + 17;
 
 /// `SYS_SCHEDCTL` flag: revert the target to kernel scheduling
 /// (`target.scheduler = NONE`). Absent → the caller claims the target as its
 /// own scheduler. Matches MINIX 3 `SCHEDCTL_FLAG_KERNEL` (`include/minix/com.h`).
 pub const SCHEDCTL_FLAG_KERNEL: i32 = 1 << 0;
 
-/// Number of kernel calls defined through Phase 4. Slice 4.3 makes
-/// `SYS_SCHEDULE` real and adds `SYS_SCHEDCTL`, bringing the count to 15.
-pub const NR_KERN_CALLS_PHASE4: usize = 15;
-
-/// One-slice alias for the previous phase's count, kept so slice 4.3's existing
-/// range guards (the VM/DS/SEF "above the last kernel call" asserts) keep
-/// compiling unchanged. Dropped in slice 4.4, exactly as `_PHASE2` was dropped
-/// one slice after `_PHASE3` landed.
-pub const NR_KERN_CALLS_PHASE3: usize = NR_KERN_CALLS_PHASE4;
+/// Number of kernel calls defined through Phase 4. Slice 4.3 made
+/// `SYS_SCHEDULE` real and added `SYS_SCHEDCTL` (15); slice 4.5 adds the
+/// signal trio `SYS_KILL` / `SYS_GETKSIG` / `SYS_ENDKSIG`, bringing the
+/// count to 18.
+pub const NR_KERN_CALLS_PHASE4: usize = 18;
 
 /// Size of the privilege-table kernel-call mask, in bits. Sized as a single
 /// `u32` chunk (32 slots) to leave headroom past Phase 4's 15 calls while
@@ -74,6 +86,23 @@ pub const GET_WHOAMI: i32 = 12;
 /// the name is only used for debug/log output and the kernel never stores more
 /// than 16 bytes per slot.
 pub const SYS_GETINFO_NAME_LEN: usize = 16;
+
+// ---------------------------------------------------------------------------
+// `SYS_PRIVCTL` subcodes.
+//
+// `SYS_PRIVCTL` (real as of slice 4.5) sets up a target proc's privilege
+// slot. The target endpoint lives in payload `0..4` and the subcode in `4..8`
+// (both i32, the same target-first convention as `SYS_SCHEDULE`). Numbers
+// start at 1 so a zeroed payload is an obvious "invalid" (the `VMCTL_*`
+// convention). Modeled on MINIX 3 `SYS_PRIV_SET_USER`; the system-proc
+// variants (`SET_SYS`, range grants) arrive with RS service starts.
+// ---------------------------------------------------------------------------
+
+/// Point a frozen (`RTS_NO_PRIV`) target at the shared USER privilege slot
+/// and release it. The USER slot carries `USR_T` traps, `ipc_to` = {PM}, and
+/// an empty kernel-call mask — ordinary user processes make no kernel calls.
+/// The 4.6 fork path leans on this to hand forked children a privilege.
+pub const PRIVCTL_SET_USER: i32 = 1;
 
 // ---------------------------------------------------------------------------
 // `SYS_VMCTL` subcalls.
@@ -114,6 +143,38 @@ pub const NR_VMCTL_SUBCALLS: usize = 6;
 pub const VMCTL_PROT_WRITE: i32 = 1 << 0;
 /// EL0 may execute from the mapped page.
 pub const VMCTL_PROT_EXEC: i32 = 1 << 1;
+
+// ---------------------------------------------------------------------------
+// PM (process manager) server request numbers — `m_type` values for messages
+// addressed to the PM server (slice 4.5).
+//
+// Like the VM/DS/SEF/SCHED ranges these are *server IPC requests*, not kernel
+// calls. SCHED's `0xF00` block is the last one below the IPC `NOTIFY_MESSAGE`
+// marker (`0x1000`), so PM takes the free gap between the kernel-call range
+// (`0x600..0x618`) and VM (`0xC00`). Numbering is minix.rs-specific — MINIX 3
+// carries PM call numbers in `callnr.h`; those ABI numbers arrive with the
+// musl wrappers in Phase 5.
+// ---------------------------------------------------------------------------
+
+/// Base for PM server request `m_type` values.
+pub const PM_RQ_BASE: i32 = 0x700;
+
+/// Client → PM: return the caller's process id. No request payload — the
+/// kernel-stamped `m_source` names the caller. Reply: `m_type` *is* the pid
+/// (MINIX convention: the result is the pid, >= 0; errors are negative, e.g.
+/// `ESRCH` for a caller unknown to PM's mproc table), with the parent's pid
+/// in payload `0..4` (i32) so `getppid` needs no second call.
+pub const PM_GETPID: i32 = PM_RQ_BASE;
+
+/// Number of PM server requests defined so far. Locks the PM server's
+/// dispatch coverage the way `NR_DS_REQUESTS` locks the DS server.
+pub const NR_PM_MSGS: usize = 1;
+
+// The PM range sits strictly above the kernel-call range and strictly below
+// VM's (and therefore every other) server request range and the NOTIFY marker.
+const _: () = assert!(PM_RQ_BASE > KERNEL_CALL + (NR_KERN_CALLS_PHASE4 as i32 - 1));
+const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VM_RQ_BASE);
+const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
 // ---------------------------------------------------------------------------
 // VM server request numbers — `m_type` values for messages addressed to VM.
@@ -322,6 +383,9 @@ mod tests {
             SYS_DIAGCTL,
             SYS_SETGRANT,
             SYS_SCHEDCTL,
+            SYS_KILL,
+            SYS_GETKSIG,
+            SYS_ENDKSIG,
         ];
         for (i, call) in calls.iter().enumerate() {
             assert_eq!(*call, KERNEL_CALL + i as i32);
@@ -366,7 +430,7 @@ mod tests {
         // NOTIFY_MESSAGE marker, or any SYS_* number — a server dispatcher
         // keys on m_type and a collision would misroute.
         assert_eq!(VM_PAGEFAULT, VM_RQ_BASE);
-        assert!(VM_PAGEFAULT > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+        assert!(VM_PAGEFAULT > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
         assert_ne!(VM_PAGEFAULT, crate::ipc_const::NOTIFY_MESSAGE);
     }
 
@@ -377,7 +441,7 @@ mod tests {
         // range, and the NOTIFY marker so VM's m_type dispatcher can't misroute.
         assert_eq!(VM_BRK, VM_RQ_BASE + 1);
         assert_ne!(VM_BRK, VM_PAGEFAULT);
-        assert!(VM_BRK > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+        assert!(VM_BRK > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
         assert_ne!(VM_BRK, crate::ipc_const::NOTIFY_MESSAGE);
     }
 
@@ -387,7 +451,7 @@ mod tests {
         assert_eq!(VM_MMAP, VM_RQ_BASE + 2);
         assert_ne!(VM_MMAP, VM_PAGEFAULT);
         assert_ne!(VM_MMAP, VM_BRK);
-        assert!(VM_MMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+        assert!(VM_MMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
         assert_ne!(VM_MMAP, crate::ipc_const::NOTIFY_MESSAGE);
     }
 
@@ -400,7 +464,7 @@ mod tests {
         assert_ne!(VM_MUNMAP, VM_MMAP);
         assert_ne!(VM_MUNMAP, VM_BRK);
         assert_ne!(VM_MUNMAP, VM_PAGEFAULT);
-        assert!(VM_MUNMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+        assert!(VM_MUNMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
         assert_ne!(VM_MUNMAP, crate::ipc_const::NOTIFY_MESSAGE);
     }
 
@@ -427,7 +491,7 @@ mod tests {
             assert_ne!(r, SEF_INIT);
             assert_ne!(r, SEF_SIGNAL);
             assert!(r > SEF_RQ_BASE + (NR_SEF_MSGS as i32 - 1));
-            assert!(r > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+            assert!(r > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
             assert_ne!(r, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(r < crate::ipc_const::NOTIFY_MESSAGE);
         }
@@ -492,12 +556,61 @@ mod tests {
     }
 
     #[test]
-    fn schedctl_is_last_kernel_call() {
-        // SYS_SCHEDCTL is the new Phase-4 kernel call; the count must include it.
-        assert_eq!(SYS_SCHEDCTL, KERNEL_CALL + 14);
-        assert_eq!(NR_KERN_CALLS_PHASE4, 15);
-        // The one-slice alias mirrors the new count until 4.4 drops it.
-        assert_eq!(NR_KERN_CALLS_PHASE3, NR_KERN_CALLS_PHASE4);
+    fn endksig_is_last_kernel_call() {
+        // The slice-4.5 signal trio extends the Phase-4 call set; the count
+        // must cover it.
+        assert_eq!(SYS_KILL, KERNEL_CALL + 15);
+        assert_eq!(SYS_GETKSIG, KERNEL_CALL + 16);
+        assert_eq!(SYS_ENDKSIG, KERNEL_CALL + 17);
+        assert_eq!(NR_KERN_CALLS_PHASE4, 18);
+    }
+
+    #[test]
+    fn privctl_set_user_is_nonzero() {
+        // Subcode 0 is reserved as "invalid" (a zeroed payload), the VMCTL
+        // convention.
+        assert_eq!(PRIVCTL_SET_USER, 1);
+    }
+
+    #[test]
+    fn pm_msgs_contiguous_from_base() {
+        // PM requests are contiguous from PM_RQ_BASE; NR_PM_MSGS locks the PM
+        // server's dispatch coverage.
+        let msgs = [PM_GETPID];
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(*m, PM_RQ_BASE + i as i32);
+        }
+        assert_eq!(msgs.len(), NR_PM_MSGS);
+    }
+
+    #[test]
+    fn pm_msgs_distinct_from_other_ranges() {
+        // Each PM request must stay distinct from the VM/DS/SEF/SCHED request
+        // ranges and the KERNEL_CALL range, and below NOTIFY_MESSAGE — so a
+        // server's m_type dispatcher and the SEF classifier never collide.
+        for m in [PM_GETPID] {
+            for other in [
+                VM_PAGEFAULT,
+                VM_BRK,
+                VM_MMAP,
+                VM_MUNMAP,
+                DS_PUBLISH,
+                DS_RETRIEVE,
+                DS_CHECK,
+                SEF_INIT,
+                SEF_SIGNAL,
+                SCHEDULING_NO_QUANTUM,
+                SCHEDULING_START,
+                SCHEDULING_STOP,
+                SCHEDULING_SET_NICE,
+            ] {
+                assert_ne!(m, other);
+            }
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32 - 1);
+            assert!(m < VM_RQ_BASE);
+            assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
+            assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
+        }
     }
 
     #[test]
@@ -512,7 +625,7 @@ mod tests {
             assert_ne!(m, VM_BRK);
             assert_ne!(m, VM_MMAP);
             assert_ne!(m, VM_MUNMAP);
-            assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE3 as i32);
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
         }

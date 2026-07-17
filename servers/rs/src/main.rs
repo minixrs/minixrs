@@ -38,7 +38,7 @@ use minixrs_ipc::{ipc_notify, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{SYS_GETINFO_NAME_LEN, SYS_SETALARM};
 use minixrs_kernel_shared::com::{
-    CLOCK, DS_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
+    CLOCK, DS_PROC_NR, PM_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
 };
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
@@ -47,11 +47,12 @@ use minixrs_server_rt::{SefConfig, sef_publish_to_ds, sef_startup};
 /// Boot servers RS heartbeats. Boot endpoints (generation 0) are valid for the
 /// whole kernel lifetime — boot procs never exit in Phase 4 — so a static list
 /// suffices; DS-driven discovery is a later enhancement.
-const PEERS: [Endpoint; 4] = [
+const PEERS: [Endpoint; 5] = [
     boot_endpoint(DS_PROC_NR),
     boot_endpoint(VM_PROC_NR),
     boot_endpoint(SCHED_PROC_NR),
     boot_endpoint(VFS_PROC_NR),
+    boot_endpoint(PM_PROC_NR),
 ];
 
 /// Heartbeat period, in clock ticks. At 100 Hz this is ≈1 s, giving ~8–10 fires
