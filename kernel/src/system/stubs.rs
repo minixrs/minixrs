@@ -36,3 +36,8 @@ enosys_stub!(do_irqctl);
 enosys_stub!(do_times);
 enosys_stub!(do_diagctl);
 enosys_stub!(do_setgrant);
+// Slice-4.5 signal trio: placeholders while the call numbers land ahead of
+// the real handlers (`system::do_sig`, later in the same slice).
+enosys_stub!(do_kill);
+enosys_stub!(do_getksig);
+enosys_stub!(do_endksig);
