@@ -32,7 +32,10 @@
 use core::sync::atomic::Ordering;
 
 use minixrs_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
-use minixrs_kernel_shared::com::{RS_PROC_NR, SCHED_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint};
+use minixrs_kernel_shared::com::{
+    RS_PROC_NR, SCHED_PROC_NR, STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR, STUB_D_PROC_NR,
+    STUB_E_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint,
+};
 use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use crate::arch::aarch64::addrspace::{AddrSpace, Prot};
@@ -40,7 +43,7 @@ use crate::arch::aarch64::asid::alloc_asid;
 use crate::arch::aarch64::mmu::{self, PAGE_SIZE, flush_icache_range};
 use crate::mm::{Frame, alloc_frame, phys_to_hhdm};
 use crate::proc::bitmap::{set_call_bit, set_sys_bit};
-use crate::proc::flags::{BILLABLE, PREEMPTIBLE, SRV_T, SYS_PROC, USR_T};
+use crate::proc::flags::{BILLABLE, PREEMPTIBLE, RTS_NO_PRIV, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
 use crate::proc::table::{priv_slot_mut, proc_index, proc_slot_mut, proc_table_ref};
 use crate::proc::{HeapWindow, Priv, Proc};
@@ -67,22 +70,25 @@ pub const USER_CODE_VA_D: u64 = 0x0043_0000;
 /// VA at which stub D's stack page is mapped.
 pub const USER_STACK_VA_D: u64 = 0x0083_0000;
 
+/// VA at which stub E's code page is mapped.
+pub const USER_CODE_VA_E: u64 = 0x0044_0000;
+/// VA at which stub E's stack page is mapped.
+pub const USER_STACK_VA_E: u64 = 0x0084_0000;
+
 // Stub D's heap VA (`0x0100_0000`) lives only in `user_stub.S`'s stub D blob
 // and in the VM server's `region::HEAP_BASE` (slice 3.5): D issues `VM_BRK` to
 // grow its heap, then touches it. The kernel needs no heap-window constant —
 // faults route to VM, which gates them on its per-proc region table.
 
-/// First proc-table slot beyond the boot image — `ProcNr(11)`.
-const STUB_A_PROC_NR: ProcNr = ProcNr::new(11);
-/// Second stub slot, just after A.
-const STUB_B_PROC_NR: ProcNr = ProcNr::new(12);
-/// Slice-2.6 kernel-call client. Slot 13 — one past the slice-2.5 pair.
-const STUB_C_PROC_NR: ProcNr = ProcNr::new(13);
-/// Slice-3.2 page-fault demo. Slot 14.
-const STUB_D_PROC_NR: ProcNr = ProcNr::new(14);
+// Stub proc numbers (slots 11..=15, just past the boot image) live in
+// `kernel-shared::com` since slice 4.5 — PM's mproc table seeds them, so the
+// kernel and PM must agree on one source.
 
-/// Privilege-table slots for the four stubs. Boot image uses 0..=15;
-/// 16, 17, 18, and 19 are the first free entries.
+/// Privilege-table slots for the dedicated-priv stubs A–D. Boot image uses
+/// 0..=15; 16, 17, 18, and 19 are the first free entries. Stub E has *no*
+/// dedicated slot: it is built frozen and PM points it at the shared USER
+/// priv (`proc::table::USER_PRIV_ID` = 20, the next slot up) via
+/// `SYS_PRIVCTL(PRIVCTL_SET_USER)`.
 const STUB_A_PRIV_ID: PrivId = PrivId::new(16);
 const STUB_B_PRIV_ID: PrivId = PrivId::new(17);
 const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
@@ -103,6 +109,8 @@ unsafe extern "C" {
     static _user_stub_c_end: u8;
     static _user_stub_d_start: u8;
     static _user_stub_d_end: u8;
+    static _user_stub_e_start: u8;
+    static _user_stub_e_end: u8;
 }
 
 /// VA at which each boot server's stack page is mapped. Distinct from the server
@@ -163,37 +171,40 @@ pub unsafe fn userland_bootstrap() {
     unsafe {
         build_stub(
             STUB_A_PROC_NR,
-            STUB_A_PRIV_ID,
+            Some(STUB_A_PRIV_ID),
             b'A',
             &_user_stub_a_start,
             &_user_stub_a_end,
             USER_CODE_VA_A,
             USER_STACK_VA_A,
             HeapWindow::EMPTY,
+            false,
         );
         build_stub(
             STUB_B_PROC_NR,
-            STUB_B_PRIV_ID,
+            Some(STUB_B_PRIV_ID),
             b'B',
             &_user_stub_b_start,
             &_user_stub_b_end,
             USER_CODE_VA_B,
             USER_STACK_VA_B,
             HeapWindow::EMPTY,
+            false,
         );
         build_stub(
             STUB_C_PROC_NR,
-            STUB_C_PRIV_ID,
+            Some(STUB_C_PRIV_ID),
             b'C',
             &_user_stub_c_start,
             &_user_stub_c_end,
             USER_CODE_VA_C,
             USER_STACK_VA_C,
             HeapWindow::EMPTY,
+            false,
         );
         build_stub(
             STUB_D_PROC_NR,
-            STUB_D_PRIV_ID,
+            Some(STUB_D_PRIV_ID),
             b'D',
             &_user_stub_d_start,
             &_user_stub_d_end,
@@ -204,6 +215,23 @@ pub unsafe fn userland_bootstrap() {
             // route to the VM server, which gates them on its region table. The
             // kernel `heap_window` fast path stays unused, so EMPTY.
             HeapWindow::EMPTY,
+            false,
+        );
+        // Stub E is built *frozen* (slice 4.5): full address space, but no
+        // priv slot and RTS_NO_PRIV set — the state a forked child will hold
+        // in 4.6. PM's SEF init points it at the shared USER priv and
+        // releases it via `SYS_PRIVCTL(PRIVCTL_SET_USER)`; only then does E
+        // start its `SENDREC PM_GETPID` loop.
+        build_stub(
+            STUB_E_PROC_NR,
+            None,
+            b'E',
+            &_user_stub_e_start,
+            &_user_stub_e_end,
+            USER_CODE_VA_E,
+            USER_STACK_VA_E,
+            HeapWindow::EMPTY,
+            true,
         );
     }
 
@@ -225,7 +253,9 @@ pub unsafe fn userland_bootstrap() {
     // priv-table slots 16, 17, 18.
     unsafe { install_stub_privs() };
 
-    // 5. Enqueue all three on the scheduler.
+    // 5. Enqueue the runnable stubs. E is *not* enqueued — it sits frozen on
+    //    RTS_NO_PRIV until PM's `SYS_PRIVCTL(PRIVCTL_SET_USER)` releases it
+    //    (rts_unset enqueues it then).
     // SAFETY: single-threaded boot; no other PROC_TABLE / RUNQ borrows
     // live at this point.
     unsafe {
@@ -328,13 +358,14 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8], stack_va: u64) {
 /// in the kernel image; the linker guarantees both.
 unsafe fn build_stub(
     nr: ProcNr,
-    priv_id: PrivId,
+    priv_id: Option<PrivId>,
     id: u8,
     stub_start: *const u8,
     stub_end: *const u8,
     code_va: u64,
     stack_va: u64,
     heap_window: HeapWindow,
+    frozen: bool,
 ) {
     // Per-proc page-table tree. AddrSpace::new allocates and zeroes the
     // L0 root via the frame allocator.
@@ -374,6 +405,7 @@ unsafe fn build_stub(
             ttbr0_pa,
             asid,
             heap_window,
+            frozen,
         );
     }
 
@@ -409,13 +441,14 @@ unsafe fn copy_stub_into_frame(frame: Frame, stub_start: *const u8, stub_end: *c
 fn populate_stub_slot(
     p: &mut Proc,
     nr: ProcNr,
-    priv_id: PrivId,
+    priv_id: Option<PrivId>,
     id: u8,
     entry_va: u64,
     stack_top: u64,
     ttbr0_pa: u64,
     asid: u8,
     heap_window: HeapWindow,
+    frozen: bool,
 ) {
     // Name: `id` followed by "-stub\0..." padding. Lets the clock tick
     // handler print `name[0]` to identify which stub is running.
@@ -429,7 +462,7 @@ fn populate_stub_slot(
 
     p.nr = nr;
     p.endpoint = boot_endpoint(nr);
-    p.priv_id = Some(priv_id);
+    p.priv_id = priv_id;
     p.priority = crate::proc::table::SRV_Q;
     // 5 ticks per quantum = 50 ms at 100 Hz.
     p.quantum_ms = 5;
@@ -452,8 +485,13 @@ fn populate_stub_slot(
     // Run-queue link starts cleared — `sched::enqueue` sets it.
     p.next_ready = None;
 
-    // Mark runnable.
-    p.rts_flags.store(0, Ordering::Relaxed);
+    // Mark runnable — or, for a frozen stub (E), leave it blocked awaiting a
+    // privilege: RTS_NO_PRIV is the same "built but not yet privileged" state
+    // a forked child will hold in 4.6, cleared by `SYS_PRIVCTL`. The address
+    // space above is fully built either way, so `schedule_next`'s
+    // ttbr0/asid asserts hold whenever the proc first becomes runnable.
+    let rts = if frozen { RTS_NO_PRIV } else { 0 };
+    p.rts_flags.store(rts, Ordering::Relaxed);
 }
 
 /// Install priv slots for A, B, C. Unchanged from slice 2.6.
@@ -586,7 +624,7 @@ unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId)
 /// the end of `userland_bootstrap`; proves each stub has a distinct
 /// per-proc address space.
 ///
-/// SAFETY: single-threaded boot; read-only borrows on proc slots 11/12/13/14.
+/// SAFETY: single-threaded boot; read-only borrows on proc slots 11..=15.
 unsafe fn print_addrspace_summary() {
     use crate::arch::aarch64::uart::Pl011;
     use core::fmt::Write;
@@ -597,6 +635,7 @@ unsafe fn print_addrspace_summary() {
         STUB_B_PROC_NR,
         STUB_C_PROC_NR,
         STUB_D_PROC_NR,
+        STUB_E_PROC_NR,
     ] {
         // SAFETY: sequential read-only borrow of the slot; no other
         // reference held while we read.

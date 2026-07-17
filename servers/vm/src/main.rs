@@ -17,8 +17,10 @@
 //!
 //! Slice 3.5 adds memory to VM: a per-process [`region`] table and a `VM_BRK`
 //! request that grows a process's heap region. Page faults are now satisfied
-//! only when the address lies inside a known region; out-of-region faults take
-//! a SIGSEGV path (logged, faulter left blocked — real signals are Phase 4).
+//! only when the address lies inside a known region; out-of-region faults are
+//! a SIGSEGV — since slice 4.5, VM raises it via `SYS_KILL(faulter, SIGSEGV)`
+//! and PM terminates the faulter (mirroring MINIX 3's VM
+//! `handle_pagefault → sys_kill` chain).
 //!
 //! Slice 3.6 adds `VM_MMAP` / `VM_MUNMAP`: anonymous, VM-chosen regions
 //! bump-allocated from `MMAP_BASE`. `VM_MMAP` records an `Mmap` region (pages
@@ -44,12 +46,13 @@ mod region;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    SYS_GETINFO_NAME_LEN, SYS_VMCTL, VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT,
+    SYS_GETINFO_NAME_LEN, SYS_KILL, SYS_VMCTL, VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT,
     VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP,
 };
 use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
 use minixrs_kernel_shared::error::OK;
+use minixrs_kernel_shared::signal::SIGSEGV;
 use minixrs_server_rt::{SefConfig, sef_publish_to_ds, sef_startup};
 
 /// aarch64 4 KiB page size — VM only needs to page-align fault addresses.
@@ -123,14 +126,24 @@ fn vm_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
 ///
 /// Slice 3.5 gates this on the faulter's [`region`] table: only faults inside a
 /// known region (today, the heap) are satisfied. A fault outside every region
-/// is a SIGSEGV — VM returns without mapping or clearing, leaving the faulter
-/// blocked on `RTS_PAGEFAULT` (the only "kill" available until PM + signals in
-/// Phase 4). VM cannot print from EL0, so this path is silent; the symptom is a
-/// process that stops making progress.
+/// is a SIGSEGV: since slice 4.5, VM raises it with `SYS_KILL(faulter,
+/// SIGSEGV)` — the kernel queues the ksig and notifies PM, whose default
+/// disposition terminates the faulter via `SYS_EXIT` (MINIX 3's
+/// `handle_pagefault → sys_kill` chain). The faulter stays blocked on
+/// `RTS_PAGEFAULT` throughout; VM never clears a fault it did not satisfy.
 fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     let nr = endpoint_proc(faulting_e).get();
     if !region::contains(nr, far) {
-        // SIGSEGV: unmapped access outside any region. Leave it blocked.
+        // SIGSEGV: unmapped access outside any region. Raise it toward PM and
+        // leave the faulter blocked; PM terminates it.
+        let mut m = Message {
+            m_source: 0,
+            m_type: SYS_KILL,
+            payload: [0u8; 96],
+        };
+        wr_i32(&mut m, 0, faulting_e);
+        wr_i32(&mut m, 4, SIGSEGV);
+        let _ = ipc_sendrec(system, &mut m);
         return;
     }
 
