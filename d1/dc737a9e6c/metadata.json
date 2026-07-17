@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "d1dc737a9e6c",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-4-5-pm-signals",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "kernel/src/proc/table.rs",
+    "kernel/src/system/do_exit.rs",
+    "kernel/src/system/do_privctl.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d1/dc737a9e6c/0/metadata.json",
+      "transcript": "/d1/dc737a9e6c/0/full.jsonl",
+      "content_hash": "/d1/dc737a9e6c/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 658,
+    "cache_creation_tokens": 21829,
+    "cache_read_tokens": 2607391,
+    "output_tokens": 15372,
+    "api_call_count": 10
+  }
+}
