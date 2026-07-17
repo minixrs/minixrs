@@ -29,9 +29,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::{
-    KERNEL_CALL, NR_KERN_CALLS_PHASE4, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL, SYS_EXEC, SYS_EXIT,
-    SYS_FORK, SYS_GETINFO, SYS_IRQCTL, SYS_PRIVCTL, SYS_SAFECOPY, SYS_SCHEDCTL, SYS_SCHEDULE,
-    SYS_SETALARM, SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
+    KERNEL_CALL, NR_KERN_CALLS_PHASE4, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL, SYS_ENDKSIG, SYS_EXEC,
+    SYS_EXIT, SYS_FORK, SYS_GETINFO, SYS_GETKSIG, SYS_IRQCTL, SYS_KILL, SYS_PRIVCTL, SYS_SAFECOPY,
+    SYS_SCHEDCTL, SYS_SCHEDULE, SYS_SETALARM, SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
 };
 use minixrs_kernel_shared::com::{NR_SYS_PROCS, SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -187,7 +187,7 @@ fn kernel_call_dispatch(
 /// arm here is a compile error.
 fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Message) -> i32 {
     const _: () = assert!(
-        NR_KERN_CALLS_PHASE4 == 15,
+        NR_KERN_CALLS_PHASE4 == 18,
         "expand kernel_call_dispatch when a new SYS_* lands",
     );
     match msg.m_type {
@@ -205,6 +205,9 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
         SYS_DIAGCTL => stubs::do_diagctl(caller, caller_priv, msg),
         SYS_SETGRANT => stubs::do_setgrant(caller, caller_priv, msg),
+        SYS_KILL => stubs::do_kill(caller, caller_priv, msg),
+        SYS_GETKSIG => stubs::do_getksig(caller, caller_priv, msg),
+        SYS_ENDKSIG => stubs::do_endksig(caller, caller_priv, msg),
         _ => EBADREQUEST,
     }
 }
