@@ -901,7 +901,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   line `result=0`; zero panic / `el0_sync_unexpected`. Host: `cargo test
   -p minixrs-kernel-shared -p minixrs-sched -p minixrs-server-rt` green; `cargo
   check --workspace` + clippy `-D warnings` + fmt clean.
-- **Slice 4.4** ◀ ready (branch `feature/phase-4-4-rs-setalarm`, pending merge) —
+- **Slice 4.4** ✓ shipped (PR #26, merged 2026-06-27) —
   RS (reincarnation server) + real `SYS_SETALARM`. `SYS_SETALARM` replaces its
   slice-2.6 `ENOSYS` stub with a per-proc one-shot timer: `Proc` gains
   `alarm_at: u64` (absolute uptime tick, 0 = disarmed; `Proc::EMPTY` zeroes it),
@@ -940,19 +940,70 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   every line `result=0`; zero panic / `el0_sync_unexpected`. Host: `cargo test
   -p minixrs-rs -p minixrs-kernel-shared -p minixrs-server-rt` green; `cargo
   check --workspace` + clippy `-D warnings` + fmt clean.
-- **Slice 4.5** ◀ next — PM part A: process table + getpid + `SYS_PRIVCTL` + minimal
-  signals. Stand up PM with a static `mproc` table, `getpid`/`getppid`, and a
-  kill path whose default action is terminate (no handlers/sigaction/masks —
-  that's beyond Phase 4). Make `SYS_PRIVCTL` real (set up a target's priv slot;
-  the 4.6 fork path leans on it). This gives the Phase-3 VM "SIGSEGV leaves
-  faulter blocked" path a real consequence (PM terminates the faulter).
-- **Slice 4.6** — PM part B: fork + exit + wait. Kernel `SYS_FORK` (free slot,
-  copy register frame, bump generation, alloc ASID, eager AS copy by walking the
-  parent's TTBR0 + copying each user page via HHDM; CoW deferred) and `SYS_EXIT`
-  (tear down AS via `AddrSpace::destroy`, free slot). Forked user procs share one
-  USER priv slot (MINIX's `static_priv` model) so fork can't exhaust the 64-slot
-  `PRIV_TABLE`. `VM_FORK` clones the parent's `ClientRegions` into the child. PM
-  owns the tree: fork → `SYS_FORK` + `VM_FORK` + `SCHEDULING_START`; exit →
+- **Slice 4.5** ◀ ready (branch `feature/phase-4-5-pm-signals`, pending merge) —
+  PM part A: mproc + getpid + real `SYS_PRIVCTL` + minimal signals
+  (kernel-mediated, MINIX-faithful). The kernel gains the signal trio
+  `SYS_KILL`/`SYS_GETKSIG`/`SYS_ENDKSIG` (`0x60F..0x611`;
+  `NR_KERN_CALLS_PHASE4` 15 → 18, overdue `_PHASE3` alias dropped) in
+  `kernel/src/system/do_sig.rs`: `do_kill` validates and calls `cause_sig`,
+  which records the signal in a new per-proc bitmap (`Proc::sig_pending`),
+  sets `RTS_SIGNALED | RTS_SIG_PENDING` (the reserved flags, first real use),
+  and wakes PM with a kernel-originated `NOTIFY` from `SYSTEM`
+  (`ipc::notify::deliver_ksig`, a `deliver_alarm` clone — SYSTEM's `ipc_to` is
+  empty so `mini_notify` would deny it; `do_kill`'s deferred-notify write is
+  why `kernel_call_dispatch`'s priv param went `&mut`). PM drains with
+  `SYS_GETKSIG` (hands off the bitmap — the scan requires `sig_pending != 0`,
+  not just the RTS bit, so a handed-off proc isn't re-returned — and keeps RTS
+  state) and acknowledges with `SYS_ENDKSIG` (clears it; PM must ENDKSIG
+  *every* returned endpoint, after any terminate). Terminate itself is
+  `SYS_EXIT`-lite (`do_exit.rs`, target-taking): dequeue via
+  `rts_set(RTS_PROC_STOP)`, `alarm_at = 0`, and a `caller_q` unlink of the one
+  chain named by `sendto_e` when the target died SENDING — AS teardown / slot
+  free / generation bump stay with 4.6. `SYS_PRIVCTL` becomes real
+  (`do_privctl.rs`): sole subcode `PRIVCTL_SET_USER` points a
+  `RTS_NO_PRIV`-frozen target at the new shared USER priv slot
+  (`table::USER_PRIV_ID` = 20: `USR_T`, `ipc_to` = {PM}, empty `k_call_mask`,
+  `sig_mgr` = PM; `populate_user_priv` also opens the reverse PM → 20 edge,
+  `install_stub_d_priv` pattern) and releases it (`EPERM` on a live target —
+  the freeze gate doubles as authorization). PM (`servers/pm`, MXBI row 6,
+  proc 0) boots through SEF, publishes to DS, seeds a host-tested
+  `mproc.rs` table (pids: PM 0, INIT 1, servers 2..10 slot-order parented to
+  RS, stubs 11..15 parented to INIT; stub proc nrs now shared in `com.rs` as
+  `STUB_A..E_PROC_NR`), releases the new frozen stub E, serves `PM_GETPID`
+  (new `PM_RQ_BASE = 0x700` — the last free block below `VM_RQ_BASE`; reply
+  `m_type` *is* the pid, ppid in payload `0..4`), and on `NOTIFY` from
+  `SYSTEM` runs the drain with default-terminate for user procs
+  (`MF_PRIV_PROC` servers are skipped — sig2mess waits for RS restarts).
+  Signal numbers live in new `kernel-shared/src/signal.rs` (POSIX values).
+  Live demo: stub E is built *frozen* (`build_stub` gains `Option<PrivId>` +
+  `frozen`; no priv slot, not enqueued) and PM's init unfreezes it into a
+  `SENDREC PM_GETPID` loop; stub D, after 32 steady-loop iterations, touches
+  its munmapped mmap page — VM's out-of-region arm now raises
+  `SYS_KILL(faulter, SIGSEGV)` instead of the slice-3.5 silent return. RS
+  heartbeats PM as a fifth peer; `ipc::TRACE_HEAD` widened 12 → 24 (six
+  servers' boot chatter). Verified in QEMU over 25 s: eleven `[as]` lines
+  (vm/ds/vfs/sched/rs/pm asid 1–6, stubs A–E asid 7–11);
+  `[ksys SYS_PRIVCTL] target=E nr=15 subcode=1 result=0` exactly once; E's
+  getpid SENDRECs recur in sampled `[ipc]` (`caller=15 … target=0x0`); stub
+  D's three resolved `[pf]` + one fatal at the munmapped `far=0x2000000`,
+  then the full chain in order — `[ksys SYS_KILL] target=D sig=11` →
+  `[ksys SYS_GETKSIG] target=D map=0x800` → `[ksys SYS_EXIT] target=D` →
+  `[ksys SYS_ENDKSIG] target=D` — and D goes silent; A↔B ping-pong, C
+  `[noq]`/`SYS_SCHEDULE` delegation, six periodic RS `[alarm]` fires all
+  intact; every traced `result=0`; zero panic / `el0_sync_unexpected`. Host:
+  `cargo test --workspace` green (new mproc + callnr/signal/com + classify
+  tests); `cargo check --workspace` + clippy `-D warnings` + fmt clean; miri
+  job gains `-p minixrs-pm` (advisory).
+- **Slice 4.6** ◀ next — PM part B: fork + exit + wait. Kernel `SYS_FORK` (free
+  slot, copy register frame, bump generation, alloc ASID, eager AS copy by
+  walking the parent's TTBR0 + copying each user page via HHDM; CoW deferred;
+  must zero `sig_pending` on slot reuse) and completion of 4.5's
+  `SYS_EXIT`-lite (tear down AS via `AddrSpace::destroy`, free slot, bump
+  generation, unblock receivers blocked on the dead endpoint). Forked user
+  procs share the 4.5 USER priv slot (`USER_PRIV_ID`, MINIX's `static_priv`
+  model) via `SYS_PRIVCTL(PRIVCTL_SET_USER)` so fork can't exhaust the 64-slot
+  `PRIV_TABLE`. `VM_FORK` clones the parent's `ClientRegions` into the child.
+  PM owns the tree: fork → `SYS_FORK` + `VM_FORK` + `SCHEDULING_START`; exit →
   zombie + SIGCHLD; `wait`/`waitpid` → reap.
 - **Slice 4.7** — exec: `SYS_EXEC` + PM exec of a boot-embedded binary. Kernel
   builds a fresh `AddrSpace`, `elf::load_into` the archive module resolved by
