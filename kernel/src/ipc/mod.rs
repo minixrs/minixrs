@@ -29,6 +29,7 @@ mod senda;
 // SENDREC fast path can read/write the request and reply without each
 // caller dragging in `ipc::message` paths directly.
 pub(crate) use message::{copy_msg_from_user, copy_msg_to_user};
+pub(crate) use notify::deliver_ksig;
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -66,8 +67,14 @@ const TRACE_EVERY: u64 = 100;
 /// show each stub's first IPC call — slice 2.6 added a third stub (C)
 /// whose fast-path SENDRECs to SYSTEM outpace stubs A and B by orders
 /// of magnitude, so without this aid the slice-2.5 ping-pong looks like
-/// it regressed even though A↔B are still cooperating fine.
-const TRACE_HEAD: u64 = 12;
+/// it regressed even though A↔B are still cooperating fine. Slice 4.5
+/// widened 12 → 24: six boot servers' startup SENDRECs (GET_WHOAMI +
+/// DS publish + replies + RS's first heartbeat round) exceed the old
+/// window. PM itself boots after stub C's kernel-call flood begins, so
+/// its handshake still lands past any practical head window — the
+/// `[ksys SYS_PRIVCTL] target=E` trace is PM's boot evidence instead
+/// (it can only fire after PM's GET_WHOAMI + DS publish succeeded).
+const TRACE_HEAD: u64 = 24;
 
 /// IPC dispatch. Called from `trap.S` immediately after the SVC entry
 /// stub has saved the caller's registers into `frame`.

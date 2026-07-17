@@ -43,10 +43,12 @@
     .equ ANY,          0x3FFF
     .equ ENDPOINT_A,   11
     .equ ENDPOINT_B,   12
+    .equ ENDPOINT_PM,  0                   // boot_endpoint(PM_PROC_NR = 0)
     .equ ENDPOINT_VM,  7                   // boot_endpoint(VM_PROC_NR = 7)
     .equ ENDPOINT_SYS, 0x7FFE              // boot_endpoint(SYSTEM)
     .equ SYS_GETINFO,  0x600               // KERNEL_CALL + 0
     .equ GET_WHOAMI,   12
+    .equ PM_GETPID,    0x700               // PM_RQ_BASE + 0
     .equ VM_BRK,       0xC01               // VM_RQ_BASE + 1
     .equ VM_MMAP,      0xC02               // VM_RQ_BASE + 2
     .equ VM_MUNMAP,    0xC03               // VM_RQ_BASE + 3
@@ -154,9 +156,13 @@ _user_stub_c_end:
  *   7. VM_MUNMAP(x22, 0x2000): SENDREC to VM. VM drops the region and unmaps the
  *      one mapped page (SYS_VMCTL(VMCTL_PT_UNMAP)); the second, never-touched
  *      page is a harmless EINVAL inside the kernel.
- *   8. Loop writing the two *heap* pages, incrementing a counter in x19. The
- *      mmap page is now unmapped, so D must not touch x22 again (that would be
- *      an out-of-region SIGSEGV). No further faults — D round-robins like A/B/C.
+ *   8. Write the two *heap* pages 32 times, incrementing a counter in x19. The
+ *      mmap page is now unmapped, so this steady phase touches only the heap —
+ *      no further faults.
+ *   9. Deliberately store to x22 (the munmapped page): an out-of-region fault
+ *      (slice 4.5). VM's region check fails, VM raises SYS_KILL(D, SIGSEGV),
+ *      the kernel queues the ksig toward PM, and PM terminates D via SYS_EXIT.
+ *      D never executes past this store.
  *
  * x19/x20/x21/x22 are AAPCS callee-saved and survive the SVC (trap.S saves and
  * restores x0..x30), so x22 (the mmap base) is still valid for the munmap after
@@ -233,14 +239,61 @@ _user_stub_d_start:
     mov     x1, #SENDREC
     mov     x2, x9
     svc     #0
-    // x22's page is now unmapped; the steady loop must touch only the heap pages.
+    // x22's page is now unmapped; the steady phase touches only the heap pages.
 
-    // --- steady loop: write both heap pages, no further faults ---
+    // --- steady phase: write both heap pages 32 times, no further faults ---
+    mov     x23, #32
 1:
     str     x19, [x20]
     str     x19, [x21]
     add     x19, x19, #1
-    b       1b
+    subs    x23, x23, #1
+    b.ne    1b
+
+    // --- deliberate SIGSEGV (slice 4.5): touch the munmapped mmap page ---
+    // Step 7 dropped x22's region, so this store faults out-of-region: VM
+    // raises SYS_KILL(D, SIGSEGV) and PM terminates D via SYS_EXIT. The park
+    // loop below is unreachable while the kill chain works; it only keeps D
+    // contained if a future change ever resumes a SIGSEGV'd process.
+    str     x19, [x22]
+2:
+    b       2b
     .global _user_stub_d_end
 _user_stub_d_end:
     .size _user_stub_d_start, _user_stub_d_end - _user_stub_d_start
+
+/* ---- Stub E: PM getpid client (slice 4.5) ------------------------------- */
+
+/*
+ * Stub E is built *frozen*: `userland_bootstrap` constructs its address space
+ * but installs no privilege slot and leaves RTS_NO_PRIV set — the state a
+ * forked child will hold in 4.6. PM's SEF init releases it with
+ * SYS_PRIVCTL(PRIVCTL_SET_USER), pointing it at the shared USER priv slot
+ * (SENDREC-to-PM only, no kernel calls). E then loops SENDREC PM_GETPID to
+ * PM: the reply's m_type is E's pid and payload[0..4] the parent's pid — the
+ * live proof that a PM-granted privilege works end to end.
+ */
+
+    .section .rodata.user_stub_e, "a", %progbits
+    .balign 4
+    .global _user_stub_e_start
+    .type _user_stub_e_start, %object
+_user_stub_e_start:
+    mov     x19, #0                         // persistent call counter
+1:
+    // Build the request at [SP_EL0 - 104, SP_EL0):
+    //   [+0]   m_source — kernel overwrites
+    //   [+4]   m_type = PM_GETPID (no request payload)
+    sub     x9, sp, #MSG_SIZE
+    str     wzr, [x9, #0]
+    mov     w10, #PM_GETPID
+    str     w10, [x9, #4]
+    mov     x0, #ENDPOINT_PM
+    mov     x1, #SENDREC
+    mov     x2, x9
+    svc     #0
+    add     x19, x19, #1
+    b       1b
+    .global _user_stub_e_end
+_user_stub_e_end:
+    .size _user_stub_e_start, _user_stub_e_end - _user_stub_e_start

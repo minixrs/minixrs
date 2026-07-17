@@ -22,10 +22,8 @@ macro_rules! enosys_stub {
     };
 }
 
-enosys_stub!(do_privctl);
 enosys_stub!(do_fork);
 enosys_stub!(do_exec);
-enosys_stub!(do_exit);
 enosys_stub!(do_copy);
 enosys_stub!(do_safecopy);
 enosys_stub!(do_irqctl);
@@ -33,6 +31,10 @@ enosys_stub!(do_irqctl);
 // `do_schedule` / `do_schedctl` are real handlers as of slice 4.3 — see
 // `system::do_schedule`.
 // `do_setalarm` is a real handler as of slice 4.4 — see `system::do_setalarm`.
+// `do_privctl` / `do_exit` are real handlers as of slice 4.5 — see
+// `system::do_privctl` / `system::do_exit`.
 enosys_stub!(do_times);
 enosys_stub!(do_diagctl);
 enosys_stub!(do_setgrant);
+// `do_kill` / `do_getksig` / `do_endksig` are real handlers as of slice 4.5 —
+// see `system::do_sig`.

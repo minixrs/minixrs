@@ -65,6 +65,38 @@ pub const NR_BOOT_PROCS: usize = (INIT_PROC_NR.get() as usize) + 1;
 const _: () = assert!(NR_PROCS >= NR_BOOT_PROCS);
 const _: () = assert!(NR_SYS_PROCS >= NR_BOOT_PROCS);
 
+// ---------------------------------------------------------------------------
+// Phase-4 demo stubs — hand-installed EL0 programs just past the boot image.
+//
+// Slices 2.x-4.x install five tiny assembly stubs (kernel
+// `arch::aarch64::userland`) as live exercises for IPC, kernel calls, VM, and
+// the PM signal path. PM's mproc table (slice 4.5) seeds them as user
+// processes, so their proc numbers are shared here rather than kept
+// kernel-private. The whole range is retired in slice 4.8 when init + real
+// processes take over as the live exercise.
+// ---------------------------------------------------------------------------
+
+/// Stub A — SENDREC ping loop to stub B.
+pub const STUB_A_PROC_NR: ProcNr = ProcNr::new(11);
+/// Stub B — RECEIVE/SEND echo peer of stub A.
+pub const STUB_B_PROC_NR: ProcNr = ProcNr::new(12);
+/// Stub C — `SYS_GETINFO(GET_WHOAMI)` kernel-call loop (SCHED-delegated).
+pub const STUB_C_PROC_NR: ProcNr = ProcNr::new(13);
+/// Stub D — brk/mmap/munmap VM client; deliberately faults out-of-region
+/// after its munmap (slice 4.5) to exercise the SIGSEGV → PM kill path.
+pub const STUB_D_PROC_NR: ProcNr = ProcNr::new(14);
+/// Stub E — built frozen (`RTS_NO_PRIV`, no priv slot); PM unfreezes it via
+/// `SYS_PRIVCTL(PRIVCTL_SET_USER)` and it then loops `SENDREC PM_GETPID`.
+pub const STUB_E_PROC_NR: ProcNr = ProcNr::new(15);
+
+/// Number of demo stubs.
+pub const NR_STUB_PROCS: usize = 5;
+
+// Stubs sit contiguously just past the boot image, well inside the proc table.
+const _: () = assert!(STUB_A_PROC_NR.get() as usize == NR_BOOT_PROCS);
+const _: () = assert!(STUB_E_PROC_NR.get() as usize == NR_BOOT_PROCS + NR_STUB_PROCS - 1);
+const _: () = assert!((STUB_E_PROC_NR.get() as usize) < NR_PROCS);
+
 /// Build a boot-time endpoint (generation 0) for a task or server.
 pub const fn boot_endpoint(p: ProcNr) -> Endpoint {
     make_endpoint(0, p)
@@ -115,6 +147,23 @@ mod tests {
             assert_eq!(endpoint_gen(e), 0);
             assert_eq!(endpoint_proc(e), p);
         }
+    }
+
+    #[test]
+    fn stub_procs_contiguous_past_boot_image() {
+        // The demo stubs occupy the five slots just past the boot image, in
+        // order and without duplicates; PM's mproc seeding depends on this.
+        let stubs = [
+            STUB_A_PROC_NR,
+            STUB_B_PROC_NR,
+            STUB_C_PROC_NR,
+            STUB_D_PROC_NR,
+            STUB_E_PROC_NR,
+        ];
+        for (i, s) in stubs.iter().enumerate() {
+            assert_eq!(s.get() as usize, NR_BOOT_PROCS + i);
+        }
+        assert_eq!(stubs.len(), NR_STUB_PROCS);
     }
 
     #[test]

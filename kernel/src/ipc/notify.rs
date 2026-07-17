@@ -12,7 +12,7 @@
 
 use core::sync::atomic::Ordering;
 
-use minixrs_kernel_shared::com::{CLOCK, NR_SYS_PROCS};
+use minixrs_kernel_shared::com::{CLOCK, NR_SYS_PROCS, PM_PROC_NR, SYSTEM};
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
 use minixrs_kernel_shared::error::{EBADSRCDST, ECALLDENIED, OK};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
@@ -151,5 +151,56 @@ pub(crate) fn deliver_alarm(
     set_sys_bit(
         &mut priv_table[owner_priv_id.as_usize()].notify_pending,
         clock_priv_id,
+    );
+}
+
+/// Kernel-originated ksig notification (slice 4.5). Deliver a `NOTIFY` from
+/// the `SYSTEM` kernel task to PM after `cause_sig` marks a target proc
+/// signal-pending, so PM wakes and drains via `SYS_GETKSIG` / `SYS_ENDKSIG`.
+///
+/// Modeled on [`deliver_alarm`]: the source is a kernel task and there is
+/// **no `ipc_to` permission check** — the kernel originates the notification,
+/// and routing through [`mini_notify`] would in fact *fail* because SYSTEM's
+/// `ipc_to` bitmap is empty (only `SRV_T` slots get theirs filled at boot).
+///
+/// Immediate delivery if PM is `RECEIVE`-blocked and would accept from
+/// `SYSTEM`; otherwise the bit is recorded in PM's `notify_pending` against
+/// SYSTEM's priv slot, so PM's next `RECEIVE` synthesizes the message via
+/// [`super::receive`]'s `take_pending_notification`.
+///
+/// Takes the caller's exclusive table slices — never re-materializes the
+/// statics (`kernel_call_sendrec` already holds them).
+pub(crate) fn deliver_ksig(
+    proc_table: &mut [Proc; N_PROC_SLOTS],
+    priv_table: &mut [Priv; NR_SYS_PROCS],
+) {
+    // SYSTEM and PM are boot-time slots: `proc::init` always populates them,
+    // so a missing entry is a structural bug — halt loudly rather than
+    // silently drop the notification.
+    let system_idx = proc_index(SYSTEM).expect("SYSTEM in proc table");
+    let system_e = proc_table[system_idx].endpoint;
+    let system_priv_id = proc_table[system_idx]
+        .priv_id
+        .expect("SYSTEM priv populated by proc::init");
+    let pm_idx = proc_index(PM_PROC_NR).expect("PM in proc table");
+
+    let pm = &mut proc_table[pm_idx];
+    if will_receive(pm, system_e) && pm.misc_flags & MF_REPLY_PEND == 0 {
+        // Immediate delivery — synthesize the notification and unblock.
+        build_notify_message(pm, system_e);
+        pm.misc_flags |= MF_DELIVERMSG;
+        // SAFETY: single-threaded EL1 context; the exclusive `pm` borrow ends
+        // (NLL) as `rts_unset` captures `nr`, so no other PROC_TABLE borrow
+        // aliases.
+        unsafe { sched::rts_unset(pm, RTS_RECEIVING) };
+        return;
+    }
+
+    // Deferred — record against SYSTEM's priv slot in PM's bitmap. PM's boot
+    // priv slot always exists, so the notification can't be dropped.
+    let pm_priv_id = pm.priv_id.expect("PM priv populated by init_boot_image");
+    set_sys_bit(
+        &mut priv_table[pm_priv_id.as_usize()].notify_pending,
+        system_priv_id,
     );
 }
