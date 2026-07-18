@@ -38,10 +38,10 @@ use minixrs_kernel_shared::com::{
 };
 use minixrs_kernel_shared::{PrivId, ProcNr};
 
-use crate::arch::aarch64::addrspace::{AddrSpace, Prot};
+use crate::arch::aarch64::addrspace::{AddrSpace, Prot, walk_leaves};
 use crate::arch::aarch64::asid::alloc_asid;
 use crate::arch::aarch64::mmu::{self, PAGE_SIZE, flush_icache_range};
-use crate::mm::{Frame, alloc_frame, phys_to_hhdm};
+use crate::mm::{Frame, alloc_frame, free_frame, phys_to_hhdm};
 use crate::proc::bitmap::{set_call_bit, set_sys_bit};
 use crate::proc::flags::{BILLABLE, PREEMPTIBLE, RTS_NO_PRIV, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
@@ -95,8 +95,9 @@ const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
 const STUB_D_PRIV_ID: PrivId = PrivId::new(19);
 
 // SPSR_EL1 to install on each stub's `eret`. Matches slice 2.4: IRQs
-// unmasked at EL0 (bit 7 = 0), debug + SError + FIQ masked. EL0t.
-const STUB_SPSR_EL0: u64 = 0x340;
+// unmasked at EL0 (bit 7 = 0), debug + SError + FIQ masked. EL0t. Shared with
+// `system::do_exec`, which resets an exec'd proc to the same EL0 state.
+pub(crate) const STUB_SPSR_EL0: u64 = 0x340;
 
 // ----- EL0 stub blobs (linked into the kernel image by `user_stub.S`) ------
 
@@ -160,7 +161,14 @@ pub unsafe fn userland_bootstrap() {
     unsafe {
         let image = crate::boot_image::BootImage::get();
         for (nr, elf) in image.iter() {
-            load_boot_server(nr, elf, SERVER_STACK_VA);
+            // A negative proc-nr (`com::EXEC_ONLY_PROC_NR`) tags an archive
+            // module that is not a boot server — it is packed only so
+            // `SYS_EXEC` can resolve it by name (slice 4.7's `worker`), and it
+            // has no proc/priv slot to load into. Skip it.
+            if nr.get() < 0 {
+                continue;
+            }
+            load_boot_server(nr, elf);
         }
     }
 
@@ -218,10 +226,10 @@ pub unsafe fn userland_bootstrap() {
             false,
         );
         // Stub E is built *frozen* (slice 4.5): full address space, but no
-        // priv slot and RTS_NO_PRIV set — the state a forked child will hold
-        // in 4.6. PM's SEF init points it at the shared USER priv and
-        // releases it via `SYS_PRIVCTL(PRIVCTL_SET_USER)`; only then does E
-        // start its `SENDREC PM_GETPID` loop.
+        // priv slot and RTS_NO_PRIV set — the state a forked child holds. PM's
+        // SEF init points it at the shared USER priv and releases it via
+        // `SYS_PRIVCTL(PRIVCTL_SET_USER)`; only then does E start its fork loop
+        // (child execs the `worker` binary, parent `wait`s and reaps — 4.6b/4.7).
         build_stub(
             STUB_E_PROC_NR,
             None,
@@ -282,42 +290,109 @@ pub unsafe fn userland_bootstrap() {
 /// fills in only the address space + EL0 entry state. No `install_*_priv` helper
 /// is needed.
 ///
-/// `stack_va` is shared across servers ([`SERVER_STACK_VA`]); each gets its own
-/// TTBR0, so the same VA maps a distinct frame per server.
+/// A freshly built user address space ready to become a proc's image: its
+/// page-table root PA, ASID, program entry VA, and initial stack pointer.
+/// Produced by [`load_exec_image`]; consumed by boot-server load and
+/// `system::do_exec`.
+pub(crate) struct ExecImage {
+    pub ttbr0_pa: u64,
+    pub asid: u8,
+    pub entry: u64,
+    pub sp_top: u64,
+}
+
+/// Build a fresh address space from an ELF image: allocate the L0 root, load
+/// the `PT_LOAD` segments (BSS satisfied for free — `alloc_frame` zeroes), map
+/// one zeroed RW stack page at [`SERVER_STACK_VA`], and allocate an ASID. The
+/// `AddrSpace` is `mem::forget`-ed — the page-table tree is now owned via the
+/// returned `ttbr0_pa` (tear it down with the `do_exit` teardown sequence, never
+/// `AddrSpace::destroy`). Returns `None` on OOM or a malformed ELF, freeing any
+/// partial tree first so nothing leaks (the do_fork `copy_addrspace` contract).
 ///
-/// The `AddrSpace` is `mem::forget`-ed for the same reason as [`build_stub`]:
-/// the page-table tree is now owned via `Proc::ttbr0_pa`.
+/// The stack VA is shared with every boot server because each image gets its own
+/// TTBR0, so the same low VA resolves to a distinct frame per proc.
+///
+/// SAFETY: single-threaded EL1; the sole caller of the frame allocator + ASID
+/// pool for its duration. Must run after `mm::init_from_limine_memmap`.
+pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
+    let mut aspace = AddrSpace::new().ok()?;
+
+    let entry = match crate::boot_image::elf::load_into(elf, &mut aspace) {
+        Ok(e) => e,
+        Err(_) => {
+            destroy_addrspace_with_leaves(aspace);
+            return None;
+        }
+    };
+
+    // Stack: one zeroed RW page; SP starts at its top.
+    let stack_frame = match alloc_frame() {
+        Some(f) => f,
+        None => {
+            destroy_addrspace_with_leaves(aspace);
+            return None;
+        }
+    };
+    if aspace
+        .map_page(SERVER_STACK_VA, stack_frame.addr(), Prot::RW_DATA)
+        .is_err()
+    {
+        // `map_page` failed before linking the leaf, so free the orphan stack
+        // frame explicitly; the leaf sweep below won't see it.
+        free_frame(stack_frame);
+        destroy_addrspace_with_leaves(aspace);
+        return None;
+    }
+
+    let ttbr0_pa = aspace.ttbr0_pa;
+    // SAFETY: single-threaded EL1 context; sole accessor of the ASID pool.
+    let asid = unsafe { alloc_asid() };
+    // The page-table tree is durable via `ttbr0_pa`; don't run `destroy`.
+    core::mem::forget(aspace);
+    Some(ExecImage {
+        ttbr0_pa,
+        asid,
+        entry,
+        sp_top: SERVER_STACK_VA + PAGE_SIZE as u64,
+    })
+}
+
+/// Free every mapped leaf frame of a partially-built address space, then the
+/// tree itself. Used only on the [`load_exec_image`] error paths, before any
+/// ASID is allocated — so unlike `do_exit::teardown_addrspace` there is nothing
+/// to flush or recycle.
+fn destroy_addrspace_with_leaves(aspace: AddrSpace) {
+    let ttbr0_pa = aspace.ttbr0_pa;
+    let _ = walk_leaves(ttbr0_pa, &mut |_va, pa, _prot| {
+        free_frame(Frame::from_addr(pa));
+        Ok(())
+    });
+    aspace.destroy();
+}
+
+/// The page-table tree is durable via `Proc::ttbr0_pa` for the same reason as
+/// [`build_stub`]: `load_exec_image` `mem::forget`s the `AddrSpace`.
 ///
 /// SAFETY: single-threaded boot; the only writer of `nr`'s proc slot and the
 /// frame allocator here. Must run after `mm::init_from_limine_memmap` and
 /// before `sched::run`. `nr` must be a boot server already populated by
 /// `init_boot_image` (blocked on `RTS_NO_PRIV`).
-unsafe fn load_boot_server(nr: ProcNr, elf: &[u8], stack_va: u64) {
+unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
     use crate::arch::aarch64::uart::Pl011;
     use core::fmt::Write;
 
-    let mut aspace = AddrSpace::new().expect("server AddrSpace::new failed");
-    let ttbr0_pa = aspace.ttbr0_pa;
-
-    let entry =
-        crate::boot_image::elf::load_into(elf, &mut aspace).expect("server ELF load failed");
-
-    // Stack: one zeroed RW page; SP starts at its top.
-    let stack_frame = alloc_frame().expect("server stack frame alloc failed");
-    aspace
-        .map_page(stack_va, stack_frame.addr(), Prot::RW_DATA)
-        .expect("map_page(server stack) failed");
-
-    let asid = unsafe { alloc_asid() };
+    // SAFETY: single-threaded boot; sole caller of the frame allocator + ASID
+    // pool at this point.
+    let img = unsafe { load_exec_image(elf) }.expect("server image load failed");
 
     // SAFETY: single-threaded boot; sole borrow of this server's slot.
     unsafe {
         let p = proc_slot_mut(nr).expect("server proc slot in range");
-        p.regs.elr_el1 = entry;
-        p.regs.sp_el0 = stack_va + PAGE_SIZE as u64;
+        p.regs.elr_el1 = img.entry;
+        p.regs.sp_el0 = img.sp_top;
         p.regs.spsr_el1 = STUB_SPSR_EL0;
-        p.ttbr0_pa = ttbr0_pa;
-        p.asid = asid;
+        p.ttbr0_pa = img.ttbr0_pa;
+        p.asid = img.asid;
         p.next_ready = None;
         // Clear the boot RTS_NO_PRIV: the server now has an address space.
         p.rts_flags.store(0, Ordering::Relaxed);
@@ -332,12 +407,9 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8], stack_va: u64) {
             p.nr.get(),
             p.ttbr0_pa,
             p.asid,
-            entry,
+            img.entry,
         );
     }
-
-    // The page-table tree is durable via `ttbr0_pa`; don't run `destroy`.
-    core::mem::forget(aspace);
 
     // SAFETY: single-threaded boot; no other PROC_TABLE / RUNQ borrow is live.
     unsafe { sched::enqueue(nr) };

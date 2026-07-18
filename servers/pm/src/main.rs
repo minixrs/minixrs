@@ -43,8 +43,9 @@ mod mproc;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    PM_EXIT, PM_FORK, PM_GETPID, PM_WAIT, PRIVCTL_SET_USER, SCHEDULING_START, SCHEDULING_STOP,
-    SYS_ENDKSIG, SYS_EXIT, SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
+    EXEC_NAME_LEN, PM_EXEC, PM_EXIT, PM_FORK, PM_GETPID, PM_WAIT, PRIVCTL_SET_USER,
+    SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT, SYS_FORK,
+    SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
 };
 use minixrs_kernel_shared::com::{
     SCHED_PROC_NR, STUB_E_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint,
@@ -60,6 +61,13 @@ use minixrs_server_rt::{SefConfig, sef_publish_to_ds, sef_startup};
 /// kernel-scheduled stubs.
 const CHILD_PRIORITY: i32 = 8;
 const CHILD_QUANTUM: i32 = 5;
+
+/// The boot-embedded binary PM's `execve` selects (slice 4.7). Until the
+/// filesystem/musl wrappers thread a user-supplied path (Phase 5), PM always
+/// execs the `worker` demo binary — the kernel resolves it by name in the MXBI
+/// archive. Must be `<= EXEC_NAME_LEN` bytes to fit the `SYS_EXEC` payload.
+const EXEC_TARGET: &str = "worker";
+const _: () = assert!(EXEC_TARGET.len() <= EXEC_NAME_LEN);
 
 /// ELF entry point. The kernel primes `SP_EL0` before `eret`, so `_start`
 /// dives straight into Rust. Gated to `not(test)` (under `cargo test` the
@@ -115,6 +123,7 @@ fn main() -> ! {
             PM_FORK => handle_fork(system, vm, sched, &mut msg),
             PM_EXIT => handle_exit(system, sched, &mut msg),
             PM_WAIT => handle_wait(&mut msg),
+            PM_EXEC => handle_exec(system, &mut msg),
             // Unknown request: drop it.
             _ => {}
         }
@@ -294,6 +303,22 @@ fn handle_wait(msg: &mut Message) {
     }
 }
 
+/// Handle `PM_EXEC`: replace the caller's program image with the boot-embedded
+/// [`EXEC_TARGET`]. PM issues `SYS_EXEC` naming the caller (kernel-stamped
+/// `m_source`); the kernel builds the new address space and resumes the caller
+/// at the new entry point. On success PM sends **no** reply — the caller does
+/// not return from this call, it restarts at the new image's `_start`. On
+/// failure the caller is untouched on its old image, so PM replies the errno.
+#[cfg_attr(test, allow(dead_code))]
+fn handle_exec(system: Endpoint, msg: &mut Message) {
+    let caller_e = msg.m_source;
+    let rc = sys_exec(system, caller_e, EXEC_TARGET);
+    if rc != OK {
+        reply(caller_e, msg, rc);
+    }
+    // Success: the kernel already resumed the caller at the new image — no reply.
+}
+
 /// MINIX `W_EXITCODE` for a normal exit: the low byte of `status` in bits 8..16,
 /// the terminating-signal byte (0 for a normal exit) in bits 0..8.
 fn encode_status(status: i32) -> i32 {
@@ -423,6 +448,28 @@ fn sys_fork(system: Endpoint, parent_e: Endpoint, child_nr: i32) -> (i32, Endpoi
         return (rc, NONE);
     }
     (m.m_type, rd_i32(&m, 0))
+}
+
+/// `SYS_EXEC` — ask the kernel to replace `target_e`'s image with the
+/// boot-embedded binary `name` (SENDREC to SYSTEM). Payload: target endpoint in
+/// `0..4`, the NUL-padded name in `4..4+EXEC_NAME_LEN`. Returns the kernel-call
+/// result; on `OK` the kernel has already resumed the target at the new entry.
+#[cfg_attr(test, allow(dead_code))]
+fn sys_exec(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
+    let mut m = Message {
+        m_source: 0,
+        m_type: SYS_EXEC,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, 0, target_e);
+    // `EXEC_TARGET` is asserted `<= EXEC_NAME_LEN`, so the name fits the field.
+    let bytes = name.as_bytes();
+    m.payload[4..4 + bytes.len()].copy_from_slice(bytes);
+    let rc = ipc_sendrec(system, &mut m);
+    if rc != OK {
+        return rc;
+    }
+    m.m_type
 }
 
 /// `VM_FORK` — ask VM to clone `parent_e`'s region set into `child_e` (SENDREC

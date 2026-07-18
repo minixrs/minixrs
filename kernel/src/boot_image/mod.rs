@@ -108,9 +108,8 @@ impl BootImage {
         )
     }
 
-    /// The ELF payload for a module name (e.g. `"vfs"`), or `None`. Reused by
-    /// exec in slice 4.7 to resolve a boot-embedded binary by name.
-    #[allow(dead_code)] // consumed by slice 4.7 (SYS_EXEC of a boot-embedded binary)
+    /// The ELF payload for a module name (e.g. `"vfs"`), or `None`. `SYS_EXEC`
+    /// resolves the boot-embedded exec target (`"worker"`) through this.
     pub fn module_by_name(&self, name: &str) -> Option<&'static [u8]> {
         (0..self.count).map(|i| self.record(i)).find_map(
             |(_, n, elf)| {
