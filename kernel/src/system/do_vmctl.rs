@@ -53,7 +53,7 @@ use minixrs_kernel_shared::callnr::{
     NR_VMCTL_SUBCALLS, VMCTL_CLEAR_PAGEFAULT, VMCTL_GET_PAGEFAULT, VMCTL_PROT_EXEC,
     VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP, VMCTL_VMINHIBIT_CLEAR, VMCTL_VMINHIBIT_SET,
 };
-use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
+use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{EINVAL, ENOMEM, OK};
 use minixrs_kernel_shared::message::Message;
 
@@ -61,7 +61,7 @@ use crate::arch::aarch64::addrspace::{MapError, Prot, map_page_in, unmap_page_in
 use crate::arch::aarch64::mmu;
 use crate::mm::{Frame, alloc_frame, free_frame};
 use crate::proc::flags::{RTS_PAGEFAULT, RTS_VMINHIBIT};
-use crate::proc::table::{N_PROC_SLOTS, proc_index};
+use crate::proc::table::N_PROC_SLOTS;
 use crate::proc::{PageFaultState, Proc, sched};
 use crate::uart::Uart;
 
@@ -85,13 +85,9 @@ pub(super) fn do_vmctl(
     // No per-target authorization — the caller is trusted via `k_call_mask`
     // (see the "Trust model" note above). `target_nr` may be any slot,
     // including a kernel task; `proc_index` only range-checks it.
-    let target_nr = if target_e == SELF {
-        caller_nr
-    } else {
-        endpoint_proc(target_e)
-    };
-    let Some(target_idx) = proc_index(target_nr) else {
-        return EINVAL;
+    let target_idx = match super::resolve_target(proc_table, caller_nr, target_e) {
+        Ok(idx) => idx,
+        Err(e) => return e,
     };
 
     // Lock subcall coverage: adding a `VMCTL_*` without a match arm is a

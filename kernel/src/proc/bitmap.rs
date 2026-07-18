@@ -35,6 +35,13 @@ pub(crate) fn get_sys_bit(map: &[u32], id: PrivId) -> bool {
     get_bit(map, id.as_usize())
 }
 
+/// Clear bit `id` in a sysproc-indexed bitmap. Slice 4.6's `SYS_EXIT` uses
+/// this to purge a dead dedicated-priv proc's pending-notification bits.
+#[inline]
+pub(crate) fn clear_sys_bit(map: &mut [u32], id: PrivId) {
+    clear_bit(map, id.as_usize());
+}
+
 /// Set bit `call_idx` in a call-indexed bitmap (`k_call_mask`).
 #[inline]
 pub(crate) fn set_call_bit(map: &mut [u32], call_idx: usize) {
@@ -61,4 +68,12 @@ fn get_bit(map: &[u32], n: usize) -> bool {
         return false;
     }
     map[n / 32] & (1 << (n % 32)) != 0
+}
+
+#[inline]
+fn clear_bit(map: &mut [u32], n: usize) {
+    if n / 32 >= map.len() {
+        return;
+    }
+    map[n / 32] &= !(1 << (n % 32));
 }

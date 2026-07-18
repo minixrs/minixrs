@@ -21,7 +21,7 @@ use crate::ipc::deadlock::deadlock_check;
 use crate::ipc::notify::build_notify_message;
 use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND, RTS_RECEIVING, RTS_SENDING};
 use crate::proc::priv_struct::IPC_MAP_CHUNKS;
-use crate::proc::table::{N_PROC_SLOTS, proc_index};
+use crate::proc::table::{N_PROC_SLOTS, okendpt, proc_index};
 use crate::proc::{Priv, Proc, sched};
 
 /// Blocking discipline for [`mini_receive`].
@@ -48,6 +48,15 @@ pub fn mini_receive(
     let Some(caller_idx) = proc_index(caller_nr) else {
         return EBADSRCDST;
     };
+
+    // Slots recycle as of slice 4.6: a specific source filter must pass
+    // okendpt so receiving from a dead endpoint fails with EDEADSRCDST
+    // instead of blocking forever (MINIX 3 proc.c:999).
+    if src_e != ANY {
+        if let Err(e) = okendpt(proc_table, src_e) {
+            return e;
+        }
+    }
 
     // Record buffer VA up-front. Even if we block here, a later deferred
     // SEND will find this and deposit the message at the right place when

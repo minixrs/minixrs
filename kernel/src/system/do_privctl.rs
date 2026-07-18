@@ -32,19 +32,21 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::PRIVCTL_SET_USER;
-use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
+use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{EINVAL, EPERM, OK};
 use minixrs_kernel_shared::message::Message;
 
 use crate::proc::flags::RTS_NO_PRIV;
-use crate::proc::table::{N_PROC_SLOTS, USER_PRIV_ID, proc_index};
+use crate::proc::table::{N_PROC_SLOTS, USER_PRIV_ID};
 use crate::proc::{Proc, sched};
 use crate::uart::Uart;
 
-/// Leading `SYS_PRIVCTL` calls to trace explicitly — priv assignment is a
-/// once-per-boot event (PM unfreezing stub E), invisible to the modulo-100
-/// `[ksys]` sampler (same reasoning as `do_schedule::SCHED_TRACE_HEAD`).
+/// Leading `SYS_PRIVCTL` calls traced explicitly, plus an every-100th steady
+/// sample — 4.6's fork loop releases every child through here, so a head-only
+/// trace (the 4.5 shape, when stub E's release was a once-per-boot event)
+/// would go silent seconds into boot.
 const PRIVCTL_TRACE_HEAD: u64 = 6;
+const PRIVCTL_TRACE_EVERY: u64 = 100;
 static PRIVCTL_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// `SYS_PRIVCTL` — install the shared USER privilege on a frozen target and
@@ -61,13 +63,9 @@ pub(super) fn do_privctl(
         return EINVAL;
     }
 
-    let target_nr = if target_e == SELF {
-        caller_nr
-    } else {
-        endpoint_proc(target_e)
-    };
-    let Some(target_idx) = proc_index(target_nr) else {
-        return EINVAL;
+    let target_idx = match super::resolve_target(proc_table, caller_nr, target_e) {
+        Ok(idx) => idx,
+        Err(e) => return e,
     };
 
     let (nr, name0) = {
@@ -88,7 +86,7 @@ pub(super) fn do_privctl(
     };
 
     let n = PRIVCTL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if n <= PRIVCTL_TRACE_HEAD {
+    if n <= PRIVCTL_TRACE_HEAD || n.is_multiple_of(PRIVCTL_TRACE_EVERY) {
         let _ = writeln!(
             Uart::new(),
             "[ksys SYS_PRIVCTL] target={} nr={} subcode={subcode} result=0",

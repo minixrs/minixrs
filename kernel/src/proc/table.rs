@@ -17,13 +17,14 @@ use minixrs_kernel_shared::com::{
     NR_BOOT_PROCS, NR_PROCS, NR_SYS_PROCS, NR_TASKS, PFS_PROC_NR, PM_PROC_NR, RS_PROC_NR,
     SCHED_PROC_NR, SYSTEM, TTY_PROC_NR, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
 };
-use minixrs_kernel_shared::endpoint::NONE;
+use minixrs_kernel_shared::endpoint::{Endpoint, NONE, endpoint_proc};
+use minixrs_kernel_shared::error::{EBADSRCDST, EDEADSRCDST};
 use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use super::bitmap::set_sys_bit;
 use super::flags::{
-    BILLABLE, CSK_T, PREEMPTIBLE, ROOT_SYS_PROC, RTS_NO_PRIV, SRV_T, SYS_PROC, TSK_T, USR_T,
-    VM_SYS_PROC,
+    BILLABLE, CSK_T, PREEMPTIBLE, ROOT_SYS_PROC, RTS_NO_PRIV, RTS_SLOT_FREE, SRV_T, SYS_PROC,
+    TSK_T, USR_T, VM_SYS_PROC,
 };
 use super::priv_struct::{IPC_MAP_CHUNKS, K_CALL_MASK_CHUNKS, Priv};
 use super::proc_struct::{PROC_NAME_LEN, Proc};
@@ -85,6 +86,32 @@ pub const fn proc_index(nr: ProcNr) -> Option<usize> {
     } else {
         Some(shifted as usize)
     }
+}
+
+/// Resolve a user-supplied endpoint to its process-table index, verifying the
+/// slot is allocated and its stored endpoint — generation included — matches.
+/// MINIX 3 `kernel/system.c` `isokendpt`/`okendpt`.
+///
+/// Once slots recycle (slice 4.6: `SYS_EXIT` bumps the generation on free,
+/// `SYS_FORK` reuses the slot), a bare `proc_index(endpoint_proc(e))` would
+/// silently resolve a stale endpoint to the slot's *new* occupant. Every path
+/// that translates an endpoint taken from a message or trap register must go
+/// through here; kernel-originated deliveries that hold live `ProcNr`s
+/// (`mini_pf_send`, `deliver_alarm`, …) don't.
+///
+/// Errors: `EBADSRCDST` for an out-of-range proc field, `EDEADSRCDST` for a
+/// freed slot or generation mismatch.
+pub fn okendpt(proc_table: &[Proc; N_PROC_SLOTS], e: Endpoint) -> Result<usize, i32> {
+    let Some(idx) = proc_index(endpoint_proc(e)) else {
+        return Err(EBADSRCDST);
+    };
+    let p = &proc_table[idx];
+    if p.rts_flags.load(core::sync::atomic::Ordering::Relaxed) & RTS_SLOT_FREE != 0
+        || p.endpoint != e
+    {
+        return Err(EDEADSRCDST);
+    }
+    Ok(idx)
 }
 
 /// Map a [`PrivId`] to its index in the privilege table.
