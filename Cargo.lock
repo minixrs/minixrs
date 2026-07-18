@@ -58,6 +58,10 @@ dependencies = [
 [[package]]
 name = "minixrs-init"
 version = "0.1.0"
+dependencies = [
+ "minixrs-ipc",
+ "minixrs-kernel-shared",
+]
 
 [[package]]
 name = "minixrs-ipc"

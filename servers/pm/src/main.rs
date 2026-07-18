@@ -26,11 +26,12 @@
 //!
 //! ## Live demo
 //!
-//! PM's SEF init also releases stub E — built frozen (`RTS_NO_PRIV`, no priv
-//! slot) at boot — via `SYS_PRIVCTL(PRIVCTL_SET_USER)`, standing in for the
-//! fork path that will create frozen children in 4.6. E then exercises
-//! `PM_GETPID` in a SENDREC loop over the PM ↔ shared-USER-priv edge opened
-//! by `populate_user_priv`.
+//! init (PID 1) is the live process-lifecycle exercise (slice 4.8): a real boot
+//! process the kernel loader makes runnable, it forks a child, the child execs
+//! the `worker` binary, and init `wait`s to reap it before looping — driving
+//! `PM_FORK` / `PM_EXEC` / `PM_WAIT` over the PM ↔ shared-USER-priv edge opened
+//! by `populate_user_priv`. (This replaced the slice-4.6 frozen stub E, which PM
+//! used to release via `SYS_PRIVCTL(PRIVCTL_SET_USER)` at SEF init.)
 
 // Freestanding for the bare-metal build, but a normal host binary under
 // `cargo test` so `mproc`'s logic gets host-runnable unit tests. Same gating
@@ -47,9 +48,7 @@ use minixrs_kernel_shared::callnr::{
     SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT, SYS_FORK,
     SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
 };
-use minixrs_kernel_shared::com::{
-    SCHED_PROC_NR, STUB_E_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint,
-};
+use minixrs_kernel_shared::com::{SCHED_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, NONE, endpoint_proc};
 use minixrs_kernel_shared::error::{EAGAIN, ECHILD, EINVAL, ESRCH, OK};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
@@ -84,7 +83,7 @@ pub extern "C" fn _start() -> ! {
 #[cfg_attr(test, allow(dead_code))]
 fn main() -> ! {
     // `sef_startup` learns PM's endpoint/name via SYS_GETINFO(GET_WHOAMI) and
-    // runs `pm_init` (DS publish, mproc seed, stub E release). No signal
+    // runs `pm_init` (DS publish, mproc seed). No signal
     // handler: PM *is* the signal manager, not a signal consumer. On failure
     // there is nothing to print from EL0 — park forever.
     let sef = sef_startup(SefConfig {
@@ -130,8 +129,10 @@ fn main() -> ! {
     }
 }
 
-/// SEF fresh-init callback: publish PM's endpoint to DS, seed the mproc
-/// table, and release the frozen stub E onto the shared USER priv slot.
+/// SEF fresh-init callback: publish PM's endpoint to DS and seed the mproc
+/// table. init (PID 1) — the live fork/exec/wait driver that replaced the
+/// slice-4.6 stub E demo — is a real boot process made runnable by the kernel
+/// boot loader, so PM no longer hand-releases a frozen stub here.
 #[cfg_attr(test, allow(dead_code))]
 fn pm_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
     let rc = sef_publish_to_ds(name);
@@ -139,10 +140,7 @@ fn pm_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
         return rc;
     }
     mproc::seed();
-    // Stand-in for 4.6's fork path: grant the boot-frozen stub E its USER
-    // privilege and let it run. E may SENDREC us before we reach the receive
-    // loop — it just parks on our caller queue until then.
-    privctl_set_user(boot_endpoint(SYSTEM), boot_endpoint(STUB_E_PROC_NR))
+    OK
 }
 
 /// Handle `PM_GETPID`: reply `m_type = pid` (MINIX result-is-pid convention;

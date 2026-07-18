@@ -34,7 +34,7 @@ use core::sync::atomic::Ordering;
 use minixrs_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
 use minixrs_kernel_shared::com::{
     RS_PROC_NR, SCHED_PROC_NR, STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR, STUB_D_PROC_NR,
-    STUB_E_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint,
+    SYSTEM, VM_PROC_NR, boot_endpoint,
 };
 use minixrs_kernel_shared::{PrivId, ProcNr};
 
@@ -70,11 +70,6 @@ pub const USER_CODE_VA_D: u64 = 0x0043_0000;
 /// VA at which stub D's stack page is mapped.
 pub const USER_STACK_VA_D: u64 = 0x0083_0000;
 
-/// VA at which stub E's code page is mapped.
-pub const USER_CODE_VA_E: u64 = 0x0044_0000;
-/// VA at which stub E's stack page is mapped.
-pub const USER_STACK_VA_E: u64 = 0x0084_0000;
-
 // Stub D's heap VA (`0x0100_0000`) lives only in `user_stub.S`'s stub D blob
 // and in the VM server's `region::HEAP_BASE` (slice 3.5): D issues `VM_BRK` to
 // grow its heap, then touches it. The kernel needs no heap-window constant —
@@ -85,10 +80,9 @@ pub const USER_STACK_VA_E: u64 = 0x0084_0000;
 // kernel and PM must agree on one source.
 
 /// Privilege-table slots for the dedicated-priv stubs A–D. Boot image uses
-/// 0..=15; 16, 17, 18, and 19 are the first free entries. Stub E has *no*
-/// dedicated slot: it is built frozen and PM points it at the shared USER
-/// priv (`proc::table::USER_PRIV_ID` = 20, the next slot up) via
-/// `SYS_PRIVCTL(PRIVCTL_SET_USER)`.
+/// 0..=15; 16, 17, 18, and 19 are the first free entries. The next slot up
+/// (`proc::table::USER_PRIV_ID` = 20) is the shared USER priv that init (PID 1)
+/// and every forked child use — no stub owns it.
 const STUB_A_PRIV_ID: PrivId = PrivId::new(16);
 const STUB_B_PRIV_ID: PrivId = PrivId::new(17);
 const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
@@ -110,8 +104,6 @@ unsafe extern "C" {
     static _user_stub_c_end: u8;
     static _user_stub_d_start: u8;
     static _user_stub_d_end: u8;
-    static _user_stub_e_start: u8;
-    static _user_stub_e_end: u8;
 }
 
 /// VA at which each boot server's stack page is mapped. Distinct from the server
@@ -225,22 +217,6 @@ pub unsafe fn userland_bootstrap() {
             HeapWindow::EMPTY,
             false,
         );
-        // Stub E is built *frozen* (slice 4.5): full address space, but no
-        // priv slot and RTS_NO_PRIV set — the state a forked child holds. PM's
-        // SEF init points it at the shared USER priv and releases it via
-        // `SYS_PRIVCTL(PRIVCTL_SET_USER)`; only then does E start its fork loop
-        // (child execs the `worker` binary, parent `wait`s and reaps — 4.6b/4.7).
-        build_stub(
-            STUB_E_PROC_NR,
-            None,
-            b'E',
-            &_user_stub_e_start,
-            &_user_stub_e_end,
-            USER_CODE_VA_E,
-            USER_STACK_VA_E,
-            HeapWindow::EMPTY,
-            true,
-        );
     }
 
     // 3.5. Pre-delegate stub C to the user-space SCHED server (slice 4.3). C is
@@ -261,9 +237,8 @@ pub unsafe fn userland_bootstrap() {
     // priv-table slots 16, 17, 18.
     unsafe { install_stub_privs() };
 
-    // 5. Enqueue the runnable stubs. E is *not* enqueued — it sits frozen on
-    //    RTS_NO_PRIV until PM's `SYS_PRIVCTL(PRIVCTL_SET_USER)` releases it
-    //    (rts_unset enqueues it then).
+    // 5. Enqueue the runnable stubs A–D. (The fork-loop stub E was retired in
+    //    slice 4.8; init (PID 1) drives fork/exec/wait as a real boot process.)
     // SAFETY: single-threaded boot; no other PROC_TABLE / RUNQ borrows
     // live at this point.
     unsafe {
@@ -696,7 +671,7 @@ unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId)
 /// the end of `userland_bootstrap`; proves each stub has a distinct
 /// per-proc address space.
 ///
-/// SAFETY: single-threaded boot; read-only borrows on proc slots 11..=15.
+/// SAFETY: single-threaded boot; read-only borrows on proc slots 11..=14.
 unsafe fn print_addrspace_summary() {
     use crate::arch::aarch64::uart::Pl011;
     use core::fmt::Write;
@@ -707,7 +682,6 @@ unsafe fn print_addrspace_summary() {
         STUB_B_PROC_NR,
         STUB_C_PROC_NR,
         STUB_D_PROC_NR,
-        STUB_E_PROC_NR,
     ] {
         // SAFETY: sequential read-only borrow of the slot; no other
         // reference held while we read.

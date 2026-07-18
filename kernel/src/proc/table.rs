@@ -275,11 +275,17 @@ static IMAGE: [BootEntry; N_IMAGE] = [
         quantum_ms: SRV_QUANTUM_MS,
         runnable: false,
     },
+    // init (PID 1) is an ordinary user process, not a system server (slice 4.8):
+    // `USR_T` traps (SENDREC only), and `init_boot_image` points its proc slot at
+    // the shared `USER_PRIV_ID` (ipc_to = {PM}, empty kernel-call mask) rather than
+    // populating a dedicated server-grade priv slot. `priv_flags` still carries
+    // `SYS_PROC` so the whole `IMAGE` range keeps uniform boot handling; the priv
+    // grade is what the user-grade slot enforces.
     BootEntry {
         nr: INIT_PROC_NR,
         name: b"init",
         priv_flags: SYS_PROC | PREEMPTIBLE,
-        trap_mask: SRV_T,
+        trap_mask: USR_T,
         priority: INIT_Q,
         quantum_ms: SRV_QUANTUM_MS,
         runnable: false,
@@ -442,6 +448,16 @@ fn init_boot_image() {
     let n_active = N_IMAGE as u16;
 
     for (slot, entry) in IMAGE.iter().enumerate() {
+        if entry.nr == INIT_PROC_NR {
+            // init is PID 1 — an ordinary user process. Point its proc slot at the
+            // shared USER priv (`USER_PRIV_ID`: `USR_T`, ipc_to = {PM}, empty
+            // k_call_mask, sig_mgr = PM), the same slot every forked child uses.
+            // `populate_user_priv()` (called right after this loop) fills that slot
+            // and opens the PM → USER reverse edge, so no dedicated server-grade
+            // priv slot is populated for init. Its would-be slot stays free.
+            populate_proc(USER_PRIV_ID, entry);
+            continue;
+        }
         let priv_id = PrivId::new(slot as u16);
         populate_priv(priv_id, entry, n_active);
         populate_proc(priv_id, entry);
