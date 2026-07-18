@@ -197,11 +197,29 @@ fn handle_fork(system: Endpoint, vm: Endpoint, sched: Endpoint, msg: &mut Messag
         return reply(parent_e, msg, vrc);
     }
 
-    // SCHED schedules the (still-frozen) child; then release the freeze. The
-    // child remains RTS_RECEIVING — a blocked receiver, off the run queue —
-    // until its reply below clears the last block bit.
-    let _ = sched_start(sched, child_e, CHILD_PRIORITY, CHILD_QUANTUM);
-    let _ = privctl_set_user(system, child_e);
+    // SCHED schedules the (still-frozen) child. On failure, roll back like the
+    // VM step above so we never record an unschedulable child.
+    let src = sched_start(sched, child_e, CHILD_PRIORITY, CHILD_QUANTUM);
+    if src != OK {
+        let _ = sys_exit(system, child_e);
+        mproc::cleanup(child_slot);
+        return reply(parent_e, msg, src);
+    }
+
+    // Release the freeze; the child stays RTS_RECEIVING — a blocked receiver,
+    // off the run queue — until its reply below clears the last block bit. On
+    // failure roll back like `handle_exit` — stop SCHED first (endpoint still
+    // valid), then tear the child down — so a child that never became runnable
+    // is never recorded as "live" (which would hang the parent's `wait()`
+    // forever). Both calls are boot-server-backed and don't fail with correct
+    // wiring; this is defense-in-depth.
+    let prc = privctl_set_user(system, child_e);
+    if prc != OK {
+        let _ = sched_stop(sched, child_e);
+        let _ = sys_exit(system, child_e);
+        mproc::cleanup(child_slot);
+        return reply(parent_e, msg, prc);
+    }
 
     let child_pid = mproc::set_child(child_slot, parent_slot, child_e);
 
@@ -229,6 +247,11 @@ fn handle_exit(system: Endpoint, sched: Endpoint, msg: &mut Message) {
     let Some((child_pid, _)) = mproc::getpid(child_slot) else {
         return;
     };
+    // Scope limitation: there is no reparenting yet. If the parent already
+    // exited, `parent_of` falls back to the child itself, so the zombie below is
+    // never reaped (no live parent will `wait()` for it). Harmless while every
+    // parent is a long-lived boot stub; reparenting orphans to INIT waits for a
+    // running INIT (4.8+).
     let parent_slot = mproc::parent_of(child_slot).unwrap_or(child_slot);
 
     let _ = sched_stop(sched, child_e);
