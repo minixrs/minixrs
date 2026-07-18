@@ -227,7 +227,15 @@ fn copy_addrspace(parent_ttbr0: u64) -> Result<(u64, u64), MapError> {
             // `userland::build_stub`'s blob install).
             unsafe { flush_icache_range(phys_to_hhdm(new_pa) as u64, FRAME_SIZE) };
         }
-        child.map_page(va, new_pa, prot)?;
+        if let Err(e) = child.map_page(va, new_pa, prot) {
+            // `map_page` can OOM allocating an intermediate table *after* the
+            // leaf frame is already live but before it is linked into the
+            // tree. The `Err` unwind below sweeps only *mapped* leaves, so
+            // free this orphan here — otherwise a fork that runs out of
+            // memory mid-copy would leak exactly this frame.
+            free_frame(frame);
+            return Err(e);
+        }
         pages += 1;
         Ok(())
     });
