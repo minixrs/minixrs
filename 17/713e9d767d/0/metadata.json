@@ -1,0 +1,72 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "17713e9d767d",
+  "session_id": "6d7eff75-b1d8-4950-ae34-c6d479a10a72",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-18T18:46:33.933762Z",
+  "branch": "feature/phase-4-7-exec",
+  "checkpoints_count": 4,
+  "save_step_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel-shared/src/com.rs",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/boot_image/mod.rs",
+    "kernel/src/system/do_exec.rs",
+    "kernel/src/system/do_exit.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs",
+    "servers/pm/src/main.rs",
+    "sonar-project.properties",
+    "userland/worker/Cargo.toml",
+    "userland/worker/src/main.rs",
+    "userland/worker/user.ld"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8",
+  "turn_id": "30639cd43664",
+  "token_usage": {
+    "input_tokens": 220,
+    "cache_creation_tokens": 581008,
+    "cache_read_tokens": 25667304,
+    "output_tokens": 112599,
+    "api_call_count": 111
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-18T18:46:33.872246Z",
+    "agent_lines": 613,
+    "agent_removed": 72,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 613,
+    "total_lines_changed": 685,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 613,
+      "agent_lines_removed": 72
+    }
+  ]
+}
