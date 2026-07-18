@@ -191,6 +191,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "minixrs-worker"
+version = "0.1.0"
+dependencies = [
+ "minixrs-ipc",
+ "minixrs-kernel-shared",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

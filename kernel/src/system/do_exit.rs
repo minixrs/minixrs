@@ -206,7 +206,11 @@ fn unblock_dependents(
 /// TLB entries, free the tree itself, and recycle the ASID. Returns the leaf
 /// count (the trace's frame-leak canary). No-op for procs that never ran at
 /// EL0 (`ttbr0_pa == 0`: kernel tasks, never-loaded boot servers).
-fn teardown_addrspace(ttbr0_pa: u64, dead_asid: u8) -> u64 {
+///
+/// Shared with `do_exec`, which reuses it to reclaim the *old* image's address
+/// space after swapping in the new one — the same "not the active TTBR0"
+/// invariant holds there (exec's target is never the running caller).
+pub(super) fn teardown_addrspace(ttbr0_pa: u64, dead_asid: u8) -> u64 {
     if ttbr0_pa == 0 {
         return 0;
     }
