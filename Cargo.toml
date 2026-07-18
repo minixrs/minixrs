@@ -21,6 +21,7 @@ members = [
     "userland/init",
     "userland/sh",
     "userland/coreutils",
+    "userland/worker",
     "minixrs",
 ]
 

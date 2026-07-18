@@ -14,6 +14,13 @@ pub const KERNEL_CALL: i32 = 0x600;
 pub const SYS_GETINFO: i32 = KERNEL_CALL + 0;
 pub const SYS_PRIVCTL: i32 = KERNEL_CALL + 1;
 pub const SYS_FORK: i32 = KERNEL_CALL + 2;
+/// PM → kernel: replace a target proc's program image (slice 4.7). Target
+/// endpoint in payload `0..4` (i32); the boot-embedded binary name (NUL-padded,
+/// `EXEC_NAME_LEN` bytes) in `4..4+EXEC_NAME_LEN`. The kernel resolves the name
+/// in the MXBI archive (`BootImage::module_by_name`), builds a fresh address
+/// space, resets the target to the new entry point, and tears down the old AS.
+/// Target-taking (like `SYS_FORK`). On success the target is resumed at the new
+/// image with no reply; failures return a negative errno to PM.
 pub const SYS_EXEC: i32 = KERNEL_CALL + 3;
 pub const SYS_EXIT: i32 = KERNEL_CALL + 4;
 pub const SYS_COPY: i32 = KERNEL_CALL + 5;
@@ -52,6 +59,11 @@ pub const SYS_ENDKSIG: i32 = KERNEL_CALL + 17;
 /// (`target.scheduler = NONE`). Absent → the caller claims the target as its
 /// own scheduler. Matches MINIX 3 `SCHEDCTL_FLAG_KERNEL` (`include/minix/com.h`).
 pub const SCHEDCTL_FLAG_KERNEL: i32 = 1 << 0;
+
+/// Length of the boot-embedded binary name carried in the `SYS_EXEC` payload
+/// (`4..4+EXEC_NAME_LEN`), NUL-padded. Sized to fit the MXBI record name field
+/// (`< 20` bytes); a short name like `"worker"` fits with room to spare.
+pub const EXEC_NAME_LEN: usize = 16;
 
 /// Number of kernel calls defined through Phase 4. Slice 4.3 made
 /// `SYS_SCHEDULE` real and added `SYS_SCHEDCTL` (15); slice 4.5 adds the
@@ -189,9 +201,17 @@ pub const PM_EXIT: i32 = PM_RQ_BASE + 2;
 /// `ECHILD` in `m_type` if the caller has no children. (slice 4.6b)
 pub const PM_WAIT: i32 = PM_RQ_BASE + 3;
 
+/// User → PM: `execve()`. No request payload in the slice-4.7 demo — PM selects
+/// the boot-embedded target (`"worker"`) and issues `SYS_EXEC` naming the
+/// caller. PM sends **no** reply on success (the kernel resumes the caller at
+/// the new image's entry point); on failure the reply `m_type` carries a
+/// negative errno and the caller continues in its old image. A user-supplied
+/// path arrives with the filesystem/musl wrappers in Phase 5. (slice 4.7)
+pub const PM_EXEC: i32 = PM_RQ_BASE + 4;
+
 /// Number of PM server requests defined so far. Locks the PM server's
 /// dispatch coverage the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_PM_MSGS: usize = 4;
+pub const NR_PM_MSGS: usize = 5;
 
 // The PM range sits strictly above the kernel-call range and strictly below
 // VM's (and therefore every other) server request range and the NOTIFY marker.
@@ -622,7 +642,7 @@ mod tests {
     fn pm_msgs_contiguous_from_base() {
         // PM requests are contiguous from PM_RQ_BASE; NR_PM_MSGS locks the PM
         // server's dispatch coverage.
-        let msgs = [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT];
+        let msgs = [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, PM_RQ_BASE + i as i32);
         }
@@ -637,7 +657,7 @@ mod tests {
         // Each PM request must stay distinct from the VM/DS/SEF/SCHED request
         // ranges and the KERNEL_CALL range, and below NOTIFY_MESSAGE — so a
         // server's m_type dispatcher and the SEF classifier never collide.
-        for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT] {
+        for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC] {
             for other in [
                 VM_PAGEFAULT,
                 VM_BRK,
