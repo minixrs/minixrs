@@ -86,7 +86,8 @@ pub const STUB_C_PROC_NR: ProcNr = ProcNr::new(13);
 /// after its munmap (slice 4.5) to exercise the SIGSEGV → PM kill path.
 pub const STUB_D_PROC_NR: ProcNr = ProcNr::new(14);
 /// Stub E — built frozen (`RTS_NO_PRIV`, no priv slot); PM unfreezes it via
-/// `SYS_PRIVCTL(PRIVCTL_SET_USER)` and it then loops `SENDREC PM_GETPID`.
+/// `SYS_PRIVCTL(PRIVCTL_SET_USER)`, then it drives a fork loop: the child execs
+/// the `worker` binary (slice 4.7), the parent `wait`s and reaps.
 pub const STUB_E_PROC_NR: ProcNr = ProcNr::new(15);
 
 /// Number of demo stubs.
@@ -96,6 +97,13 @@ pub const NR_STUB_PROCS: usize = 5;
 const _: () = assert!(STUB_A_PROC_NR.get() as usize == NR_BOOT_PROCS);
 const _: () = assert!(STUB_E_PROC_NR.get() as usize == NR_BOOT_PROCS + NR_STUB_PROCS - 1);
 const _: () = assert!((STUB_E_PROC_NR.get() as usize) < NR_PROCS);
+
+/// Sentinel `proc_nr` for an MXBI archive module that is **not** a boot server:
+/// it is packed only so `SYS_EXEC` can resolve it by name (slice 4.7's `worker`
+/// binary), and the boot loader skips any module with a negative proc number
+/// (it has no proc/priv slot to load into). `kernel/build.rs` tags such records
+/// with this value; the kernel-side skip lives in `userland`'s load loop.
+pub const EXEC_ONLY_PROC_NR: i32 = -1;
 
 /// Build a boot-time endpoint (generation 0) for a task or server.
 pub const fn boot_endpoint(p: ProcNr) -> Endpoint {

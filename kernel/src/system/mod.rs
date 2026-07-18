@@ -18,6 +18,7 @@
 //! [`ipc::dispatch`]: crate::ipc
 //! [`ipc::send::mini_send`]: crate::ipc
 
+mod do_exec;
 mod do_exit;
 mod do_fork;
 mod do_getinfo;
@@ -199,6 +200,7 @@ fn kernel_call_dispatch(
         SYS_ENDKSIG => return do_sig::do_endksig(proc_table, caller_nr, msg),
         SYS_EXIT => return do_exit::do_exit(proc_table, priv_table, caller_nr, msg),
         SYS_FORK => return do_fork::do_fork(proc_table, caller_nr, msg),
+        SYS_EXEC => return do_exec::do_exec(proc_table, caller_nr, msg),
         SYS_PRIVCTL => return do_privctl::do_privctl(proc_table, caller_nr, msg),
         _ => {}
     }
@@ -221,13 +223,12 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
     );
     match msg.m_type {
         SYS_GETINFO => do_getinfo::do_getinfo(caller, caller_priv, msg),
-        SYS_EXEC => stubs::do_exec(caller, caller_priv, msg),
         SYS_COPY => stubs::do_copy(caller, caller_priv, msg),
         SYS_SAFECOPY => stubs::do_safecopy(caller, caller_priv, msg),
         SYS_IRQCTL => stubs::do_irqctl(caller, caller_priv, msg),
         // SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL / SYS_KILL / SYS_GETKSIG /
-        // SYS_ENDKSIG / SYS_EXIT / SYS_FORK / SYS_PRIVCTL are handled in
-        // `kernel_call_dispatch` (they act on a target proc and need the table).
+        // SYS_ENDKSIG / SYS_EXIT / SYS_FORK / SYS_EXEC / SYS_PRIVCTL are handled
+        // in `kernel_call_dispatch` (they act on a target proc and need the table).
         SYS_SETALARM => do_setalarm::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
         SYS_DIAGCTL => stubs::do_diagctl(caller, caller_priv, msg),

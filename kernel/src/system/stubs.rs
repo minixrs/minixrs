@@ -22,10 +22,10 @@ macro_rules! enosys_stub {
     };
 }
 
-enosys_stub!(do_exec);
 enosys_stub!(do_copy);
 enosys_stub!(do_safecopy);
 enosys_stub!(do_irqctl);
+// `do_exec` is a real handler as of slice 4.7 — see `system::do_exec`.
 // `do_vmctl` is a real handler as of slice 3.3 — see `system::do_vmctl`.
 // `do_schedule` / `do_schedctl` are real handlers as of slice 4.3 — see
 // `system::do_schedule`.

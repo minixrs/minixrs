@@ -52,6 +52,7 @@
     .equ PM_FORK,      0x701               // PM_RQ_BASE + 1
     .equ PM_EXIT,      0x702               // PM_RQ_BASE + 2
     .equ PM_WAIT,      0x703               // PM_RQ_BASE + 3
+    .equ PM_EXEC,      0x704               // PM_RQ_BASE + 4
     .equ VM_BRK,       0xC01               // VM_RQ_BASE + 1
     .equ VM_MMAP,      0xC02               // VM_RQ_BASE + 2
     .equ VM_MUNMAP,    0xC03               // VM_RQ_BASE + 3
@@ -278,14 +279,18 @@ _user_stub_d_end:
  *   loop:
  *     SENDREC(PM, PM_FORK)              // fork() — returns twice
  *     if reply m_type == 0:            //   child half
- *         SENDREC(PM, PM_EXIT, 0)      //   exit(0); PM tears us down, no return
+ *         SENDREC(PM, PM_EXEC)         //   execve("worker"); replaces our image
  *     else:                            //   parent half (m_type = child pid)
  *         SENDREC(PM, PM_WAIT)         //   wait() for the child, then loop
  *
  * The child is a byte-for-byte copy of E's frame taken mid-fork SENDREC, so
  * both halves resume here reading the same reply buffer; only the reply m_type
- * (0 vs the child pid) tells them apart. Observable kernel-side via
- * [fork]/[exit] traces and the SYS_FORK/SYS_EXIT [ksys] samples.
+ * (0 vs the child pid) tells them apart. The child then execs the boot-embedded
+ * `worker` binary (slice 4.7): PM issues SYS_EXEC, the kernel replaces the
+ * child's image, and it resumes at worker's _start — so the PM_EXEC SENDREC
+ * never returns here. The worker runs a few getpids then exits, the parent
+ * reaps it, and the loop forks again reusing the same child slot. Observable
+ * kernel-side via the SYS_FORK/SYS_EXEC/SYS_EXIT [ksys] samples.
  */
 
     .section .rodata.user_stub_e, "a", %progbits
@@ -319,18 +324,19 @@ _user_stub_e_start:
     b       1b
 
 3:
-    // Child: exit(0) — SENDREC(PM, PM_EXIT) with status 0 in payload[0..4].
-    // PM tears us down (SYS_EXIT) rather than replying, so this never returns.
+    // Child: execve("worker") — SENDREC(PM, PM_EXEC). No request payload; PM
+    // selects the boot-embedded target and issues SYS_EXEC naming us. The kernel
+    // replaces our image and resumes us at worker's _start, so this never
+    // returns in the old image.
     sub     x9, sp, #MSG_SIZE
     str     wzr, [x9, #0]
-    mov     w10, #PM_EXIT
-    str     w10, [x9, #4]                   // m_type = PM_EXIT
-    str     wzr, [x9, #8]                   // payload[0..4] = exit status 0
+    mov     w10, #PM_EXEC
+    str     w10, [x9, #4]                   // m_type = PM_EXEC
     mov     x0, #ENDPOINT_PM
     mov     x1, #SENDREC
     mov     x2, x9
     svc     #0
-    // Unreachable — PM never replies to a dead child. Park defensively.
+    // Unreachable — exec replaced our image. Park defensively.
 2:
     b       2b
     .global _user_stub_e_end

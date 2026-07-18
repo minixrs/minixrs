@@ -1001,8 +1001,8 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   zeroes `sig_pending` on slot reuse), completion of 4.5's `SYS_EXIT`-lite into a
   full teardown (`AddrSpace::destroy`, free slot, bump generation,
   `unblock_dependents`), `okendpt` stale-generation rejection, and ASID
-  free-list recycling. **4.6b** ◀ ready (branch
-  `feature/phase-4-6b-pm-fork-exit-wait`, pending merge): the PM/VM/stub-E half.
+  free-list recycling. **4.6b** ✓ shipped (PR #29, merged 2026-07-18): the
+  PM/VM/stub-E half.
   New PM requests `PM_FORK`/`PM_EXIT`/`PM_WAIT` (`PM_RQ_BASE + 1..3`) let a user
   proc drive the lifecycle entirely through PM (POSIX shape: user → PM, never
   user → kernel). `handle_fork` owns the tree — allocate a child `mproc` slot
@@ -1037,13 +1037,47 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   Host: `cargo test --workspace` green (new `mproc` fork/wait, `region::fork`,
   `callnr` contiguity tests); `cargo check --workspace` + clippy `-D warnings` +
   fmt clean.
-- **Slice 4.7** ◀ next — exec: `SYS_EXEC` + PM exec of a boot-embedded binary. Kernel
-  builds a fresh `AddrSpace`, `elf::load_into` the archive module resolved by
-  `module_by_name`, sets a minimal initial user stack, swaps `ttbr0_pa` +
-  destroys the old AS, sets entry/SP. PM's `execve(name)` selects the embedded
-  binary. A tiny freestanding "worker" ELF packed into the archive is the exec
-  target.
-- **Slice 4.8** — init (PID 1) + Phase 4 wrap-up + docs. **Phase 4 complete.**
+- **Slice 4.7** ◀ ready (branch `feature/phase-4-7-exec`, pending merge) — exec:
+  `SYS_EXEC` + PM exec of a boot-embedded binary. `SYS_EXEC` (already numbered
+  `0x603`, ENOSYS since 2.6) becomes real in `kernel/src/system/do_exec.rs` and
+  moves from the caller-local arm to the **target-taking** match beside
+  `SYS_FORK`: PM names the exec-ing user proc as the target. The handler resolves
+  the boot-embedded binary by name (`BootImage::module_by_name`, its `dead_code`
+  allow now dropped), builds a fresh address space via a new arch helper
+  `userland::load_exec_image` (factored out of `load_boot_server` — `AddrSpace::new`
+  + `elf::load_into` + one RW stack page at `SERVER_STACK_VA` + `alloc_asid`,
+  `mem::forget`-ing the tree, `None` + partial-tree cleanup on OOM), resets the
+  target's register frame to a clean EL0 start (`ArchRegisterFrame::EMPTY` +
+  `elr_el1`/`sp_el0`/`spsr_el1`), renames the proc to the new binary, swaps in the
+  new `(ttbr0_pa, asid)`, reclaims the old image via `do_exit::teardown_addrspace`
+  (now `pub(super)`), and `rts_unset(RTS_RECEIVING)` to resume it at `_start`. The
+  target is gated exactly like `do_fork`'s parent (a clean `RTS_RECEIVING`
+  receiver — in the live flow mid-`SENDREC` to PM); `SELF`/self-target rejected
+  (the active-TTBR0 hazard). exec preserves pid/priv/scheduler; **no reply on
+  success** (the kernel resumes the target), errno reply on failure. New
+  `PM_EXEC = PM_RQ_BASE + 4` (`0x704`, `NR_PM_MSGS` 4→5) + `EXEC_NAME_LEN = 16`
+  (the name field in the `SYS_EXEC` payload) in `kernel-shared`; PM's `handle_exec`
+  issues `sys_exec(caller, EXEC_TARGET="worker")` (a Phase-5 filesystem/musl path
+  will thread a user-supplied name). The exec target is a new freestanding
+  `userland/worker` ELF (getpid loop + `PM_EXIT`, no SEF — a plain user program),
+  packed into the MXBI archive by `build.rs` with sentinel proc_nr
+  `com::EXEC_ONLY_PROC_NR = -1` so the boot loader skips it (resolvable by name,
+  never boot-loaded). Stub E's child branch rewritten from `PM_EXIT` to `PM_EXEC`:
+  fork → child execs `worker` → worker exits → parent reaps → loop. PM's `main.rs`
+  stays coverage-excluded (glob widened to `userland/**/src/main.rs`). Verified in
+  QEMU over 25 s: eleven `[as]` lines (worker **absent** — exec-only); six
+  `[ksys SYS_EXEC] target=16 name=worker entry=0x100000 freed=2` matched by six
+  `SYS_FORK` (child_nr 16) and six `SYS_EXIT] target=w nr=16 freed=2`, all reusing
+  child slot 16 with a monotonically advancing endpoint generation
+  (`0x10 → 0x18010`) and recycled ASIDs (12↔10 — proof of exec teardown + reap +
+  slot/ASID recycle); the worker's `PM_GETPID` SENDRECs surface (`caller=16
+  target=0x0`); A↔B ping-pong, C `SYS_GETINFO`, D's 3 `[pf]` + 1 fatal SIGSEGV,
+  SCHED `[noq]`, six RS `[alarm]` fires all intact; every traced `result=0` (bar
+  D's designed kill), zero panic / `el0_sync_unexpected`. Host: `cargo test
+  --workspace` green (extended `PM_EXEC` contiguity tests); `cargo check
+  --workspace` + clippy `-D warnings` + fmt clean; `cargo kernel-aarch64` builds +
+  packs the worker.
+- **Slice 4.8** ◀ next — init (PID 1) + Phase 4 wrap-up + docs. **Phase 4 complete.**
   init (a freestanding Rust ELF loaded into `INIT_PROC_NR=10` by the archive)
   forks children that exec the worker, `wait`s, and respawns in a loop. Retire or
   demote the A/B/C/D stubs now that init + real procs are the live exercise. Real
