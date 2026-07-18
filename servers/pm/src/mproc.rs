@@ -25,28 +25,47 @@
 use core::cell::UnsafeCell;
 
 use minixrs_kernel_shared::com::{
-    INIT_PROC_NR, NR_BOOT_PROCS, NR_STUB_PROCS, PM_PROC_NR, RS_PROC_NR,
+    INIT_PROC_NR, NR_BOOT_PROCS, NR_STUB_PROCS, PM_PROC_NR, RS_PROC_NR, boot_endpoint,
 };
+use minixrs_kernel_shared::endpoint::{Endpoint, ProcNr};
 
 /// Table capacity. Slots `0..NR_BOOT_PROCS + NR_STUB_PROCS` (= 16) are seeded
-/// at init; the headroom is for slice 4.6's fork.
+/// at init; the pool above that ([`FORK_POOL_BASE`]`..NR_MPROCS`) is where 4.6's
+/// fork allocates children.
 pub const NR_MPROCS: usize = 32;
+
+/// First slot fork may allocate. Boot servers + demo stubs own `[0, 16)`; forked
+/// children land in `[FORK_POOL_BASE, NR_MPROCS)`. A child's slot index is also
+/// its kernel proc number, so this range must stay within the kernel proc table
+/// and within VM's `MAX_CLIENTS` region-table cap (both hold).
+pub const FORK_POOL_BASE: usize = NR_BOOT_PROCS + NR_STUB_PROCS;
 
 /// Entry holds a live process.
 pub const MF_IN_USE: u8 = 1 << 0;
 /// Boot system process — the kill path refuses to terminate it.
 pub const MF_PRIV_PROC: u8 = 1 << 1;
-/// Terminated by the kill path. The slot is kept (not reusable) until 4.6's
-/// exit/wait lands zombie + reap semantics.
+/// Terminated (a zombie): the process is gone at the kernel level (`SYS_EXIT`
+/// ran) but its `mproc` slot is retained — holding the exit status — until its
+/// parent `wait()`s and reaps it. Set by both the exit path ([`set_zombie_in`],
+/// with a real status) and the kill path ([`handle_kill_in`]).
 pub const MF_DEAD: u8 = 1 << 2;
+/// This process is a parent blocked in `wait()` with no reapable child yet;
+/// when a child exits, [`set_zombie_in`]'s caller wakes it directly.
+pub const MF_WAITING: u8 = 1 << 3;
 
-/// One `mproc` entry. The slot index *is* the kernel proc number; the
-/// endpoint is derivable as `boot_endpoint(slot)` while everything is
-/// generation 0 (4.6's fork adds generations and will store endpoints).
+/// One `mproc` entry. The slot index *is* the kernel proc number, but once slots
+/// recycle (4.6 fork/exit bump the endpoint generation) `boot_endpoint(slot)` no
+/// longer identifies the occupant, so the generation-aware endpoint is stored
+/// explicitly.
 #[derive(Clone, Copy)]
 pub struct MProc {
     pub pid: i32,
     pub parent_slot: usize,
+    /// Generation-aware endpoint of this process (from `SYS_FORK` for children,
+    /// `boot_endpoint(slot)` for seeded boot/stub procs).
+    pub endpoint: Endpoint,
+    /// Encoded exit status stored while the process is a zombie (`MF_DEAD`).
+    pub exit_status: i32,
     pub flags: u8,
 }
 
@@ -54,6 +73,8 @@ impl MProc {
     pub const EMPTY: Self = Self {
         pid: 0,
         parent_slot: 0,
+        endpoint: 0,
+        exit_status: 0,
         flags: 0,
     };
 }
@@ -76,10 +97,17 @@ fn seed_in(t: &mut [MProc; NR_MPROCS]) {
     let rs = RS_PROC_NR.get() as usize;
     let init = INIT_PROC_NR.get() as usize;
 
+    // Every seeded proc is at generation 0, so its endpoint is `boot_endpoint`
+    // of its slot (= kernel proc number). Forked children later store the
+    // generation-aware endpoint `SYS_FORK` hands back.
+    let ep = |slot: usize| boot_endpoint(ProcNr::new(slot as i32));
+
     // PM: pid 0, its own parent (MINIX `pm_init` patches itself the same way).
     t[pm] = MProc {
         pid: 0,
         parent_slot: pm,
+        endpoint: ep(pm),
+        exit_status: 0,
         flags: MF_IN_USE | MF_PRIV_PROC,
     };
     // INIT: pid 1. Not running yet (no ELF until 4.8) but seeded so the demo
@@ -87,6 +115,8 @@ fn seed_in(t: &mut [MProc; NR_MPROCS]) {
     t[init] = MProc {
         pid: 1,
         parent_slot: rs,
+        endpoint: ep(init),
+        exit_status: 0,
         flags: MF_IN_USE | MF_PRIV_PROC,
     };
 
@@ -101,6 +131,8 @@ fn seed_in(t: &mut [MProc; NR_MPROCS]) {
         *e = MProc {
             pid: next_pid,
             parent_slot: if slot == rs { pm } else { rs },
+            endpoint: ep(slot),
+            exit_status: 0,
             flags: MF_IN_USE | MF_PRIV_PROC,
         };
         next_pid += 1;
@@ -108,10 +140,17 @@ fn seed_in(t: &mut [MProc; NR_MPROCS]) {
 
     // Demo stubs: ordinary user processes, parented to INIT, pids continuing
     // past the servers (slots 11..=15 land on pids 11..=15).
-    for e in t.iter_mut().skip(NR_BOOT_PROCS).take(NR_STUB_PROCS) {
+    for (slot, e) in t
+        .iter_mut()
+        .enumerate()
+        .skip(NR_BOOT_PROCS)
+        .take(NR_STUB_PROCS)
+    {
         *e = MProc {
             pid: next_pid,
             parent_slot: init,
+            endpoint: ep(slot),
+            exit_status: 0,
             flags: MF_IN_USE,
         };
         next_pid += 1;
@@ -142,6 +181,117 @@ fn handle_kill_in(t: &mut [MProc; NR_MPROCS], slot: usize) -> KillAction {
     }
     e.flags |= MF_DEAD;
     KillAction::Terminate
+}
+
+// ---------------------------------------------------------------------------
+// Fork / exit / wait table management (slice 4.6b). All pure `*_in` helpers.
+// ---------------------------------------------------------------------------
+
+/// True if `slot` holds a live (in-use, not-yet-reaped) process.
+fn in_use_in(t: &[MProc; NR_MPROCS], slot: usize) -> bool {
+    t.get(slot).is_some_and(|e| e.flags & MF_IN_USE != 0)
+}
+
+/// The parent slot of `slot`, or `None` if the slot is not in use.
+fn parent_of_in(t: &[MProc; NR_MPROCS], slot: usize) -> Option<usize> {
+    let e = t.get(slot)?;
+    (e.flags & MF_IN_USE != 0).then_some(e.parent_slot)
+}
+
+/// The stored endpoint of `slot`, or `None` if the slot is not in use.
+fn endpoint_of_in(t: &[MProc; NR_MPROCS], slot: usize) -> Option<Endpoint> {
+    let e = t.get(slot)?;
+    (e.flags & MF_IN_USE != 0).then_some(e.endpoint)
+}
+
+/// First free slot in the fork pool `[FORK_POOL_BASE, NR_MPROCS)`, or `None`
+/// when the table is full (PM replies `EAGAIN`). MINIX `do_fork` scans `mproc`
+/// the same way; the slot index becomes the child's kernel proc number.
+fn alloc_slot_in(t: &[MProc; NR_MPROCS]) -> Option<usize> {
+    (FORK_POOL_BASE..NR_MPROCS).find(|&slot| t[slot].flags == 0)
+}
+
+/// Next pid to assign: one past the highest pid any current entry holds (live
+/// or zombie), so a pid is never reused while its predecessor is still around.
+/// Pids climb monotonically as long as the high-water entry persists; after the
+/// whole fork pool drains they may repeat — harmless, since the endpoint
+/// generation (not the pid) is what guards slot recycling.
+fn alloc_pid_in(t: &[MProc; NR_MPROCS]) -> i32 {
+    let max = t
+        .iter()
+        .filter(|e| e.flags != 0)
+        .map(|e| e.pid)
+        .max()
+        .unwrap_or(0);
+    max + 1
+}
+
+/// Populate a freshly forked child at `slot`, returning its assigned pid. The
+/// caller passes the generation-aware endpoint `SYS_FORK` handed back.
+fn set_child_in(
+    t: &mut [MProc; NR_MPROCS],
+    slot: usize,
+    parent_slot: usize,
+    endpoint: Endpoint,
+) -> i32 {
+    let pid = alloc_pid_in(t);
+    t[slot] = MProc {
+        pid,
+        parent_slot,
+        endpoint,
+        exit_status: 0,
+        flags: MF_IN_USE,
+    };
+    pid
+}
+
+/// Mark `slot` a zombie (terminated, awaiting reap), recording `status`.
+fn set_zombie_in(t: &mut [MProc; NR_MPROCS], slot: usize, status: i32) {
+    if let Some(e) = t.get_mut(slot) {
+        e.exit_status = status;
+        e.flags |= MF_DEAD;
+    }
+}
+
+/// Set or clear `slot`'s `MF_WAITING` (parent blocked in `wait()`).
+fn set_waiting_in(t: &mut [MProc; NR_MPROCS], slot: usize, waiting: bool) {
+    if let Some(e) = t.get_mut(slot) {
+        if waiting {
+            e.flags |= MF_WAITING;
+        } else {
+            e.flags &= !MF_WAITING;
+        }
+    }
+}
+
+/// True if `slot` is a parent blocked in `wait()`.
+fn is_waiting_in(t: &[MProc; NR_MPROCS], slot: usize) -> bool {
+    t.get(slot).is_some_and(|e| e.flags & MF_WAITING != 0)
+}
+
+/// First zombie child of `parent_slot`, as `(slot, pid, exit_status)`, or `None`.
+fn find_zombie_child_in(t: &[MProc; NR_MPROCS], parent_slot: usize) -> Option<(usize, i32, i32)> {
+    t.iter().enumerate().find_map(|(slot, e)| {
+        (e.flags & MF_IN_USE != 0 && e.flags & MF_DEAD != 0 && e.parent_slot == parent_slot)
+            .then_some((slot, e.pid, e.exit_status))
+    })
+}
+
+/// True if `parent_slot` has at least one still-live (non-zombie) child.
+fn has_live_child_in(t: &[MProc; NR_MPROCS], parent_slot: usize) -> bool {
+    t.iter().enumerate().any(|(slot, e)| {
+        slot != parent_slot
+            && e.flags & MF_IN_USE != 0
+            && e.flags & MF_DEAD == 0
+            && e.parent_slot == parent_slot
+    })
+}
+
+/// Release `slot` back to the free pool (fork rollback, or reaping a zombie).
+fn cleanup_in(t: &mut [MProc; NR_MPROCS], slot: usize) {
+    if let Some(e) = t.get_mut(slot) {
+        *e = MProc::EMPTY;
+    }
 }
 
 /// `UnsafeCell`-wrapped static table. See the module note for the
@@ -177,6 +327,66 @@ pub fn handle_kill(slot: usize) -> KillAction {
     // the table is live during PM's straight-line loop.
     let t = unsafe { &mut *TABLE.0.get() };
     handle_kill_in(t, slot)
+}
+
+// Fork / exit / wait wrappers over the global table. Each is the only `unsafe`
+// touching the static; the logic lives in the host-tested `*_in` helpers above.
+// SAFETY (all): single-mutator invariant (module note); PM's straight-line loop
+// never holds another live reference into the table across these calls.
+
+/// True if `slot` holds a live process.
+pub fn in_use(slot: usize) -> bool {
+    in_use_in(unsafe { &*TABLE.0.get() }, slot)
+}
+
+/// The parent slot of `slot`, or `None` if not in use.
+pub fn parent_of(slot: usize) -> Option<usize> {
+    parent_of_in(unsafe { &*TABLE.0.get() }, slot)
+}
+
+/// The stored endpoint of `slot`, or `None` if not in use.
+pub fn endpoint_of(slot: usize) -> Option<Endpoint> {
+    endpoint_of_in(unsafe { &*TABLE.0.get() }, slot)
+}
+
+/// Allocate a free fork-pool slot, or `None` if the table is full.
+pub fn alloc_slot() -> Option<usize> {
+    alloc_slot_in(unsafe { &*TABLE.0.get() })
+}
+
+/// Populate a forked child at `slot`; returns its assigned pid.
+pub fn set_child(slot: usize, parent_slot: usize, endpoint: Endpoint) -> i32 {
+    set_child_in(unsafe { &mut *TABLE.0.get() }, slot, parent_slot, endpoint)
+}
+
+/// Mark `slot` a zombie carrying `status`.
+pub fn set_zombie(slot: usize, status: i32) {
+    set_zombie_in(unsafe { &mut *TABLE.0.get() }, slot, status)
+}
+
+/// Set or clear `slot`'s waiting flag.
+pub fn set_waiting(slot: usize, waiting: bool) {
+    set_waiting_in(unsafe { &mut *TABLE.0.get() }, slot, waiting)
+}
+
+/// True if `slot` is a parent blocked in `wait()`.
+pub fn is_waiting(slot: usize) -> bool {
+    is_waiting_in(unsafe { &*TABLE.0.get() }, slot)
+}
+
+/// First zombie child of `parent_slot`, as `(slot, pid, exit_status)`.
+pub fn find_zombie_child(parent_slot: usize) -> Option<(usize, i32, i32)> {
+    find_zombie_child_in(unsafe { &*TABLE.0.get() }, parent_slot)
+}
+
+/// True if `parent_slot` has at least one still-live child.
+pub fn has_live_child(parent_slot: usize) -> bool {
+    has_live_child_in(unsafe { &*TABLE.0.get() }, parent_slot)
+}
+
+/// Release `slot` back to the free pool.
+pub fn cleanup(slot: usize) {
+    cleanup_in(unsafe { &mut *TABLE.0.get() }, slot)
 }
 
 #[cfg(test)]
@@ -280,5 +490,108 @@ mod tests {
         assert_eq!(handle_kill_in(&mut t, d), KillAction::NotFound);
         assert_eq!(handle_kill_in(&mut t, 20), KillAction::NotFound);
         assert_eq!(handle_kill_in(&mut t, NR_MPROCS), KillAction::NotFound);
+    }
+
+    // --- Fork / exit / wait helpers (slice 4.6b) ---------------------------
+
+    #[test]
+    fn seed_stores_boot_endpoints() {
+        let t = seeded();
+        // Seeded procs are generation 0, so endpoint == boot_endpoint(slot).
+        let e = STUB_E_PROC_NR.get() as usize;
+        assert_eq!(t[e].endpoint, boot_endpoint(ProcNr::new(e as i32)));
+        assert_eq!(endpoint_of_in(&t, e), Some(t[e].endpoint));
+    }
+
+    #[test]
+    fn alloc_slot_returns_first_free_fork_pool_slot() {
+        let mut t = seeded();
+        // Seeded slots stop at FORK_POOL_BASE (16); the first free slot is it.
+        assert_eq!(alloc_slot_in(&t), Some(FORK_POOL_BASE));
+        // Occupy it, and the next free slot moves up by one.
+        set_child_in(
+            &mut t,
+            FORK_POOL_BASE,
+            STUB_E_PROC_NR.get() as usize,
+            0x1234,
+        );
+        assert_eq!(alloc_slot_in(&t), Some(FORK_POOL_BASE + 1));
+    }
+
+    #[test]
+    fn alloc_slot_none_when_pool_full() {
+        let mut t = seeded();
+        for slot in FORK_POOL_BASE..NR_MPROCS {
+            set_child_in(&mut t, slot, 0, 0x1000 + slot as i32);
+        }
+        assert_eq!(alloc_slot_in(&t), None);
+    }
+
+    #[test]
+    fn set_child_assigns_monotonic_pid_and_records_fields() {
+        let mut t = seeded();
+        let parent = STUB_E_PROC_NR.get() as usize; // pid 15
+        let slot = alloc_slot_in(&t).unwrap();
+        let pid = set_child_in(&mut t, slot, parent, 0xABCD);
+        // Highest seeded pid is 15 (stub E) → child gets 16.
+        assert_eq!(pid, 16);
+        assert!(in_use_in(&t, slot));
+        assert_eq!(parent_of_in(&t, slot), Some(parent));
+        assert_eq!(endpoint_of_in(&t, slot), Some(0xABCD));
+        // A live child is getpid-visible.
+        assert_eq!(getpid_in(&t, slot), Some((16, 15)));
+    }
+
+    #[test]
+    fn zombie_child_is_found_and_reaped() {
+        let mut t = seeded();
+        let parent = STUB_E_PROC_NR.get() as usize;
+        let slot = alloc_slot_in(&t).unwrap();
+        let pid = set_child_in(&mut t, slot, parent, 0xABCD);
+
+        // Before exit: a live child, no zombie.
+        assert!(has_live_child_in(&t, parent));
+        assert_eq!(find_zombie_child_in(&t, parent), None);
+
+        set_zombie_in(&mut t, slot, 0x0500);
+        // Now a zombie, no longer counted as a live child.
+        assert!(!has_live_child_in(&t, parent));
+        assert_eq!(find_zombie_child_in(&t, parent), Some((slot, pid, 0x0500)));
+
+        // Reap frees the slot.
+        cleanup_in(&mut t, slot);
+        assert_eq!(find_zombie_child_in(&t, parent), None);
+        assert!(!in_use_in(&t, slot));
+        assert_eq!(alloc_slot_in(&t), Some(slot)); // slot is reusable again
+    }
+
+    #[test]
+    fn waiting_flag_round_trips() {
+        let mut t = seeded();
+        let parent = STUB_E_PROC_NR.get() as usize;
+        assert!(!is_waiting_in(&t, parent));
+        set_waiting_in(&mut t, parent, true);
+        assert!(is_waiting_in(&t, parent));
+        set_waiting_in(&mut t, parent, false);
+        assert!(!is_waiting_in(&t, parent));
+    }
+
+    #[test]
+    fn has_live_child_is_false_without_children() {
+        let t = seeded();
+        // Stub A has no children (parents are INIT-parented, none point at A).
+        assert!(!has_live_child_in(&t, STUB_A_PROC_NR.get() as usize));
+    }
+
+    #[test]
+    fn out_of_range_slots_are_inert() {
+        let mut t = seeded();
+        assert!(!in_use_in(&t, NR_MPROCS));
+        assert_eq!(parent_of_in(&t, NR_MPROCS), None);
+        assert_eq!(endpoint_of_in(&t, NR_MPROCS), None);
+        // Mutators on an out-of-range slot are no-ops, not panics.
+        set_zombie_in(&mut t, NR_MPROCS, 0);
+        set_waiting_in(&mut t, NR_MPROCS, true);
+        cleanup_in(&mut t, NR_MPROCS);
     }
 }

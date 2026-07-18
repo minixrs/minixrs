@@ -49,6 +49,9 @@
     .equ SYS_GETINFO,  0x600               // KERNEL_CALL + 0
     .equ GET_WHOAMI,   12
     .equ PM_GETPID,    0x700               // PM_RQ_BASE + 0
+    .equ PM_FORK,      0x701               // PM_RQ_BASE + 1
+    .equ PM_EXIT,      0x702               // PM_RQ_BASE + 2
+    .equ PM_WAIT,      0x703               // PM_RQ_BASE + 3
     .equ VM_BRK,       0xC01               // VM_RQ_BASE + 1
     .equ VM_MMAP,      0xC02               // VM_RQ_BASE + 2
     .equ VM_MUNMAP,    0xC03               // VM_RQ_BASE + 3
@@ -262,16 +265,27 @@ _user_stub_d_start:
 _user_stub_d_end:
     .size _user_stub_d_start, _user_stub_d_end - _user_stub_d_start
 
-/* ---- Stub E: PM getpid client (slice 4.5) ------------------------------- */
+/* ---- Stub E: PM fork/exit/wait client (slice 4.6b) ---------------------- */
 
 /*
  * Stub E is built *frozen*: `userland_bootstrap` constructs its address space
- * but installs no privilege slot and leaves RTS_NO_PRIV set — the state a
- * forked child will hold in 4.6. PM's SEF init releases it with
+ * but installs no privilege slot and leaves RTS_NO_PRIV set — the very state a
+ * forked child holds after SYS_FORK. PM's SEF init releases it with
  * SYS_PRIVCTL(PRIVCTL_SET_USER), pointing it at the shared USER priv slot
- * (SENDREC-to-PM only, no kernel calls). E then loops SENDREC PM_GETPID to
- * PM: the reply's m_type is E's pid and payload[0..4] the parent's pid — the
- * live proof that a PM-granted privilege works end to end.
+ * (SENDREC-to-PM only, no kernel calls). E then drives the process lifecycle
+ * entirely through PM, the POSIX shape (user -> PM, never user -> kernel):
+ *
+ *   loop:
+ *     SENDREC(PM, PM_FORK)              // fork() — returns twice
+ *     if reply m_type == 0:            //   child half
+ *         SENDREC(PM, PM_EXIT, 0)      //   exit(0); PM tears us down, no return
+ *     else:                            //   parent half (m_type = child pid)
+ *         SENDREC(PM, PM_WAIT)         //   wait() for the child, then loop
+ *
+ * The child is a byte-for-byte copy of E's frame taken mid-fork SENDREC, so
+ * both halves resume here reading the same reply buffer; only the reply m_type
+ * (0 vs the child pid) tells them apart. Observable kernel-side via
+ * [fork]/[exit] traces and the SYS_FORK/SYS_EXIT [ksys] samples.
  */
 
     .section .rodata.user_stub_e, "a", %progbits
@@ -279,21 +293,46 @@ _user_stub_d_end:
     .global _user_stub_e_start
     .type _user_stub_e_start, %object
 _user_stub_e_start:
-    mov     x19, #0                         // persistent call counter
 1:
-    // Build the request at [SP_EL0 - 104, SP_EL0):
-    //   [+0]   m_source — kernel overwrites
-    //   [+4]   m_type = PM_GETPID (no request payload)
+    // fork(): SENDREC(PM, PM_FORK). No request payload — m_source names us.
+    sub     x9, sp, #MSG_SIZE
+    str     wzr, [x9, #0]                   // m_source — kernel overwrites
+    mov     w10, #PM_FORK
+    str     w10, [x9, #4]                   // m_type = PM_FORK
+    mov     x0, #ENDPOINT_PM
+    mov     x1, #SENDREC
+    mov     x2, x9
+    svc     #0
+    // Fork return is in the reply m_type at [x9 + 4]: 0 => child, else parent.
+    ldr     w11, [x9, #4]
+    cbz     w11, 3f
+
+    // Parent: wait() for the child — SENDREC(PM, PM_WAIT), then fork again.
     sub     x9, sp, #MSG_SIZE
     str     wzr, [x9, #0]
-    mov     w10, #PM_GETPID
+    mov     w10, #PM_WAIT
     str     w10, [x9, #4]
     mov     x0, #ENDPOINT_PM
     mov     x1, #SENDREC
     mov     x2, x9
     svc     #0
-    add     x19, x19, #1
     b       1b
+
+3:
+    // Child: exit(0) — SENDREC(PM, PM_EXIT) with status 0 in payload[0..4].
+    // PM tears us down (SYS_EXIT) rather than replying, so this never returns.
+    sub     x9, sp, #MSG_SIZE
+    str     wzr, [x9, #0]
+    mov     w10, #PM_EXIT
+    str     w10, [x9, #4]                   // m_type = PM_EXIT
+    str     wzr, [x9, #8]                   // payload[0..4] = exit status 0
+    mov     x0, #ENDPOINT_PM
+    mov     x1, #SENDREC
+    mov     x2, x9
+    svc     #0
+    // Unreachable — PM never replies to a dead child. Park defensively.
+2:
+    b       2b
     .global _user_stub_e_end
 _user_stub_e_end:
     .size _user_stub_e_start, _user_stub_e_end - _user_stub_e_start
