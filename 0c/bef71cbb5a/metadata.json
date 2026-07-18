@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "0cbef71cbb5a",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-4-6a-kernel-fork-exit",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/plan.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0c/bef71cbb5a/0/metadata.json",
+      "transcript": "/0c/bef71cbb5a/0/full.jsonl",
+      "content_hash": "/0c/bef71cbb5a/0/content_hash.txt",
+      "prompt": "/0c/bef71cbb5a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 517,
+    "cache_creation_tokens": 492415,
+    "cache_read_tokens": 22015054,
+    "output_tokens": 123872,
+    "api_call_count": 88
+  }
+}

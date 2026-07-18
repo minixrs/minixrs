@@ -1,0 +1,104 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "0cbef71cbb5a",
+  "session_id": "1240903d-f851-4a77-9b78-18c393eede03",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-18T04:24:14.080953Z",
+  "branch": "feature/phase-4-6a-kernel-fork-exit",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/plan.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "07613c8aeff3",
+  "token_usage": {
+    "input_tokens": 517,
+    "cache_creation_tokens": 492415,
+    "cache_read_tokens": 22015054,
+    "output_tokens": 123872,
+    "api_call_count": 88
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01YaRC9fH3HsdBGWCKZzFU4B",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:executing-plans"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "07613c8aeff3",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 117,
+        "end": 118,
+        "entry_ids": [
+          "fdfa7683-39b1-40c8-985a-e2a2de89362b"
+        ],
+        "tool_use_id": "toolu_01YaRC9fH3HsdBGWCKZzFU4B"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01YaRC9fH3HsdBGWCKZzFU4B"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:executing-plans",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01DkBZqAB9z1bfaHaNz8b8xy",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "07613c8aeff3",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 614,
+        "end": 615,
+        "entry_ids": [
+          "0002444a-3653-4ade-975c-8875b8d8bfd6"
+        ],
+        "tool_use_id": "toolu_01DkBZqAB9z1bfaHaNz8b8xy"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01DkBZqAB9z1bfaHaNz8b8xy"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-18T04:24:14.053664Z",
+    "agent_lines": 5,
+    "agent_removed": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 5,
+    "total_lines_changed": 8,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
