@@ -46,7 +46,7 @@ mod region;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    SYS_GETINFO_NAME_LEN, SYS_KILL, SYS_VMCTL, VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT,
+    SYS_GETINFO_NAME_LEN, SYS_KILL, SYS_VMCTL, VM_BRK, VM_FORK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT,
     VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP,
 };
 use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
@@ -109,6 +109,7 @@ fn main() -> ! {
             VM_BRK => handle_brk(&mut msg),
             VM_MMAP => handle_mmap(&mut msg),
             VM_MUNMAP => handle_munmap(system, &mut msg),
+            VM_FORK => handle_fork(&mut msg),
             // Unknown request: drop it.
             _ => {}
         }
@@ -260,11 +261,40 @@ fn handle_munmap(system: Endpoint, msg: &mut Message) {
     let _ = ipc_send(caller_e, msg);
 }
 
+/// Handle a `VM_FORK` request from PM: clone the parent's region set into the
+/// freshly forked child. PM passes the parent endpoint (payload `0..4`) and the
+/// child endpoint (payload `4..8`); the kernel already copied the child's page
+/// tables in `SYS_FORK`, so this only copies VM's per-client bookkeeping so the
+/// child inherits the parent's heap/mmap regions. Reply (PM issued a SENDREC)
+/// with `m_type = OK`, or the negative error from [`region::fork`].
+fn handle_fork(msg: &mut Message) {
+    let caller_e = msg.m_source;
+    let parent_e: Endpoint = rd_i32(msg, 0);
+    let child_e: Endpoint = rd_i32(msg, 4);
+    let parent_nr = endpoint_proc(parent_e).get();
+    let child_nr = endpoint_proc(child_e).get();
+
+    let reply_type = match region::fork(parent_nr, child_nr) {
+        Ok(()) => OK,
+        Err(e) => e,
+    };
+
+    msg.m_type = reply_type;
+    msg.m_source = 0; // kernel overwrites on delivery
+    let _ = ipc_send(caller_e, msg);
+}
+
 // Native-endian payload accessors, mirroring the kernel's `do_vmctl` reads.
 fn rd_u64(m: &Message, off: usize) -> u64 {
     let mut b = [0u8; 8];
     b.copy_from_slice(&m.payload[off..off + 8]);
     u64::from_ne_bytes(b)
+}
+
+fn rd_i32(m: &Message, off: usize) -> i32 {
+    let mut b = [0u8; 4];
+    b.copy_from_slice(&m.payload[off..off + 4]);
+    i32::from_ne_bytes(b)
 }
 
 fn wr_i32(m: &mut Message, off: usize, v: i32) {
