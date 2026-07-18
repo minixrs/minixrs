@@ -44,8 +44,11 @@ pub const MMAP_BASE: u64 = 0x0200_0000;
 /// aarch64 4 KiB page.
 const PAGE_SIZE: u64 = 4096;
 
-/// Proc-number range the table can key. Boot procs are `0..=15`.
-const MAX_CLIENTS: usize = 16;
+/// Proc-number range the table can key. Boot procs are `0..=15`; PM allocates
+/// forked children from the pool above that (kernel proc-nr = PM mproc slot,
+/// `[16, 32)` — see `servers/pm/src/mproc.rs`), so the table must cover the
+/// whole fork pool for `VM_FORK` to record a child's inherited regions.
+const MAX_CLIENTS: usize = 32;
 
 /// Regions tracked per process: one heap plus a few `mmap` regions in the
 /// spare slots.
@@ -267,6 +270,20 @@ pub fn munmap(nr: i32, addr: u64, len: u64) -> Result<(u64, u64), i32> {
     client_mut(nr).ok_or(EINVAL)?.munmap(addr, len)
 }
 
+/// Clone `parent_nr`'s whole region set into `child_nr` (the `VM_FORK` path).
+/// The kernel already copied the child's page tables in `SYS_FORK`; this copies
+/// VM's own bookkeeping so the child's later brk/mmap/fault lookups inherit the
+/// parent's heap/mmap regions (and its `mmap_next` bump cursor). `EINVAL` if
+/// either proc number is untrackable. An untracked parent (never touched
+/// memory) clones as an empty set, which is correct.
+pub fn fork(parent_nr: i32, child_nr: i32) -> Result<(), i32> {
+    // Snapshot the parent by value first (ClientRegions is Copy) so we never
+    // hold two live borrows into TABLE at once.
+    let parent = *client_ref(parent_nr).ok_or(EINVAL)?;
+    *client_mut(child_nr).ok_or(EINVAL)? = parent;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +478,38 @@ mod tests {
         // Caller overstates len; the sweep must not exceed the region's own end.
         let (start, end) = c.munmap(a, 0x4000).unwrap();
         assert_eq!((start, end), (a, a + 0x1000));
+    }
+
+    // The `fork` free function operates on the global TABLE, so each test below
+    // uses its own dedicated proc-number slots (distinct from every other test's)
+    // to stay independent under parallel test execution.
+
+    #[test]
+    fn fork_clones_parent_regions_into_child() {
+        // Seed parent slot 20 with a heap and an mmap region, then fork into 21.
+        set_brk(20, HEAP_BASE + 0x4000).unwrap();
+        let mmap_base = mmap(20, 0x2000).unwrap();
+
+        fork(20, 21).unwrap();
+
+        // Child inherited both regions.
+        assert!(contains(21, HEAP_BASE));
+        assert!(contains(21, HEAP_BASE + 0x3FFF));
+        assert!(contains(21, mmap_base));
+        assert!(!contains(21, HEAP_BASE + 0x4000)); // half-open, as parent
+    }
+
+    #[test]
+    fn fork_from_untracked_parent_gives_empty_child() {
+        // Parent slot 28 was never touched → empty clone; child 29 has no regions.
+        fork(28, 29).unwrap();
+        assert!(!contains(29, HEAP_BASE));
+    }
+
+    #[test]
+    fn fork_out_of_range_is_einval() {
+        // Kernel-task parent or past-the-cap child are both untrackable.
+        assert_eq!(fork(-1, 5), Err(EINVAL));
+        assert_eq!(fork(30, MAX_CLIENTS as i32), Err(EINVAL));
     }
 }

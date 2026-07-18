@@ -166,9 +166,32 @@ pub const PM_RQ_BASE: i32 = 0x700;
 /// in payload `0..4` (i32) so `getppid` needs no second call.
 pub const PM_GETPID: i32 = PM_RQ_BASE;
 
+/// User → PM: `fork()`. No request payload — the kernel-stamped `m_source` names
+/// the parent. PM allocates a child slot, drives `SYS_FORK` + `VM_FORK` +
+/// `SCHEDULING_START` + `SYS_PRIVCTL(PRIVCTL_SET_USER)`, then replies to **both**
+/// halves of the shared blocked SENDREC: the child receives `m_type = 0`, the
+/// parent receives `m_type = child_pid` (MINIX fork-returns-twice). On failure
+/// the parent's reply carries a negative errno (`EAGAIN` if PM's process table
+/// is full). (slice 4.6b)
+pub const PM_FORK: i32 = PM_RQ_BASE + 1;
+
+/// User → PM: `exit(status)`. Exit status in payload `0..4` (i32). PM tears the
+/// caller down (`SCHEDULING_STOP` + `SYS_EXIT`) and either wakes a `wait()`ing
+/// parent or leaves a zombie for the parent's next `wait()`. The caller is dead
+/// after `SYS_EXIT`, so PM sends **no** reply. (slice 4.6b)
+pub const PM_EXIT: i32 = PM_RQ_BASE + 2;
+
+/// User → PM: `wait()` for any child. No request payload — `m_source` names the
+/// parent. If a zombie child exists PM reaps it and replies immediately;
+/// otherwise, with a live child, PM suspends the caller (no reply) until the
+/// child exits. Reply: `m_type` *is* the reaped child's pid (>= 0), with the
+/// encoded exit status in payload `0..4` (i32, `(status & 0xff) << 8`), or
+/// `ECHILD` in `m_type` if the caller has no children. (slice 4.6b)
+pub const PM_WAIT: i32 = PM_RQ_BASE + 3;
+
 /// Number of PM server requests defined so far. Locks the PM server's
 /// dispatch coverage the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_PM_MSGS: usize = 1;
+pub const NR_PM_MSGS: usize = 4;
 
 // The PM range sits strictly above the kernel-call range and strictly below
 // VM's (and therefore every other) server request range and the NOTIFY marker.
@@ -219,6 +242,14 @@ pub const VM_MMAP: i32 = VM_RQ_BASE + 2;
 /// `m_type = OK`, or `EINVAL` in `m_type` if no `Mmap` region matches the base
 /// address. (slice 3.6)
 pub const VM_MUNMAP: i32 = VM_RQ_BASE + 3;
+
+/// PM → VM: clone a parent's memory region set into a freshly forked child.
+/// The kernel already copied the child's page tables (`SYS_FORK`); this copies
+/// VM's own bookkeeping so the child's later brk/mmap/fault lookups see the
+/// inherited heap/mmap regions. Payload: parent endpoint (`0..4`, i32), child
+/// endpoint (`4..8`, i32). Reply `m_type = OK`, or `EINVAL` in `m_type` if
+/// either endpoint maps to an out-of-range proc number. (slice 4.6b)
+pub const VM_FORK: i32 = VM_RQ_BASE + 4;
 
 // ---------------------------------------------------------------------------
 // DS (Data Store) server request numbers — `m_type` values for messages
@@ -306,9 +337,9 @@ pub const SEF_SIGNAL: i32 = SEF_RQ_BASE + 1;
 /// coverage in `server-rt` the way `NR_VMCTL_SUBCALLS` locks `do_vmctl`.
 pub const NR_SEF_MSGS: usize = 2;
 
-// The SEF range sits strictly above the VM request range (0xC00..0xC03) so a
+// The SEF range sits strictly above the VM request range (0xC00..0xC04) so a
 // server's `m_type` dispatcher and the SEF classifier can never collide.
-const _: () = assert!(SEF_RQ_BASE > VM_RQ_BASE + 3);
+const _: () = assert!(SEF_RQ_BASE > VM_RQ_BASE + 4);
 const _: () = assert!(SEF_RQ_BASE < crate::ipc_const::NOTIFY_MESSAGE);
 
 // ---------------------------------------------------------------------------
@@ -469,6 +500,20 @@ mod tests {
     }
 
     #[test]
+    fn vm_fork_follows_munmap_in_request_range() {
+        // VM_FORK is the fifth VM server request, contiguous after VM_MUNMAP.
+        assert_eq!(VM_FORK, VM_RQ_BASE + 4);
+        assert_ne!(VM_FORK, VM_MUNMAP);
+        assert_ne!(VM_FORK, VM_MMAP);
+        assert_ne!(VM_FORK, VM_BRK);
+        assert_ne!(VM_FORK, VM_PAGEFAULT);
+        assert!(VM_FORK > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+        // (The VM_FORK < SEF_RQ_BASE ordering is locked by a module-level
+        // const-assert, so it needs no runtime assertion here.)
+        assert_ne!(VM_FORK, crate::ipc_const::NOTIFY_MESSAGE);
+    }
+
+    #[test]
     fn ds_requests_contiguous_from_base() {
         // DS requests are contiguous from DS_RQ_BASE; NR_DS_REQUESTS locks the
         // DS server's dispatch coverage.
@@ -485,7 +530,7 @@ mod tests {
         // control range, and the KERNEL_CALL range, and below NOTIFY_MESSAGE —
         // so a server's m_type dispatcher and the SEF classifier never collide.
         for r in [DS_PUBLISH, DS_RETRIEVE, DS_CHECK] {
-            for vm in [VM_PAGEFAULT, VM_BRK, VM_MMAP, VM_MUNMAP] {
+            for vm in [VM_PAGEFAULT, VM_BRK, VM_MMAP, VM_MUNMAP, VM_FORK] {
                 assert_ne!(r, vm);
             }
             assert_ne!(r, SEF_INIT);
@@ -540,6 +585,7 @@ mod tests {
                 VM_BRK,
                 VM_MMAP,
                 VM_MUNMAP,
+                VM_FORK,
                 DS_PUBLISH,
                 DS_RETRIEVE,
                 DS_CHECK,
@@ -576,11 +622,14 @@ mod tests {
     fn pm_msgs_contiguous_from_base() {
         // PM requests are contiguous from PM_RQ_BASE; NR_PM_MSGS locks the PM
         // server's dispatch coverage.
-        let msgs = [PM_GETPID];
+        let msgs = [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, PM_RQ_BASE + i as i32);
         }
         assert_eq!(msgs.len(), NR_PM_MSGS);
+        // The whole PM range stays below VM's (and therefore every other
+        // server request range and the NOTIFY marker).
+        assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VM_RQ_BASE);
     }
 
     #[test]
@@ -588,12 +637,13 @@ mod tests {
         // Each PM request must stay distinct from the VM/DS/SEF/SCHED request
         // ranges and the KERNEL_CALL range, and below NOTIFY_MESSAGE — so a
         // server's m_type dispatcher and the SEF classifier never collide.
-        for m in [PM_GETPID] {
+        for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT] {
             for other in [
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
                 VM_MUNMAP,
+                VM_FORK,
                 DS_PUBLISH,
                 DS_RETRIEVE,
                 DS_CHECK,
@@ -625,6 +675,7 @@ mod tests {
             assert_ne!(m, VM_BRK);
             assert_ne!(m, VM_MMAP);
             assert_ne!(m, VM_MUNMAP);
+            assert_ne!(m, VM_FORK);
             assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
