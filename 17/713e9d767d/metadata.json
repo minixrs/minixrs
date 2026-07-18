@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "17713e9d767d",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-4-7-exec",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "CLAUDE.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel-shared/src/com.rs",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/boot_image/mod.rs",
+    "kernel/src/system/do_exec.rs",
+    "kernel/src/system/do_exit.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs",
+    "servers/pm/src/main.rs",
+    "sonar-project.properties",
+    "userland/worker/Cargo.toml",
+    "userland/worker/src/main.rs",
+    "userland/worker/user.ld"
+  ],
+  "sessions": [
+    {
+      "metadata": "/17/713e9d767d/0/metadata.json",
+      "transcript": "/17/713e9d767d/0/full.jsonl",
+      "content_hash": "/17/713e9d767d/0/content_hash.txt",
+      "prompt": "/17/713e9d767d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 220,
+    "cache_creation_tokens": 581008,
+    "cache_read_tokens": 25667304,
+    "output_tokens": 112599,
+    "api_call_count": 111
+  }
+}

@@ -1,0 +1,654 @@
+Work on the next slice in @docs/plan.md
+
+---
+
+<task-notification>
+<task-id>af22f73acf0d64119</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/6d7eff75-b1d8-4950-ae34-c6d479a10a72/tasks/af22f73acf0d64119.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore kernel SYS_FORK/exec path" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I now have everything needed across all eight areas plus the boot-server load analog. Here is the complete report.
+
+---
+
+# Slice 4.7 SYS_EXEC — Reuse Survey
+
+All paths absolute. Key headline: **`elf::load_into(elf, &amp;mut aspace)` already exists** and is the exact "load into a given AddrSpace" primitive the slice needs; **`module_by_name` already exists** (dead-code-gated awaiting exec); **`SYS_EXEC` is wired as an ENOSYS stub**; and **there is no `PM_EXEC` request yet** — one must be added.
+
+---
+
+## 1. SYS_FORK implementation
+`/Users/kevinbarnard/src/minixrs/kernel/src/system/do_fork.rs`
+
+**Signature** (lines 72-76), dispatched from `mod.rs:201` as a target-taking call:
+```rust
+pub(super) fn do_fork(
+    proc_table: &amp;mut [Proc; N_PROC_SLOTS],
+    caller_nr: ProcNr,
+    msg: &amp;mut Message,
+) -&gt; i32
+```
+
+Flow:
+- **Free slot selection**: fork does *not* search for a free slot — PM picks `child_nr` and passes it in `msg` payload `4..8`. do_fork validates it is in `0..NR_PROCS` (lines 88-90), converts via `proc_index` (line 92), and checks `RTS_SLOT_FREE` is set (lines 93-95). Parent resolved via `super::resolve_target` (line 80).
+- **Parent gate** (lines 100-112): must be `RTS_RECEIVING`, not `RTS_SENDING`, no `MF_DELIVERMSG`, and `ttbr0_pa != 0`.
+- **Register frame copy** (line 128 snapshot `parent.regs`, line 142 `c.regs = parent_regs`): copied verbatim; both resume after the same `svc`.
+- **Generation bump**: NOT done here. The child consumes the slot's already-bumped stored endpoint (`c.endpoint`, line 182); `SYS_EXIT`'s `free_slot` did the bump.
+- **ASID allocation** (line 123): `let child_asid = unsafe { asid::alloc_asid() };`
+- **Eager address-space copy** (lines 116-120 call `copy_addrspace`, defined 207-257): builds `AddrSpace::new()`, then `walk_leaves(parent_ttbr0, ...)`: per leaf `alloc_frame`, `copy_nonoverlapping` through `phys_to_hhdm(pa)` → `phys_to_hhdm(new_pa)` for `FRAME_SIZE`, `flush_icache_range` if `prot.executable`, then `child.map_page(va, new_pa, prot)`. On error unwinds (frees mapped leaves via `walk_leaves`, then `child.destroy()`). Returns `(child.ttbr0_pa, pages)`.
+- **sig_pending zeroing**: line 157 `c.sig_pending = 0;` (part of the "fresh, must not leak" block, lines 153-181). Also zeroes user_time, sys_time, alarm_at, caller_q, q_link, send/deliver msgs, page_fault_state.
+- Child left frozen: `c.rts_flags.store(RTS_RECEIVING | RTS_NO_PRIV, ...)` (lines 180-181), not enqueued.
+- Writes child endpoint back to `msg` payload `0..4` (line 185).
+
+**Payload layout**: in — parent endpoint `0..4` (i32), child proc nr `4..8` (i32); out — child endpoint `0..4` (i32).
+
+---
+
+## 2. SYS_EXIT / teardown
+`/Users/kevinbarnard/src/minixrs/kernel/src/system/do_exit.rs`
+
+**Signature** (lines 72-77), dispatched `mod.rs:200`:
+```rust
+pub(super) fn do_exit(
+    proc_table: &amp;mut [Proc; N_PROC_SLOTS],
+    priv_table: &amp;mut [Priv; NR_SYS_PROCS],
+    caller_nr: ProcNr,
+    msg: &amp;mut Message,
+) -&gt; i32
+```
+
+**Address-space teardown** is factored into `teardown_addrspace(ttbr0_pa: u64, dead_asid: u8) -&gt; u64` (lines 209-231) — this is the exact reusable sequence exec needs for destroying the *old* AS after swap:
+```rust
+fn teardown_addrspace(ttbr0_pa: u64, dead_asid: u8) -&gt; u64 {
+    if ttbr0_pa == 0 { return 0; }
+    let mut freed: u64 = 0;
+    let _ = walk_leaves(ttbr0_pa, &amp;mut |_va, pa, _prot| {
+        free_frame(Frame::from_addr(pa));
+        freed += 1;
+        Ok(())
+    });
+    unsafe { mmu::flush_tlb_asid(dead_asid) };   // must precede destroy? see note
+    AddrSpace { ttbr0_pa }.destroy();
+    unsafe { asid::free_asid(dead_asid) };
+    freed
+}
+```
+Order (important for exec): **walk_leaves → free each leaf → flush_tlb_asid → AddrSpace{ttbr0_pa}.destroy() → asid::free_asid**. The leaf walk MUST precede `destroy` (destroy frees the tables the walk reads). `AddrSpace { ttbr0_pa }` is constructed by struct literal directly (the struct has a single public field). Note the safety comment (lines 222-224): the dead AS is never the active TTBR0 — for exec you must swap `ttbr0_pa`/ASID on the proc *before* tearing the old one down, so the same "not active" invariant holds.
+
+`free_slot` (lines 237-257) also zeroes sig_pending and bumps generation — exec does NOT free the slot (the proc lives on), so this is not reused, but shows the field-reset pattern.
+
+---
+
+## 3. Kernel-call dispatch
+`/Users/kevinbarnard/src/minixrs/kernel/src/system/mod.rs`
+
+- **SYS_EXEC currently stubbed**: `dispatch_caller_local` line 224: `SYS_EXEC =&gt; stubs::do_exec(caller, caller_priv, msg),` — routed as a **caller-local** call, returning `ENOSYS`.
+- **Dispatch structure**: `kernel_call_sendrec` (line 90) → `kernel_call_dispatch` (line 170). The latter range-checks `m_type - KERNEL_CALL` against `NR_SYS_CALLS`, gates on `k_call_mask` via `get_call_bit` (line 187), then a `match msg.m_type` routes **target-taking** calls first (lines 193-204): `SYS_VMCTL`, `SYS_SCHEDULE`, `SYS_SCHEDCTL`, `SYS_KILL`, `SYS_GETKSIG`, `SYS_ENDKSIG`, `SYS_EXIT`, `SYS_FORK`, `SYS_PRIVCTL` — these get the full `proc_table` (+ `priv_table` for the ones touching notify bitmaps) + `caller_nr`. Everything else falls through to `dispatch_caller_local(caller, caller_priv, msg)` (line 210) with a single re-borrowed caller slot.
+- **`resolve_target`** helper (lines 64-74): `SELF` → caller index, else `okendpt`. Shared by every target-taking handler; exec would use this to resolve its target (or operate on the caller).
+- **The const-assert** locking arm coverage is in `dispatch_caller_local` (lines 218-221):
+```rust
+const _: () = assert!(
+    NR_KERN_CALLS_PHASE4 == 18,
+    "expand kernel_call_dispatch when a new SYS_* lands",
+);
+```
+Since `SYS_EXEC` already has a number and a stub arm, no new number is added, so this `== 18` assert would remain satisfied — but see §8.
+
+**Design note for exec**: exec must swap the proc's `ttbr0_pa`/`asid` and tear down the *old* AS, which acts on a proc's whole slot + touches the frame allocator; it is currently a caller-local arm. If exec targets the caller only (MINIX self-exec model), the caller-local slot suffices; if PM names a target, it would need promotion to the target-taking match block like SYS_FORK/SYS_EXIT.
+
+---
+
+## 4. ELF loader
+`/Users/kevinbarnard/src/minixrs/kernel/src/boot_image/elf.rs`
+
+**`elf::load_into` ALREADY EXISTS** (lines 88-133) — this is exactly the "load into a given AddrSpace" primitive:
+```rust
+pub fn load_into(elf: &amp;[u8], aspace: &amp;mut AddrSpace) -&gt; Result&lt;u64, ElfError&gt;
+```
+Returns the entry-point VA (`e_entry`, read at line 110, returned line 132). There is **no** separate "allocate+map its own frames" variant — `load_into` allocates frames internally and maps them into the passed-in `aspace`. Validates magic/class/data/`ET_EXEC`/`EM_AARCH64`/`e_phentsize == 56`, walks program headers, and calls `load_segment` for each `PT_LOAD`.
+
+`load_segment` (lines 135-200): requires page-aligned vaddr+offset and `p_filesz &lt;= p_memsz` (else `Misaligned`); rejects W^X (`WriteExec`); maps `p_memsz.div_ceil(PAGE_SIZE)` pages via `alloc_frame` (frames are zeroed on hand-out, so **BSS tail is satisfied for free**) + `aspace.map_page(va, frame.addr(), prot)`. Copies file bytes through `phys_to_hhdm(frame.addr())`, `flush_icache_range` for executable pages. Prot mapping: `(false,true)→RO_CODE`, `(true,false)→RW_DATA`, `(false,false)→RO_DATA`.
+
+`ElfError` enum (lines 25-48): Truncated, BadMagic, BadClass, BadData, BadMachine, BadType, BadPhentsize, Misaligned, WriteExec, `Map(MapError)` (with `From&lt;MapError&gt;` impl). All are `#[allow(dead_code)]`-free — publicly usable.
+
+**Caveat**: `load_into` maps segments but does NOT set up a stack — exec must map the initial user stack itself (see §9).
+
+---
+
+## 5. Boot image module resolution
+`/Users/kevinbarnard/src/minixrs/kernel/src/boot_image/mod.rs`
+
+`BootImage` is a zero-copy view; `BootImage::get()` (lines 53-77) validates the MXBI header and every record's bounds.
+
+- **`module_by_name`** (lines 113-120), `#[allow(dead_code)]` with comment "consumed by slice 4.7 (SYS_EXEC of a boot-embedded binary)":
+```rust
+pub fn module_by_name(&amp;self, name: &amp;str) -&gt; Option&lt;&amp;'static [u8]&gt;
+```
+- **`module_by_proc_nr`** (lines 102-109), `#[allow(dead_code)]` "used by later Phase-4 slices (RS restart, exec)":
+```rust
+pub fn module_by_proc_nr(&amp;self, nr: ProcNr) -&gt; Option&lt;&amp;'static [u8]&gt;
+```
+- **`iter`** (lines 92-98): `pub fn iter(&amp;self) -&gt; BootImageIter` yielding `(ProcNr, &amp;'static [u8])` in archive/load order.
+
+Both accessors return a `&amp;'static [u8]` ELF payload — directly feedable to `elf::load_into`. The module doc (lines 22-23) explicitly names `module_by_name` as "reused by exec in slice 4.7". Module gated on `target_os = "none"`.
+
+---
+
+## 6. AddrSpace API
+`/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/addrspace.rs` (whole file `#![allow(dead_code)]`)
+
+- **Struct** (lines 87-90): `pub struct AddrSpace { pub ttbr0_pa: u64 }` — single public field, so `AddrSpace { ttbr0_pa }` literal construction works (as do_exit does).
+- **`AddrSpace::new() -&gt; Result&lt;Self, MapError&gt;`** (lines 95-101): allocates the L0 root frame only.
+- **`map_page(&amp;mut self, va, pa, prot) -&gt; Result&lt;(), MapError&gt;`** (line 108) → delegates to free fn **`map_page_in(ttbr0_pa, va, pa, prot) -&gt; Result&lt;(), MapError&gt;`** (line 172, operates on a live proc's tree given only `ttbr0_pa`).
+- **`unmap_page(&amp;mut self, va) -&gt; Option&lt;u64&gt;`** (line 122) → free fn **`unmap_page_in(ttbr0_pa, va) -&gt; Option&lt;u64&gt;`** (line 200).
+- **`walk_pt(&amp;self, va) -&gt; Option&lt;u64&gt;`** (line 128).
+- **`walk_leaves(ttbr0_pa, f: &amp;mut dyn FnMut(u64,u64,Prot)-&gt;Result&lt;(),MapError&gt;) -&gt; Result&lt;(),MapError&gt;`** (line 226): free function, visits every L3 leaf in ascending-VA order.
+- **`destroy(self)`** (line 149): frees all L1/L2/L3 tables + L0 root; does NOT free leaf frames (caller's responsibility — hence walk_leaves-then-destroy in teardown).
+- **`Prot`** (lines 37-58): `pub struct Prot { pub writable: bool, pub executable: bool }` with consts `RO_CODE` (r-x), `RW_DATA` (rw-), `RO_DATA` (r--).
+- `MapError` (lines 72-83): OutOfMemory, Misaligned, OutOfRange, AlreadyMapped.
+
+---
+
+## 7. ASID allocator
+`/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/asid.rs`
+
+- **`pub unsafe fn alloc_asid() -&gt; u8`** (lines 59-73): pops from the LIFO free list if non-empty, else mints `pool.next++`; panics at 255 live.
+- **`pub unsafe fn free_asid(asid: u8)`** (lines 86-99): asserts `asid != 0`, asserts it was allocated (`&lt; pool.next`), asserts no double-free (O(255) scan), pushes onto free list. **Contract (lines 77-79): caller must have already `mmu::flush_tlb_asid`'d the ASID's TLB entries before freeing.**
+- Free-list recycling: `AsidPool { next: u16, free: [u8; 255], free_len: usize }` (lines 34-52), `UnsafeCell` + `unsafe impl Sync`. `FIRST_ASID = 1`, ASID 0 reserved.
+
+For exec: allocate a fresh ASID for the new AS via `alloc_asid()`, install it on the proc, and free the *old* ASID (after `flush_tlb_asid`) via the do_exit teardown sequence.
+
+---
+
+## 8. callnr for SYS_EXEC
+`/Users/kevinbarnard/src/minixrs/kernel-shared/src/callnr.rs`
+
+- **`SYS_EXEC`** (line 17): `pub const SYS_EXEC: i32 = KERNEL_CALL + 3;` → **`0x603`**. Already defined and in the contiguity test (line 407) and `NR_KERN_CALLS_PHASE4` count.
+- `NR_KERN_CALLS_PHASE4 = 18` (line 60). SYS_EXEC is already within this — no bump needed for the kernel-call number.
+- **PM requests** (base `PM_RQ_BASE = 0x700`, line 160):
+  - `PM_GETPID = PM_RQ_BASE` = **0x700** (line 167)
+  - `PM_FORK = PM_RQ_BASE + 1` = **0x701** (line 176)
+  - `PM_EXIT = PM_RQ_BASE + 2` = **0x702** (line 182)
+  - `PM_WAIT = PM_RQ_BASE + 3` = **0x703** (line 190)
+  - `NR_PM_MSGS = 4` (line 194)
+- **There is NO `PM_EXEC` request.** To drive exec from userspace via PM, a new `PM_EXEC = PM_RQ_BASE + 4` (0x704) would need adding, `NR_PM_MSGS` bumped to 5, and the `pm_msgs_contiguous_from_base` test (lines 622-633) extended. The PM range has room: `const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS - 1) &lt; VM_RQ_BASE)` (line 199, VM_RQ_BASE = 0xC00) still holds.
+
+Stub location: `/Users/kevinbarnard/src/minixrs/kernel/src/system/stubs.rs` line 25 `enosys_stub!(do_exec);` — the real handler replaces this, keeping the `do_exec` name (dispatch table untouched, per stubs.rs doc lines 8-10).
+
+---
+
+## 9. BONUS — closest analog for "load ELF + set entry/SP + swap AS"
+`/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/userland.rs`
+
+`load_boot_server(nr, elf, stack_va)` (lines 295-344) is the exact shape exec reuses at boot time:
+1. `AddrSpace::new()` → `ttbr0_pa` (lines 299-300)
+2. `let entry = elf::load_into(elf, &amp;mut aspace)` (lines 302-303)
+3. Map one zeroed RW stack page: `alloc_frame()` + `aspace.map_page(stack_va, frame.addr(), Prot::RW_DATA)` (lines 306-309)
+4. `let asid = alloc_asid()` (line 311)
+5. Set EL0 entry state on the proc (lines 316-320):
+```rust
+p.regs.elr_el1 = entry;
+p.regs.sp_el0 = stack_va + PAGE_SIZE as u64;   // SP at top of the stack page
+p.regs.spsr_el1 = STUB_SPSR_EL0;
+p.ttbr0_pa = ttbr0_pa;
+p.asid = asid;
+```
+6. `core::mem::forget(aspace)` (line 340) — the tree is now owned via `p.ttbr0_pa`; do NOT `destroy`.
+
+Stack VAs are constants at the top of the file: `USER_STACK_VA_A..E` (lines 56-76, e.g. `0x0080_0000`), `SERVER_STACK_VA` used by servers. `build_stub` (line 359+) sets the same three regs fields (`elr_el1`/`sp_el0`/`spsr_el1`, lines 472-474). The register frame fields exec must set are therefore: `regs.elr_el1` (entry PC), `regs.sp_el0` (stack pointer), and, for a fresh stack, `regs.spsr_el1 = STUB_SPSR_EL0`. For exec the key difference from boot is that the proc already has a live `ttbr0_pa`/`asid` — exec swaps in the new pair, then tears down the old pair via the do_exit `teardown_addrspace` sequence (§2), and must `mem::forget` the new `AddrSpace` so the swapped-in tree is not destroyed.</result>
+<usage><subagent_tokens>72872</subagent_tokens><tool_uses>12</tool_uses><duration_ms>123342</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>afa1378f295c12a68</task-id>
+<tool-use-id>toolu_01CQbiKasaCj7a55witQUCMZ</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/6d7eff75-b1d8-4950-ae34-c6d479a10a72/tasks/afa1378f295c12a68.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore PM server exec integration" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything I need. Here is the comprehensive report.
+
+---
+
+# Slice 4.7 Exec Groundwork — PM Server Exploration
+
+Repo state: on `main` at `eca268a` (merge of phase 4.6b). Everything below is what exists today; no design proposed.
+
+Key upfront finding: the exec scaffolding is **already partly stubbed in**. `SYS_EXEC` is a defined kernel-call number, the kernel dispatcher already routes it to an `ENOSYS` stub, PM already holds the `k_call_mask` bit for it, and `BootImage::module_by_name` is explicitly reserved "for exec in slice 4.7." There is **no** `PM_EXEC` server request number yet (PM's range stops at `PM_WAIT`).
+
+---
+
+## 1. PM main loop &amp; handlers
+
+File: `/Users/kevinbarnard/src/minixrs/servers/pm/src/main.rs` (511 lines).
+
+**SEF startup + receive loop** (`main`, lines 76–122): `sef_startup(SefConfig { init_fresh: Some(pm_init), signal_handler: None })` (82–90). Boot endpoints are captured once before the loop: `system = boot_endpoint(SYSTEM)`, `vm = boot_endpoint(VM_PROC_NR)`, `sched = boot_endpoint(SCHED_PROC_NR)` (92–97). The loop calls `sef.receive(&amp;mut msg)` then dispatches on `msg.m_type` (104–121):
+
+```rust
+match msg.m_type {
+    NOTIFY_MESSAGE if msg.m_source == system =&gt; drain_ksigs(system),
+    PM_GETPID =&gt; handle_getpid(&amp;mut msg),
+    PM_FORK =&gt; handle_fork(system, vm, sched, &amp;mut msg),
+    PM_EXIT =&gt; handle_exit(system, sched, &amp;mut msg),
+    PM_WAIT =&gt; handle_wait(&amp;mut msg),
+    _ =&gt; {}   // Unknown request: drop it.
+}
+```
+
+`Message` is `{ m_source: i32, m_type: i32, payload: [u8; 96] }` (defined in kernel-shared; constructed here at 99–103). Note: no default/error reply on the `_` arm — unknown requests are silently dropped.
+
+**`pm_init`** (127–137): `sef_publish_to_ds(name)`, then `mproc::seed()`, then `privctl_set_user(boot_endpoint(SYSTEM), boot_endpoint(STUB_E_PROC_NR))` to release the frozen stub E. Returns the privctl result as the init rc.
+
+**`handle_getpid`** (144–157): caller identified purely by kernel-stamped `msg.m_source` (no spoofable payload). Slot = `usize::try_from(endpoint_proc(caller_e).get())`. On hit writes ppid into payload `0..4` and replies `m_type = pid`; miss → `ESRCH`.
+
+**`handle_fork`** (169–230) — the canonical multi-step kernel-call driver, the template exec will follow:
+1. Resolve `parent_slot` from `endpoint_proc(parent_e)`; `EINVAL` if bad, `EINVAL` if `!mproc::in_use(parent_slot)` (170–176).
+2. `mproc::alloc_slot()` → child slot or `EAGAIN` (180–182).
+3. `sys_fork(system, parent_e, child_slot as i32)` → `(rc, child_e)`; on failure `mproc::cleanup(child_slot)` + reply (185–189).
+4. `vm_fork(vm, parent_e, child_e)`; on failure roll back with `sys_exit(system, child_e)` + `cleanup` (193–198).
+5. `sched_start(sched, child_e, CHILD_PRIORITY, CHILD_QUANTUM)`; failure → `sys_exit` + `cleanup` (202–207). `CHILD_PRIORITY = 8`, `CHILD_QUANTUM = 5` (61–62).
+6. `privctl_set_user(system, child_e)` to release the freeze; failure → `sched_stop` + `sys_exit` + `cleanup` (216–222).
+7. `mproc::set_child(child_slot, parent_slot, child_e)` → child_pid (224).
+8. **Reply to both halves of the shared SENDREC** (227–229):
+```rust
+reply(child_e, msg, 0);          // child half: m_type = 0
+reply(parent_e, msg, child_pid); // parent half: m_type = child pid
+```
+Ordering is deliberate: release before the replies, replies last, so the child can't run until identity/memory/scheduling are set up. `msg` is reused for both sends (the kernel snapshots each send).
+
+**`handle_exit`** (240–271): caller = `msg.m_source`, status = `rd_i32(msg, 0)`. `sched_stop` then `sys_exit`, then `mproc::set_zombie(child_slot, encode_status(status))`. If parent `is_waiting`, it writes the encoded status into payload `0..4`, replies the child pid to the parent, clears waiting, and reaps. Exiting child gets **no** reply. `encode_status` (299–301) = `(status &amp; 0xff) &lt;&lt; 8` (MINIX `W_EXITCODE`).
+
+**`handle_wait`** (278–295): zombie child → reply pid with status in payload `0..4` + cleanup; else live child → `set_waiting(true)` and SUSPEND (no reply); else `ECHILD`.
+
+---
+
+## 2. mproc table
+
+File: `/Users/kevinbarnard/src/minixrs/servers/pm/src/mproc.rs` (597 lines).
+
+**Constants**: `NR_MPROCS = 32` (35); `FORK_POOL_BASE = NR_BOOT_PROCS + NR_STUB_PROCS = 16` (41). Flags: `MF_IN_USE = 1&lt;&lt;0`, `MF_PRIV_PROC = 1&lt;&lt;1`, `MF_DEAD = 1&lt;&lt;2`, `MF_WAITING = 1&lt;&lt;3` (44–54).
+
+**`MProc` struct** (60–70):
+```rust
+pub struct MProc {
+    pub pid: i32,
+    pub parent_slot: usize,
+    pub endpoint: Endpoint,     // generation-aware; from SYS_FORK for children, boot_endpoint(slot) for seeded
+    pub exit_status: i32,       // encoded status while MF_DEAD
+    pub flags: u8,
+}
+```
+`MProc::EMPTY` at 73–80. The doc-comment at 56–59 is the key exec-relevant note: the slot index *is* the kernel proc number, but once slots recycle the generation-aware `endpoint` field is authoritative, not `boot_endpoint(slot)`.
+
+**Slot lookup by endpoint/pid** — the pattern exec will reuse to find the caller's slot: `usize::try_from(endpoint_proc(caller_e).get())` (as used in main.rs). There is no by-pid reverse lookup helper; pid lookups iterate.
+
+**Pure `*_in` helpers** (all host-tested, lines 95–295):
+- `seed_in` (95) — seeds `[0,16)`.
+- `getpid_in` (162) → `Option&lt;(pid, ppid)&gt;`; None for dead/unused/out-of-range.
+- `handle_kill_in` (172) → `KillAction` (`Terminate`/`SkipPrivileged`/`NotFound`), marks `MF_DEAD` on terminate.
+- `in_use_in` (191), `parent_of_in` (196), `endpoint_of_in` (202).
+- `alloc_slot_in` (210) — first slot in `[FORK_POOL_BASE, NR_MPROCS)` with `flags == 0`.
+- `alloc_pid_in` (219) — max existing pid + 1 (monotonic).
+- `set_child_in` (231) — populates child, returns pid.
+- `set_zombie_in` (249), `set_waiting_in` (257), `is_waiting_in` (268).
+- `find_zombie_child_in` (273) → `(slot, pid, exit_status)`.
+- `has_live_child_in` (281), `cleanup_in` (291) → resets to `EMPTY`.
+
+**Static + wrappers**: `#[repr(transparent)] struct Table(UnsafeCell&lt;[MProc; NR_MPROCS]&gt;)` with hand-written `unsafe impl Sync` (299–305), `static TABLE` (307). Public wrappers `seed/getpid/handle_kill/in_use/parent_of/endpoint_of/alloc_slot/set_child/set_zombie/set_waiting/is_waiting/find_zombie_child/has_live_child/cleanup` (310–390) — each the only `unsafe` reaching the static; single-mutator invariant documented. Host tests: lines 392–597.
+
+---
+
+## 3. How PM constructs/sends kernel-call messages
+
+**IPC library**: `/Users/kevinbarnard/src/minixrs/minix-ipc/src/lib.rs`. Public wrappers: `ipc_send(dest, &amp;mut Message)` (28), `ipc_receive(src, &amp;mut Message)` (35), `ipc_sendrec(src_dest, &amp;mut Message)` (42), `ipc_sendnb` (49), `ipc_notify(dest)` (58). All aarch64 traps go through `ipc_trap` (66): `x0 = endpoint`, `x1 = primitive`, `x2 = &amp;mut Message`, `svc #0`, result back in `x0`. Off-target builds are `unreachable!` fallbacks (115–126). There is **no** higher-level "kernel call" helper — PM builds each message by hand.
+
+**PM's per-call helper pattern** — every helper builds a `Message` with `m_source: 0`, sets `m_type`, writes i32 args via `wr_i32`, `ipc_sendrec`s, and returns `m.m_type` (the kernel-call result). All in main.rs:
+
+- `sys_fork(system, parent_e, child_nr) -&gt; (i32, Endpoint)` (413–426): `m_type = SYS_FORK`; payload `0..4 = parent_e`, `4..8 = child_nr`. On OK, reads child endpoint from reply payload `0..4`. Returns `(m.m_type, rd_i32(&amp;m, 0))`.
+- `vm_fork(vm, parent_e, child_e) -&gt; i32` (431–444): `m_type = VM_FORK`; payload `0..4 = parent_e`, `4..8 = child_e`. Sent to the **VM** endpoint (a server request, not a kernel call).
+- `sched_start(sched, target_e, priority, quantum) -&gt; i32` (449–463): `m_type = SCHEDULING_START`; payload `0..4 = target_e`, `4..8 = priority`, `8..12 = quantum`. Sent to **SCHED**.
+- `sched_stop(sched, target_e) -&gt; i32` (468–480): `m_type = SCHEDULING_STOP`; payload `0..4 = target_e`.
+- `sys_exit(system, target_e) -&gt; i32` (364–376): `m_type = SYS_EXIT`; payload `0..4 = target_e`.
+- `sys_endksig(system, target_e)` (380–388), `drain_ksigs(system)` (320–358).
+- `privctl_set_user(system, target_e) -&gt; i32` (393–406): `m_type = SYS_PRIVCTL`; payload `0..4 = target_e`, `4..8 = PRIVCTL_SET_USER`.
+
+**Reply helper** `reply(target_e, msg, m_type)` (486–490): sets `msg.m_type = m_type`, `msg.m_source = 0` (kernel overwrites on delivery), `ipc_send(target_e, msg)`. Payload must be written before calling. **Payload accessors** `rd_i32`/`wr_i32` (494–502): native-endian i32 at `payload[off..off+4]`.
+
+**Kernel side of the SYS_FORK call** (the analog a real `do_exec` would mirror): `/Users/kevinbarnard/src/minixrs/kernel/src/system/do_fork.rs`, `do_fork(proc_table, caller_nr, msg) -&gt; i32` (72). Reads `parent_e` from payload `0..4`, `child_nr` from `4..8` (77–78); resolves parent via `super::resolve_target` (80); writes `child_e` back to payload `0..4` (185); returns `OK`. Payload table documented at lines 36–42. Trace pattern: `[ksys SYS_FORK] parent=… nr=… child_nr=… child_e=… pages=…` gated by `FORK_TRACE_HEAD=6` / `FORK_TRACE_EVERY=100` (64–68, 187–195). This is the model for a future `do_exec` trace.
+
+---
+
+## 4. Stub E (the live demo driver)
+
+**Blob**: `/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/user_stub.S`, section `.rodata.user_stub_e`, symbols `_user_stub_e_start`/`_end` (291–338). It is the fork/exit/wait loop described in the header comment (268–289). Relevant `.equ` constants at top: `ENDPOINT_PM = 0` (46), `SENDREC = 3` (42), `PM_GETPID=0x700`, `PM_FORK=0x701`, `PM_EXIT=0x702`, `PM_WAIT=0x703` (51–54), `MSG_SIZE=104` (58). Note there is **no `PM_EXEC` .equ** — a new one would be needed for a stub-driven exec demo.
+
+Stub E logic (each `Message` carved from `[SP-104, SP)`):
+- Label `1:` — `PM_FORK` SENDREC to PM, no payload (296–305). Reads fork return from reply `m_type` at `[x9+4]`: `cbz` → child branch `3:` (307–308).
+- Parent — `PM_WAIT` SENDREC, then `b 1b` (311–319).
+- `3:` child — `PM_EXIT` SENDREC with status 0 at payload `[x9+8]` (322–332); PM tears it down, never replies; defensive park at `2:` (333–335).
+
+Other stubs for reference: A sender (60–81), B echo server (83–108), C `SYS_GETINFO` kernel-call client (110–137), D brk/mmap/munmap/SIGSEGV demo (139–266).
+
+**Wiring**: `/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/userland.rs`.
+- Stub VAs: `USER_CODE_VA_E = 0x0044_0000`, `USER_STACK_VA_E = 0x0084_0000` (74–76).
+- `extern "C"` symbol decls for all stub start/end (103–114).
+- Stub E has **no dedicated priv slot**: A–D use `STUB_{A..D}_PRIV_ID = 16..19` (92–95); E gets `None` (see below). Comment at 87–95 explains E is pointed at `USER_PRIV_ID = 20` (the shared USER priv) by PM.
+- `build_stub(STUB_E_PROC_NR, None, b'E', &amp;_user_stub_e_start, &amp;_user_stub_e_end, USER_CODE_VA_E, USER_STACK_VA_E, HeapWindow::EMPTY, /*frozen=*/true)` (225–235). The `frozen` flag drives `populate_stub_slot` (441–495): when frozen it leaves `RTS_NO_PRIV` set (493–494), i.e. built-but-unprivileged — the same state a forked child holds.
+- Stub E is **not** enqueued at boot (only A–D are, 261–266) — it waits for PM's `SYS_PRIVCTL(PRIVCTL_SET_USER)` to unblock it (comment 256–260, 220–224).
+- `build_stub` builds the full address space and `mem::forget`s the `AddrSpace` (373–416); `copy_stub_into_frame` (425–437) copies the blob via HHDM + I-cache flush.
+
+So today PM "drives" stub E only by releasing it once (`pm_init` → `privctl_set_user` for `STUB_E_PROC_NR`); thereafter E drives itself through PM_FORK/WAIT/EXIT. There is no exec drive path anywhere yet.
+
+---
+
+## 5. PM priv wiring — does PM already have SYS_EXEC?
+
+File: `/Users/kevinbarnard/src/minixrs/kernel/src/proc/table.rs`.
+
+**PM's boot entry** is in the static `IMAGE` table (140–), `N_IMAGE = NR_TASKS + NR_BOOT_PROCS = 16` (137–138). PM's entry (188–192) sets `nr: PM_PROC_NR`, **`trap_mask: SRV_T`** (all other servers VFS/RS/…/VM/SCHED are also `SRV_T`; the four kernel tasks are `TSK_T`/`CSK_T`).
+
+**`populate_priv`** (451–473): for any `SRV_T` entry it fills the IPC bitmap `[0, n_active)` **and** does `fill_bits(&amp;mut pr.k_call_mask, NR_KERN_CALLS_PHASE4)` (462–466). `NR_KERN_CALLS_PHASE4 = 18` (callnr.rs:60), so bits for call indices 0..17 are all set.
+
+`SYS_EXEC = KERNEL_CALL + 3` (callnr.rs:17) → call index **3**, which is inside `[0, 18)`. **Therefore PM's `k_call_mask` already grants `SYS_EXEC`** via the blanket SRV_T fill — no priv change needed for 4.7. (`fill_bits` helper: 502–510; `K_CALL_MASK_CHUNKS == 1` const-asserted at 514.)
+
+Contrast: the shared **USER priv** slot (`USER_PRIV_ID = 20`, 369) set up by `populate_user_priv` (385–417) has `trap_mask = USR_T`, `ipc_to = {PM}`, and `k_call_mask.fill(0)` (404) — so ordinary user procs (stub E, forked children) **cannot** issue `SYS_EXEC` directly; exec must go through PM. `populate_user_priv` also opens the reverse PM→USER `ipc_to` bit (410–416).
+
+**Kernel dispatch of `SYS_EXEC`**: `/Users/kevinbarnard/src/minixrs/kernel/src/system/mod.rs`.
+- `kernel_call_dispatch` (170–211): range-checks `m_type - KERNEL_CALL`, gates on `get_call_bit(k_call_mask, call_idx)` returning `ECALLDENIED` if unset (181–189). Target-taking calls (`SYS_VMCTL`, `SYS_SCHEDULE/CTL`, `SYS_KILL/GETKSIG/ENDKSIG`, `SYS_EXIT`, `SYS_FORK`, `SYS_PRIVCTL`) are routed here with the full `proc_table` (193–204). `SYS_EXEC` is **not** in that list.
+- `dispatch_caller_local` (217–237): `SYS_EXEC =&gt; stubs::do_exec(caller, caller_priv, msg)` (224). So `SYS_EXEC` is currently wired as a **caller-local** call (gets `&amp;mut Proc` caller + `&amp;Priv`, no table). A const-assert `NR_KERN_CALLS_PHASE4 == 18` locks the arm count (218–221).
+- `resolve_target(proc_table, caller_nr, target_e)` (64–74) — how target-taking calls turn an endpoint into a slot index (`SELF` → caller, else `okendpt`). This is what a table-taking `do_exec` would use if exec needs to name a target proc.
+
+**Current `do_exec` handler**: `/Users/kevinbarnard/src/minixrs/kernel/src/system/stubs.rs:25` — `enosys_stub!(do_exec);`, i.e. returns `ENOSYS`. The macro (17–23) yields `fn do_exec(_caller: &amp;mut Proc, _caller_priv: &amp;Priv, _msg: &amp;mut Message) -&gt; i32`. Comment convention: keep the MINIX `do_*` name so the real impl drops in without touching dispatch (8–10).
+
+**Boot-image binary lookup for exec**: `/Users/kevinbarnard/src/minixrs/kernel/src/boot_image/mod.rs`. `BootImage::module_by_name(&amp;self, name: &amp;str) -&gt; Option&lt;&amp;'static [u8]&gt;` (114–120) is explicitly annotated `#[allow(dead_code)] // consumed by slice 4.7 (SYS_EXEC of a boot-embedded binary)` (113); doc at 111–112. Sibling `module_by_proc_nr` (103–109). `BootImage::get()` validates the MXBI archive (53–77); ELF loader is `boot_image/elf.rs` (`load_into`, used by `load_boot_server`). MXBI layout documented at 12–19.
+
+---
+
+## 6. Coverage exclusions
+
+File: `/Users/kevinbarnard/src/minixrs/sonar-project.properties` (27 lines).
+
+- `sonar.exclusions=target/**,external/**,**/*.S,**/*.ld` (5) — the `user_stub.S` blob is excluded from analysis entirely.
+- `sonar.rust.lcov.reportPaths=lcov.info` (8).
+- **`sonar.coverage.exclusions`** (line 26):
+```
+servers/**/src/main.rs,drivers/**/src/main.rs,minix-ipc/src/**,server-rt/src/sef.rs,server-rt/src/ds.rs
+```
+
+So `servers/pm/src/main.rs` **is already covered by the `servers/**/src/main.rs` glob** — PM's main.rs (all the handlers and kernel-call helpers) is excluded from coverage, verified instead by the QEMU boot trace. The rationale comment (10–25) states the three excluded kinds: freestanding server/driver entry points, the `minix-ipc` trap library, and `server-rt/src/sef.rs`/`ds.rs`. It explicitly notes that testable logic stays in measured submodules — e.g. `servers/vm/src/region.rs`, `servers/ds/src/registry.rs`, `server-rt/src/classify.rs`.
+
+Implication for 4.7: `servers/pm/src/mproc.rs` is **not** excluded (it carries the host `#[cfg(test)]` unit tests and is measured), matching the established convention — pure `*_in` table logic goes in `mproc.rs` with tests; IPC-issuing handlers go in `main.rs` which is coverage-excluded.
+
+---
+
+## Cross-cutting facts for exec
+
+- Endpoint helpers (`/Users/kevinbarnard/src/minixrs/kernel-shared/src/endpoint.rs`): `Endpoint = i32` (26), `make_endpoint(gen, proc)` (115), `endpoint_proc(e) -&gt; ProcNr` (121), `endpoint_gen` (133), `bump_generation` (148), `ENDPOINT_GEN_SHIFT = 15` (92), `ENDPOINT_PROC_MASK` (95). `NONE`/`ANY`/`SELF` sentinels (105–112).
+- Boot constants (`/Users/kevinbarnard/src/minixrs/kernel-shared/src/com.rs`): `PM_PROC_NR = 0` (48), `VM_PROC_NR = 7` (55), `SCHED_PROC_NR = 9` (57), `SYSTEM = -2` (36), `NR_BOOT_PROCS = INIT+1 = 11`, `STUB_A_PROC_NR = 11`, `STUB_E_PROC_NR = 15`, `NR_STUB_PROCS = 5` (80–93), `NR_PROCS = 1024` (16), `boot_endpoint(ProcNr)` (101).
+- No `PM_EXEC` constant exists — PM's request range (`/Users/kevinbarnard/src/minixrs/kernel-shared/src/callnr.rs`) is `PM_RQ_BASE = 0x700` with `PM_GETPID/FORK/EXIT/WAIT` at +0..+3 and `NR_PM_MSGS = 4` (160–194). `NR_PM_MSGS` locks the dispatch coverage and there are const-asserts + tests (`pm_msgs_contiguous_from_base`, 622) that a new `PM_EXEC` would extend.
+- `SefConfig`/`Sef::receive` (`/Users/kevinbarnard/src/minixrs/server-rt/src/sef.rs`): the receive loop transparently handles SEF control (Ping/Signal/Init) and returns only Application messages (99–138); `sef_startup` does the `GET_WHOAMI` handshake and runs `init_fresh` (40–81).</result>
+<usage><subagent_tokens>114139</subagent_tokens><tool_uses>20</tool_uses><duration_ms>225781</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ab2f3ab5f47f72e21</task-id>
+<tool-use-id>toolu_018bHjcAfmBNAbdVPJJYb1qA</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/6d7eff75-b1d8-4950-ae34-c6d479a10a72/tasks/ab2f3ab5f47f72e21.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore freestanding worker ELF build" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything needed. Here is the complete report.
+
+---
+
+# Slice 4.7 Worker ELF — how existing freestanding server ELFs are built, linked, and packed
+
+## 1. `kernel/build.rs` — server packing
+
+File: `/Users/kevinbarnard/src/minixrs/kernel/build.rs` (entire file read).
+
+The aarch64 arm of `main()` (lines ~33-70) assembles the `.S` entry/vector files, then calls `build_boot_image(&amp;out_dir)` (line 68). Everything server-related lives below.
+
+**The `servers` array** — `build_boot_image`, lines ~101-108. This is `[(crate, dir, proc_nr); 6]`:
+```rust
+let servers: [(&amp;str, std::path::PathBuf, i32); 6] = [
+    ("minixrs-vm",    workspace.join("servers/vm"),    7), // VM_PROC_NR
+    ("minixrs-ds",    workspace.join("servers/ds"),    5), // DS_PROC_NR
+    ("minixrs-vfs",   workspace.join("servers/vfs"),   1), // VFS_PROC_NR
+    ("minixrs-sched", workspace.join("servers/sched"), 9), // SCHED_PROC_NR
+    ("minixrs-rs",    workspace.join("servers/rs"),    2), // RS_PROC_NR
+    ("minixrs-pm",    workspace.join("servers/pm"),    0), // PM_PROC_NR
+];
+```
+The loop (lines ~110-117) builds each ELF, reads its bytes, strips the `minixrs-` prefix to get the archive name (`vm`, `ds`, ...), and pushes `(proc_nr, name, bytes)`. The packed archive is written to `OUT_DIR/boot_image.mxbi` and exported as `cargo:rustc-env=BOOT_IMAGE_PATH=...` (lines ~119-124).
+
+**`build_server(crate_name, crate_dir, workspace, out_dir) -&gt; PathBuf`** — lines ~144-193. Key mechanics:
+- `user_ld = crate_dir.join("user.ld")` and `target_dir = out_dir.join("{crate_name}-target")` (lines ~152-153) — the **isolated CARGO_TARGET_DIR** per server, so nesting cargo inside the build script doesn't deadlock on the outer kernel target-dir lock.
+- **CARGO_ENCODED_RUSTFLAGS linker-script override** (lines ~166-186):
+```rust
+let encoded_rustflags = format!("-Clink-arg=-T{}", user_ld.display());
+...
+Command::new(cargo)
+    .current_dir(workspace)
+    .args(["build","-p",crate_name,"--target","aarch64-unknown-none","--release"])
+    .env("CARGO_TARGET_DIR", &amp;target_dir)
+    .env_remove("RUSTFLAGS")
+    .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags)
+    .status()
+```
+This replaces the workspace `.cargo/config.toml` rustflags that would otherwise force the kernel linker script onto the `aarch64-unknown-none` triple (see §note below). The produced ELF path is `target_dir.join("aarch64-unknown-none/release/{crate_name}")` (line ~188).
+
+Note: `CARGO_ENCODED_RUSTFLAGS` is documented as a single `-Clink-arg=-T&lt;user.ld&gt;` here (comment at lines ~163-165 mentions the `\x1f` separator cargo expects, but only one flag is passed so no separator is present).
+
+**`.cargo/config.toml`** (`/Users/kevinbarnard/src/minixrs/.cargo/config.toml`, lines 10-12) is what the override defeats:
+```toml
+[target.aarch64-unknown-none]
+runner = "tools/qemu-run.sh"
+rustflags = ["-C", "link-arg=-Tkernel/src/arch/aarch64/linker.ld"]
+```
+
+**`pack_mxbi(modules) -&gt; Vec&lt;u8&gt;`** — lines ~207-256. Archive format:
+- 16-byte header: magic `0x4942_584D` ("MXBI" LE), version `1`, `entry_count`, `total_size` — all LE u32.
+- `entry_count` × 32-byte records: `{ proc_nr:i32, offset:u32, len:u32, name:[u8;20] }`. Asserts `name.len() &lt; 20` (line ~228).
+- ELF payloads back-to-back, each at its recorded offset (lines ~250-252).
+
+**rerun-if-changed watch list:**
+- In `build_boot_image` (lines ~92-98): `minix-ipc/src`, `server-rt/src`, `kernel-shared/src` — watched once, each as a directory (covers submodules recursively).
+- In `build_server` (lines ~155-161): per-server `crate_dir/src` (directory), `user.ld`, and `Cargo.toml`.
+- In `main`: each `.S` source, `linker.ld`.
+
+**Whether the worker needs a proc_nr — load-bearing fact:** The `proc_nr` in each MXBI record is consumed at boot by `BootImage::iter()`, which loads **every** packed module. In `kernel/src/arch/aarch64/userland.rs` lines 160-165:
+```rust
+let image = crate::boot_image::BootImage::get();
+for (nr, elf) in image.iter() {
+    load_boot_server(nr, elf, SERVER_STACK_VA);
+}
+```
+`load_boot_server` calls `proc_slot_mut(nr).expect(...)` (userland.rs line 315), which panics if `nr` has no proc slot. So there is currently **no skip mechanism** — anything packed into the servers array with a real proc_nr is boot-loaded into that proc slot. There are two independent sources of truth that must agree for a boot server:
+1. build.rs `servers` array (which ELFs get packed + their record proc_nr), and
+2. the kernel-side `IMAGE` / `BootEntry` array in `/Users/kevinbarnard/src/minixrs/kernel/src/proc/table.rs` (lines ~188-287) which pre-populates the proc/priv slot (name, priority, `runnable`).
+
+The already-present, currently-`#[allow(dead_code)]` exec hook is `BootImage::module_by_name(name)` (`kernel/src/boot_image/mod.rs` lines 111-120), whose doc-comment reads *"Reused by exec in slice 4.7 to resolve a boot-embedded binary by name."* `SYS_EXEC` itself is presently `enosys_stub!(do_exec)` (`kernel/src/system/stubs.rs:25`, dispatched at `kernel/src/system/mod.rs:224`), i.e. not yet implemented — 4.7 territory. So a worker packed for exec-by-name needs to be reachable via `module_by_name` but must **not** be boot-loaded by `iter()` — the current iter loads all records unconditionally, so this is the key gap the plan must address (e.g. a sentinel proc_nr the iter/loader skips).
+
+## 2. Minimal server crate — `servers/vfs` (skeletal, smallest)
+
+`servers/vfs/Cargo.toml` (`/Users/kevinbarnard/src/minixrs/servers/vfs/Cargo.toml`):
+```toml
+[package]
+name = "minixrs-vfs"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "minixrs-vfs"
+path = "src/main.rs"
+
+[dependencies]
+minixrs-kernel-shared = { path = "../../kernel-shared" }
+minixrs-ipc = { path = "../../minix-ipc" }
+minixrs-server-rt = { path = "../../server-rt" }
+```
+(`servers/ds/Cargo.toml` is identical modulo name; ds additionally has `src/registry.rs`.)
+
+`servers/vfs/src/main.rs` (`/Users/kevinbarnard/src/minixrs/servers/vfs/src/main.rs`) — the freestanding structure the worker must mirror:
+- SPDX header lines 1-2: `// SPDX-License-Identifier: BSD-3-Clause` / `// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors`.
+- Freestanding gating, lines 18-19: `#![cfg_attr(not(test), no_std)]` / `#![cfg_attr(not(test), no_main)]`.
+- `_start` shim, lines 28-33:
+```rust
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(link_section = ".text._start"))]
+pub extern "C" fn _start() -&gt; ! {
+    main()
+}
+```
+- Panic handler, lines 74-80:
+```rust
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(_: &amp;core::panic::PanicInfo) -&gt; ! {
+    loop { core::hint::spin_loop() }
+}
+```
+- `main()` (lines 36-63) calls `sef_startup(SefConfig { init_fresh: Some(vfs_init), signal_handler: None })`, then loops on `sef.receive(&amp;mut msg)` with `Message { m_source: 0, m_type: 0, payload: [0u8; 96] }`. The `_start` doc-comment (lines 26-27) explicitly states: *"The kernel primes `SP_EL0` before `eret`, so `_start` can dive straight into Rust without setting up a stack itself."*
+
+## 3. `user.ld` linker script
+
+There is **one `user.ld` per server** (not shared): `servers/{vm,ds,vfs,sched,rs,pm}/user.ld` each exist. They are byte-identical for ds/vfs/sched/rs/pm (same md5 `cff16ca3...`); `servers/vm/user.ld` differs only by two omitted comment lines (the "Each server gets its own per-process TTBR0..." sentence) — no functional difference. Full contents (`servers/vfs/user.ld`):
+```
+OUTPUT_FORMAT(elf64-littleaarch64)
+OUTPUT_ARCH(aarch64)
+ENTRY(_start)
+
+PHDRS {
+    text   PT_LOAD FLAGS(5); /* R+X */
+    rodata PT_LOAD FLAGS(4); /* R   */
+    data   PT_LOAD FLAGS(6); /* RW  */
+}
+
+SECTIONS {
+    . = 0x00100000;
+
+    .text : ALIGN(4K) {
+        KEEP(*(.text._start))
+        *(.text .text.*)
+    } :text
+
+    . = ALIGN(4K);
+    .rodata : ALIGN(4K) {
+        *(.rodata .rodata.*)
+    } :rodata
+
+    . = ALIGN(4K);
+    .data : ALIGN(4K) {
+        *(.data .data.*)
+    } :data
+
+    .bss : ALIGN(4K) {
+        *(.bss .bss.*)
+        *(COMMON)
+    } :data
+
+    /DISCARD/ : {
+        *(.eh_frame)
+        *(.eh_frame_hdr)
+        *(.note .note.*)
+        *(.comment)
+        *(.dynsym .dynstr .hash .gnu.hash .dynamic)
+    }
+}
+```
+Load base `0x0010_0000` (1 MiB), every PT_LOAD page-aligned in both vaddr and file offset, no dynamic sections/relocations. The header comment states the stack is NOT part of the ELF — the kernel allocates a stack frame and sets SP_EL0 before `eret`. Produces a static `ET_EXEC` consumed by `kernel/src/boot_image/elf.rs`.
+
+## 4. `minix-ipc` public API
+
+File: `/Users/kevinbarnard/src/minixrs/minix-ipc/src/lib.rs`. Crate is `#![no_std]` (line 21). Public function signatures (all return `i32` — the kernel reply code, from saved `x0`):
+```rust
+pub fn ipc_send(dest: Endpoint, msg: &amp;mut Message) -&gt; i32       // line 28  (SEND)
+pub fn ipc_receive(src: Endpoint, msg: &amp;mut Message) -&gt; i32     // line 35  (RECEIVE)
+pub fn ipc_sendrec(src_dest: Endpoint, msg: &amp;mut Message) -&gt; i32 // line 42 (SENDREC)
+pub fn ipc_sendnb(dest: Endpoint, msg: &amp;mut Message) -&gt; i32     // line 49  (SENDNB)
+pub fn ipc_notify(dest: Endpoint) -&gt; i32                        // line 58  (NOTIFY, no msg buffer)
+```
+`Endpoint` and `Message` come from `minixrs_kernel_shared` (line 24). The aarch64 SVC stub is `ipc_trap` (lines 64-83): `endpoint → x0`, `primitive → x1`, `msg → x2`, `svc #0`, with `inlateout("x0")` (only x0 clobbered), `options(nostack)`. `ipc_trap_no_msg` (lines 90-110) is the NOTIFY-only variant with `x2 = 0` and `options(nostack, nomem)`. Non-aarch64 fallbacks (lines 115-125) are `unreachable!`.
+
+For the worker to "prove it ran," `PM_GETPID` = `0x700` (`PM_RQ_BASE`, `/Users/kevinbarnard/src/minixrs/kernel-shared/src/callnr.rs:167`) sent via `ipc_sendrec(boot_endpoint(PM_PROC_NR /* 0 */), &amp;mut msg)` is the established minimal call (this is exactly stub E's loop).
+
+## 4b. How a loaded ELF proves it ran (observability)
+
+EL0 servers cannot print; activity is observed via kernel UART traces keyed on the **caller proc number**. In `/Users/kevinbarnard/src/minixrs/kernel/src/ipc/mod.rs`, `do_ipc` (line 93) emits, at lines 121-127:
+```rust
+if n &lt;= TRACE_HEAD || n % TRACE_EVERY == 0 {
+    let mut uart = Uart::new();
+    let _ = writeln!(uart,
+        "[ipc {n}] caller={caller_nr} call={call_nr} target={src_dst_e:#x} result={result}",
+    );
+}
+```
+`TRACE_EVERY = 100` (line 63), `TRACE_HEAD = 24` (line 77) — the first 24 IPC ops are traced unconditionally, then every 100th. So *any* SVC the worker issues (e.g. `SEND`/`SENDREC`) surfaces as an `[ipc]` line tagged with its `caller` proc number. Separately, `load_boot_server` prints an `[as] &lt;name&gt; nr=… ttbr0_pa=… asid=… entry=…` line when a module is loaded (userland.rs lines 328-336), and `SYS_*` kernel calls are sampled as `[ksys]` traces (referenced in `kernel/src/proc/sched.rs:37`, `system/do_sig.rs:58`, `system/do_schedule.rs:55`). The existing pattern for a proc that only becomes observable late is stub E: comment at `kernel-shared/src/com.rs:89` — *"…and it then loops `SENDREC PM_GETPID`"*; its `[ipc]` lines with `caller=15` are its evidence. Any server built on `server-rt` is also observable at startup via the `SYS_GETINFO(GET_WHOAMI)` SENDREC to `SYSTEM` inside `sef_startup` (`server-rt/src/sef.rs:51`).
+
+## 5. Kernel entry/SP setup for a loaded server
+
+File: `/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/userland.rs`.
+
+`load_boot_server(nr, elf, stack_va)` — lines 295-344. Relevant setup:
+```rust
+let mut aspace = AddrSpace::new()...;
+let entry = crate::boot_image::elf::load_into(elf, &amp;mut aspace)...;   // line 302-303
+let stack_frame = alloc_frame()...;                                   // line 306
+aspace.map_page(stack_va, stack_frame.addr(), Prot::RW_DATA)...;      // line 307-309
+let asid = unsafe { alloc_asid() };                                  // line 311
+// ... into the proc slot:
+p.regs.elr_el1 = entry;                          // line 316  — entry PC
+p.regs.sp_el0  = stack_va + PAGE_SIZE as u64;    // line 317  — SP = top of the one stack page
+p.regs.spsr_el1 = STUB_SPSR_EL0;                 // line 318  — EL0t, IRQs unmasked (0x340)
+p.ttbr0_pa = ttbr0_pa; p.asid = asid;            // lines 319-320
+p.rts_flags.store(0, Ordering::Relaxed);         // line 323  — clear RTS_NO_PRIV
+```
+Constants: `SERVER_STACK_VA = 0x0020_0000` (2 MiB), line 121 — a single zeroed RW page; SP starts at its **top** (`stack_va + PAGE_SIZE`). `STUB_SPSR_EL0 = 0x340` (line 99, EL0t, DAIF: IRQ unmasked, debug/SError/FIQ masked). `entry` is the ELF's `e_entry` returned by `elf::load_into` (`kernel/src/boot_image/elf.rs`; requires `ET_EXEC`, const `ET_EXEC = 2` at line 62, checked at line 103). The stack VA is shared across all servers because each has its own TTBR0 (comment lines 116-121 of table.rs / 285-286 of userland.rs).
+
+This is the convention the worker's `_start` relies on: SP_EL0 already points to a valid stack top and ELR_EL1 = `e_entry`, so `_start` needs no stack setup. (For contrast, the hand-coded stubs are set up the same way via `populate_stub_slot`, userland.rs lines 442-474 — `p.regs.elr_el1 = entry_va; p.regs.sp_el0 = stack_top; p.regs.spsr_el1 = STUB_SPSR_EL0`.) Note that exec (4.7) will need to reproduce this `entry`/SP/SPSR priming and the "minimal initial user stack" (one page, SP at top) that boot servers currently get from `load_boot_server`.
+
+## 6. Workspace membership + `publish = false`
+
+Root `/Users/kevinbarnard/src/minixrs/Cargo.toml`, `[workspace] members`:
+```toml
+members = [
+    "kernel",
+    "kernel-shared",
+    "minix-ipc",
+    "server-rt",
+    "servers/pm",
+    "servers/vfs",
+    "servers/vm",
+    "servers/rs",
+    "servers/ds",
+    "servers/sched",
+    "drivers/driver-rt",
+    "drivers/virtio-blk",
+    "drivers/virtio-net",
+    "drivers/virtio-console",
+    "drivers/memory",
+    "fs/mfs",
+    "fs/pfs",
+    "userland/init",
+    "userland/sh",
+    "userland/coreutils",
+    "minixrs",
+]
+```
+A new worker crate (e.g. `servers/worker` or `userland/worker`) must be added to this list. Server crates mark `publish = false` directly in their own `Cargo.toml` (`servers/vfs/Cargo.toml` line 6; same in `servers/ds/Cargo.toml`). Note the two idioms in use: the skeletal servers (vfs, ds) spell out `version`/`edition`/`license` literally and add `publish = false`, whereas library crates like `server-rt`/`minix-ipc` use `version.workspace = true` etc. The workspace defines `[workspace.package]` (version `0.1.0`, edition `2024`, license `BSD-3-Clause`, repo/homepage/authors) and `[profile.release]` `opt-level = 's'`, `panic = "abort"`, plus `[profile.dev] panic = "abort"` — the `panic = "abort"` profiles are what let the `#[panic_handler] -&gt; !` loop compile without an unwinder.
+
+## Extra: proc-number constants (for wiring the record `proc_nr`)
+
+`/Users/kevinbarnard/src/minixrs/kernel-shared/src/com.rs` lines 48-90 define the `*_PROC_NR` constants (PM=0, VFS=1, RS=2, MEM=3, TTY=4, DS=5, MFS=6, VM=7, PFS=8, SCHED=9, INIT=10; stubs A-E = 11-15). `NR_BOOT_PROCS = INIT_PROC_NR + 1 = 11` (line 62). These are the values the build.rs `servers` array's `proc_nr` column must match, and they index the `IMAGE`/proc table. A worker exec target has no assigned proc_nr in this file today.</result>
+<usage><subagent_tokens>68385</subagent_tokens><tool_uses>34</tool_uses><duration_ms>2244446</duration_ms></usage>
+</task-notification>
