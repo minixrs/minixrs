@@ -43,13 +43,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::com::NR_SYS_PROCS;
-use minixrs_kernel_shared::endpoint::{Endpoint, NONE, endpoint_proc};
+use minixrs_kernel_shared::endpoint::{Endpoint, NONE};
 use minixrs_kernel_shared::error::{EINVAL, OK};
 use minixrs_kernel_shared::message::Message;
 use minixrs_kernel_shared::signal::NSIG;
 
-use crate::proc::flags::{RTS_SIG_PENDING, RTS_SIGNALED, RTS_SLOT_FREE};
-use crate::proc::table::{N_PROC_SLOTS, proc_index};
+use crate::proc::flags::{RTS_SIG_PENDING, RTS_SIGNALED};
+use crate::proc::table::N_PROC_SLOTS;
 use crate::proc::{Priv, Proc, sched};
 use crate::uart::Uart;
 
@@ -70,7 +70,7 @@ static ENDKSIG_COUNT: AtomicU64 = AtomicU64::new(0);
 pub(super) fn do_kill(
     proc_table: &mut [Proc; N_PROC_SLOTS],
     priv_table: &mut [Priv; NR_SYS_PROCS],
-    _caller_nr: ProcNr,
+    caller_nr: ProcNr,
     msg: &mut Message,
 ) -> i32 {
     let target_e: Endpoint = read_i32(msg, 0);
@@ -79,16 +79,16 @@ pub(super) fn do_kill(
     if !(1..NSIG as i32).contains(&signo) {
         return EINVAL;
     }
-    let Some(target_idx) = proc_index(endpoint_proc(target_e)) else {
-        return EINVAL;
+    // okendpt (via resolve_target) subsumes the old RTS_SLOT_FREE check and
+    // additionally rejects stale generations now that slots recycle.
+    let target_idx = match super::resolve_target(proc_table, caller_nr, target_e) {
+        Ok(idx) => idx,
+        Err(e) => return e,
     };
-    let (rts, name0, nr) = {
+    let (name0, nr) = {
         let p = &proc_table[target_idx];
-        (p.rts_flags.load(Ordering::Relaxed), p.name[0], p.nr)
+        (p.name[0], p.nr)
     };
-    if rts & RTS_SLOT_FREE != 0 {
-        return EINVAL;
-    }
 
     cause_sig(proc_table, priv_table, target_idx, signo);
 
@@ -136,8 +136,11 @@ fn cause_sig(
 ///
 /// Replies with the proc's endpoint and pending bitmap, handing the bitmap
 /// off (clearing [`Proc::sig_pending`]) but leaving the RTS signal state set
-/// until PM acknowledges with `SYS_ENDKSIG`. Replies `NONE` when no proc is
-/// pending — PM's drain loop terminates on that.
+/// until PM disposes of the proc: `SYS_ENDKSIG` for survivors, or `SYS_EXIT`
+/// for terminations — the 4.6 full exit zeroes all signal state itself, so a
+/// terminated target gets **no** acknowledge (a post-exit ENDKSIG would just
+/// fail `okendpt`). Replies `NONE` when no proc is pending — PM's drain loop
+/// terminates on that.
 ///
 /// [`Proc::sig_pending`]: crate::proc::Proc::sig_pending
 pub(super) fn do_getksig(
@@ -186,12 +189,13 @@ pub(super) fn do_getksig(
 /// handled, resume" case.
 pub(super) fn do_endksig(
     proc_table: &mut [Proc; N_PROC_SLOTS],
-    _caller_nr: ProcNr,
+    caller_nr: ProcNr,
     msg: &mut Message,
 ) -> i32 {
     let target_e: Endpoint = read_i32(msg, 0);
-    let Some(target_idx) = proc_index(endpoint_proc(target_e)) else {
-        return EINVAL;
+    let target_idx = match super::resolve_target(proc_table, caller_nr, target_e) {
+        Ok(idx) => idx,
+        Err(e) => return e,
     };
     let (rts, name0, nr) = {
         let p = &proc_table[target_idx];

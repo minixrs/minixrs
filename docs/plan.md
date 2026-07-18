@@ -940,7 +940,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   every line `result=0`; zero panic / `el0_sync_unexpected`. Host: `cargo test
   -p minixrs-rs -p minixrs-kernel-shared -p minixrs-server-rt` green; `cargo
   check --workspace` + clippy `-D warnings` + fmt clean.
-- **Slice 4.5** ◀ ready (branch `feature/phase-4-5-pm-signals`, pending merge) —
+- **Slice 4.5** ✓ shipped (PR #27, merged 2026-07-17) —
   PM part A: mproc + getpid + real `SYS_PRIVCTL` + minimal signals
   (kernel-mediated, MINIX-faithful). The kernel gains the signal trio
   `SYS_KILL`/`SYS_GETKSIG`/`SYS_ENDKSIG` (`0x60F..0x611`;
@@ -994,7 +994,9 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   `cargo test --workspace` green (new mproc + callnr/signal/com + classify
   tests); `cargo check --workspace` + clippy `-D warnings` + fmt clean; miri
   job gains `-p minixrs-pm` (advisory).
-- **Slice 4.6** ◀ next — PM part B: fork + exit + wait. Kernel `SYS_FORK` (free
+- **Slice 4.6** ◀ ready (two PRs like 3.4: 4.6a kernel half on branch
+  `feature/phase-4-6a-kernel-fork-exit`, pending merge; 4.6b PM/VM/stub-E half
+  to follow) — PM part B: fork + exit + wait. Kernel `SYS_FORK` (free
   slot, copy register frame, bump generation, alloc ASID, eager AS copy by
   walking the parent's TTBR0 + copying each user page via HHDM; CoW deferred;
   must zero `sig_pending` on slot reuse) and completion of 4.5's
