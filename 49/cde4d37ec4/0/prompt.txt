@@ -1,0 +1,1 @@
+Work on the next slice in @docs/plan.md which should wrap up phase 4.  Let me know if there is anything hanging before we start on phase 5

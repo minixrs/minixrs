@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "49cde4d37ec4",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-4-8-init",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "Cargo.lock",
+    "book/src/SUMMARY.md",
+    "book/src/servers/overview.md",
+    "docs/plan.md",
+    "kernel-shared/src/com.rs",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/proc/table.rs",
+    "kernel/src/system/do_privctl.rs",
+    "servers/pm/src/main.rs",
+    "servers/pm/src/mproc.rs",
+    "userland/init/Cargo.toml",
+    "userland/init/src/main.rs",
+    "userland/init/user.ld"
+  ],
+  "sessions": [
+    {
+      "metadata": "/49/cde4d37ec4/0/metadata.json",
+      "transcript": "/49/cde4d37ec4/0/full.jsonl",
+      "content_hash": "/49/cde4d37ec4/0/content_hash.txt",
+      "prompt": "/49/cde4d37ec4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 253,
+    "cache_creation_tokens": 279262,
+    "cache_read_tokens": 28174762,
+    "output_tokens": 114185,
+    "api_call_count": 128
+  }
+}
