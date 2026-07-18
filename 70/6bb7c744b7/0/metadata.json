@@ -1,0 +1,81 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "706bb7c744b7",
+  "session_id": "b04a7c40-e686-4e65-a963-6ca2ee771551",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-18T15:06:34.236291Z",
+  "branch": "feature/phase-4-6b-pm-fork-exit-wait",
+  "checkpoints_count": 2,
+  "save_step_count": 1,
+  "files_touched": [
+    "servers/pm/src/main.rs",
+    "servers/pm/src/mproc.rs",
+    "servers/vm/src/region.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8",
+  "turn_id": "638d40605deb",
+  "token_usage": {
+    "input_tokens": 65,
+    "cache_creation_tokens": 137410,
+    "cache_read_tokens": 4802944,
+    "output_tokens": 46345,
+    "api_call_count": 35
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-review-2026-07-18T14:01:04.707523Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "2442c969409c",
+      "timestamp": "2026-07-18T14:01:04.707523Z",
+      "native": {
+        "command": "/review"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/review",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-18T15:06:34.223508Z",
+    "agent_lines": 35,
+    "agent_removed": 6,
+    "human_added": 1,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 36,
+    "total_lines_changed": 43,
+    "agent_percentage": 95.34883720930233,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 35,
+      "agent_lines_removed": 6
+    }
+  ]
+}
