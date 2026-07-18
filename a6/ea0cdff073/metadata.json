@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "a6ea0cdff073",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-4-6b-pm-fork-exit-wait",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/plan.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel/src/arch/aarch64/user_stub.S",
+    "servers/pm/src/main.rs",
+    "servers/pm/src/mproc.rs",
+    "servers/vm/src/main.rs",
+    "servers/vm/src/region.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a6/ea0cdff073/0/metadata.json",
+      "transcript": "/a6/ea0cdff073/0/full.jsonl",
+      "content_hash": "/a6/ea0cdff073/0/content_hash.txt",
+      "prompt": "/a6/ea0cdff073/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 204,
+    "cache_creation_tokens": 332637,
+    "cache_read_tokens": 25368768,
+    "output_tokens": 145623,
+    "api_call_count": 104
+  }
+}
