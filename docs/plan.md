@@ -994,20 +994,50 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   `cargo test --workspace` green (new mproc + callnr/signal/com + classify
   tests); `cargo check --workspace` + clippy `-D warnings` + fmt clean; miri
   job gains `-p minixrs-pm` (advisory).
-- **Slice 4.6** ◀ ready (two PRs like 3.4: 4.6a kernel half on branch
-  `feature/phase-4-6a-kernel-fork-exit`, pending merge; 4.6b PM/VM/stub-E half
-  to follow) — PM part B: fork + exit + wait. Kernel `SYS_FORK` (free
+- **Slice 4.6** — PM part B: fork + exit + wait (two PRs like 3.4). **4.6a**
+  ✓ shipped (PR #28, merged 2026-07-18): the kernel half — `SYS_FORK` (free
   slot, copy register frame, bump generation, alloc ASID, eager AS copy by
   walking the parent's TTBR0 + copying each user page via HHDM; CoW deferred;
-  must zero `sig_pending` on slot reuse) and completion of 4.5's
-  `SYS_EXIT`-lite (tear down AS via `AddrSpace::destroy`, free slot, bump
-  generation, unblock receivers blocked on the dead endpoint). Forked user
-  procs share the 4.5 USER priv slot (`USER_PRIV_ID`, MINIX's `static_priv`
-  model) via `SYS_PRIVCTL(PRIVCTL_SET_USER)` so fork can't exhaust the 64-slot
-  `PRIV_TABLE`. `VM_FORK` clones the parent's `ClientRegions` into the child.
-  PM owns the tree: fork → `SYS_FORK` + `VM_FORK` + `SCHEDULING_START`; exit →
-  zombie + SIGCHLD; `wait`/`waitpid` → reap.
-- **Slice 4.7** — exec: `SYS_EXEC` + PM exec of a boot-embedded binary. Kernel
+  zeroes `sig_pending` on slot reuse), completion of 4.5's `SYS_EXIT`-lite into a
+  full teardown (`AddrSpace::destroy`, free slot, bump generation,
+  `unblock_dependents`), `okendpt` stale-generation rejection, and ASID
+  free-list recycling. **4.6b** ◀ ready (branch
+  `feature/phase-4-6b-pm-fork-exit-wait`, pending merge): the PM/VM/stub-E half.
+  New PM requests `PM_FORK`/`PM_EXIT`/`PM_WAIT` (`PM_RQ_BASE + 1..3`) let a user
+  proc drive the lifecycle entirely through PM (POSIX shape: user → PM, never
+  user → kernel). `handle_fork` owns the tree — allocate a child `mproc` slot
+  (fork pool `[16, NR_MPROCS)`, slot index = child kernel proc-nr), `SYS_FORK`
+  (kernel clones the *frozen* child), `VM_FORK` (new `0xC04` request; VM's
+  `region::fork` clones the parent's `ClientRegions`, `MAX_CLIENTS` widened
+  16→32 to address the fork pool), `SCHEDULING_START` (SCHED schedules the
+  still-frozen child — verified safe: `rts_unset` only enqueues on the
+  last-block-bit clear, so `SYS_SCHEDULE`/`SYS_PRIVCTL` leave it a blocked
+  `RTS_RECEIVING` receiver), `SYS_PRIVCTL(PRIVCTL_SET_USER)` to release the
+  freeze, then a reply to **both** halves of the shared SENDREC (child gets
+  `m_type = 0`, parent gets the child pid — MINIX fork-returns-twice). `mproc`
+  gains a generation-aware `endpoint` field, `exit_status`, `MF_WAITING`, and a
+  free-slot allocator / zombie-and-reap helpers (all pure `*_in`, host-tested).
+  `handle_exit` = `SCHEDULING_STOP` (before teardown, while the endpoint is
+  valid) + `SYS_EXIT` + zombie; `handle_wait` reaps a zombie or suspends the
+  parent (no reply) until `handle_exit` wakes it. **Scope decision:** parent
+  notification is the zombie + wait-reap handshake only — the kernel signal path
+  default-*terminates* user procs, so a real `SIGCHLD` to the handler-less
+  parent would kill it; async `SIGCHLD` waits for Phase 5 handlers. No new priv
+  wiring (PM↔VM, PM↔SCHED, child↔`USER_PRIV_ID` edges all pre-exist). Stub E
+  rewritten from the 4.5 `PM_GETPID` loop into a fork/exit/wait loop: fork, and
+  on the reply `m_type` branch child→`PM_EXIT(0)` vs parent→`PM_WAIT`→loop.
+  Verified in QEMU over 25 s: eleven `[as]` lines; `[ksys SYS_PRIVCTL] target=E`
+  releasing E then each child; a sustained fork loop (69 cycles, still forking at
+  t≈25 s) all reusing child slot 16 with a monotonically advancing endpoint
+  generation (`0x10 → 0x220010` — proof of `okendpt` slot/ASID recycling and
+  full reap between cycles), `[ksys SYS_FORK]`/`SYS_EXIT] target=E nr=16 freed=2`
+  round-trips; A↔B ping-pong, C `SYS_GETINFO`, D's 3 resolved `[pf]` + 1 fatal
+  SIGSEGV, six RS `[alarm]` fires, SCHED `[noq]` delegation all intact; every
+  traced `result=0` (bar D's designed kill), zero panic / `el0_sync_unexpected`.
+  Host: `cargo test --workspace` green (new `mproc` fork/wait, `region::fork`,
+  `callnr` contiguity tests); `cargo check --workspace` + clippy `-D warnings` +
+  fmt clean.
+- **Slice 4.7** ◀ next — exec: `SYS_EXEC` + PM exec of a boot-embedded binary. Kernel
   builds a fresh `AddrSpace`, `elf::load_into` the archive module resolved by
   `module_by_name`, sets a minimal initial user stack, swaps `ttbr0_pa` +
   destroys the old AS, sets entry/SP. PM's `execve(name)` selects the embedded
