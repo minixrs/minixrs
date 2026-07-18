@@ -276,6 +276,12 @@ pub fn munmap(nr: i32, addr: u64, len: u64) -> Result<(u64, u64), i32> {
 /// parent's heap/mmap regions (and its `mmap_next` bump cursor). `EINVAL` if
 /// either proc number is untrackable. An untracked parent (never touched
 /// memory) clones as an empty set, which is correct.
+///
+/// There is deliberately no per-exit VM teardown yet (no `VM_EXIT`), so a child's
+/// region set outlives the kernel proc. That is benign: the assignment below is a
+/// *full overwrite* of `child_nr`'s entry, so a recycled proc number never
+/// inherits stale regions from a previous occupant, and the fault path only ever
+/// resolves addresses for live procs.
 pub fn fork(parent_nr: i32, child_nr: i32) -> Result<(), i32> {
     // Snapshot the parent by value first (ClientRegions is Copy) so we never
     // hold two live borrows into TABLE at once.

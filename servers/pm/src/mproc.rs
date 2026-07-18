@@ -538,7 +538,7 @@ mod tests {
         assert!(in_use_in(&t, slot));
         assert_eq!(parent_of_in(&t, slot), Some(parent));
         assert_eq!(endpoint_of_in(&t, slot), Some(0xABCD));
-        // A live child is not yet a getpid-visible... it is, actually: live.
+        // A live child is getpid-visible.
         assert_eq!(getpid_in(&t, slot), Some((16, 15)));
     }
 
