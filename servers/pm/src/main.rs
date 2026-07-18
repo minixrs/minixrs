@@ -146,10 +146,14 @@ fn handle_getpid(msg: &mut Message) {
 /// terminate (`SYS_EXIT`) for user processes; boot servers are skipped.
 ///
 /// Contract with the kernel (see `system::do_sig`): every endpoint GETKSIG
-/// returns must be ENDKSIG-acknowledged — even skipped or unknown ones —
-/// or it stays signal-pending forever. Terminate-before-acknowledge order
-/// matters: `SYS_ENDKSIG` clears block flags, so a target must already hold
-/// `RTS_PROC_STOP` when its signal state clears.
+/// returns must be either terminated or ENDKSIG-acknowledged, or it stays
+/// signal-pending forever. Terminated targets get **no** `SYS_ENDKSIG`: as of
+/// slice 4.6 `SYS_EXIT` is a full teardown — signal state zeroed, slot freed,
+/// endpoint generation bumped — so a post-exit acknowledge would only bounce
+/// off `okendpt` with `EDEADSRCDST`. (MINIX can acknowledge after terminate
+/// because its `sys_clear` is deferred behind VFS; minix.rs tears down
+/// immediately.) GETKSIG's scan gates on `sig_pending != 0`, which the exit
+/// zeroed, so the dead proc is never re-returned.
 #[cfg_attr(test, allow(dead_code))]
 fn drain_ksigs(system: Endpoint) {
     loop {
@@ -176,8 +180,9 @@ fn drain_ksigs(system: Endpoint) {
             .unwrap_or(mproc::KillAction::NotFound);
         if matches!(action, mproc::KillAction::Terminate) {
             sys_exit(system, target_e);
+        } else {
+            sys_endksig(system, target_e);
         }
-        sys_endksig(system, target_e);
     }
 }
 

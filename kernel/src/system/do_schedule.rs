@@ -39,7 +39,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::SCHEDCTL_FLAG_KERNEL;
-use minixrs_kernel_shared::endpoint::{Endpoint, NONE, SELF, endpoint_proc};
+use minixrs_kernel_shared::endpoint::{Endpoint, NONE};
 use minixrs_kernel_shared::error::{EINVAL, OK};
 use minixrs_kernel_shared::message::Message;
 
@@ -77,13 +77,9 @@ pub(super) fn do_schedule(
     let priority = read_i32(msg, 4);
     let quantum_ms = read_i32(msg, 8);
 
-    let target_nr = if target_e == SELF {
-        caller_nr
-    } else {
-        endpoint_proc(target_e)
-    };
-    let Some(target_idx) = proc_index(target_nr) else {
-        return EINVAL;
+    let target_idx = match super::resolve_target(proc_table, caller_nr, target_e) {
+        Ok(idx) => idx,
+        Err(e) => return e,
     };
 
     // Priority must name a real band; quantum must be positive. An out-of-range
@@ -145,13 +141,9 @@ pub(super) fn do_schedctl(
     let flags = read_i32(msg, 0);
     let target_e: Endpoint = read_i32(msg, 4);
 
-    let target_nr = if target_e == SELF {
-        caller_nr
-    } else {
-        endpoint_proc(target_e)
-    };
-    let Some(target_idx) = proc_index(target_nr) else {
-        return EINVAL;
+    let target_idx = match super::resolve_target(proc_table, caller_nr, target_e) {
+        Ok(idx) => idx,
+        Err(e) => return e,
     };
 
     // Snapshot the caller's endpoint before borrowing the target mutably (the
