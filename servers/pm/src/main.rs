@@ -147,13 +147,16 @@ fn handle_getpid(msg: &mut Message) {
 ///
 /// Contract with the kernel (see `system::do_sig`): every endpoint GETKSIG
 /// returns must be either terminated or ENDKSIG-acknowledged, or it stays
-/// signal-pending forever. Terminated targets get **no** `SYS_ENDKSIG`: as of
-/// slice 4.6 `SYS_EXIT` is a full teardown — signal state zeroed, slot freed,
-/// endpoint generation bumped — so a post-exit acknowledge would only bounce
-/// off `okendpt` with `EDEADSRCDST`. (MINIX can acknowledge after terminate
-/// because its `sys_clear` is deferred behind VFS; minix.rs tears down
-/// immediately.) GETKSIG's scan gates on `sig_pending != 0`, which the exit
-/// zeroed, so the dead proc is never re-returned.
+/// signal-pending forever. A *successful* terminate gets **no** `SYS_ENDKSIG`:
+/// as of slice 4.6 `SYS_EXIT` is a full teardown — signal state zeroed, slot
+/// freed, endpoint generation bumped — so a post-exit acknowledge would only
+/// bounce off `okendpt` with `EDEADSRCDST`. (MINIX can acknowledge after
+/// terminate because its `sys_clear` is deferred behind VFS; minix.rs tears
+/// down immediately.) GETKSIG's scan gates on `sig_pending != 0`, which the
+/// exit zeroed, so the dead proc is never re-returned. A *rejected* exit,
+/// however, leaves the slot live with `sig_pending` already handed off — so
+/// it falls back to `SYS_ENDKSIG` to clear the RTS signal state, keeping the
+/// dispose-exactly-once invariant even when teardown can't proceed.
 #[cfg_attr(test, allow(dead_code))]
 fn drain_ksigs(system: Endpoint) {
     loop {
@@ -179,23 +182,38 @@ fn drain_ksigs(system: Endpoint) {
             .map(mproc::handle_kill)
             .unwrap_or(mproc::KillAction::NotFound);
         if matches!(action, mproc::KillAction::Terminate) {
-            sys_exit(system, target_e);
+            // Happy path: SYS_EXIT tears the target down (signal state zeroed,
+            // slot freed) so no acknowledge follows — a post-exit ENDKSIG
+            // would just bounce off `okendpt`. But if the exit is *rejected*
+            // the slot stays live, and since GETKSIG already handed off
+            // `sig_pending` the scan will never re-return it — so fall back to
+            // ENDKSIG to clear the RTS signal state. Every drained endpoint is
+            // thus disposed of exactly once.
+            if sys_exit(system, target_e) != OK {
+                sys_endksig(system, target_e);
+            }
         } else {
             sys_endksig(system, target_e);
         }
     }
 }
 
-/// `SYS_EXIT` — terminate `target_e` (SENDREC to SYSTEM).
+/// `SYS_EXIT` — terminate `target_e` (SENDREC to SYSTEM). Returns the
+/// kernel-call result so `drain_ksigs` can tell a real teardown from a
+/// rejected one.
 #[cfg_attr(test, allow(dead_code))]
-fn sys_exit(system: Endpoint, target_e: Endpoint) {
+fn sys_exit(system: Endpoint, target_e: Endpoint) -> i32 {
     let mut m = Message {
         m_source: 0,
         m_type: SYS_EXIT,
         payload: [0u8; 96],
     };
     wr_i32(&mut m, 0, target_e);
-    let _ = ipc_sendrec(system, &mut m);
+    let rc = ipc_sendrec(system, &mut m);
+    if rc != OK {
+        return rc;
+    }
+    m.m_type
 }
 
 /// `SYS_ENDKSIG` — acknowledge `target_e`'s signals as handled.
