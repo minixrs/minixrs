@@ -29,12 +29,12 @@ use minixrs_kernel_shared::com::{
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, ProcNr};
 
-/// Table capacity. Slots `0..NR_BOOT_PROCS + NR_STUB_PROCS` (= 16) are seeded
-/// at init; the pool above that ([`FORK_POOL_BASE`]`..NR_MPROCS`) is where 4.6's
-/// fork allocates children.
+/// Table capacity. Slots `0..NR_BOOT_PROCS + NR_STUB_PROCS` (= 15 since stub E's
+/// slice-4.8 retirement) are seeded at init; the pool above that
+/// ([`FORK_POOL_BASE`]`..NR_MPROCS`) is where 4.6's fork allocates children.
 pub const NR_MPROCS: usize = 32;
 
-/// First slot fork may allocate. Boot servers + demo stubs own `[0, 16)`; forked
+/// First slot fork may allocate. Boot servers + demo stubs own `[0, 15)`; forked
 /// children land in `[FORK_POOL_BASE, NR_MPROCS)`. A child's slot index is also
 /// its kernel proc number, so this range must stay within the kernel proc table
 /// and within VM's `MAX_CLIENTS` region-table cap (both hold).
@@ -110,8 +110,11 @@ fn seed_in(t: &mut [MProc; NR_MPROCS]) {
         exit_status: 0,
         flags: MF_IN_USE | MF_PRIV_PROC,
     };
-    // INIT: pid 1. Not running yet (no ELF until 4.8) but seeded so the demo
-    // stubs have a parent with a pid.
+    // INIT: pid 1. A real boot process as of slice 4.8 (the kernel loader makes
+    // it runnable); it drives fork/exec/wait through PM. `MF_PRIV_PROC` keeps it
+    // unkillable (correct for PID 1) — that flag gates only the kill path, not
+    // fork/wait/getpid, so PM still serves it as an ordinary client. It also
+    // parents the demo stubs (pids advance from it below).
     t[init] = MProc {
         pid: 1,
         parent_slot: rs,
@@ -393,7 +396,7 @@ pub fn cleanup(slot: usize) {
 mod tests {
     use super::*;
     use minixrs_kernel_shared::com::{
-        SCHED_PROC_NR, STUB_A_PROC_NR, STUB_D_PROC_NR, STUB_E_PROC_NR, VFS_PROC_NR, VM_PROC_NR,
+        SCHED_PROC_NR, STUB_A_PROC_NR, STUB_D_PROC_NR, VFS_PROC_NR, VM_PROC_NR,
     };
 
     fn seeded() -> [MProc; NR_MPROCS] {
@@ -447,7 +450,7 @@ mod tests {
         assert_eq!(getpid_in(&t, VM_PROC_NR.get() as usize), Some((8, 3)));
         // Stubs are parented to INIT (pid 1).
         assert_eq!(getpid_in(&t, STUB_A_PROC_NR.get() as usize), Some((11, 1)));
-        assert_eq!(getpid_in(&t, STUB_E_PROC_NR.get() as usize), Some((15, 1)));
+        assert_eq!(getpid_in(&t, STUB_D_PROC_NR.get() as usize), Some((14, 1)));
     }
 
     #[test]
@@ -498,7 +501,7 @@ mod tests {
     fn seed_stores_boot_endpoints() {
         let t = seeded();
         // Seeded procs are generation 0, so endpoint == boot_endpoint(slot).
-        let e = STUB_E_PROC_NR.get() as usize;
+        let e = STUB_D_PROC_NR.get() as usize;
         assert_eq!(t[e].endpoint, boot_endpoint(ProcNr::new(e as i32)));
         assert_eq!(endpoint_of_in(&t, e), Some(t[e].endpoint));
     }
@@ -506,13 +509,13 @@ mod tests {
     #[test]
     fn alloc_slot_returns_first_free_fork_pool_slot() {
         let mut t = seeded();
-        // Seeded slots stop at FORK_POOL_BASE (16); the first free slot is it.
+        // Seeded slots stop at FORK_POOL_BASE (15); the first free slot is it.
         assert_eq!(alloc_slot_in(&t), Some(FORK_POOL_BASE));
         // Occupy it, and the next free slot moves up by one.
         set_child_in(
             &mut t,
             FORK_POOL_BASE,
-            STUB_E_PROC_NR.get() as usize,
+            STUB_D_PROC_NR.get() as usize,
             0x1234,
         );
         assert_eq!(alloc_slot_in(&t), Some(FORK_POOL_BASE + 1));
@@ -530,22 +533,22 @@ mod tests {
     #[test]
     fn set_child_assigns_monotonic_pid_and_records_fields() {
         let mut t = seeded();
-        let parent = STUB_E_PROC_NR.get() as usize; // pid 15
+        let parent = STUB_D_PROC_NR.get() as usize; // pid 14 — a childless seeded proc
         let slot = alloc_slot_in(&t).unwrap();
         let pid = set_child_in(&mut t, slot, parent, 0xABCD);
-        // Highest seeded pid is 15 (stub E) → child gets 16.
-        assert_eq!(pid, 16);
+        // Highest seeded pid is 14 (stub D) → child gets 15.
+        assert_eq!(pid, 15);
         assert!(in_use_in(&t, slot));
         assert_eq!(parent_of_in(&t, slot), Some(parent));
         assert_eq!(endpoint_of_in(&t, slot), Some(0xABCD));
-        // A live child is getpid-visible.
-        assert_eq!(getpid_in(&t, slot), Some((16, 15)));
+        // A live child is getpid-visible: (child pid, parent pid).
+        assert_eq!(getpid_in(&t, slot), Some((15, 14)));
     }
 
     #[test]
     fn zombie_child_is_found_and_reaped() {
         let mut t = seeded();
-        let parent = STUB_E_PROC_NR.get() as usize;
+        let parent = STUB_D_PROC_NR.get() as usize; // childless seeded proc
         let slot = alloc_slot_in(&t).unwrap();
         let pid = set_child_in(&mut t, slot, parent, 0xABCD);
 
@@ -568,7 +571,7 @@ mod tests {
     #[test]
     fn waiting_flag_round_trips() {
         let mut t = seeded();
-        let parent = STUB_E_PROC_NR.get() as usize;
+        let parent = STUB_D_PROC_NR.get() as usize;
         assert!(!is_waiting_in(&t, parent));
         set_waiting_in(&mut t, parent, true);
         assert!(is_waiting_in(&t, parent));

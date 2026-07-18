@@ -13,7 +13,7 @@
 //! IPC/IO/IRQ grants) arrive with RS service starts.
 //!
 //! The `RTS_NO_PRIV` gate doubles as the authorization model: only a process
-//! deliberately built frozen (stub E at boot; forked children in 4.6) can be
+//! deliberately built frozen (forked children in the 4.6 fork path) can be
 //! re-privileged, so the call can't strip or swap a live process's privilege.
 //! Beyond that the trust model matches `do_vmctl`: `k_call_mask` is the only
 //! caller check, and PM is the intended sole holder.
@@ -43,8 +43,8 @@ use crate::uart::Uart;
 
 /// Leading `SYS_PRIVCTL` calls traced explicitly, plus an every-100th steady
 /// sample — 4.6's fork loop releases every child through here, so a head-only
-/// trace (the 4.5 shape, when stub E's release was a once-per-boot event)
-/// would go silent seconds into boot.
+/// trace (the 4.5 shape, when the release was a once-per-boot event) would go
+/// silent seconds into boot.
 const PRIVCTL_TRACE_HEAD: u64 = 6;
 const PRIVCTL_TRACE_EVERY: u64 = 100;
 static PRIVCTL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -80,7 +80,8 @@ pub(super) fn do_privctl(
         let out = (p.nr, p.name[0]);
         // SAFETY: single-threaded EL1 context; the exclusive `p` borrow ends
         // (NLL) as `rts_unset` captures `nr` internally — it enqueues the
-        // target if `RTS_NO_PRIV` was its only block bit (stub E's case).
+        // target if `RTS_NO_PRIV` was its only block bit (a released child that
+        // is not still a blocked `RTS_RECEIVING` receiver).
         unsafe { sched::rts_unset(p, RTS_NO_PRIV) };
         out
     };
