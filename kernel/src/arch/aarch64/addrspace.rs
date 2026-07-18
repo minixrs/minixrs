@@ -212,6 +212,76 @@ pub fn unmap_page_in(ttbr0_pa: u64, va: u64) -> Option<u64> {
     Some(pte & PA_MASK)
 }
 
+/// Visit every valid L3 leaf mapping in the tree rooted at `ttbr0_pa`,
+/// calling `f(va, pa, prot)` for each in ascending-VA order.
+///
+/// This is the enumeration primitive slice 4.6 needs twice: `SYS_FORK` copies
+/// every parent page into a fresh child tree, and `SYS_EXIT` frees every leaf
+/// frame before [`AddrSpace::destroy`] (which only frees the tables). `f` may
+/// allocate frames and write *other* trees, but must not modify this one —
+/// each table is snapshotted before its entries are walked (the
+/// [`free_subtree`] pattern), so mid-walk edits to `ttbr0_pa`'s tree would be
+/// silently ignored, not honored. Returning `Err` aborts the walk (fork's
+/// out-of-memory unwind).
+pub fn walk_leaves(
+    ttbr0_pa: u64,
+    f: &mut dyn FnMut(u64, u64, Prot) -> Result<(), MapError>,
+) -> Result<(), MapError> {
+    let l0: [u64; PTES_PER_LEVEL] = *table_ref(ttbr0_pa);
+    for (i0, d0) in l0.iter().enumerate() {
+        if !is_table_desc(*d0) {
+            continue;
+        }
+        let l1: [u64; PTES_PER_LEVEL] = *table_ref(d0 & PA_MASK);
+        for (i1, d1) in l1.iter().enumerate() {
+            if !is_table_desc(*d1) {
+                continue;
+            }
+            let l2: [u64; PTES_PER_LEVEL] = *table_ref(d1 & PA_MASK);
+            for (i2, d2) in l2.iter().enumerate() {
+                if !is_table_desc(*d2) {
+                    continue;
+                }
+                let l3: [u64; PTES_PER_LEVEL] = *table_ref(d2 & PA_MASK);
+                for (i3, d3) in l3.iter().enumerate() {
+                    if *d3 & PTE_VALID == 0 {
+                        continue;
+                    }
+                    let va = ((i0 as u64) << 39)
+                        | ((i1 as u64) << 30)
+                        | ((i2 as u64) << 21)
+                        | ((i3 as u64) << PAGE_SHIFT);
+                    f(va, *d3 & PA_MASK, pte_prot(*d3))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The AP bit that distinguishes read-only from read-write at EL0: set in
+/// `PTE_AP_RO_EL0` (0b11 << 6), clear in `PTE_AP_RW_EL0` (0b01 << 6).
+const PTE_AP_READONLY_BIT: u64 = PTE_AP_RO_EL0 & !PTE_AP_RW_EL0;
+
+/// Recover the mapping intent from a leaf page descriptor — the inverse of
+/// [`prot_attrs`]. Writable ⇔ the AP read-only bit is clear; executable ⇔
+/// UXN is clear. Fork uses this to re-install a copied page with the same
+/// permissions the parent had.
+fn pte_prot(pte: u64) -> Prot {
+    Prot {
+        writable: pte & PTE_AP_READONLY_BIT == 0,
+        executable: pte & PTE_UXN == 0,
+    }
+}
+
+/// True when `desc` is a valid table descriptor (at L0–L2 — the only kind of
+/// valid entry [`ensure_next_table`] writes at those levels; a valid entry
+/// with `PTE_TABLE` clear would be a block descriptor, which this kernel
+/// never maps).
+fn is_table_desc(desc: u64) -> bool {
+    desc & (PTE_VALID | PTE_TABLE) == (PTE_VALID | PTE_TABLE)
+}
+
 /// Mask selecting the PA bits of a descriptor (47:12).
 const PA_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 

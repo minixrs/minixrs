@@ -60,8 +60,10 @@ pub struct Proc {
     /// Pending kernel-signal bitmap (bit n = signal n, `1..NSIG`). Set by
     /// `system::do_sig::cause_sig`; handed off (cleared) by `SYS_GETKSIG`,
     /// with the matching `RTS_SIGNALED`/`RTS_SIG_PENDING` state cleared at
-    /// `SYS_ENDKSIG` (slice 4.5). The 4.6 `SYS_FORK` slot-reuse path must
-    /// zero this alongside the generation bump.
+    /// `SYS_ENDKSIG` (slice 4.5). Zeroed on slot free (`SYS_EXIT`'s
+    /// `free_slot`, alongside the generation bump) and again on `SYS_FORK`'s
+    /// child populate, so recycled slots never inherit a predecessor's
+    /// pending signals.
     pub sig_pending: u32,
 
     // ----- IPC state -------------------------------------------------------

@@ -19,6 +19,7 @@
 //! [`ipc::send::mini_send`]: crate::ipc
 
 mod do_exit;
+mod do_fork;
 mod do_getinfo;
 mod do_privctl;
 mod do_schedule;
@@ -43,7 +44,7 @@ use minixrs_kernel_shared::message::Message;
 
 use crate::ipc::{copy_msg_from_user, copy_msg_to_user};
 use crate::proc::bitmap::{get_call_bit, get_sys_bit};
-use crate::proc::table::{N_PROC_SLOTS, proc_index};
+use crate::proc::table::{N_PROC_SLOTS, okendpt, proc_index};
 use crate::proc::{Priv, Proc};
 use crate::uart::Uart;
 
@@ -54,6 +55,22 @@ use crate::uart::Uart;
 #[inline]
 pub fn system_endpoint() -> Endpoint {
     boot_endpoint(SYSTEM)
+}
+
+/// Resolve a kernel-call target endpoint to a proc-table index. `SELF` maps
+/// to the caller; anything else must pass [`okendpt`] — slots recycle as of
+/// slice 4.6, so a stale endpoint returns `EDEADSRCDST` rather than resolving
+/// to the slot's new occupant. Shared by every target-taking handler.
+fn resolve_target(
+    proc_table: &[Proc; N_PROC_SLOTS],
+    caller_nr: ProcNr,
+    target_e: Endpoint,
+) -> Result<usize, i32> {
+    if target_e == minixrs_kernel_shared::endpoint::SELF {
+        proc_index(caller_nr).ok_or(minixrs_kernel_shared::error::EINVAL)
+    } else {
+        okendpt(proc_table, target_e)
+    }
 }
 
 /// Cadence of the boot-time kernel-call trace. Mirrors `ipc::TRACE_EVERY`.
@@ -146,9 +163,9 @@ pub fn kernel_call_sendrec(
 /// `SYS_VMCTL` / `SYS_SCHEDULE` / `SYS_SCHEDCTL` and the slice-4.5 signal trio
 /// (`SYS_KILL` / `SYS_GETKSIG` / `SYS_ENDKSIG`) act on a *target* proc named in
 /// the message, so they take the whole `proc_table` + `caller_nr` (and
-/// `do_kill` additionally writes PM's `notify_pending`, which is why
-/// `priv_table` is `&mut`). Every other handler acts only on the caller, so it
-/// gets a single caller slot re-borrowed inside its arm (see
+/// `do_kill` / `do_exit` additionally write `notify_pending` bitmaps, which is
+/// why `priv_table` is `&mut`). Every other handler acts only on the caller,
+/// so it gets a single caller slot re-borrowed inside its arm (see
 /// [`dispatch_caller_local`]).
 fn kernel_call_dispatch(
     proc_table: &mut [Proc; N_PROC_SLOTS],
@@ -180,7 +197,8 @@ fn kernel_call_dispatch(
         SYS_KILL => return do_sig::do_kill(proc_table, priv_table, caller_nr, msg),
         SYS_GETKSIG => return do_sig::do_getksig(proc_table, caller_nr, msg),
         SYS_ENDKSIG => return do_sig::do_endksig(proc_table, caller_nr, msg),
-        SYS_EXIT => return do_exit::do_exit(proc_table, caller_nr, msg),
+        SYS_EXIT => return do_exit::do_exit(proc_table, priv_table, caller_nr, msg),
+        SYS_FORK => return do_fork::do_fork(proc_table, caller_nr, msg),
         SYS_PRIVCTL => return do_privctl::do_privctl(proc_table, caller_nr, msg),
         _ => {}
     }
@@ -203,13 +221,12 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
     );
     match msg.m_type {
         SYS_GETINFO => do_getinfo::do_getinfo(caller, caller_priv, msg),
-        SYS_FORK => stubs::do_fork(caller, caller_priv, msg),
         SYS_EXEC => stubs::do_exec(caller, caller_priv, msg),
         SYS_COPY => stubs::do_copy(caller, caller_priv, msg),
         SYS_SAFECOPY => stubs::do_safecopy(caller, caller_priv, msg),
         SYS_IRQCTL => stubs::do_irqctl(caller, caller_priv, msg),
         // SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL / SYS_KILL / SYS_GETKSIG /
-        // SYS_ENDKSIG / SYS_EXIT / SYS_PRIVCTL are handled in
+        // SYS_ENDKSIG / SYS_EXIT / SYS_FORK / SYS_PRIVCTL are handled in
         // `kernel_call_dispatch` (they act on a target proc and need the table).
         SYS_SETALARM => do_setalarm::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),

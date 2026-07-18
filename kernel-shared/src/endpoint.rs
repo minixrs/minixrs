@@ -134,6 +134,27 @@ pub const fn endpoint_gen(e: Endpoint) -> GenNr {
     e >> ENDPOINT_GEN_SHIFT
 }
 
+/// Highest generation an endpoint can carry: the generation field occupies
+/// bits `ENDPOINT_GEN_SHIFT..31`, and the top (sign) bit must stay clear so
+/// endpoints remain positive `i32`s on the wire. Mirrors MINIX 3
+/// `_ENDPOINT_MAX_GENERATION`.
+pub const ENDPOINT_MAX_GENERATION: GenNr = (1 << (31 - ENDPOINT_GEN_SHIFT)) - 1;
+
+/// Advance an endpoint's generation for slot reuse (`SYS_EXIT` frees a slot,
+/// `SYS_FORK` consumes the bumped endpoint). Wraps to **1**, never back to 0 —
+/// generation 0 is reserved for boot endpoints (MINIX 3 `do_fork.c` parity),
+/// so a recycled slot can never alias a `boot_endpoint(nr)` again. The proc
+/// field is preserved.
+pub const fn bump_generation(e: Endpoint) -> Endpoint {
+    let g = endpoint_gen(e);
+    let next = if g >= ENDPOINT_MAX_GENERATION {
+        1
+    } else {
+        g + 1
+    };
+    make_endpoint(next, endpoint_proc(e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +217,53 @@ mod tests {
         for g in 0..8 {
             let e = make_endpoint(g, ProcNr::new(5));
             assert_eq!(endpoint_proc(e), ProcNr::new(5), "gen={g}");
+        }
+    }
+
+    #[test]
+    fn bump_generation_increments_and_preserves_proc() {
+        let e = crate::com::boot_endpoint(ProcNr::new(16));
+        let b = bump_generation(e);
+        assert_eq!(endpoint_gen(b), 1);
+        assert_eq!(endpoint_proc(b), ProcNr::new(16));
+        let b2 = bump_generation(b);
+        assert_eq!(endpoint_gen(b2), 2);
+        assert_eq!(endpoint_proc(b2), ProcNr::new(16));
+    }
+
+    #[test]
+    fn bump_generation_wraps_to_one_not_zero() {
+        // Gen 0 is reserved for boot endpoints; the wrap must skip it so a
+        // heavily-recycled slot never re-aliases boot_endpoint(nr).
+        let e = make_endpoint(ENDPOINT_MAX_GENERATION, ProcNr::new(16));
+        let b = bump_generation(e);
+        assert_eq!(endpoint_gen(b), 1);
+        assert_eq!(endpoint_proc(b), ProcNr::new(16));
+    }
+
+    #[test]
+    fn bump_generation_preserves_negative_proc() {
+        // Task slots never recycle in practice, but the proc field must
+        // survive the round trip regardless of sign.
+        let e = make_endpoint(4, ProcNr::new(-2));
+        let b = bump_generation(e);
+        assert_eq!(endpoint_gen(b), 5);
+        assert_eq!(endpoint_proc(b), ProcNr::new(-2));
+    }
+
+    #[test]
+    fn endpoints_stay_positive_through_max_generation() {
+        // The sign bit is the wire-format invariant ENDPOINT_MAX_GENERATION
+        // protects: every (gen, user-proc) endpoint must be a positive i32.
+        for g in [
+            0,
+            1,
+            2,
+            ENDPOINT_MAX_GENERATION - 1,
+            ENDPOINT_MAX_GENERATION,
+        ] {
+            let e = make_endpoint(g, ProcNr::new(NR_PROCS as i32 - 1));
+            assert!(e >= 0, "gen {g} produced negative endpoint {e:#x}");
         }
     }
 

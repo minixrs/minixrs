@@ -13,14 +13,14 @@
 use core::sync::atomic::Ordering;
 
 use minixrs_kernel_shared::com::{CLOCK, NR_SYS_PROCS, PM_PROC_NR, SYSTEM};
-use minixrs_kernel_shared::endpoint::{ANY, Endpoint, endpoint_proc};
+use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
 use minixrs_kernel_shared::error::{EBADSRCDST, ECALLDENIED, OK};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minixrs_kernel_shared::message::Message;
 
 use crate::proc::bitmap::{get_sys_bit, set_sys_bit};
 use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND, RTS_RECEIVING, RTS_SENDING};
-use crate::proc::table::{N_PROC_SLOTS, proc_index};
+use crate::proc::table::{N_PROC_SLOTS, okendpt, proc_index};
 use crate::proc::{Priv, Proc, sched};
 
 /// MINIX 3 `WILLRECEIVE(dst, src_e)`. Returns true when `dst` is blocked
@@ -53,12 +53,12 @@ pub fn mini_notify(
     caller_nr: minixrs_kernel_shared::ProcNr,
     dst_e: Endpoint,
 ) -> i32 {
-    // TODO(phase 3+): okendpt-style (gen, slot) validation — stale
-    // endpoints after slot recycle should return EDEADSRCDST. Phase 2
-    // has no slot recycling, so `endpoint_proc` alone is sufficient.
-    let dst_nr = endpoint_proc(dst_e);
-    let Some(dst_idx) = proc_index(dst_nr) else {
-        return EBADSRCDST;
+    // Slots recycle as of slice 4.6 (SYS_EXIT frees + bumps the generation),
+    // so the destination must pass full okendpt validation — a stale endpoint
+    // returns EDEADSRCDST instead of reaching the slot's new occupant.
+    let dst_idx = match okendpt(proc_table, dst_e) {
+        Ok(idx) => idx,
+        Err(e) => return e,
     };
     let Some(caller_idx) = proc_index(caller_nr) else {
         return EBADSRCDST;
