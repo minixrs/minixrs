@@ -1037,7 +1037,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   Host: `cargo test --workspace` green (new `mproc` fork/wait, `region::fork`,
   `callnr` contiguity tests); `cargo check --workspace` + clippy `-D warnings` +
   fmt clean.
-- **Slice 4.7** ◀ ready (branch `feature/phase-4-7-exec`, pending merge) — exec:
+- **Slice 4.7** ✓ shipped (PR #30, merged 2026-07-18) — exec:
   `SYS_EXEC` + PM exec of a boot-embedded binary. `SYS_EXEC` (already numbered
   `0x603`, ENOSYS since 2.6) becomes real in `kernel/src/system/do_exec.rs` and
   moves from the caller-local arm to the **target-taking** match beside
@@ -1077,13 +1077,41 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   --workspace` green (extended `PM_EXEC` contiguity tests); `cargo check
   --workspace` + clippy `-D warnings` + fmt clean; `cargo kernel-aarch64` builds +
   packs the worker.
-- **Slice 4.8** ◀ next — init (PID 1) + Phase 4 wrap-up + docs. **Phase 4 complete.**
-  init (a freestanding Rust ELF loaded into `INIT_PROC_NR=10` by the archive)
-  forks children that exec the worker, `wait`s, and respawns in a loop. Retire or
-  demote the A/B/C/D stubs now that init + real procs are the live exercise. Real
-  mdBook *Servers* chapter (`book/src/servers/overview.md`); CLAUDE.md Phase-4
-  conventions; flip every slice marker and write the Phase-4-complete aggregate
-  paragraph.
+- **Slice 4.8** ◀ ready (branch `feature/phase-4-8-init`, pending merge) — init
+  (PID 1) + Phase 4 wrap-up + docs. **Phase 4 complete.** `init` becomes a real
+  boot process: a freestanding `userland/init` ELF (fork/exec/wait respawn loop,
+  `minix-ipc` only — no SEF; `_start` + panic handler `not(test)`-gated; `user.ld`
+  copied from `worker`) packed into the MXBI archive by adding
+  `("minixrs-init", …/init, 10)` to `build.rs`'s `servers` array. The existing
+  boot loader loads it into `INIT_PROC_NR=10`, clears `RTS_NO_PRIV`, and enqueues
+  it — no PM hand-release (contrast stub E's `PRIVCTL_SET_USER`). Its loop:
+  `PM_FORK` → child (`m_type==0`) `PM_EXEC`s the boot-embedded `worker`, parent
+  (`>0`) `PM_WAIT`s to reap, then loops. **User-grade privilege:** init's `IMAGE`
+  `BootEntry.trap_mask` goes `SRV_T`→`USR_T`, and `init_boot_image` special-cases
+  `INIT_PROC_NR` to point its proc slot at the shared `USER_PRIV_ID` (slot 20,
+  filled by `populate_user_priv`, which already opens the PM↔USER edge) rather than
+  a dedicated server-grade slot — so init SENDRECs PM only and makes no kernel
+  calls, exactly the forked-child profile; its would-be dedicated priv slot 15
+  stays free. `MF_PRIV_PROC` stays on init's `mproc` seed (unkillable PID 1; that
+  flag gates only the kill path, not fork/wait/getpid). **Stub E retired (only E;
+  A–D kept** as the live regression battery — A↔B IPC primitives, C's SCHED
+  quantum-delegation round-trip, D's page-fault→VM + out-of-region SIGSEGV — which
+  init+worker don't exercise): removed E's `user_stub.S` blob, its `userland.rs`
+  `build_stub`/VAs/externs/summary line, `com.rs` `STUB_E_PROC_NR` + `NR_STUB_PROCS`
+  5→4 (which shifts `FORK_POOL_BASE` 16→15, so forked-child kernel proc-nrs now
+  start at 15), and PM `pm_init`'s stub-E release; `mproc` host tests rebase from
+  stub E (slot 15) onto stub D (slot 14). Docs: new mdBook *Servers* chapter
+  (`book/src/servers/overview.md`) + `SUMMARY.md` entry + CLAUDE.md 4.8 bullet.
+  Verified in QEMU over 30 s: 11 `[as]` lines (vm/ds/vfs/sched/rs/pm/init asid 1–7,
+  stubs A–D asid 8–11; stub E + `worker` **absent**), init (`parent=i nr=10`)
+  driving `SYS_FORK child_nr=15` → `SYS_EXEC target=15 name=worker` →
+  `SYS_EXIT target=w nr=15 freed=2` with a monotonically advancing child endpoint
+  generation (`0xf → 0x800f → 0x1000f`) + recycled ASIDs, worker `PM_GETPID`
+  SENDRECs (`caller=15/16 target=0x0`) surfacing; A↔B ping-pong, C `[noq]`, D's
+  three `[pf]` + `SYS_KILL sig=11` chain, six RS `[alarm]` fires all intact; every
+  `result=0` (bar D's designed kill); zero panic / `el0_sync_unexpected`. Host:
+  `cargo test --workspace` green; `cargo check --workspace` + clippy `-D warnings`
+  + fmt clean; `cargo kernel-aarch64` builds + packs the init ELF.
 
 Aggregate scope (Phase 4 as a whole):
 
@@ -1097,9 +1125,10 @@ Aggregate scope (Phase 4 as a whole):
   user-space policy), RS (heartbeat monitor), VFS (skeletal boot), PM (process
   table, fork, exec, exit, wait, getpid, minimal signals)
 - init (PID 1) forking/exec/waiting; embedded "worker" binary as the exec target
-- **Milestone:** Full server boot sequence completes; init process starts
+- **Milestone:** Full server boot sequence completes; init process starts —
+  **reached; Phase 4 complete (slice 4.8, 2026-07-18).**
 
-### Phase 5: musl Fork + File Systems
+### Phase 5: musl Fork + File Systems ◀ next
 
 - Add `src/minix/` to musl fork with IPC wrappers
 - Generate C headers from `kernel-shared` via cbindgen
