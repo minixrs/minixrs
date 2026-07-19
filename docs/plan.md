@@ -1077,7 +1077,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   --workspace` green (extended `PM_EXEC` contiguity tests); `cargo check
   --workspace` + clippy `-D warnings` + fmt clean; `cargo kernel-aarch64` builds +
   packs the worker.
-- **Slice 4.8** ✓ shipped (branch `feature/phase-4-8-init`, pending merge) — init
+- **Slice 4.8** ◀ ready (branch `feature/phase-4-8-init`, pending merge) — init
   (PID 1) + Phase 4 wrap-up + docs. **Phase 4 complete.** `init` becomes a real
   boot process: a freestanding `userland/init` ELF (fork/exec/wait respawn loop,
   `minix-ipc` only — no SEF; `_start` + panic handler `not(test)`-gated; `user.ld`
