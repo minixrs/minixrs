@@ -1,0 +1,80 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "bc1c3d58f1eb",
+  "session_id": "49c6b28e-7a2c-42d7-8103-6dea88a7d5a2",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-19T05:26:51.653992Z",
+  "branch": "feature/phase-4-8-init",
+  "checkpoints_count": 2,
+  "save_step_count": 1,
+  "files_touched": [
+    "docs/plan.md",
+    "kernel/src/proc/table.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "e445b914e3ca",
+  "token_usage": {
+    "input_tokens": 43,
+    "cache_creation_tokens": 108750,
+    "cache_read_tokens": 2505469,
+    "output_tokens": 30493,
+    "api_call_count": 23
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-review-2026-07-19T04:27:46.419733Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "9acc01925877",
+      "timestamp": "2026-07-19T04:27:46.419733Z",
+      "native": {
+        "command": "/review"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/review",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-19T05:26:51.64374Z",
+    "agent_lines": 12,
+    "agent_removed": 9,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 12,
+    "total_lines_changed": 21,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 12,
+      "agent_lines_removed": 9
+    }
+  ]
+}
