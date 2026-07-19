@@ -278,9 +278,10 @@ static IMAGE: [BootEntry; N_IMAGE] = [
     // init (PID 1) is an ordinary user process, not a system server (slice 4.8):
     // `USR_T` traps (SENDREC only), and `init_boot_image` points its proc slot at
     // the shared `USER_PRIV_ID` (ipc_to = {PM}, empty kernel-call mask) rather than
-    // populating a dedicated server-grade priv slot. `priv_flags` still carries
-    // `SYS_PROC` so the whole `IMAGE` range keeps uniform boot handling; the priv
-    // grade is what the user-grade slot enforces.
+    // populating a dedicated server-grade priv slot. `priv_flags` here is *inert*
+    // for init: `init_boot_image` skips `populate_priv` for this entry, so `SYS_PROC`
+    // is never consumed — it's kept only so the `IMAGE` array stays structurally
+    // uniform. The user grade is enforced entirely by the shared `USER_PRIV_ID` slot.
     BootEntry {
         nr: INIT_PROC_NR,
         name: b"init",
@@ -367,11 +368,13 @@ pub fn init() {
 
 /// Shared privilege slot for ordinary user processes (slice 4.5) — MINIX 3's
 /// single user priv (`USER_PRIV_ID`), minus the dynamic id allocation. The
-/// boot image occupies priv slots `[0, 16)` and the demo stubs are
-/// kernel-installed at 16..=19 (`arch::aarch64::userland`); 20 is the next
-/// free slot. `SYS_PRIVCTL(PRIVCTL_SET_USER)` points a frozen target here,
-/// and the 4.6 fork path hands every forked child this same slot so fork
-/// can't exhaust the 64-slot `PRIV_TABLE`.
+/// boot image populates dedicated priv slots `[0, 15)`; init (PID 1, index 15)
+/// would have taken slot 15 but shares *this* slot instead (slice 4.8), so 15
+/// stays free. The demo stubs are kernel-installed at 16..=19
+/// (`arch::aarch64::userland`); 20 is the next free slot.
+/// `SYS_PRIVCTL(PRIVCTL_SET_USER)` points a frozen target here, and the 4.6
+/// fork path hands every forked child this same slot so fork can't exhaust the
+/// 64-slot `PRIV_TABLE`.
 pub(crate) const USER_PRIV_ID: PrivId = PrivId::new(20);
 
 const _: () = assert!((USER_PRIV_ID.get() as usize) < NR_SYS_PROCS);
