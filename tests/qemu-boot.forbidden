@@ -1,0 +1,9 @@
+# tests/qemu-boot.forbidden -- substrings that must NOT appear in a healthy
+# boot log. One literal substring per line; blank lines and '#' comments are
+# ignored. These are the kernel's halt-path banners (panic.rs, exception.rs,
+# irq.rs). Designed [pf] faults from stubs C/D are healthy and NOT listed.
+!!! KERNEL PANIC:
+!!! unexpected EL0 sync exception
+!!! EL0 instruction abort
+!!! EL0 data abort
+do_irq: unexpected INTID
