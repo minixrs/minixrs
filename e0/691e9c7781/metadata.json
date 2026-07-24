@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "e0691e9c7781",
+  "strategy": "manual-commit",
+  "branch": "feature/boot-stubs-flag",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "CLAUDE.md",
+    "book/src/build.md",
+    "docs/plan.md",
+    "docs/plans/phase-5-prep.md",
+    "kernel-shared/src/com.rs",
+    "kernel/Cargo.toml",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/proc/bitmap.rs",
+    "servers/pm/Cargo.toml",
+    "servers/pm/src/mproc.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e0/691e9c7781/0/metadata.json",
+      "transcript": "/e0/691e9c7781/0/full.jsonl",
+      "content_hash": "/e0/691e9c7781/0/content_hash.txt",
+      "prompt": "/e0/691e9c7781/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 191,
+    "cache_creation_tokens": 255058,
+    "cache_read_tokens": 21468286,
+    "output_tokens": 135958,
+    "api_call_count": 105
+  }
+}

@@ -1,0 +1,637 @@
+work on @docs/plans/phase-5-prep.md chunk 3
+
+---
+
+<task-notification>
+<task-id>a25b93fc49832b2d7</task-id>
+<tool-use-id>toolu_01GRS1AUtzB1DKtqqLAWaBEx</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/d2c8c320-e5a2-44e4-9f08-e1a33731181c/tasks/a25b93fc49832b2d7.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore cargo features and doc locations" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything needed. Here is the thorough report.
+
+---
+
+# Report: `boot-stubs` feature infrastructure &amp; docs
+
+Note: this exact change is already scoped as **Chunk 3 "Stub A–D disable flag"** in `/Users/kevinbarnard/src/minixrs/docs/plans/phase-5-prep.md` (lines 79–99), which explicitly names the feature `boot-stubs`, **default-on**, gating `user_stub.S` in `build.rs`, the `build_stub` calls in `userland.rs`, and PM's stub `mproc` seeds. That plan chunk is the authoritative spec.
+
+## 1. Existing Cargo features in the workspace
+
+**No crate in the workspace declares a `[features]` section.** A recursive grep of every `Cargo.toml` (23 manifests found, listed below) returned zero `[features]` blocks.
+
+`/Users/kevinbarnard/src/minixrs/kernel/Cargo.toml` (full file, 14 lines):
+```toml
+[package]
+name = "minixrs-kernel"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[dependencies]
+minixrs-kernel-shared = { path = "../kernel-shared" }
+arrayvec = { version = "0.7", default-features = false }
+
+[build-dependencies]
+cc = "1"
+```
+There is no `[features]` section — adding one is greenfield. Note `arrayvec` already uses `default-features = false`, the same mechanism your `--no-default-features` boot will rely on.
+
+Root `/Users/kevinbarnard/src/minixrs/Cargo.toml` is a virtual workspace manifest (lines 1–43): `[workspace]` with `resolver = "3"`, 22 members (lines 3–26), `[workspace.package]` shared metadata (lines 28–34), and `[profile.release]`/`[profile.dev]` with `panic = "abort"` (lines 36–43). No features, no `default-members`.
+
+**Dependency structure conventions** (all path-based, no versioned external deps except the kernel's `arrayvec` and `cc`):
+- Servers (`servers/pm/Cargo.toml`, `servers/vm/Cargo.toml`) follow an identical pattern: a `[[bin]]` block plus three path deps — `minixrs-kernel-shared`, `minixrs-ipc`, `minixrs-server-rt`.
+- `kernel-shared/Cargo.toml` uses `*.workspace = true` inheritance for version/edition/license/etc. and has an empty `[dependencies]`. The kernel and servers do **not** inherit workspace package fields (they hardcode `version`/`edition`/`license`).
+
+Convention takeaway: there is no existing feature-flag idiom to match — you are establishing the first one. The closest precedent for opt-out is `default-features = false` on `arrayvec`.
+
+All 23 manifests: `./Cargo.toml`, `./kernel/Cargo.toml`, `./kernel-shared/Cargo.toml`, `./minix-ipc/Cargo.toml`, `./server-rt/Cargo.toml`, `./minixrs/Cargo.toml`, `./servers/{pm,vfs,vm,rs,ds,sched}/Cargo.toml`, `./drivers/{driver-rt,memory,virtio-blk,virtio-console,virtio-net}/Cargo.toml`, `./fs/{mfs,pfs}/Cargo.toml`, `./userland/{init,sh,coreutils,worker}/Cargo.toml`.
+
+## 2. How `kernel/build.rs` reads cargo cfg/features
+
+File: `/Users/kevinbarnard/src/minixrs/kernel/build.rs`.
+
+**It does not currently read any `CARGO_FEATURE_*` variable.** All env reads:
+- Line 22: `let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();` — early-return gate.
+- Line 27: `let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect(...)`.
+- Line 28: `OUT_DIR`; line 87: `CARGO_MANIFEST_DIR`; line 167: `CARGO`; line 179: `.env_remove("RUSTFLAGS")`.
+
+**How it branches today:**
+- Lines 22–25 — the target_os gate: `if target_os != "none" { return; }` (host builds skip all assembly).
+- Lines 30–74 — a `match arch.as_str()`: `"aarch64"` assembles the `.S` sources and calls `build_boot_image`; `"x86_64"` is a no-op stub (lines 70–72); any other arch panics.
+
+**The `user_stub.S` assembly** (the exact thing chunk 3 wants gated) is at **line 37**, inside the `sources` array (lines 32–38) of the aarch64 arm:
+```rust
+let sources = [
+    "src/arch/aarch64/entry.S",
+    "src/arch/aarch64/vectors.S",
+    "src/arch/aarch64/trap.S",
+    "src/arch/aarch64/interrupt.S",
+    "src/arch/aarch64/user_stub.S",   // line 37
+];
+```
+Each source is assembled via `clang --target=aarch64-unknown-none` and linked in with `cargo:rustc-link-arg=` (lines 39–61).
+
+**Feature detection is available.** Cargo sets `CARGO_FEATURE_&lt;NAME&gt;=1` for every enabled feature when running a build script, uppercasing the name and replacing `-` with `_`. So `boot-stubs` → `CARGO_FEATURE_BOOT_STUBS`. build.rs can detect it with e.g. `std::env::var_os("CARGO_FEATURE_BOOT_STUBS").is_some()` and conditionally include `"src/arch/aarch64/user_stub.S"` in `sources`. (One caveat worth flagging in the plan: build scripts do **not** honor `#[cfg(feature = ...)]`; they must read the env var. Also the comment at lines 62 / the `cargo:rerun-if-changed` lines don't currently re-run on feature change, but cargo re-runs build scripts automatically when the feature set changes.)
+
+## 3. Cargo aliases in `.cargo/config.toml`
+
+File: `/Users/kevinbarnard/src/minixrs/.cargo/config.toml` (21 lines).
+
+- Lines 10–12 — the aarch64 target config:
+  ```toml
+  [target.aarch64-unknown-none]
+  runner = "tools/qemu-run.sh"
+  rustflags = ["-C", "link-arg=-Tkernel/src/arch/aarch64/linker.ld"]
+  ```
+- Lines 18–20 — `[alias]`:
+  ```toml
+  kernel-aarch64 = "build -p minixrs-kernel --target aarch64-unknown-none --release"
+  kernel-x86_64  = "build -p minixrs-kernel --target x86_64-unknown-none --release"
+  ```
+
+So `cargo kernel-aarch64` expands to `cargo build -p minixrs-kernel --target aarch64-unknown-none --release` (build only, no boot — booting is a separate `cargo run -p minixrs-kernel --target aarch64-unknown-none --release`, which invokes the `runner = "tools/qemu-run.sh"`).
+
+There is **no** `run`/boot alias and **no** `--no-default-features` variant. A clean boot would be invoked as:
+```
+cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
+```
+Consideration for your plan: `--no-default-features` is a flag on `build`/`run`, so it composes with the existing aliases (`cargo kernel-aarch64 --no-default-features` works since alias args are prefixes). But there is **no run/boot alias to inherit it**, so a documented clean-boot command is a full `cargo run …` line. You may optionally add a companion alias (e.g. `kernel-aarch64-nostubs`), though the repo currently keeps aliases build-only and spells out `cargo run …` verbatim in the book (see §4). Matching that convention argues for documenting the flag on the full `cargo run` line rather than adding an alias.
+
+## 4. mdBook build/debugging chapter
+
+TOC: `/Users/kevinbarnard/src/minixrs/book/src/SUMMARY.md`. The build chapter is a single top-level page — line 10: `- [Build &amp; Toolchain](build.md)`. (There is no `build/` subdirectory; it is a flat `build.md`.) Related page: line 6 `- [Boot](boot/overview.md)` covers the ESP layout/QEMU command and the MXBI module set.
+
+The chapter file is **`/Users/kevinbarnard/src/minixrs/book/src/build.md`** (154 lines). Structure and the exact insertion points relevant to `boot-stubs`:
+- `# Build &amp; Toolchain` intro (lines 1–6), `## Prerequisites` (9–14).
+- `## Quick start` (16–39) — line 27 shows the canonical boot command `timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release`. **This is where the clean-boot `--no-default-features` invocation should be documented.**
+- `## Cargo workspace` (41–60) — quotes `.cargo/config.toml` including the `[alias] kernel-aarch64` block (lines 50–57). A `[features]` note would fit here.
+- `### Assembly and the boot image (kernel/build.rs)` (62–75) — describes the two build.rs jobs (assembly + boot-image packing) and explicitly mentions the `CARGO_CFG_TARGET_OS != "none"` skip (line 68). **This is the natural place to document that the `boot-stubs` feature gates `user_stub.S` assembly.**
+- `## Host tests` (76–87), `## CI` (89–111) — a 9-job table (lines 94–104) listing `qemu-smoke` as advisory (line 102), and line 109 explicitly references `tools/check-boot-log.sh` against `tests/qemu-boot.expected`/`.forbidden`.
+- `## Debugging: QEMU trace forensics` (113–140) — this is the "debugging chapter" content the plan's chunk 2 mentions; it discusses `[as]`/`[ipc]`/`[ksys]` traces and stub behavior. Line 137–140 describe the acceptance harness. **A clean-boot-for-debugging note (stubs off) fits naturally here** since the whole section is about reading stub-heavy traces.
+- `## Debugging with GDB` (143–153).
+
+Note: per `SUMMARY.md` and phase-5-prep chunk 2 (lines 55–74, branch `docs/book-port-kernel` "pending merge"), `build.md` is actively being edited; coordinate to avoid conflicts. There are **no legacy `docs/*.md`** build files present now (the grep for build content found only the book page and the plan).
+
+## 5. CI qemu-smoke job and the stub-dependent expectations
+
+**Job definition** — `/Users/kevinbarnard/src/minixrs/.github/workflows/ci.yml`, job `qemu-smoke` (lines 100–143):
+- Runs on `ubuntu-24.04-arm` (line 103), `continue-on-error: true` / advisory (line 106), `timeout-minutes: 20` (line 107).
+- Builds with `cargo kernel-aarch64` (line 123) — **default features on**, so stubs are included today.
+- Boots at lines 124–134: `timeout 45 cargo run -p minixrs-kernel --target aarch64-unknown-none --release &gt; qemu.log 2&gt;&amp;1` with `QEMU_EFI_AARCH64: /usr/share/qemu-efi-aarch64/QEMU_EFI.fd` (line 126). Exit 124 (timeout) is the expected healthy status.
+- Verdict step (lines 135–136): `run: tools/check-boot-log.sh qemu.log`.
+
+**Runner** — `/Users/kevinbarnard/src/minixrs/tools/qemu-run.sh`: stages `target/esp/`, copies Limine + kernel, and `exec qemu-system-aarch64` (lines 65–72). It just boots whatever ELF cargo built; it is feature-agnostic. Because CI builds with default features (stubs on), no runner change is needed for the default path.
+
+**Checker** — `/Users/kevinbarnard/src/minixrs/tools/check-boot-log.sh`: every substring in `tests/qemu-boot.expected` must be present (lines 37–44); no substring in `tests/qemu-boot.forbidden` may appear (lines 47–55). Uses `grep -aqF` (literal substrings, text-forced).
+
+**Yes — `tests/qemu-boot.expected` references stub markers, including stub D's `sig=11`.** File `/Users/kevinbarnard/src/minixrs/tests/qemu-boot.expected`:
+- Lines 21–24 — the four stub address-space lines (part of the "11 `[as]` lines total" comment at line 20):
+  ```
+  [as] stub A nr=11 ttbr0_pa=
+  [as] stub B nr=12 ttbr0_pa=
+  [as] stub C nr=13 ttbr0_pa=
+  [as] stub D nr=14 ttbr0_pa=
+  ```
+- Lines 32–36 — stub D's designed SIGSEGV chain, including the `sig=11` marker:
+  ```
+  [pf] proc=D far=
+  [ksys SYS_KILL] target=D nr=14 sig=11 -&gt; pm
+  [ksys SYS_EXIT] target=D nr=14 freed=
+  ```
+
+**Implication for a default-on feature:** because `boot-stubs` defaults **on** and CI builds via `cargo kernel-aarch64` (no `--no-default-features`), these stub expectations keep passing unchanged — the whole point of default-on. The forbidden file (`/Users/kevinbarnard/src/minixrs/tests/qemu-boot.forbidden`, lines 5–9: `!!! KERNEL PANIC:`, `!!! unexpected EL0 sync exception`, `!!! EL0 instruction abort`, `!!! EL0 data abort`, `do_irq: unexpected INTID`) contains no stub markers, so it is unaffected either way. If you later add a `--no-default-features` CI variant it would need its own expected file (the `[as] stub *`, `[pf] proc=D`, and `sig=11` lines would have to be absent — matching the plan's "Proof" at lines 98–99), but the existing default job needs no changes.
+
+---
+
+### Bottom line for planning
+- No existing `[features]` anywhere — you define the first; opt-out precedent is `arrayvec`'s `default-features = false`.
+- `kernel/build.rs` already branches on `CARGO_CFG_TARGET_OS`/`CARGO_CFG_TARGET_ARCH`; it can detect the feature via `CARGO_FEATURE_BOOT_STUBS` (env var, not `#[cfg]`), gating `user_stub.S` at build.rs line 37.
+- Aliases are build-only; document the clean boot as a full `cargo run … --no-default-features` line (book `build.md` §Quick start, line 27 area).
+- Docs land in `book/src/build.md` (Quick start, the build.rs subsection at lines 62–75, and the trace-forensics debugging section) plus `CLAUDE.md` per the plan.
+- CI stays green with default-on: `tests/qemu-boot.expected` lines 21–24 and 32–36 depend on the stubs (incl. stub D `sig=11`), and CI builds with defaults, so nothing there must change.</result>
+<usage><subagent_tokens>39294</subagent_tokens><tool_uses>17</tool_uses><duration_ms>116657</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>af8655afae56f410d</task-id>
+<tool-use-id>toolu_015NbWLqFZrbWHqKeFB7K4DF</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/d2c8c320-e5a2-44e4-9f08-e1a33731181c/tasks/af8655afae56f410d.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore kernel stub wiring" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I now have a complete picture. Here is my thorough report on the kernel side of how stubs A-D are wired.
+
+---
+
+# Kernel-side wiring of boot stubs A-D
+
+## 1. `kernel/build.rs` — assembly of `user_stub.S` and server-ELF/MXBI packing
+
+`/Users/kevinbarnard/src/minixrs/kernel/build.rs`
+
+**Top-level conditional gating (lines 16-25):** the whole build script no-ops unless the target OS is `none`:
+```rust
+let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+if target_os != "none" {
+    return;
+}
+```
+
+**The `sources` array and `user_stub.S` assembly (lines 30-63, inside the `"aarch64"` match arm):**
+```rust
+"aarch64" =&gt; {
+    let sources = [
+        "src/arch/aarch64/entry.S",
+        "src/arch/aarch64/vectors.S",
+        "src/arch/aarch64/trap.S",
+        "src/arch/aarch64/interrupt.S",
+        "src/arch/aarch64/user_stub.S",
+    ];
+    for src in &amp;sources {
+        println!("cargo:rerun-if-changed={src}");
+        let stem = std::path::Path::new(src).file_stem().unwrap().to_string_lossy();
+        let obj = out_dir.join(format!("{stem}.o"));
+        let status = Command::new("clang")
+            .args(["--target=aarch64-unknown-none", "-ffreestanding", "-c", src, "-o"])
+            .arg(&amp;obj)
+            .status()
+            .expect("failed to spawn clang");
+        if !status.success() {
+            panic!("clang failed assembling {src}");
+        }
+        println!("cargo:rustc-link-arg={}", obj.display());
+    }
+    println!("cargo:rerun-if-changed=src/arch/aarch64/linker.ld");
+    build_boot_image(&amp;out_dir);
+}
+```
+
+Key points for your refactor:
+- `user_stub.S` is **one entry in a flat `sources` array**, each compiled by directly spawning `clang` (not the `cc` crate — see the header comment, lines 4-11) and linked via `cargo:rustc-link-arg=&lt;obj&gt;`. There is **no per-stub conditional** today; it is assembled unconditionally alongside the arch entry/vector/trap files whenever `target_os == "none"` and `arch == aarch64`. To gate it behind `boot-stubs` you would read `CARGO_FEATURE_BOOT_STUBS` and conditionally include `"src/arch/aarch64/user_stub.S"` in `sources`.
+- The `x86_64` arm is a stub ("Phase 8 territory -- nothing to assemble yet", lines 65-67); `other =&gt; panic!(...)`.
+- `Cargo.toml` (`/Users/kevinbarnard/src/minixrs/kernel/Cargo.toml`) declares `cc = "1"` as a `[build-dependencies]` entry (line 13) but build.rs never actually uses the `cc` crate — it spawns `clang` directly. There is **no `[features]` section yet**, so `boot-stubs` would be net-new.
+
+**Server ELF build + MXBI packing (surrounding structure):**
+- `build_boot_image(out_dir)` (defined lines 87-142) is the single source of truth for the boot-server list. The `servers` array (lines 118-127) is `[(&amp;str crate, PathBuf dir, i32 proc_nr); 8]`:
+  ```
+  minixrs-vm→7, minixrs-ds→5, minixrs-vfs→1, minixrs-sched→9, minixrs-rs→2,
+  minixrs-pm→0, minixrs-init→10, minixrs-worker→-1 (EXEC_ONLY_PROC_NR)
+  ```
+  Comment (lines 111-117) states proc numbers must match `kernel-shared/src/com.rs`, and `worker` at `-1` is packed but skipped by the loader.
+- `build_server(...)` (lines 156-210) nests a `cargo build -p &lt;crate&gt; --target aarch64-unknown-none --release` per server, overriding rustflags to use each server's `user.ld`.
+- `pack_mxbi(...)` (lines 224-274) builds the archive: 16-byte header (magic `0x4942_584D` "MXBI", version 1, entry_count, total_size), then `entry_count × 32-byte` records `{proc_nr:i32, offset:u32, len:u32, name:[u8;20]}`, then ELF payloads. Result written to `OUT_DIR/boot_image.mxbi` and exposed via `cargo:rustc-env=BOOT_IMAGE_PATH=...` (lines 136-141).
+
+Note: the stubs A-D are **NOT** part of the MXBI archive — they are raw assembly blobs linked directly into the kernel `.rodata` via the `sources` loop. Only real servers + init + worker go through MXBI. This is the core structural distinction relevant to your feature.
+
+## 2. `user_stub.S` — content, exported labels, how A-D share it
+
+`/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/user_stub.S` (267 lines)
+
+It is a single hand-written assembly file containing **four independent PC-relative-free blobs**, each in its own `.rodata.user_stub_&lt;x&gt;` section, sharing a common block of `.equ` constants (lines 40-59: `SEND/RECEIVE/SENDREC`, `ANY=0x3FFF`, endpoint numbers, `SYS_GETINFO`, `VM_BRK/VM_MMAP/VM_MUNMAP`, `MSG_SIZE=104`).
+
+The eight exported labels (each `.global`, bracketing one blob so the kernel can compute its length by `end - start`):
+- **Stub A** (sender, SENDREC loop to endpoint B, counter in x19): `_user_stub_a_start` (line 65-67) / `_user_stub_a_end` (line 80-82), section `.rodata.user_stub_a`.
+- **Stub B** (echo server, RECEIVE ANY then SEND back): `_user_stub_b_start` (line 88-90) / `_user_stub_b_end` (line 107-109), section `.rodata.user_stub_b`.
+- **Stub C** (kernel-call client, SENDREC to SYSTEM with `SYS_GETINFO`/`GET_WHOAMI`): `_user_stub_c_start` (line 115-117) / `_user_stub_c_end` (line 136-138), section `.rodata.user_stub_c`.
+- **Stub D** (brk + mmap/munmap + page-fault + deliberate out-of-region SIGSEGV demo): `_user_stub_d_start` (line 178-180) / `_user_stub_d_end` (line 265-267), section `.rodata.user_stub_d`.
+
+Each blob carves a 104-byte `Message` from `[SP_EL0-104, SP_EL0)` and shares the same `svc #0` IPC calling convention (x0=endpoint, x1=call, x2=msg ptr). The file header comment (lines 4-38) and stub D's block comment (lines 140-174) document behavior in detail. There is no shared code between blobs — they only share the `.equ` constants and the SVC ABI.
+
+## 3. `kernel/src/arch/aarch64/userland.rs` — every stub A-D wiring point
+
+`/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/userland.rs` (698 lines)
+
+**Module declaration/gating:** `arch/aarch64/mod.rs:13` `pub mod userland;` and `mod.rs:18` `pub use userland::userland_bootstrap;`. The whole arch tree is compiled only under `target_os="none"` (via `main.rs`). Called once from `main.rs:97` `unsafe { arch::userland_bootstrap() };`.
+
+**Extern declarations of the `_user_stub_*` symbols (lines 96-107):**
+```rust
+// ----- EL0 stub blobs (linked into the kernel image by `user_stub.S`) ------
+unsafe extern "C" {
+    static _user_stub_a_start: u8;
+    static _user_stub_a_end: u8;
+    static _user_stub_b_start: u8;
+    static _user_stub_b_end: u8;
+    static _user_stub_c_start: u8;
+    static _user_stub_c_end: u8;
+    static _user_stub_d_start: u8;
+    static _user_stub_d_end: u8;
+}
+```
+
+**The `USER_CODE_VA_*` / `USER_STACK_VA_*` constants (lines 51-71):**
+```rust
+pub const USER_CODE_VA_A: u64 = 0x0040_0000; // 4 MiB
+pub const USER_STACK_VA_A: u64 = 0x0080_0000; // 8 MiB
+pub const USER_CODE_VA_B: u64 = 0x0041_0000;
+pub const USER_STACK_VA_B: u64 = 0x0081_0000;
+pub const USER_CODE_VA_C: u64 = 0x0042_0000;
+pub const USER_STACK_VA_C: u64 = 0x0082_0000;
+pub const USER_CODE_VA_D: u64 = 0x0043_0000;
+pub const USER_STACK_VA_D: u64 = 0x0083_0000;
+```
+
+**Per-stub priv-id constants (lines 86-89):**
+```rust
+const STUB_A_PRIV_ID: PrivId = PrivId::new(16);
+const STUB_B_PRIV_ID: PrivId = PrivId::new(17);
+const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
+const STUB_D_PRIV_ID: PrivId = PrivId::new(19);
+```
+(`STUB_SPSR_EL0: u64 = 0x340` is defined at line 94 — `pub(crate)`, also consumed by `system/do_exec.rs:138` and `load_boot_server` at line 368.)
+
+**The four `build_stub` calls in `userland_bootstrap` (lines 171-220):** all inside one `unsafe` block. Each passes `STUB_x_PROC_NR`, `Some(STUB_x_PRIV_ID)`, an id byte `b'A'..b'D'`, the `&amp;_user_stub_x_start`/`&amp;_user_stub_x_end` extern pair, `USER_CODE_VA_x`, `USER_STACK_VA_x`, `HeapWindow::EMPTY`, and `false` (the `frozen` flag). E.g. stub A (lines 172-182):
+```rust
+build_stub(
+    STUB_A_PROC_NR, Some(STUB_A_PRIV_ID), b'A',
+    &amp;_user_stub_a_start, &amp;_user_stub_a_end,
+    USER_CODE_VA_A, USER_STACK_VA_A,
+    HeapWindow::EMPTY, false,
+);
+```
+Stubs B, C, D follow identically at lines 183-193, 194-204, 205-219 (D carries the long comment lines 213-216 about routing faults to VM).
+
+**Stub-C SCHED pre-delegation (lines 230-233):**
+```rust
+let p = proc_slot_mut(STUB_C_PROC_NR).expect("stub C proc slot in range");
+p.scheduler = boot_endpoint(SCHED_PROC_NR);
+```
+
+**Priv install (line 238):** `unsafe { install_stub_privs() };`
+
+**Enqueue of the four runnable stubs (lines 244-249):**
+```rust
+sched::enqueue(STUB_A_PROC_NR);
+sched::enqueue(STUB_B_PROC_NR);
+sched::enqueue(STUB_C_PROC_NR);
+sched::enqueue(STUB_D_PROC_NR);
+```
+
+**Diagnostic (line 254):** `unsafe { print_addrspace_summary() };`
+
+**Supporting stub-only functions:**
+- `build_stub` (lines 406-464) — allocates AddrSpace + code/stack frames, `copy_stub_into_frame`, maps RO_CODE / RW_DATA, `populate_stub_slot`, `mem::forget`s the AddrSpace.
+- `copy_stub_into_frame` (lines 472-484) — computes `stub_end.offset_from(stub_start)` length, HHDM copy + `flush_icache_range`.
+- `populate_stub_slot` (lines 488-542) — writes name (`id` + "-stub"), nr, endpoint, priv_id, priority `SRV_Q`, quantum, EL0 regs (`elr_el1`/`sp_el0`/`spsr_el1 = STUB_SPSR_EL0`), ttbr0/asid, heap_window; sets `RTS_NO_PRIV` iff `frozen`.
+- `install_stub_privs` (lines 548-565) — calls `install_one_stub_priv` for A (peer B) and B (peer A), then `install_stub_c_priv` and `install_stub_d_priv`.
+- `install_stub_c_priv` (lines 573-597) — `USR_T`, `ipc_to` → SYSTEM only, `k_call_mask` → `SYS_GETINFO` only; sets `pr.proc_nr = Some(STUB_C_PROC_NR)` (line 587).
+- `install_stub_d_priv` (lines 615-648) — `USR_T`, `ipc_to` → VM priv slot, empty `k_call_mask`; sets `pr.proc_nr = Some(STUB_D_PROC_NR)` (line 630); also opens the reverse VM→D `ipc_to` bit (lines 644-647).
+- `install_one_stub_priv` (lines 655-668) — generic A/B installer: `SRV_T`, `ipc_to` → single `peer_priv_id` bit.
+- `print_addrspace_summary` (lines 675-698) — iterates `&amp;[STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR, STUB_D_PROC_NR]` (lines 680-685) and prints `[as] stub X nr=… ttbr0_pa=… asid=…`.
+
+**Shared (non-stub) machinery in the same file** that a `boot-stubs` gate must NOT remove: `ExecImage` (lines 272-277), `load_exec_image` (lines 292-333, used by boot servers AND `do_exec`), `destroy_addrspace_with_leaves` (lines 339-346), `load_boot_server` (lines 355-391), `SERVER_STACK_VA` (line 114). `STUB_SPSR_EL0` is used by both `load_boot_server` and `do_exec`, so it cannot be gated away.
+
+## 4. How the boot image / load loop distinguishes stubs from real servers and init
+
+The distinction is architectural, not a runtime tag on the stubs — **stubs live in a completely separate path from MXBI servers**:
+
+- **Boot servers + init + worker** are packed into the MXBI archive by build.rs and loaded by the archive-driven loop in `userland_bootstrap` (lines 153-165):
+  ```rust
+  let image = crate::boot_image::BootImage::get();
+  for (nr, elf) in image.iter() {
+      if nr.get() &lt; 0 {          // EXEC_ONLY_PROC_NR sentinel (= -1): `worker`
+          continue;              // packed for SYS_EXEC name resolution, no proc slot
+      }
+      load_boot_server(nr, elf);
+  }
+  ```
+  The **only** discriminator inside the MXBI loop is `nr.get() &lt; 0`, which skips the exec-only `worker` module (`com::EXEC_ONLY_PROC_NR = -1`, defined `kernel-shared/src/com.rs:104`). Init is NOT special-cased here — it is loaded as an ordinary boot server (proc_nr 10); its "PID 1 / ordinary user" nature is expressed only in its priv slot (see below) and in PM's mproc seeding.
+- `boot_image/mod.rs` (`/Users/kevinbarnard/src/minixrs/kernel/src/boot_image/mod.rs`): `BootImage::get()` (lines 53-77) validates the header/records; `iter()` (lines 92-98) yields `(ProcNr, &amp;[u8])`; `proc_and_elf` (lines 147-153) decodes the proc_nr/offset/len. `boot_image/elf.rs` does the PT_LOAD parsing into an AddrSpace.
+- **Stubs A-D** are then built by four explicit `build_stub` calls (lines 171-220) — entirely outside the archive loop, from the linked `_user_stub_*` blobs.
+- **Proc/priv-slot seeding difference:** boot servers get their proc + dedicated priv slots pre-populated by `proc::init()` → `init_boot_image()` (`kernel/src/proc/table.rs:448-468`) from the static `IMAGE` array (`table.rs:140`, `N_IMAGE = NR_TASKS + NR_BOOT_PROCS = 16`, line 137). Those slots boot blocked on `RTS_NO_PRIV` (`table.rs:515`), and `load_boot_server` clears it after loading the ELF (`userland.rs:373` `p.rts_flags.store(0, …)`). Init is special-cased *inside* `init_boot_image` (`table.rs:454-463`): it is pointed at the shared `USER_PRIV_ID` (20) rather than a dedicated server priv slot. Stubs, by contrast, have **no `IMAGE` entry** — their proc slots are filled entirely by `populate_stub_slot` and their priv slots (16-19) by `install_stub_privs`, at userland-bootstrap time.
+
+So a `boot-stubs=off` build would remove: the `user_stub.S` source from build.rs, the extern block, the VA/priv-id constants, the four `build_stub` calls + enqueues + priv installs + `print_addrspace_summary`, while leaving the MXBI loop and `load_boot_server`/`load_exec_image`/`STUB_SPSR_EL0` intact.
+
+## 5. Workspace-wide search for the five constant families
+
+### `NR_BOOT_PROCS` — defined `kernel-shared/src/com.rs:62` (`= INIT_PROC_NR.get() as usize + 1` = 11)
+- `kernel-shared/src/com.rs`: `:62` (def), `:65` and `:66` (const asserts `NR_PROCS/NR_SYS_PROCS &gt;= NR_BOOT_PROCS`), `:95`, `:96` (stub-contiguity asserts), `:141` (`seen` array in test), `:169` (test).
+- `kernel/src/proc/table.rs`: `:17` (import), `:137` (`const N_IMAGE = NR_TASKS + NR_BOOT_PROCS`).
+- `servers/pm/src/mproc.rs`: `:28` (import), `:32` and `:41` (doc + `FORK_POOL_BASE` def), `:130` (`.take(NR_BOOT_PROCS)` for boot-server seeding), `:149` (`.skip(NR_BOOT_PROCS)`), `:418`, `:426` (tests).
+
+### `NR_STUB_PROCS` — defined `kernel-shared/src/com.rs:92` (`= 4`)
+- `kernel-shared/src/com.rs`: `:92` (def), `:96` (asserts `STUB_D == NR_BOOT_PROCS + NR_STUB_PROCS - 1`), `:171` (test).
+- `servers/pm/src/mproc.rs`: `:28` (import), `:32` (doc), `:41` (`FORK_POOL_BASE = NR_BOOT_PROCS + NR_STUB_PROCS`), `:150` (`.take(NR_STUB_PROCS)` for stub seeding), `:426` (test).
+- Not referenced in the kernel crate itself (kernel wires stubs individually by proc-nr).
+
+### `FORK_POOL_BASE` — defined `servers/pm/src/mproc.rs:41` (`= NR_BOOT_PROCS + NR_STUB_PROCS` = 15). PM-only.
+- `servers/pm/src/mproc.rs`: `:41` (def), `:34`, `:38` (doc on NR_MPROCS), `:210` (doc), `:214` (`alloc_slot_in` scans `FORK_POOL_BASE..NR_MPROCS`), `:512`, `:513`, `:517`, `:521`, `:527` (tests).
+- No kernel or kernel-shared references.
+
+### `STUB_A_PROC_NR`..`STUB_D_PROC_NR` — defined `kernel-shared/src/com.rs:82, 84, 86, 89` (ProcNr 11, 12, 13, 14)
+- `kernel-shared/src/com.rs`: defs at `:82/:84/:86/:89`; used in the contiguity asserts `:95/:96` and the tests `:163-166`.
+- `kernel/src/arch/aarch64/userland.rs`: import `:36`; `build_stub` proc-nr args `:173/:184/:195/:206`; `:231` (stub-C scheduler), `:245-248` (enqueue), `:551/:555` (A/B priv install), `:587` (`install_stub_c_priv` proc_nr), `:630` (`install_stub_d_priv` proc_nr), `:681-684` (`print_addrspace_summary` array).
+- `servers/pm/src/mproc.rs`: import `:399` (test module); tests at `:452, :453, :466, :474, :490, :504, :518, :536, :551, :574, :586`. (Note: PM's non-test seeding at `:146-160` reaches the stub slots by index range `NR_BOOT_PROCS..NR_BOOT_PROCS+NR_STUB_PROCS`, not by the named constants.)
+- No `STUB_*_PROC_NR` references in build.rs (build.rs uses the MXBI server list, which does not include stubs).
+
+---
+
+### Cross-crate sync summary (kernel ↔ PM)
+The authoritative definitions all live in `/Users/kevinbarnard/src/minixrs/kernel-shared/src/com.rs` (lines 62, 82-104), with static asserts (lines 95-97) tying `STUB_A_PROC_NR == NR_BOOT_PROCS` and `STUB_D_PROC_NR == NR_BOOT_PROCS + NR_STUB_PROCS - 1`. The kernel consumes them in `userland.rs`; PM consumes them in `mproc.rs` (`FORK_POOL_BASE`, `seed_in`). If your `boot-stubs` feature makes `NR_STUB_PROCS` conditional, note that PM's `FORK_POOL_BASE = NR_BOOT_PROCS + NR_STUB_PROCS` and its `seed_in` stub-seeding loop (`mproc.rs:146-160`) would shift, and the `const _` asserts in com.rs (lines 95-97) plus the tests in com.rs (lines 159-172) and mproc.rs would need to stay consistent — the two crates must agree on `NR_STUB_PROCS` since it is defined in the shared crate they both depend on.
+
+Note: I did not create a plan file — this was a read-only exploration/reporting task, and the findings above are returned directly.</result>
+<usage><subagent_tokens>63126</subagent_tokens><tool_uses>17</tool_uses><duration_ms>160654</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a0a1a78cc9e2e5447</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/d2c8c320-e5a2-44e4-9f08-e1a33731181c/tasks/a0a1a78cc9e2e5447.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore PM stub seeds and shared consts" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything I need. Here is my thorough report.
+
+---
+
+# Report: `boot-stubs` feature — shared constants + PM side
+
+## Key finding up front: no Cargo `[features]` exist yet
+
+None of `kernel-shared/Cargo.toml`, `servers/pm/Cargo.toml`, `servers/vm/Cargo.toml`, or `kernel/Cargo.toml` have a `[features]` section. A workspace-wide grep for `[features]` in any `Cargo.toml` returns nothing. So `boot-stubs` would be brand-new infrastructure, and the crates that must agree (kernel-shared defines the constants; kernel and PM both consume them) currently share the stub count purely through `NR_STUB_PROCS` in `kernel-shared::com`. That single constant is the natural feature pivot, but note the many `const _: () = assert!(...)` compile-time checks and `#[cfg(test)]` host tests that hard-code `4` stubs / slot 14 / slot 15 and will need to stay consistent under both feature settings.
+
+The paths `/Users/kevinbarnard/src/minixrs/target/package/minixrs-kernel-shared-0.1.0/src/com.rs` are a packaged build artifact (a stale copy — it predates the stub retirement) — ignore them.
+
+---
+
+## 1. `kernel-shared/src/com.rs` — the constant definitions
+
+File: `/Users/kevinbarnard/src/minixrs/kernel-shared/src/com.rs`
+
+Boot-server proc numbers and `NR_BOOT_PROCS` (lines 48-66):
+
+```rust
+48  pub const PM_PROC_NR: ProcNr = ProcNr::new(0);
+...
+57  pub const SCHED_PROC_NR: ProcNr = ProcNr::new(9);
+58  pub const INIT_PROC_NR: ProcNr = ProcNr::new(10);
+59
+60  /// One past the highest boot-server proc-number (`init` is the last slot
+61  /// allocated from the boot image).
+62  pub const NR_BOOT_PROCS: usize = (INIT_PROC_NR.get() as usize) + 1;   // = 11
+63
+64  // Compile-time guarantees that the proc tables can hold every boot process.
+65  const _: () = assert!(NR_PROCS &gt;= NR_BOOT_PROCS);
+66  const _: () = assert!(NR_SYS_PROCS &gt;= NR_BOOT_PROCS);
+```
+
+The stub block (lines 68-97) — this is the heart of what the feature gates. Note the large comment explaining stub E was retired in slice 4.8 and A–D remain:
+
+```rust
+81  /// Stub A — SENDREC ping loop to stub B.
+82  pub const STUB_A_PROC_NR: ProcNr = ProcNr::new(11);
+83  /// Stub B — RECEIVE/SEND echo peer of stub A.
+84  pub const STUB_B_PROC_NR: ProcNr = ProcNr::new(12);
+85  /// Stub C — `SYS_GETINFO(GET_WHOAMI)` kernel-call loop (SCHED-delegated).
+86  pub const STUB_C_PROC_NR: ProcNr = ProcNr::new(13);
+87  /// Stub D — brk/mmap/munmap VM client; deliberately faults out-of-region
+88  /// after its munmap (slice 4.5) to exercise the SIGSEGV → PM kill path.
+89  pub const STUB_D_PROC_NR: ProcNr = ProcNr::new(14);
+90
+91  /// Number of demo stubs (A–D; the fork-loop stub E was retired in slice 4.8).
+92  pub const NR_STUB_PROCS: usize = 4;
+93
+94  // Stubs sit contiguously just past the boot image, well inside the proc table.
+95  const _: () = assert!(STUB_A_PROC_NR.get() as usize == NR_BOOT_PROCS);
+96  const _: () = assert!(STUB_D_PROC_NR.get() as usize == NR_BOOT_PROCS + NR_STUB_PROCS - 1);
+97  const _: () = assert!((STUB_D_PROC_NR.get() as usize) &lt; NR_PROCS);
+```
+
+Important note for the refactor: `FORK_POOL_BASE` is **not** defined here. It lives in PM's `mproc.rs` (see §2). The `com.rs` module only defines `NR_STUB_PROCS` and the per-stub proc numbers. `boot_endpoint` helper is at lines 106-109.
+
+Compile-time asserts that will break/need re-gating if `NR_STUB_PROCS` becomes 0 under `not(feature = "boot-stubs")`:
+- Line 96: `STUB_D_PROC_NR == NR_BOOT_PROCS + NR_STUB_PROCS - 1` — with `NR_STUB_PROCS = 0` this becomes `14 == 10`, a compile failure. The `STUB_*_PROC_NR` constants themselves would likely need to be `#[cfg(feature = "boot-stubs")]`-gated too, since asserts 95-96 reference them.
+
+`#[cfg(test)]` module (lines 111-181) hard-codes the four stubs:
+- Lines 141-146: `let mut seen = [false; NR_BOOT_PROCS];` indexed by boot-server proc numbers.
+- Lines 158-172 `stub_procs_contiguous_past_boot_image`: builds `[STUB_A..STUB_D]`, asserts each `s.get() as usize == NR_BOOT_PROCS + i` and `stubs.len() == NR_STUB_PROCS`. This test directly encodes the 4-stub assumption.
+
+---
+
+## 2. `servers/pm/src/mproc.rs` — where PM seeds stub slots
+
+File: `/Users/kevinbarnard/src/minixrs/servers/pm/src/mproc.rs`
+
+Imports (lines 27-30):
+```rust
+27  use minixrs_kernel_shared::com::{
+28      INIT_PROC_NR, NR_BOOT_PROCS, NR_STUB_PROCS, PM_PROC_NR, RS_PROC_NR, boot_endpoint,
+29  };
+```
+
+`NR_MPROCS` and `FORK_POOL_BASE` definitions (lines 32-41) — this is where `FORK_POOL_BASE` is defined, derived from `NR_BOOT_PROCS + NR_STUB_PROCS`:
+
+```rust
+32  /// Table capacity. Slots `0..NR_BOOT_PROCS + NR_STUB_PROCS` (= 15 since stub E's
+33  /// slice-4.8 retirement) are seeded at init; the pool above that
+34  /// ([`FORK_POOL_BASE`]`..NR_MPROCS`) is where 4.6's fork allocates children.
+35  pub const NR_MPROCS: usize = 32;
+36
+37  /// First slot fork may allocate. Boot servers + demo stubs own `[0, 15)`; forked
+38  /// children land in `[FORK_POOL_BASE, NR_MPROCS)`. A child's slot index is also
+39  /// its kernel proc number, so this range must stay within the kernel proc table
+40  /// and within VM's `MAX_CLIENTS` region-table cap (both hold).
+41  pub const FORK_POOL_BASE: usize = NR_BOOT_PROCS + NR_STUB_PROCS;   // = 15
+```
+
+Note the doc comment on line 32 says "= 15" — this bakes the current `NR_STUB_PROCS = 4` into prose. If the feature drops stubs, `FORK_POOL_BASE` becomes 11 and comments are stale.
+
+The seeding function `seed_in` (lines 93-161). The stub-seeding loop is lines 144-160:
+
+```rust
+144      // Demo stubs: ordinary user processes, parented to INIT, pids continuing
+145      // past the servers (slots 11..=15 land on pids 11..=15).
+146      for (slot, e) in t
+147          .iter_mut()
+148          .enumerate()
+149          .skip(NR_BOOT_PROCS)
+150          .take(NR_STUB_PROCS)
+151      {
+152          *e = MProc {
+153              pid: next_pid,
+154              parent_slot: init,
+155              endpoint: ep(slot),
+156              exit_status: 0,
+157              flags: MF_IN_USE,     // note: NOT MF_PRIV_PROC — stubs are killable user procs
+158          };
+159          next_pid += 1;
+160      }
+```
+
+This loop is cleanly parameterized on `NR_STUB_PROCS` via `.take(NR_STUB_PROCS)` — with `NR_STUB_PROCS = 0` it seeds nothing, which is the desired feature-off behavior and needs no `#[cfg]` in the body. The boot-server loop above it (lines 130-142) uses `.take(NR_BOOT_PROCS)` and is unaffected.
+
+The comment on line 145 ("slots 11..=15 land on pids 11..=15") is stale even today (stubs are slots 11..=14 now) — worth flagging.
+
+`alloc_slot_in` uses `FORK_POOL_BASE` (lines 210-214):
+```rust
+213  fn alloc_slot_in(t: &amp;[MProc; NR_MPROCS]) -&gt; Option&lt;usize&gt; {
+214      (FORK_POOL_BASE..NR_MPROCS).find(|&amp;slot| t[slot].flags == 0)
+```
+
+No direct `STUB_*_PROC_NR` or `boot_endpoint`-of-stub references in the production seeding code beyond the generic loop — the stub proc numbers themselves appear only in the test module (see §3). `boot_endpoint` is used generically via the `ep` closure (line 103).
+
+## PM `main.rs` — where seeding is invoked
+
+File: `/Users/kevinbarnard/src/minixrs/servers/pm/src/main.rs`
+
+- `pm_init` (SEF fresh-init) calls `mproc::seed();` at line 142. The doc comment (lines 132-135) already notes PM "no longer hand-releases a frozen stub here" (stub E's old `PRIVCTL_SET_USER` release is gone). So there is no per-stub release code left in PM `main.rs` to gate — the only stub coupling in PM is the `mproc.rs` seeding loop.
+- No `STUB_*_PROC_NR`, `NR_STUB_PROCS`, or `FORK_POOL_BASE` references anywhere in `main.rs` (confirmed by grep). The fork pool is reached only through `mproc::alloc_slot()` (line 187) etc.
+- Module doc-comment lines 3-34 describe stub D's SIGSEGV as the live demo (lines 15-16) — documentation that references stub behavior but no code coupling.
+
+---
+
+## 3. Host tests in `servers/pm/` keyed on stub slots
+
+All in the `#[cfg(test)] mod tests` of `/Users/kevinbarnard/src/minixrs/servers/pm/src/mproc.rs` (lines 395-599). Per CLAUDE.md line 126, these were "rebased onto stub D (slot 14, the new last-seeded proc) or INIT" when stub E was retired. Test import (lines 398-400) pulls in `STUB_A_PROC_NR, STUB_D_PROC_NR`.
+
+Slot indices the tests assume:
+
+| Test (line) | Assumption |
+|---|---|
+| `seed_assigns_boot_pids` (408-421) | PM slot 0 → pid 0; INIT slot 10 → pid 1; VFS→pid 2; RS→pid 3; VM slot 7→pid 8; SCHED slot 9→pid 10. Iterates `take(NR_BOOT_PROCS)` asserting all are `MF_IN_USE|MF_PRIV_PROC`. |
+| `seed_stub_pids_continue` (423-431) | Iterates `NR_BOOT_PROCS..NR_BOOT_PROCS + NR_STUB_PROCS` (slots 11..=14), asserts pid `11+i`, flags `MF_IN_USE` (no PRIV), parent = INIT. **Directly encodes the 4-stub range.** With `NR_STUB_PROCS = 0` this loop is empty (passes vacuously). |
+| `getpid_returns_pid_and_ppid` (444-454) | `STUB_A_PROC_NR` (slot 11) → `(11, 1)`; `STUB_D_PROC_NR` (slot 14) → `(14, 1)`. **Fails if stubs unseeded.** |
+| `getpid_unknown_slot_is_none` (456-461) | slot 16 is "unseeded" (assumes fork pool starts at/above 15). |
+| `getpid_dead_slot_is_none` (463-469) | kills slot 14 (`STUB_D`). |
+| `kill_user_proc_terminates_and_marks_dead` (471-477) | kills slot 14 (`STUB_D`) as the representative user proc. |
+| `seed_stores_boot_endpoints` (500-507) | slot 14 (`STUB_D`) endpoint == `boot_endpoint(14)`. |
+| `alloc_slot_returns_first_free_fork_pool_slot` (509-522) | first free slot == `FORK_POOL_BASE` (15); comment on line 512 hard-codes "(15)". Uses `STUB_D` as a parent. |
+| `alloc_slot_none_when_pool_full` (524-531) | fills `FORK_POOL_BASE..NR_MPROCS`. |
+| `set_child_assigns_monotonic_pid_and_records_fields` (533-546) | parent = `STUB_D` (pid 14), so **child gets pid 15** (comment line 539: "Highest seeded pid is 14 (stub D)"). **Breaks if stub D unseeded — highest seeded pid would be 10 (SCHED), so child pid would be 11.** |
+| `zombie_child_is_found_and_reaped` (548-569) | parent = `STUB_D`. |
+| `waiting_flag_round_trips` (571-580) | parent = `STUB_D`. |
+| `has_live_child_is_false_without_children` (582-587) | uses `STUB_A` (slot 11) as a childless proc. |
+
+The tests using `STUB_A`/`STUB_D` as convenient "a seeded user proc" fixtures (getpid, kill, set_child parent, zombie, waiting) are the ones that will need a feature-off alternative fixture (e.g. a seeded fork-pool child, or gating the whole test with `#[cfg(feature = "boot-stubs")]`). `set_child_assigns_monotonic_pid_and_records_fields` is the subtle one: its expected pid 15 is derived from stub D being the highest seeded pid.
+
+---
+
+## 4. Every use site of the tracked symbols (workspace, excluding `target/`)
+
+### `NR_STUB_PROCS`
+- `kernel-shared/src/com.rs`: 92 (def), 96, 171
+- `servers/pm/src/mproc.rs`: 28 (import), 32-34 (doc), 41 (`FORK_POOL_BASE` def), 150, 426
+
+### `FORK_POOL_BASE`
+- `servers/pm/src/mproc.rs`: 34 (doc), 41 (def), 210 (doc), 214, 512-513, 517, 521, 527
+- (defined only in PM; referenced by CLAUDE.md prose, not by other crates' code)
+
+### `STUB_A_PROC_NR`
+- `kernel-shared/src/com.rs`: 82 (def), 163
+- `servers/pm/src/mproc.rs`: 399 (import), 452, 586
+- `kernel/src/arch/aarch64/userland.rs`: 36 (import), 173, 245, 551, 681
+
+### `STUB_B_PROC_NR`
+- `kernel-shared/src/com.rs`: 84 (def), 164
+- `kernel/src/arch/aarch64/userland.rs`: 36 (import), 184, 246, 555 (as arg), 682
+
+### `STUB_C_PROC_NR`
+- `kernel-shared/src/com.rs`: 86 (def), 165
+- `kernel/src/arch/aarch64/userland.rs`: 36 (import), 195, 231, 247, 587, 683
+
+### `STUB_D_PROC_NR`
+- `kernel-shared/src/com.rs`: 89 (def), 166
+- `servers/pm/src/mproc.rs`: 399 (import), 453, 466, 474, 490, 504, 518, 536, 551, 574 (heavy test usage)
+- `kernel/src/arch/aarch64/userland.rs`: 36 (import), 206, 248, 630, 684
+
+### `NR_BOOT_PROCS` (related; feature-invariant but co-referenced)
+- `kernel-shared/src/com.rs`: 62 (def), 65-66, 95-96, 141, 169, 179
+- `servers/pm/src/mproc.rs`: 28 (import), 32 (doc), 41, 130, 149, 418, 426
+- `kernel/src/proc/table.rs`: 17 (import), 137 (`N_IMAGE = NR_TASKS + NR_BOOT_PROCS`)
+
+### `INIT_PROC_NR` (stub parent; feature-invariant)
+- `kernel-shared/src/com.rs`: 58 (def), 136, 151, 176, 179
+- `servers/pm/src/mproc.rs`: 28, 98, 413, 429
+- `kernel/src/proc/table.rs`: 16, 286, 454
+- `kernel/build.rs`: 114 (packs init at proc 10)
+- `kernel/src/arch/aarch64/userland.rs` and `userland/init/src/main.rs`: comments
+
+### Kernel-side stub seeding (out of your explicit scope, but the code that must stay consistent with PM)
+File `/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/userland.rs` installs and enqueues the stubs:
+- Lines 173-206: building the four stub images.
+- Lines 231, 245-248: enqueue `STUB_A..STUB_D` at boot / SCHED pre-delegate stub C (line 231).
+- Lines 551-555: `install_one_stub_priv` for A/B priv wiring.
+- Lines 587, 630: assign proc_nr for C and D.
+- Lines 681-684: a list of all four.
+This is the kernel half that a `boot-stubs` feature must gate in lockstep with PM's seeding — the two "must stay consistent" as the task notes.
+
+---
+
+## 5. VM server — `MAX_CLIENTS` / `region.rs` relation to proc numbers / fork pool
+
+File: `/Users/kevinbarnard/src/minixrs/servers/vm/src/region.rs`
+
+`MAX_CLIENTS` definition (lines 47-51):
+```rust
+47  /// Proc-number range the table can key. Boot procs are `0..=15`; PM allocates
+48  /// forked children from the pool above that (kernel proc-nr = PM mproc slot,
+49  /// `[16, 32)` — see `servers/pm/src/mproc.rs`), so the table must cover the
+50  /// whole fork pool for `VM_FORK` to record a child's inherited regions.
+51  const MAX_CLIENTS: usize = 32;
+```
+
+Relationship details:
+- `MAX_CLIENTS = 32` is a **literal**, deliberately matching PM's `NR_MPROCS = 32` (not imported from it — the two are coupled only by comment/convention). The region table is `static [ClientRegions; MAX_CLIENTS]` at line 213, indexed directly by proc number via `client_idx` (lines 217-220): `idx &lt; MAX_CLIENTS`.
+- The module doc-comment (lines 19-23) is **stale**: it still says `MAX_CLIENTS = 16` and "proc numbers 0..=15, including stub D at 14", contradicting the actual `const MAX_CLIENTS = 32` on line 51. CLAUDE.md line 124 confirms it was widened 16→32 in slice 4.6b.
+- `HEAP_BASE`/`MMAP_BASE` doc comments (lines 29-42) reference "stub D" by convention (VM and stub D agree on `HEAP_BASE`), and line 41 "acceptable while only the boot stubs run" — documentation coupling only, no code coupling.
+
+Impact of `boot-stubs` on VM: **VM does not reference `NR_STUB_PROCS`, `FORK_POOL_BASE`, or any `STUB_*_PROC_NR` in code.** `MAX_CLIENTS` is sized for the fork pool (`NR_MPROCS = 32`), not for the stub count, so it is **independent of the feature** — removing stubs frees proc numbers 11–14 but the table stays 32-wide (harmless unused slots). The only VM concern is documentation drift: the doc-comments (lines 19-23, 29-42) narrate stub D as the exemplar VM client and are already partly stale; they'd need updating so they don't describe a now-optional stub as if it always exists. VM's region tests (lines 494-519) use ad-hoc proc numbers 20/21/28/29/30 and `MAX_CLIENTS`, and one test at line 368 references "proc 14" — but proc 14 there is just "an untouched slot," a coincidental overlap with stub D's number, not a dependency on the stub being seeded (VM never seeds; it lazily creates region sets on first `brk`/`mmap`).
+
+---
+
+## Summary of the consistency contract to preserve
+
+`NR_STUB_PROCS` (in `kernel-shared::com`) is the single source of truth. It feeds:
+1. `com.rs` compile-time asserts 95-96 (reference `STUB_A/D_PROC_NR`) — will need gating if the stub proc-number constants are `#[cfg]`'d out.
+2. PM `mproc.rs::FORK_POOL_BASE = NR_BOOT_PROCS + NR_STUB_PROCS` (line 41) — automatically shifts the fork pool down when stubs are gone; PM's seeding loop `.take(NR_STUB_PROCS)` (line 150) already degrades cleanly to zero.
+3. Kernel `userland.rs` stub install/enqueue (lines 173-684) — the other half that must be gated in lockstep so the kernel doesn't create EL0 stub processes that PM's mproc no longer knows about.
+4. Host tests in `com.rs` (158-172) and `mproc.rs` (423-587) that hard-code 4 stubs / slots 11 &amp; 14 / expected fork pid 15.
+5. VM `MAX_CLIENTS` is **decoupled** (sized to `NR_MPROCS`, not the stub count) — no functional change needed, only doc updates.</result>
+<usage><subagent_tokens>54929</subagent_tokens><tool_uses>15</tool_uses><duration_ms>152322</duration_ms></usage>
+</task-notification>
