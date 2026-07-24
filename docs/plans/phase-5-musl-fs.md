@@ -78,7 +78,7 @@ Phase 6 alongside virtio-console).
 
 Servers currently cannot print at all; every later slice needs observability
 while TTY/VFS/grants are still under construction. `SYS_DIAGCTL` (MINIX 3
-pedigree: `kernel/system/do_diagctl.c`) gets a body in slice 5.0 with an
+pedigree: `kernel/system/do_diagctl.c`) gets a body in slice 5.1 with an
 **inline-payload** form — length + up to ~90 text bytes inside the 96-byte
 message payload — so it needs *zero* user-copy machinery. A `server-rt`
 helper loops longer strings. TTY/CDEV is the real stdio path; DIAGCTL is for
@@ -147,7 +147,9 @@ movement; the chunk-6 brief explicitly prefers real grants).
 
 ### D5. Fault-safe user copy: PT-walk replaces `read/write_volatile`
 
-The chunk-6-mandated opening slice. The same walk-via-HHDM technique from D4
+The chunk-6-mandated safety floor, first feature slice (5.1 — right after
+the errno resequence so its `EFAULT` marker carries the final value from
+day one). The same walk-via-HHDM technique from D4
 replaces the two message-copy functions (`copy_msg_from_user` /
 `copy_msg_to_user`): a bad user message pointer becomes **`EFAULT` in the
 caller's `x0`**, never a panic. The deferred receive-side flush
@@ -185,7 +187,10 @@ wants PIE/interpreters).
 
 ### D7. Errno ABI: classic-MINIX values (≡ Linux/musl), MINIX extras above 200
 
-`error.rs` is renumbered once, before any C exists (slice 5.4):
+`error.rs` is renumbered once, as the **opening slice (5.0)** — before any C
+exists *and* before any Phase 5 slice bakes an errno value into a trace
+marker, so no later slice ever re-touches an expected line over a value
+change:
 
 - **POSIX block:** classic book-era MINIX values, which are identical to
   Linux/musl numbering for everything Phase 5 needs (EPERM 1 … EACCES 13,
@@ -217,11 +222,12 @@ normal Rust dependency and **prints** the C headers (`minix/ipc.h` —
 `bits/errno.h` verification). Values are read from the live Rust constants,
 so they are correct by construction — no const-eval limits, no drift
 *possible* because the headers are **generated at build time into the musl
-sysroot, never committed**. The CI musl job regenerates them and compiles
-them (`clang -fsyntax-only`) so breakage fails fast. **ABI freeze point:
-slice 5.6** (first C file) — after it, `Message` layout, call numbers,
-endpoints, and errnos are frozen; changes require a deliberate ABI-bump PR
-touching both repos.
+sysroot, never committed**. The generator lands with the errno renumber in
+slice 5.0; CI regenerates and compiles the headers (`clang -fsyntax-only`)
+as a host check from 5.0 on, so breakage fails fast — the headers simply
+grow as later slices add bands. **ABI freeze point: slice 5.6** (first C
+file) — after it, `Message` layout, call numbers, endpoints, and errnos are
+frozen; changes require a deliberate ABI-bump PR touching both repos.
 
 *Rejected:* cbindgen (cannot const-eval the `ProcNr::new()` endpoint
 constants — would need mirror consts for everything plus config to track);
@@ -319,14 +325,37 @@ milestone A, deliberately de-risking musl independently of the FS stack.
 
 ## Slice decomposition
 
-Ordering rationale: copy-safety first (everything after touches user
-memory); grants second (TTY, CDEV, BDEV, FS, exec all consume them); console
-third (every later slice gains visible EL0 output); ABI + musl **before**
-the FS slices (the root image must contain `/bin/hello`, so musl must build
-before `mkfs-mfs` packs an image); FS next; exec-from-FS closes the
-milestone; stretch slices after.
+Ordering rationale: **ABI prep first** — the errno renumber lands before
+any slice bakes an errno value into a trace marker or a line of C, so
+nothing is ever re-touched over a value change; copy-safety next
+(everything after touches user memory); grants third (TTY, CDEV, BDEV, FS,
+exec all consume them); console fourth (every later slice gains visible EL0
+output); musl **before** the FS slices (the root image must contain
+`/bin/hello`, so musl must build before `mkfs-mfs` packs an image); FS
+next; exec-from-FS closes the milestone; stretch slices after.
 
-### Slice 5.0: fault-safe user copy + real `SYS_DIAGCTL` ◀ next
+### Slice 5.0: errno renumber + `tools/gen-c-headers` ◀ next
+
+**Goal:** D7 + D8 — the ABI is C-ready before any other Phase 5 work, so
+every later slice writes final errno values into its markers and code from
+day one.
+
+**Scope:** renumber `error.rs` per D7 (classic/Linux POSIX block, 200-band
+MINIX extras, add the missing FS errnos); sweep the workspace for hardcoded
+errno literals (host tests + boot markers are the net — the current
+`qemu-boot.expected`/`.forbidden` carry no errno literals, so marker churn
+is zero); fix the errno policy comment. New `tools/gen-c-headers` host
+crate (workspace member) emitting the D8 headers to a target directory; a
+host test snapshots the generated `message` struct layout against
+`Message`'s const asserts. Deliberately mechanical and isolated, like the
+chunk-5 toolchain bump.
+
+**Proof:** QEMU boot markers green (values changed, behavior identical);
+`cargo run -p gen-c-headers` output compiles under
+`clang -std=c11 -fsyntax-only` (wired into CI as a host check in this
+slice).
+
+### Slice 5.1: fault-safe user copy + real `SYS_DIAGCTL`
 
 **Goal:** no user pointer can panic the kernel (D5), and servers can print
 (D2) — the observability + safety floor for everything after.
@@ -344,11 +373,11 @@ in `kernel/src/ipc/{message.rs,senda.rs,mod.rs}`, and `ipc_const.rs`'s wrong
 "`x16`" trap-ABI comment (the real register is `x1`).
 
 **Proof:** a one-shot deliberate bad-pointer IPC from the stub battery
-(boot-stubs-gated) traces `result=-15` (`EFAULT`; becomes `-14` after 5.4)
+(boot-stubs-gated) traces `result=-14` (`EFAULT` at its final 5.0 value)
 with no panic; a server's `diag_print` line appears in the boot log and
 joins `tests/qemu-boot.expected`.
 
-### Slice 5.1: grant table + `SYS_SETGRANT` / `SYS_SAFECOPY` / `SYS_COPY`
+### Slice 5.2: grant table + `SYS_SETGRANT` / `SYS_SAFECOPY` / `SYS_COPY`
 
 **Goal:** the D4 grant model, live end-to-end between two boot servers.
 
@@ -368,7 +397,7 @@ grant id through DS (`grant.test` key — DS is already a name→i32 registry);
 PM retrieves it, `SYS_SAFECOPY`s the buffer, and `diag_print`s the checksum.
 Marker line in `qemu-boot.expected`; `[ksys]` traces show the new calls.
 
-### Slice 5.2: TTY server (TX-only, premapped PL011) + CDEV band
+### Slice 5.3: TTY server (TX-only, premapped PL011) + CDEV band
 
 **Goal:** D1 — first user-space driver; EL0-originated text on the serial
 console.
@@ -386,7 +415,7 @@ transmits; replies bytes-written. `kernel/build.rs` `servers` array +1
 `CDEV_WRITE`s a banner via direct grant — the banner reaches serial *from
 EL0* (no kernel trace prefix), distinguishable from kernel output.
 
-### Slice 5.3: VFS write path — fd 1/2 → CDEV(TTY)
+### Slice 5.4: VFS write path — fd 1/2 → CDEV(TTY)
 
 **Goal:** the POSIX write shape: user proc → VFS → TTY, single copy.
 
@@ -401,23 +430,6 @@ loop (raw `minix-ipc` message — init stays a plain Rust user program).
 
 **Proof:** init's banner reaches serial through VFS→TTY; `[ipc]` head
 traces show init→VFS SENDREC + VFS→TTY CDEV round-trip.
-
-### Slice 5.4: errno renumber + `tools/gen-c-headers`
-
-**Goal:** D7 + D8 — the ABI is C-ready before any C exists.
-
-**Scope:** renumber `error.rs` per D7 (classic/Linux POSIX block, 200-band
-MINIX extras, add the missing FS errnos); sweep the workspace for hardcoded
-errno literals (host tests + boot markers are the net); update 5.0's
-`result=-15` expected marker to `-14`; fix the errno policy comment. New
-`tools/gen-c-headers` host crate (workspace member) emitting the D8 headers
-to a target directory; a host test snapshots the generated `message` struct
-layout against `Message`'s const asserts. Deliberately mechanical and
-isolated, like the chunk-5 toolchain bump.
-
-**Proof:** QEMU boot markers green (values changed, behavior identical);
-`cargo run -p gen-c-headers` output compiles under
-`clang -std=c11 -fsyntax-only` (checked in CI from 5.6 on).
 
 ### Slice 5.5: exec ABI — SysV initial stack + minimal auxv
 
@@ -455,7 +467,7 @@ worker ELF under the name `hello`** (name-level fallback: init always execs
 `hello`, boots are green either way, no feature flags); init's exec target
 flips `worker` → `hello`; CI (qemu-smoke + a musl-build step): submodule
 checkout, clang/llvm-ar install, sysroot cache keyed on submodule SHA +
-toolchain; header `-fsyntax-only` check (5.4) wired in. License note for
+toolchain; header `-fsyntax-only` check (5.0) wired in. License note for
 musl (MIT) added to the repo's licensing docs.
 
 **Proof (milestone A):** `printf("Hello from C on minix.rs!\n")` output
@@ -524,7 +536,7 @@ for the boot's lifetime (D3).
 
 ### Slice 5.11 (stretch): `/dev/null` + `/dev/zero`
 
-**Scope:** MEM gains CDEV minors for null/zero on the 5.2 band; VFS grows a
+**Scope:** MEM gains CDEV minors for null/zero on the 5.3 band; VFS grows a
 static device-node table (`/dev/null`, `/dev/zero`, `/dev/console` →
 (driver, minor)) intercepting paths ahead of FS lookup (deliberate
 simplification — no on-disk device inodes yet).
