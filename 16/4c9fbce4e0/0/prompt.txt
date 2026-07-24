@@ -1,0 +1,803 @@
+We will work on phase 5 prep CI QEMU smoke test.  Investigate using Philipp Oppermann's blog_os custom testing framework as a way to handle the testing.  This might also allow us to get around some of the if config target none population all over the kernel main.
+
+---
+
+<task-notification>
+<task-id>a7e69c61c329cdf26</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/f38be5ad-a4fe-4792-82a4-13b2f0bc440c/tasks/a7e69c61c329cdf26.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore blog_os test framework" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have a complete picture. Here is the structured summary.
+
+---
+
+# blog_os Custom Testing Framework — Analysis
+
+**Checkout state:** branch `main`, HEAD = `e45c8a4 post09` (Post 09 "Paging Implementation"; the testing framework was introduced in Post 04 "Testing" and is fully present). Working tree clean except untracked `.idea/`. Edition 2024, `nightly` toolchain.
+
+Key files: `/Users/kevinbarnard/src/learn/blog_os/src/lib.rs`, `/src/main.rs`, `/src/serial.rs`, `/Cargo.toml`, `/.cargo/config.toml`, `/x86_64-blog_os.json`, and `/tests/{basic_boot,should_panic,stack_overflow}.rs`.
+
+---
+
+## 1. `custom_test_frameworks` setup
+
+Both `src/lib.rs` and `src/main.rs` (and each harnessed integration test) carry the same crate-attribute block. From `/Users/kevinbarnard/src/learn/blog_os/src/lib.rs:1-6`:
+
+```rust
+#![no_std]
+#![cfg_attr(test, no_main)]        // library binary needs its own entry only under `cargo test`
+#![feature(custom_test_frameworks)]
+#![feature(abi_x86_interrupt)]
+#![test_runner(crate::test_runner)]
+#![reexport_test_harness_main = "test_main"]
+```
+
+- `custom_test_frameworks` replaces the std `test` crate (unavailable on `no_std`).
+- `test_runner(...)` names the function the compiler calls with the collected tests.
+- `reexport_test_harness_main = "test_main"` renames the generated harness entry from `main` to `test_main`, so it can be called manually from a `no_main` kernel entry point.
+
+In `main.rs:4` the runner path is `blog_os::test_runner` (points at the lib). Note `cfg_attr(test, no_main)` in lib.rs: the library only becomes `no_main` when compiled as a test binary.
+
+**`Testable` trait pattern** (`src/lib.rs:23-44`) — gives each test a name-printing wrapper via a blanket impl over all `Fn()`:
+
+```rust
+pub trait Testable {
+    fn run(&amp;self) -&gt; ();
+}
+impl&lt;T&gt; Testable for T where T: Fn() {
+    fn run(&amp;self) {
+        serial_print!("{}...\t", core::any::type_name::&lt;T&gt;());
+        self();
+        serial_println!("[ok]");
+    }
+}
+pub fn test_runner(tests: &amp;[&amp;dyn Testable]) {
+    serial_println!("Running {} tests", tests.len());
+    for test in tests { test.run(); }
+    exit_qemu(QemuExitCode::Success);
+}
+```
+
+**`#[test_case]` declaration** — the framework collects any fn marked `#[test_case]`. Example in `src/main.rs:55-58`:
+
+```rust
+#[test_case]
+fn trivial_assertion() {
+    assert_eq!(1, 1);
+}
+```
+
+The compiler builds a slice of `&amp;dyn Testable` from all `#[test_case]` items and passes it to `test_runner`.
+
+---
+
+## 2. Exiting QEMU (`QemuExitCode` + `exit_qemu`)
+
+`src/lib.rs:53-67` — writes to the `isa-debug-exit` device's I/O port `0xf4`:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum QemuExitCode {
+    Success = 0x10,
+    Failed  = 0x11,
+}
+pub fn exit_qemu(exit_code: QemuExitCode) {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        let mut port = Port::new(0xf4);
+        port.write(exit_code as u32);
+    }
+}
+```
+
+Mechanism: the `isa-debug-exit` device causes QEMU to exit with process status `(value &lt;&lt; 1) | 1`. So `Success = 0x10` → host exit code `(0x10&lt;&lt;1)|1 = 33`.
+
+**Cargo metadata wiring** (`/Users/kevinbarnard/src/learn/blog_os/Cargo.toml:19-29`), consumed by the `bootimage` tool:
+
+```toml
+[package.metadata.bootimage]
+test-args = [
+    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    "-serial", "stdio",
+    "-display", "none",
+]
+test-timeout = 300
+test-success-exit-code = 33
+```
+
+`test-success-exit-code = 33` tells bootimage that host code 33 (from `QemuExitCode::Success`) means the test suite passed; anything else is a failure. `iobase=0xf4,iosize=0x04` matches the `Port::new(0xf4)` / `u32` write.
+
+---
+
+## 3. Test output to host — serial (UART 16550)
+
+`src/serial.rs:1-11` sets up COM1 at I/O port `0x3F8` via the `uart_16550` crate:
+
+```rust
+use uart_16550::SerialPort;
+lazy_static! {
+    pub static ref SERIAL1: Mutex&lt;SerialPort&gt; = {
+        let mut serial_port = unsafe { SerialPort::new(0x3F8) };
+        serial_port.init();
+        Mutex::new(serial_port)
+    };
+}
+```
+
+`_print` (serial.rs:13-24) locks `SERIAL1` and writes, wrapped in `x86_64 ... interrupts::without_interrupts(...)` to avoid deadlock. Macros `serial_print!` / `serial_println!` (serial.rs:27-41) are `#[macro_export]`ed and forward to `$crate::serial::_print(format_args!(...))`.
+
+The QEMU args `-serial stdio` redirect the guest's COM1 output to the host terminal's stdout, and `-display none` suppresses the graphical window (both in the `test-args` above), so all `serial_println!` output from `test_runner`/`Testable::run` appears on the host running `cargo test`.
+
+---
+
+## 4. `cargo test` → QEMU mapping
+
+**Runner** — `/Users/kevinbarnard/src/learn/blog_os/.cargo/config.toml`:
+
+```toml
+[build]
+target = "x86_64-blog_os.json"
+
+[target.'cfg(target_os = "none")']
+runner = "bootimage runner"
+```
+
+Flow: `cargo test` compiles each test binary for the bare-metal target, then invokes `bootimage runner &lt;binary&gt;` per binary. `bootimage` links the compiled kernel with the BIOS `bootloader` crate into a bootable disk image and launches QEMU, appending the `test-args`. QEMU boots the image; the kernel runs `test_main()` and exits via port `0xf4`. bootimage compares QEMU's host exit code to `test-success-exit-code = 33`.
+
+**Each `tests/*.rs` = a separate QEMU boot.** Every integration test is its own `#![no_main]` binary with its own `_start`/entry, so it produces a separate bootable image and separate QEMU run.
+
+- Standard harnessed test — `tests/basic_boot.rs:1-25`: repeats the full crate-attribute block, defines `_start` calling `test_main()`, and uses `#[test_case]`. Its panic handler delegates to `blog_os::test_panic_handler`.
+- **`harness = false` tests** — declared in `Cargo.toml:36-42`:
+
+```toml
+[[test]]
+name = "should_panic"
+harness = false
+[[test]]
+name = "stack_overflow"
+harness = false
+```
+
+These opt out of the custom test-framework harness entirely (no `test_main`, no `#[test_case]` collection). `tests/should_panic.rs` has no framework attributes at all; its `_start` calls one hard-coded `should_fail()` and the **panic handler is the success path** (panic → `[ok]` → `exit_qemu(Success)`; no panic → `exit_qemu(Failed)`). `tests/stack_overflow.rs` similarly hand-codes one scenario, installing a test IDT whose double-fault handler reports success. `harness = false` is required whenever the "pass" condition is a panic/fault, since a normal harness would treat any panic as failure.
+
+**Panic handler differs by mode** (`src/main.rs:41-53`):
+
+```rust
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(info: &amp;PanicInfo) -&gt; ! {
+    println!("{}", info);            // normal: print to VGA, halt
+    blog_os::hlt_loop();
+}
+#[cfg(test)]
+#[panic_handler]
+fn panic(info: &amp;PanicInfo) -&gt; ! {
+    blog_os::test_panic_handler(info) // test: serial "[failed]" + exit_qemu(Failed)
+}
+```
+
+`test_panic_handler` (lib.rs:46-51) prints `[failed]` + the error over serial and calls `exit_qemu(QemuExitCode::Failed)`, so a failing assertion produces a non-33 exit code that bootimage reports as a failure.
+
+---
+
+## 5. main.rs / lib.rs split for testability
+
+- **lib.rs is the actual library**: it holds all reusable pieces — `init()`, the whole test framework (`Testable`, `test_runner`, `test_panic_handler`, `QemuExitCode`, `exit_qemu`, `hlt_loop`) and the modules (`gdt`, `interrupts`, `memory`, `serial`, `vga_buffer`). Because it's a `#[no_std]` library crate, both `main.rs` and every `tests/*.rs` can `use blog_os::...`.
+- **main.rs is a thin binary**: its `kernal_main` does real boot work and, under test, calls `test_main()` (`main.rs:34-35`).
+- **`#[cfg(test)]` entry point inside lib.rs** (`src/lib.rs:75-92`) lets the library be tested *on its own* (`cargo test --lib`) as a bootable kernel. Only when compiled as a test does it become `no_main` (line 2) and define an entry:
+
+```rust
+#[cfg(test)]
+use bootloader::{BootInfo, entry_point};
+#[cfg(test)]
+entry_point!(test_kernel_main);
+#[cfg(test)]
+pub fn test_kernel_main(_boot_info: &amp;'static BootInfo) -&gt; ! {
+    init();
+    test_main();
+    hlt_loop();
+}
+#[cfg(test)]
+#[panic_handler]
+fn panic(info: &amp;PanicInfo) -&gt; ! { test_panic_handler(info) }
+```
+
+So the lib supplies its own `_start` (via `entry_point!`) and panic handler only under `cfg(test)`; in normal builds those come from `main.rs`.
+
+---
+
+## 6. x86_64-specific parts (need aarch64 / QEMU `virt` replacements)
+
+| Piece | Where | x86-specific detail | aarch64 replacement direction |
+|---|---|---|---|
+| **isa-debug-exit port I/O** | `lib.rs:60-67`; `Cargo.toml:21` | Port-mapped I/O `Port::new(0xf4)` + QEMU `-device isa-debug-exit,iobase=0xf4`. ISA/x86 only. | aarch64 `virt` has no ISA ports. Use the **`semihosting`** exit (`SYS_EXIT` via `hlt #0xF000` / the `semihosting` crate) with QEMU `-semihosting`, or write to the **PL061/SP804 or the `sysreset`/PSCI** path. Common choice: ARM semihosting `sys_exit`. |
+| **`test-success-exit-code = 33`** | `Cargo.toml:29` | Derived from x86 isa-debug-exit `(v&lt;&lt;1)|1` formula. | Recompute for your chosen exit mechanism (semihosting returns your code directly, so success code would just be your `Success` value). |
+| **UART / serial** | `serial.rs:1-11`; QEMU `-serial stdio` | `uart_16550::SerialPort` at ISA port `0x3F8` (16550 UART, port I/O). | QEMU `virt` uses a **PL011** UART (MMIO at `0x0900_0000`). Replace `uart_16550` with a PL011 MMIO driver (or the `arm-pl011-uart` crate). `-serial stdio` still works. |
+| **`bootimage` + `bootloader 0.9` (BIOS)** | `.cargo/config.toml` runner; `Cargo.toml:7` | `bootimage runner` builds a **BIOS/MBR x86 boot image**; `entry_point!`/`BootInfo` come from the x86 `bootloader` crate. | aarch64 QEMU `virt` loads an ELF/flat kernel directly via `qemu-system-aarch64 -M virt -kernel ...`. Replace the runner with a script/`runner = "qemu-system-aarch64 ..."` line; drop `bootloader`/`bootimage`; write your own `_start` and boot info handling. |
+| **`entry_point!` / `BootInfo`** | `lib.rs:76-82`; `main.rs:8-13` | From x86 `bootloader` crate (`physical_memory_offset`, `memory_map`). | Define your own entry (e.g. `#[no_mangle] extern "C" fn _start`) and parse the **device tree** QEMU passes in `x0`. |
+| **Custom target JSON** | `x86_64-blog_os.json` | `llvm-target: x86_64-unknown-none`, `arch: x86_64`, `-mmx,-sse,+soft-float`, `disable-redzone`. | Use `aarch64-unknown-none` (a built-in target, often no custom JSON needed) or an aarch64 JSON; feature flags differ. |
+| **`feature(abi_x86_interrupt)` / `extern "x86-interrupt"`** | `lib.rs:4`; `tests/stack_overflow.rs` IDT/double-fault | x86 IDT + interrupt calling convention. | aarch64 uses a **vector table (VBAR_EL1)** with exception handlers; the `stack_overflow` test's IDT logic must be rewritten for AArch64 exception vectors. |
+| **`x86_64` crate helpers** | `lib.rs:20,61,71`; `serial.rs:16` | `x86_64::instructions::{hlt, interrupts, port}` — port I/O, `hlt`, `cli/sti`. | aarch64: `wfi`/`wfe` for halt, `DAIF`/`msr daifset` for interrupt masking, MMIO instead of port I/O (use `cortex-a`/`aarch64-cpu` crate). |
+
+**Framework parts that port unchanged (arch-neutral):** the `custom_test_frameworks` attribute block, the `Testable` trait + blanket impl, `test_runner`'s structure, the `#[cfg(test)]`/`#[cfg(not(test))]` panic-handler split, the `harness = false` pattern for panic/fault tests, and the main.rs/lib.rs split. Only the three primitives underneath — `exit_qemu`, the serial `_print`, and the entry point/panic wiring — need aarch64 bodies.</result>
+<usage><subagent_tokens>20889</subagent_tokens><tool_uses>11</tool_uses><duration_ms>100786</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a56d1ec12b74be816</task-id>
+<tool-use-id>toolu_01Vkz3ZxhUhVwK9oSH3XB9U1</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/f38be5ad-a4fe-4792-82a4-13b2f0bc440c/tasks/a56d1ec12b74be816.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore minixrs CI/QEMU/gating" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything needed. Here's my structured report.
+
+---
+
+# minix.rs — CI QEMU Smoke Test Prep: Current State
+
+All paths absolute. Servers run at EL0 with no console, so **every runtime trace comes from the kernel-side PL011 UART** — the smoke test asserts on kernel traces, not server output.
+
+## 1. Phase 5 prep tracker &amp; plan
+
+**`/Users/kevinbarnard/src/minixrs/docs/plans/phase-5-prep.md`** — 6 chunks, all currently `◀ next`. **Chunk 1 is the CI QEMU smoke job** (lines 16-41). Exact scope wording:
+
+- New job in `.github/workflows/ci.yml` (ubuntu): install `qemu-system-aarch64` + edk2 firmware, build via `cargo kernel-aarch64`, boot the cargo runner under `timeout 25`, capture serial log to a file.
+- Grep log with `grep -a` (raw tick bytes make it binary-ish) against a checked-in expected-substrings file (suggested `tests/qemu-boot.expected`): "the 11 `[as]` lines, init's `SYS_FORK`/`SYS_EXEC name=worker`/`SYS_EXIT` chain, stub D's designed `sig=11` kill chain, RS `[alarm]` fires; and assert the absence of `panic` / `el0_sync_unexpected`."
+- Start `continue-on-error: true` like geiger/miri; flip to blocking after a few stable PRs.
+- Note: "QEMU-under-TCG guest time runs slower than wall clock — pick expectations that land well inside the timeout (boot chatter + first alarm fires, not tick counts)."
+- Pin third-party actions to full commit SHAs.
+- **Proof:** a PR that breaks boot fails the job; green run greps every marker.
+
+Note (line 137, chunk 6): expected Phase 5 opening slice includes "fault-safe user copy for messages (`EFAULT`, not a kernel panic, on a bad user pointer)" — relevant if the smoke test ever exercises bad pointers.
+
+**`/Users/kevinbarnard/src/minixrs/docs/plan.md`**: line 492 `### Pre-Phase-5 cleanup ◀ next`; line 495 lists "a CI QEMU smoke job" among the chunks. Phase 5 section at line 502 (`### Phase 5: musl Fork + File Systems`) — still 6 bullets + milestone "C 'Hello World' compiled against musl runs". Verification strategy line 577: "Phase 5: `printf("Hello\n")` from C program reaches serial."
+
+## 2. CI workflow &amp; toolchain
+
+**`/Users/kevinbarnard/src/minixrs/.github/workflows/ci.yml`** — 8 jobs, **all `runs-on: ubuntu-latest`, no ARM runners**:
+
+| Job | Notes |
+|-----|-------|
+| `fmt` | `cargo fmt --all --check` |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
+| `audit` | cargo-audit |
+| `deny` | cargo-deny |
+| `geiger` | **`continue-on-error: true`** (advisory) — the pattern chunk 1 wants to copy |
+| `miri` | **`continue-on-error: true`** (advisory), tests only `-p ...kernel-shared -p ...vm -p ...pm` |
+| `coverage` | cargo-llvm-cov → uploads `lcov.info` artifact |
+| `sonar` | `needs: coverage`, gated on non-fork |
+
+- **Toolchain install:** every real-build job runs `- name: Install pinned toolchain / run: rustup show`. `rustup show` reads `rust-toolchain.toml` and installs the pinned nightly + components + targets. Cache via `Swatinem/rust-cache@e18b497...`.
+- **QEMU is NOT installed anywhere** in CI. No boot/kernel job exists — the smoke job is greenfield.
+- All actions pinned to full SHAs (e.g. `actions/checkout@df4cb1c...`), matching chunk 1's convention.
+
+**`/Users/kevinbarnard/src/minixrs/rust-toolchain.toml`**: `channel = "nightly-2026-05-18"`, components `rust-src, rustfmt, clippy, llvm-tools, rust-analyzer`, targets `aarch64-unknown-none`, `x86_64-unknown-none`. (Chunk 5 flags this pin as ~2 months old — bump before Phase 5.)
+
+## 3. Cargo runner wiring
+
+**`/Users/kevinbarnard/src/minixrs/tools/qemu-run.sh`** (cargo runner, invoked with kernel ELF as `$1`):
+- Requires **Limine** `external/limine/dist/BOOTAA64.EFI` (auto-runs `make -C external/limine` if missing) and an **edk2/OVMF aarch64 firmware** (searches `QEMU_EFI_AARCH64`, brew paths, `/usr/share/edk2-aarch64/QEMU_EFI.fd`, `/usr/share/AAVMF/AAVMF_CODE.fd`).
+- Stages an ESP dir (`target/esp`) with Limine + `tools/limine.conf` + the kernel, hands it to QEMU as a FAT drive.
+- Launch line: `qemu-system-aarch64 -M "virt,gic-version=3" -cpu cortex-a72 -m 256M -bios "$FIRMWARE" -drive "file=fat:rw:fat-type=32:$ESP,format=raw,if=virtio" -display none -serial stdio -no-reboot "$@"`.
+- **CI implication:** on ubuntu, need `qemu-system-arm` pkg + an edk2 firmware path (`/usr/share/AAVMF/AAVMF_CODE.fd` from `qemu-efi-aarch64`), plus the Limine binary (`make -C external/limine`). `external/limine` is a submodule/checkout not present in the tracked tree listing — verify it's fetched in CI.
+
+**`/Users/kevinbarnard/src/minixrs/.cargo/config.toml`**:
+```
+[target.aarch64-unknown-none]
+runner = "tools/qemu-run.sh"
+rustflags = ["-C", "link-arg=-Tkernel/src/arch/aarch64/linker.ld"]
+[alias]
+kernel-aarch64 = "build -p minixrs-kernel --target aarch64-unknown-none --release"
+```
+No `build-std` / `-Zbuild-std` flags anywhere — the two `-unknown-none` targets are builtin (build.rs and `rust-toolchain.toml` rely on that). `cargo run -p minixrs-kernel --target aarch64-unknown-none --release` invokes the runner; `cargo kernel-aarch64` only *builds*.
+
+## 4. `kernel/src/main.rs` gating shape
+
+**Per-item `#[cfg(target_os = "none")]` attributes, NOT one big block.** Structure (`/Users/kevinbarnard/src/minixrs/kernel/src/main.rs`):
+- Crate-level: `#![cfg_attr(target_os = "none", no_std)]` + `#![cfg_attr(target_os = "none", no_main)]`.
+- A separate `#[cfg(target_os = "none")]` attribute on **each of 10 modules** (`arch, boot_image, clock, ipc, mm, panic, proc, system, uart`), and again on `use core::fmt::Write`, `const TICK_HZ`, and `extern "C" fn kmain`.
+- Entry point: `#[unsafe(no_mangle)] extern "C" fn kmain() -&gt; !` (referenced by linker `ENTRY`, not called from Rust).
+- Host fallback: `#[cfg(not(target_os = "none"))] fn main() {}` — collapses to a no-op so `cargo check --workspace` on host works.
+
+**Panic handler** (`/Users/kevinbarnard/src/minixrs/kernel/src/panic.rs`): `#[panic_handler]` prints `\n!!! KERNEL PANIC: {info}` to a fresh `arch::Uart`, then `arch::halt()` (WFE loop).
+
+**boot_image gate** (`/Users/kevinbarnard/src/minixrs/kernel/src/boot_image/mod.rs`): `static BOOT_IMAGE: &amp;[u8] = include_bytes!(env!("BOOT_IMAGE_PATH"));` (line 34). The module-level doc comment (lines 25-27) explicitly states the whole module is gated on `target_os = "none"` in main.rs, so `env!("BOOT_IMAGE_PATH")` is only evaluated for the bare-metal build — host `cargo check`/`cargo test` (env var unset) never compile it. **The gate is the single `#[cfg]` on `mod boot_image` in main.rs, not an inner attribute.**
+
+## 5. Boot-complete / failure strings for assertions
+
+Servers cannot print (EL0, no console per CLAUDE.md:143). All strings below are kernel-emitted on the PL011 UART.
+
+**UART path:** `/Users/kevinbarnard/src/minixrs/kernel/src/uart.rs` re-exports `crate::arch::Uart`; on aarch64 that is `Pl011` (`arch/aarch64/mod.rs`: `pub use uart::Pl011 as Uart`), MMIO at `PL011_PHYS_BASE` (mapped via HHDM). Output goes to `-serial stdio`.
+
+**Healthy-boot markers (assert presence):**
+- `minix.rs booting on aarch64` — very first line (`main.rs:54`).
+- `[as] {name} nr= ... ttbr0_pa= ... asid= ... entry=` — one per loaded address space; **11 `[as]` lines** on a good boot (`arch/aarch64/userland.rs:380` servers/init, `:691` stubs). CLAUDE.md:135 confirms: vm/ds/vfs/sched/rs/pm/init asid 1-7, stubs A-D asid 8-11.
+- `[ksys SYS_FORK] parent= ... child_nr=15 ...` → `[ksys SYS_EXEC] target=15 name=worker ...` → `[ksys SYS_EXIT] target= ... nr=15 freed= ...` — the init→worker chain (`system/do_fork.rs:191`, `do_exec.rs:171`, `do_exit.rs:125`).
+- `[alarm {n}] owner= ... nr= ... at= ...` — RS heartbeat alarm fires (`ipc/mod.rs:390`); CLAUDE.md notes "six RS `[alarm]` fires."
+- `[ipc {n}]`, `[pf] proc= ... -&gt; VM`, `[noq {n}]` — other liveness traces (`ipc/mod.rs:125`, `exception.rs:213`, `sched/...:399`).
+- All healthy `[ksys …]` traces end `result=0` (CLAUDE.md:135: "every `result=0`").
+
+**Designed (NOT failure) — must be tolerated:** `[ksys SYS_KILL] target= ... sig=11 -&gt; pm` (`system/do_sig.rs:99`) — stub D's intentional SIGSEGV kill chain. The expected file should whitelist `sig=11`.
+
+**Failure markers (assert absence):**
+- `!!! KERNEL PANIC:` (`panic.rs:15`).
+- `el0_sync_unexpected` / `!!! unexpected EL0 sync exception (not SVC)` (`arch/aarch64/exception.rs:86,114`; also panics with `EL0 sync exception: EC=... ESR_EL1=...` at :122).
+- `!!! EL0 instruction abort` / `!!! EL0 data abort` (`exception.rs:95,103`).
+- `do_irq: unexpected INTID` (`arch/aarch64/irq.rs:49`).
+
+**Trace sampling caveat (important for choosing assertions):** most traces are *sampled*, not per-call. `[ipc N]` and `[ksys N]` use modulo-100 (`system/mod.rs:78` `KCALL_TRACE_EVERY=100`); several have a head carve-out (`TRACE_HEAD=6`, e.g. `do_fork`, `do_sig`, `do_vmctl`, `sched`). CLAUDE.md:136 warns "zero sampled `[ipc]` lines is NOT evidence a caller is stuck." Assert on head-carved `[ksys SYS_FORK]`/`SYS_EXIT`/`SYS_EXEC` and `[as]`/`[alarm]` (reliable), not on tick counts.
+
+## 6. `kernel/build.rs` — hazards for a test harness
+
+**`/Users/kevinbarnard/src/minixrs/kernel/build.rs`:**
+- **Gates on `CARGO_CFG_TARGET_OS`:** lines 22-25 — `if target_os != "none" { return; }`. On host builds it is a full no-op. **There is NO `CARGO_CFG_TEST` / profile gate.**
+- **Consequence for `cargo test --target aarch64-unknown-none`:** `target_os == "none"`, so build.rs runs its **full path**: clang-assembles 5 `.S` files, then `build_boot_image` shells out to **nested `cargo build --release` for all 8 servers** (vm, ds, vfs, sched, rs, pm, init, worker), reads each ELF, packs the MXBI archive, and emits `cargo:rustc-env=BOOT_IMAGE_PATH=...`. This is heavy but would still run; it does not itself break under `--target aarch64-unknown-none`.
+- **The real harness blocker is `no_main` + `no_std`:** `main.rs` sets `#![cfg_attr(target_os="none", no_main)]`, and a blog_os-style `custom_test_frameworks` harness needs `#![reexport_test_harness_main = "..."]` plus a `#[no_mangle] _start` calling the generated test main — the kernel already owns `kmain`/`_start` via the linker `ENTRY`. A separate test binary would need its own entry and its own linker handling (the `.cargo/config.toml` `rustflags` force `-Tkernel/.../linker.ld` on every `aarch64-unknown-none` link, including test/bench binaries — build.rs works around this for servers via `CARGO_ENCODED_RUSTFLAGS`, but a `cargo test` integration binary would inherit the kernel linker script).
+- Env vars build.rs needs: `CARGO_CFG_TARGET_OS`, `CARGO_CFG_TARGET_ARCH`, `OUT_DIR`, `CARGO_MANIFEST_DIR`, `CARGO`; requires `clang` on PATH and the `aarch64-unknown-none` target for the nested server builds.
+
+## 7. Existing QEMU/test infrastructure — NONE
+
+Searches for `smoke`, `test_case`, `custom_test_frameworks`, `semihosting`, `psci`, `SYSTEM_OFF`:
+- **No matches** for `test_case`, `custom_test_frameworks`, `semihosting`, `psci`, `PSCI`, `SYSTEM_OFF`, `0x84000...` anywhere in the repo.
+- `smoke` appears only in prose comments (`arch/aarch64/addrspace.rs`, `userland.rs`) referring to slice-3.1a's host-side AddrSpace "smoke test," not a QEMU test.
+- **No `tests/` directory and no `*.expected` file exist** — the `tests/qemu-boot.expected` in chunk 1 is entirely to-be-created.
+- CLAUDE.md:138 confirms "`cargo test -p minixrs-kernel` runs zero tests by design" — kernel modules are all `cfg(target_os="none")`; host-runnable tests live in `kernel-shared` (that's what `miri`/`coverage` jobs exercise).
+
+**Shutdown / idle behavior — the kernel never exits QEMU:**
+- `halt() -&gt; !` is a bare `wfe` spin loop (`/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/mod.rs:24`). Fallback spins in `entry.S:46` / `vectors.S:61` are also `wfe`.
+- Once EL0 starts (slice 2.4+) the scheduler runs **indefinitely**; there is **no PSCI `SYSTEM_OFF`, no semihosting exit, no QEMU `isa-debug-exit`**. CLAUDE.md:37-46: "The kernel runs indefinitely once EL0 starts... so `timeout` is mandatory."
+- This validates chunk 1's design: the smoke job must be `timeout 25 cargo run ... &gt; log; grep -a -f expected log` (exit-on-timeout + log grep), **not** a QEMU exit-code assertion. If you later want a clean self-exit for tests you'd have to add a PSCI `SYSTEM_OFF` (HVC `0x84000008`) or `isa-debug-exit`-style path — none exists today.
+
+**Net:** the smoke job is fully greenfield. The kernel already emits stable, greppable kernel-side traces (`[as]`, head-carved `[ksys SYS_FORK/EXEC/EXIT]`, `[alarm]`, panic/`el0_sync_unexpected`) that CLAUDE.md:135 already treats as the manual Phase-4 acceptance check — chunk 1 is essentially codifying that manual check into CI.</result>
+<usage><subagent_tokens>57149</subagent_tokens><tool_uses>24</tool_uses><duration_ms>203218</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ac0e2989c351e6085</task-id>
+<tool-use-id>toolu_01Q7YhUBnFzqmX1z7yUdsG1i</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/f38be5ad-a4fe-4792-82a4-13b2f0bc440c/tasks/ac0e2989c351e6085.output</output-file>
+<status>completed</status>
+<summary>Agent "Research aarch64 QEMU test exit + CI" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have gathered comprehensive findings across all four areas. Here is the report.
+
+---
+
+# Research report: CI smoke/test harness for an aarch64 bare-metal Rust kernel
+
+## 1. Exiting `qemu-system-aarch64` with a controllable exit code from EL1
+
+### Semihosting (recommended, works cleanly for nonzero codes)
+
+**Instruction/register convention (A64, not arm32):** On AArch64 the semihosting trap instruction is `HLT #0xF000` (arm32 uses `SVC 0x123456` in ARM state or `SVC 0xAB` in Thumb; do NOT use those on A64). The call number goes in `W0`/`X0`, the argument (usually a pointer to a parameter block) in `X1`. For exit: `W0 = 0x18` (`SYS_EXIT` / `angel_SWIreason_ReportException`).
+
+**Key finding — aarch64 supports nonzero exit codes natively, no `SYS_EXIT_EXTENDED` needed.** This is the important A64-vs-arm32 distinction confirmed in QEMU source (`semihosting/arm-compat-semi.c`):
+
+- On **A64**, `SYS_EXIT`'s argument (`X1`) is a *pointer to a two-word parameter block* `[reason, subcode]`. QEMU logic: if `reason == ADP_Stopped_ApplicationExit (0x20026)`, it exits the host process with `subcode` directly (any value); otherwise it exits with `1`. Source comment: *"The A64 version of SYS_EXIT takes a parameter block, so the application-exit type can return a subcode which is the exit status code from the application."*
+- On **A32/T32**, `SYS_EXIT` passes only the reason code in the register (no pointer), so you can only get exit 0 (if `ADP_Stopped_ApplicationExit`) or 1. To return an arbitrary code on arm32 you'd need the optional `SYS_EXIT_EXTENDED (0x20)`. **On aarch64 you do not need `SYS_EXIT_EXTENDED`** — the ordinary `SYS_EXIT` extended (pointer) form already carries the code.
+
+So the exit code maps **directly** to the host process exit status (masked to 0–255 by POSIX). This is cleaner than blog_os's x86 `isa-debug-exit`, which needs the `(value&lt;&lt;1)|1` remapping (blog_os sets `test-success-exit-code = 33`). On aarch64, `exit(0)` → host 0 (cargo test sees success), `exit(1)` → host 1, etc. No remapping required.
+
+The historical bug where arm semihosting *"always calls exit(0)"* ([Launchpad #1216845](https://bugs.launchpad.net/qemu/+bug/1216845)) was fixed via the semihosting v2 ABI (merged QEMU 4.2). Any modern QEMU (Ubuntu 24.04 ships 8.2.2) is far past this.
+
+**QEMU flags:** Enable with `-semihosting` or `-semihosting-config enable=on,target=native`. The `target` matters for exit-code propagation:
+- `target=native` (the default when no debugger, via `target=auto`): QEMU handles the call itself and the exit code reaches the host process. **Use this.**
+- `target=gdb`: calls are forwarded to a connected gdb stub — you do NOT want this for CI, the host exit status won't reflect the guest.
+
+You can add `chardev`/output redirect, but for exit that's not needed.
+
+**Gotchas:**
+- **Security:** QEMU docs are explicit — *"Semihosting inherently bypasses any isolation there may be between the guest and the host"* and *"you should only ever run trusted code with semihosting enabled."* Enabling it lets the guest read/write host files, `SYS_READC` can block forever, etc. Irrelevant for trusted CI, but note it.
+- **Semihosting only works under TCG, not KVM.** QEMU docs: the trap instructions are reserved and *"most hypervisors trap and fault on them,"* so semihosting is TCG-only. This matters for point 3 below (you can't KVM-accelerate a kernel that exits via semihosting).
+- **`-semihosting` changes the meaning of instructions.** With it enabled, `HLT #0xF000` (and on arm32 the semihosting `SVC`/`BKPT` immediates) are interpreted as semihosting calls instead of trapping normally. If your kernel legitimately uses `HLT #0xF000`, behavior changes. In practice fine.
+- **Endianness edge case (flag as low-risk):** For a big-endian aarch64 guest on a LE host, `exit(0)` currently comes back as host `1` because the reason word's bytes are swapped and no longer match `0x20026` ([QEMU gitlab #3258](https://gitlab.com/qemu-project/qemu/-/issues/3258)). Does NOT affect a normal little-endian kernel.
+
+### Alternative: PSCI `SYSTEM_OFF` via HVC on `-M virt`
+
+`-M virt` emulates PSCI. From EL1 you load `X0 = 0x84000008` (`PSCI_SYSTEM_OFF`, the 32-bit function ID) and execute `HVC #0` (QEMU virt handles PSCI at EL2/EL3 via HVC/SMC). This is a *clean* shutdown, but **always yields host exit code 0** — there's no way to pass a status. So it's fine for a "kernel booted and reached end cleanly" smoke test, but useless for signaling test *failure*. Practical pattern: PSCI `SYSTEM_OFF` on success, and rely on a timeout / semihosting exit(nonzero) / panic for failure. Given you want a controllable code, semihosting is the better primary mechanism.
+
+### Is there an `isa-debug-exit` equivalent on `virt`? — No
+
+`isa-debug-exit` (`hw/misc/debugexit.c`, the `(N&lt;&lt;1)|1` device blog_os uses) is an **ISA/port-I/O device, x86-only**. The aarch64 `virt` machine has **no** `isa-debug-exit` and no general `sysbus-debug-exit` equivalent exposed on `virt`. (There is ongoing work on a `virt-ctrl`/`goldfish`-style reset controller in Linux, but nothing you'd rely on for this.) The idiomatic aarch64 answer is semihosting `SYS_EXIT`; that's exactly what the Rust crates below do.
+
+### `-no-reboot` / `-no-shutdown` interplay
+
+- Semihosting `SYS_EXIT` terminates the QEMU process immediately, so `-no-reboot`/`-no-shutdown` don't affect that path.
+- They matter for the *failure/crash* path: if a panic/exception triggers a CPU reset loop, `-no-reboot` makes QEMU exit instead of rebooting forever (avoids a hung CI job). `-no-shutdown` does the opposite (keeps QEMU alive after a guest-initiated shutdown) — you generally do **not** want `-no-shutdown` in CI. Recommended: add `-no-reboot` as a safety net alongside a workflow-level `timeout`.
+
+## 2. `custom_test_frameworks` status on 2025/2026 nightlies
+
+- **Still available and unstable**, gated by `#![feature(custom_test_frameworks)]`. Tracking issue is [rust-lang/rust#50297](https://github.com/rust-lang/rust/issues/50297) (eRFC 2318), still **open**; the Unstable Book entry still documents `#[test_case]` + `#![test_runner(...)]` with no deprecation notice.
+- **No deprecation/removal in progress.** The feature has been quietly unstable since ~2018 with *"currently no plan/RFC for stabilizing"* — i.e. stable and long-lived precisely because nobody's touching it. No removal discussion found.
+- The full blog_os trio still works on `no_std`/`no_main`:
+  ```rust
+  #![no_std]
+  #![no_main]
+  #![feature(custom_test_frameworks)]
+  #![test_runner(crate::test_runner)]
+  #![reexport_test_harness_main = "test_main"]
+  ```
+  `reexport_test_harness_main` renames the generated harness entry (e.g. to `test_main`) so your `_start` can call it. This is exactly blog_os's [testing chapter](https://os.phil-opp.com/testing/) approach; it transfers to aarch64 by swapping the x86 `isa-debug-exit` `exit_qemu()` for a semihosting `SYS_EXIT`.
+- Caveat: because it's a permanently-unstable feature, you must stay on nightly — which you already are (pinned dated nightly). No stable path exists.
+
+## 3. GitHub Actions runners
+
+### `ubuntu-24.04-arm` (native arm64) hosted runners
+
+- **Free for public repos.** Linux arm64 hosted runners (`ubuntu-22.04-arm`, `ubuntu-24.04-arm`) went to public preview and are **free on public repositories, including the Free plan** ([GitHub changelog, 2025-01-16](https://github.blog/changelog/2025-01-16-linux-arm64-hosted-runners-now-available-for-free-in-public-repositories-public-preview/); [community discussion #148648](https://github.com/orgs/community/discussions/148648)). 4 vCPU, Cobalt-100 / Armv9-A (SVE2). **These labels fail on private repos** (private-repo arm64 is billed/larger-runner only).
+- **No `/dev/kvm` on arm64 runners.** Confirmed by [actions/partner-runner-images #147 "Please support KVM on ARM runners"](https://github.com/actions/partner-runner-images/issues/147): `/dev/kvm` is absent; attempts give *"Could not access KVM kernel module: No such file or directory."* GitHub hosted runners don't do nested virtualization. **So `qemu-system-aarch64 -M virt` will run under TCG even on the arm64 runner** (and recall semihosting is TCG-only anyway, so you couldn't use `-accel kvm` with the semihosting-exit mechanism regardless). This is fine for a smoke test.
+- **QEMU version:** Ubuntu 24.04 (noble) ships `qemu-system-arm` **1:8.2.2** (QEMU 8.2.2, with `-0ubuntu1.x` security updates). More than new enough — aarch64 `-M virt` semihosting exit codes have worked since QEMU 4.2. Basically "any modern QEMU."
+
+### `ubuntu-latest` (x86) runners
+
+- `qemu-system-aarch64` there runs the aarch64 guest under **TCG** (an x86 KVM host cannot accelerate an aarch64 guest). `/dev/kvm` on standard x86 runners is inconsistent ("sometimes exists"; larger runners can enable it) but **irrelevant** here since it wouldn't accelerate a cross-arch guest anyway.
+- **TCG slowdown:** typically ~5–20x slower than native per the [TCG Continuous Benchmarking](https://ahmedkrmn.github.io/TCG-Continuous-Benchmarking/Measuring-QEMU-Performance-in-System-Mode/) project, but for a bare-metal kernel *smoke* test (boot to a few test cases then exit) this is a sub-second-to-few-seconds workload — TCG is completely adequate. Many Rust OS projects (blog_os and the broader rust-osdev ecosystem, [rust-osdev-jumpstart](https://github.com/alilee/rust-osdev-jumpstart) which does x86_64/arm/riscv under TCG) run boot tests this way successfully in CI.
+
+**Recommendation:** Use `ubuntu-24.04-arm` (free, native toolchain, apt QEMU 8.2.2, TCG for the guest) OR just `ubuntu-latest` x86 with cross-compiled aarch64 kernel under TCG. Both work; neither gets hardware acceleration for the guest. Add `-no-reboot` and a job `timeout-minutes`.
+
+## 4. Prior art / crates
+
+### `qemu-exit` (rust-embedded, formerly andre-richter)
+
+- **Supports aarch64:** yes — `qemu_exit::AArch64::new()`, then `.exit_success()` / `.exit_failure()` / `.exit(code)`.
+- **Exact mechanism (from source `src/aarch64.rs`):** executes `hlt #0xF000` with `x0 = 0x18` (SYS_EXIT) and `x1` → a `#[repr(C)]` two-`u64` parameter block `{ ADP_Stopped_ApplicationExit = 0x20026, code }`. QEMU uses the second field as the host exit code (exactly the mechanism in §1). `EXIT_SUCCESS = 0`, `EXIT_FAILURE = 1`. Requires `-semihosting`.
+- **License:** dual **MIT OR Apache-2.0** — permissive, no GPL. Fine.
+- **Maintenance:** owned by the rust-embedded libs team (Adam Greig, Andre Richter). Mature/stable rather than actively churning; small crate, ~93 commits, does one thing. Widely used in aarch64 tutorials (e.g. rust-raspberrypi-OS-tutorials).
+
+### `semihosting` (taiki-e) — the more modern, actively-maintained option
+
+- **Targets:** AArch64 (`aarch64-unknown-none{,-softfloat}`, plus `aarch64_be`), ARM, RISC-V, LoongArch, MIPS, Xtensa — tested under both qemu-system and qemu-user.
+- **Exit:** `semihosting::process::exit(code)` / `abort()` — same `HLT #0xF000` + `SYS_EXIT` ADP_Stopped_ApplicationExit path; host exit code follows `code` (subject to the big-endian caveat noted in §1, which doesn't affect LE kernels).
+- **`no_std`, feature-gated extras:** `stdio` (host stdout/stderr, useful to print test names), `panic-handler` / `panic-unwind`, `args`, `backtrace`, plus `trap-hlt` and `openocd-semihosting` knobs. There's a companion `panic-semihosting`-style behavior (panic → log to host stderr → `exit(EXIT_FAILURE)`), which pairs perfectly with a custom `test_runner`.
+- **License:** dual **MIT OR Apache-2.0** — permissive, no GPL.
+- **Maintenance:** active — ~476 commits, ongoing CI across all those targets, open issues/PRs being handled. If you want a maintained, richer crate (stdout for test output + exit + panic in one), this is the stronger choice over `qemu-exit`.
+
+### `cortex-m-semihosting` equivalent
+
+`cortex-m-semihosting` is Cortex-M (armv7-m/thumb) only and not applicable to A64 EL1. The AArch64 equivalents are the two crates above; **taiki-e/semihosting is effectively the cross-arch successor** to the older per-arch semihosting crates.
+
+---
+
+## Bottom line / recommended design
+
+- Exit mechanism: **semihosting `SYS_EXIT` (`HLT #0xF000`, `W0=0x18`, `X1`→`[0x20026, code]`)** with QEMU `-semihosting-config enable=on,target=native`. Host exit code == your code, no remapping, nonzero codes work natively on aarch64. Use the **`semihosting` (taiki-e)** crate (or `qemu-exit`); both MIT/Apache-2.0.
+- Test harness: keep blog_os's `custom_test_frameworks` + `reexport_test_harness_main` (still available/unstable on nightly, no deprecation), just replace the x86 `isa-debug-exit` `exit_qemu()` with the semihosting exit. Success = exit(0), failure = exit(nonzero) or panic→exit(1).
+- No `isa-debug-exit`/`sysbus-debug-exit` on `-M virt`; PSCI `SYSTEM_OFF` (HVC, `X0=0x84000008`) only gives exit 0, so use it (optionally) for clean success but not for failure signaling.
+- CI: `ubuntu-24.04-arm` (free on public repos, QEMU 8.2.2) or `ubuntu-latest` x86; guest runs under **TCG** either way (no `/dev/kvm` on GitHub arm runners; semihosting is TCG-only regardless). Add `-no-reboot` and a `timeout-minutes` guard.
+
+### Sources
+
+- [QEMU Emulation/semihosting docs](https://www.qemu.org/docs/master/about/emulation.html)
+- [QEMU `semihosting/arm-compat-semi.c` (A64 SYS_EXIT param block logic)](https://raw.githubusercontent.com/qemu/qemu/master/semihosting/arm-compat-semi.c)
+- [QEMU `hw/misc/debugexit.c` (isa-debug-exit, x86-only)](https://github.com/qemu/qemu/blob/master/hw/misc/debugexit.c)
+- [Launchpad #1216845 — arm semihosting always exit(0), fixed via SYS_EXIT_EXTENDED / v2 ABI](https://bugs.launchpad.net/qemu/+bug/1216845)
+- [QEMU gitlab #3258 — big-endian semihosting exit code](https://gitlab.com/qemu-project/qemu/-/issues/3258)
+- [cirosantilli linux-kernel-module-cheat aarch64 semihost_exit.S](https://github.com/cirosantilli/linux-kernel-module-cheat/blob/master/baremetal/arch/aarch64/semihost_exit.S)
+- [Löwenware — AArch64 bare-metal Rust, PSCI SYSTEM_OFF via HVC](https://lowenware.com/blog/aarch64-bare-metal-program-in-rust/)
+- [rust-lang/rust#50297 — custom_test_frameworks tracking issue](https://github.com/rust-lang/rust/issues/50297)
+- [Unstable Book — custom-test-frameworks](https://doc.rust-lang.org/unstable-book/language-features/custom-test-frameworks.html)
+- [blog_os — Testing (custom_test_frameworks, isa-debug-exit, reexport_test_harness_main)](https://os.phil-opp.com/testing/)
+- [GitHub changelog — free arm64 runners for public repos (2025-01-16)](https://github.blog/changelog/2025-01-16-linux-arm64-hosted-runners-now-available-for-free-in-public-repositories-public-preview/)
+- [community discussion #148648 — arm64 runners free public preview](https://github.com/orgs/community/discussions/148648)
+- [actions/partner-runner-images #147 — KVM not available on ARM runners](https://github.com/actions/partner-runner-images/issues/147)
+- [community discussion #8305 — KVM on hosted runners](https://github.com/orgs/community/discussions/8305)
+- [Ubuntu Noble qemu-system-arm 8.2.2 package](https://launchpad.net/ubuntu/noble/arm64/qemu-system-arm)
+- [TCG Continuous Benchmarking — system-mode perf](https://ahmedkrmn.github.io/TCG-Continuous-Benchmarking/Measuring-QEMU-Performance-in-System-Mode/)
+- [qemu-exit (rust-embedded) — MIT/Apache-2.0, aarch64](https://github.com/rust-embedded/qemu-exit) and [aarch64 source](https://raw.githubusercontent.com/rust-embedded/qemu-exit/master/src/aarch64.rs)
+- [taiki-e/semihosting — MIT/Apache-2.0, aarch64 + more](https://github.com/taiki-e/semihosting) / [crates.io](https://crates.io/crates/semihosting)
+
+Uncertainties flagged: exact `/dev/kvm` presence on *standard x86* runners varies over time but is moot for a cross-arch aarch64 guest (always TCG); the big-endian exit(0)→1 quirk only affects `aarch64_be` guests; `custom_test_frameworks` has no deprecation *today* but is a permanently-unstable feature, so it will keep you on nightly indefinitely.</result>
+<usage><subagent_tokens>41774</subagent_tokens><tool_uses>24</tool_uses><duration_ms>258824</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ae891400edb170949</task-id>
+<tool-use-id>toolu_01Hdwa8SPNktARSCL8BNG3S2</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/f38be5ad-a4fe-4792-82a4-13b2f0bc440c/tasks/ae891400edb170949.output</output-file>
+<status>completed</status>
+<summary>Agent "Design QEMU smoke job plan" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All source-level facts are now verified. Let me compile the plan. One note on marker mechanics first — in `docs/plans/phase-5-prep.md` every unstarted chunk currently carries `◀ next`, so "sliding `◀ next` to chunk 2" is realized by chunk 1's marker flipping to `◀ ready (…)` (chunk 2 then becomes the first remaining `◀ next`); `docs/plan.md` has no per-chunk markers, so its "flip" is a prose status note.
+
+# Implementation Plan — CI QEMU Boot Smoke Test (phase-5-prep chunk 1)
+
+Branch: **`feature/ci-qemu-smoke`** (repo convention `feature/`/`chore/`; this adds tooling + a CI gate, matching `feature/phase-4-8-init` precedent). Single PR, single logical commit (history style: `pre-phase-5 chunk 1: CI QEMU boot smoke job`).
+
+## Verified trace formats (source of truth for the expected file)
+
+All format strings were read directly from source:
+
+| Marker | Source | Emitted shape |
+|---|---|---|
+| Banner | `kernel/src/main.rs:54` | `minix.rs booting on aarch64` |
+| Server/init AS | `arch/aarch64/userland.rs:380` | `[as] {name} nr={nr} ttbr0_pa={hex} asid={n} entry={hex}` |
+| Stub AS | `arch/aarch64/userland.rs:691` | `[as] stub {A-D} nr={nr} ttbr0_pa={hex} asid={n}` |
+| Fork | `system/do_fork.rs:191` | `[ksys SYS_FORK] parent=i nr=10 child_nr=15 child_e={hex} pages={n}` (head 6, every 100) |
+| Exec | `system/do_exec.rs:171` | `[ksys SYS_EXEC] target=15 name=worker entry={hex} old_asid=… new_asid=… freed=…` (head 6) |
+| Exit | `system/do_exit.rs:125` | `[ksys SYS_EXIT] target={char} nr={n} freed={n} result=0` (head 6) — exec renames the proc (`do_exec.rs:141`), so worker's exit is `target=w nr=15` |
+| Kill | `system/do_sig.rs:99` | `[ksys SYS_KILL] target=D nr=14 sig=11 -&gt; pm` (head 6, kills are rare — VM's SIGSEGV kill is n=1) |
+| Page fault | `arch/aarch64/exception.rs:213` | `[pf] proc=D far={hex} flags={hex} -&gt; VM` (unsampled) |
+| Alarm | `ipc/mod.rs:390` | `[alarm {n}] owner=r nr=2 at={ticks}` (head 6 → `[alarm 1]` always printed; RS is the only `SYS_SETALARM` user, `ALARM_PERIOD=100` ticks = 1 guest-second) |
+| Failure banners | `panic.rs:15`, `exception.rs:95/103/114`, `irq.rs:49` | `!!! KERNEL PANIC:`, `!!! EL0 instruction abort`, `!!! EL0 data abort`, `!!! unexpected EL0 sync exception`, `do_irq: unexpected INTID` |
+
+Proc nrs are fixed boot-table slots (`kernel-shared/src/com.rs`): pm=0, vfs=1, rs=2, ds=5, vm=7, sched=9, init=10, stubs A–D=11–14, fork pool base=15 (recycled every cycle since init `wait`s before re-forking).
+
+Firmware verification (packages.ubuntu.com, noble): **`qemu-efi-aarch64` ships both `/usr/share/qemu-efi-aarch64/QEMU_EFI.fd` and `/usr/share/AAVMF/AAVMF_CODE.fd`**. The script's candidate list (`tools/qemu-run.sh:33-40`) already contains the AAVMF path, so it would work unaided — but the plan sets `QEMU_EFI_AARCH64=/usr/share/qemu-efi-aarch64/QEMU_EFI.fd` explicitly in the job: deterministic, self-documenting, and it picks the 2 MiB unpadded image over the 64 MiB padded AAVMF one. `external/limine/Makefile` fetches a **pinned commit** tarball from GitHub (`LIMINE_COMMIT = ee5d29…`) — reproducible, but needs network in CI (see Risks). `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4` is **already SHA-pinned in ci.yml** (coverage job) — no new SHA lookup needed.
+
+## Step 0 — Re-verify substrings against a live log (first implementation act)
+
+Before freezing `tests/qemu-boot.expected`, generate a fresh log and check every planned substring against reality (the shapes below are source-derived; I could not boot QEMU in planning mode):
+
+```sh
+cargo kernel-aarch64
+timeout 30 cargo run -p minixrs-kernel --target aarch64-unknown-none --release &gt; /tmp/qemu.log 2&gt;&amp;1 || true
+grep -aF "[as] vm nr=7 ttbr0_pa=" /tmp/qemu.log   # …repeat per planned line
+```
+
+Adjust any line that drifted, then commit.
+
+## Deliverable 1 — `tests/qemu-boot.expected` (new file, new top-level `tests/` dir — safe, the workspace root is virtual so cargo ignores it)
+
+Decision: **11 individual `[as]` substrings, not a count.** A `grep -c` count of 11 cannot say *which* address space is missing and can be satisfied by duplicates; individual name+nr pins give exact failure attribution for free via the checker's report-all loop. Every substring cuts just before the first run-variable field (`ttbr0_pa`, `child_e`, `entry`, `freed`, `at`), keeping the literal-field text (`ttbr0_pa=` etc.) as a stable anchor.
+
+```
+# tests/qemu-boot.expected -- required substrings for a healthy QEMU boot log.
+# One literal substring per line; blank lines and '#' comments are ignored.
+# Checked by tools/check-boot-log.sh via `grep -aF` (the log interleaves raw
+# single-char tick bytes, so it must be forced to text). Substrings stop just
+# before the first run-variable field (ttbr0_pa / child_e / entry / freed / at);
+# nr= values are fixed boot-table slots (kernel-shared/src/com.rs).
+
+# Kernel banner (kernel/src/main.rs)
+minix.rs booting on aarch64
+
+# Address-space bring-up: 7 servers + init (arch/aarch64/userland.rs)
+[as] vm nr=7 ttbr0_pa=
+[as] ds nr=5 ttbr0_pa=
+[as] vfs nr=1 ttbr0_pa=
+[as] sched nr=9 ttbr0_pa=
+[as] rs nr=2 ttbr0_pa=
+[as] pm nr=0 ttbr0_pa=
+[as] init nr=10 ttbr0_pa=
+
+# ...plus the 4 boot stubs (11 [as] lines total)
+[as] stub A nr=11 ttbr0_pa=
+[as] stub B nr=12 ttbr0_pa=
+[as] stub C nr=13 ttbr0_pa=
+[as] stub D nr=14 ttbr0_pa=
+
+# init's fork/exec/wait cycle (head-carved kernel traces; slot 15 is the
+# fork-pool base, recycled every cycle; exec renames the child to "worker")
+[ksys SYS_FORK] parent=i nr=10 child_nr=15
+[ksys SYS_EXEC] target=15 name=worker entry=
+[ksys SYS_EXIT] target=w nr=15 freed=
+
+# Stub D's designed SIGSEGV chain: page fault -&gt; VM -&gt; SYS_KILL sig=11 -&gt; PM
+# tears the stub down with SYS_EXIT
+[pf] proc=D far=
+[ksys SYS_KILL] target=D nr=14 sig=11 -&gt; pm
+[ksys SYS_EXIT] target=D nr=14 freed=
+
+# RS's periodic kernel alarm: assert only the FIRST fire (always inside the
+# head carve-out) -- timing-robust under slow CI TCG, unlike a fire count
+[alarm 1] owner=r nr=2 at=
+```
+
+## Deliverable 2 — `tests/qemu-boot.forbidden` (new file)
+
+Decision: **separate file, not a list embedded in the script.** Symmetric with the expected file (policy lives in data, mechanism in the script), editable without touching bash, and it extends chunk 1's proof clause ("a PR that deliberately breaks … the expected file fails the job") to the forbidden side. Note the tracker's literal `el0_sync_unexpected` is a *function name* that never appears in output — its real emissions are the `!!!` banners plus the panic it tail-calls, so those strings are listed instead. Bare `panic` is realized as the precise `!!! KERNEL PANIC:` prefix (also catches `el0_sync_unexpected`'s terminal `panic!`).
+
+```
+# tests/qemu-boot.forbidden -- substrings that must NOT appear in a healthy
+# boot log. One literal substring per line; blank lines and '#' comments are
+# ignored. These are the kernel's halt-path banners (panic.rs, exception.rs,
+# irq.rs). Designed [pf] faults from stubs C/D are healthy and NOT listed.
+!!! KERNEL PANIC:
+!!! unexpected EL0 sync exception
+!!! EL0 instruction abort
+!!! EL0 data abort
+do_irq: unexpected INTID
+```
+
+## Deliverable 3 — `tools/check-boot-log.sh` (new, executable, style-matched to `qemu-run.sh`)
+
+Per-line `grep -aqF` loop (not `grep -f`, whose any-match semantics silently pass when only one expected line matches); reports **all** violations before the non-zero exit. Uses `if …; then continue; fi` rather than `[[ … ]] &amp;&amp; continue` (the latter trips `set -e` when the guard is false on the last loop line), and `checked=$((checked + 1))` rather than `((checked++))` (which returns status 1 at 0).
+
+```bash
+#!/usr/bin/env bash
+#
+# tools/check-boot-log.sh -- verify a QEMU serial boot log against the
+# checked-in marker lists.
+#
+#   usage: tools/check-boot-log.sh &lt;qemu-log&gt;
+#
+# Every substring in tests/qemu-boot.expected must appear in the log; no
+# substring in tests/qemu-boot.forbidden may appear. Blank lines and '#'
+# comment lines in either file are ignored. Every violation is reported (not
+# just the first) before the non-zero exit, so one run shows the whole story.
+#
+# grep needs -a (the log interleaves raw single-char tick bytes, so it reads
+# as binary) and -F (the marker files hold literal substrings, not regexes).
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "usage: $0 &lt;qemu-log&gt;" &gt;&amp;2
+    exit 64
+fi
+
+LOG="$1"
+ROOT="$(git rev-parse --show-toplevel)"
+EXPECTED="$ROOT/tests/qemu-boot.expected"
+FORBIDDEN="$ROOT/tests/qemu-boot.forbidden"
+
+if [[ ! -f "$LOG" ]]; then
+    echo "error: log file not found: $LOG" &gt;&amp;2
+    exit 66
+fi
+
+fail=0
+checked=0
+
+# Required markers: report every one that is missing.
+while IFS= read -r line; do
+    if [[ -z "$line" || "$line" == \#* ]]; then continue; fi
+    checked=$((checked + 1))
+    if ! grep -aqF -- "$line" "$LOG"; then
+        echo "MISSING   $line"
+        fail=1
+    fi
+done &lt; "$EXPECTED"
+
+# Forbidden markers: report every one that is present, with its first hit.
+while IFS= read -r line; do
+    if [[ -z "$line" || "$line" == \#* ]]; then continue; fi
+    checked=$((checked + 1))
+    if hit="$(grep -am1 -F -- "$line" "$LOG")"; then
+        echo "FORBIDDEN $line"
+        echo "    first hit: $hit"
+        fail=1
+    fi
+done &lt; "$FORBIDDEN"
+
+if [[ "$fail" -ne 0 ]]; then
+    echo "FAIL: $LOG failed the checks above ($checked markers checked)"
+    exit 1
+fi
+echo "PASS: $LOG passed all $checked marker checks"
+```
+
+`chmod +x tools/check-boot-log.sh` before committing (matches `qemu-run.sh`).
+
+## Deliverable 4 — CI job in `.github/workflows/ci.yml`
+
+Insert after the `miri` job (line 98), before `coverage`, keeping the advisory jobs adjacent. All action SHAs are the ones already pinned in this file.
+
+**Timeout decision: `timeout 45`.** The tracker suggested 25 and the 4.8 verification used 30 locally — where 6 alarm fires in 30 s means the first fire (the only timing-sensitive assertion) lands ~5 s after boot on an M-series TCG host. The CI arm64 runner is also native-ISA TCG but on shared, likely slower silicon, and edk2 firmware boot under TCG can eat 10+ s before the kernel banner. 45 s gives roughly 4–8x margin over the local first-fire point at a cost of ~15 extra CI seconds; every other assertion is pure boot chatter. Tighten later once real runs are observed.
+
+**Run-step exit handling:** the kernel never exits (WFE idle), so `timeout`'s TERM is the expected terminator and exit 124 the expected status on every good run — the step must not fail on it; the checker step is the sole verdict. `cargo kernel-aarch64` runs first as its own step so a compile failure fails *there*, not silently inside the tolerated run step (the `cargo run --release` build is then a cache no-op — same profile/target).
+
+```yaml
+  qemu-smoke:
+    name: QEMU boot smoke (advisory)
+    # Free arm64 runner for public repos; native-ISA TCG (no KVM requested).
+    runs-on: ubuntu-24.04-arm
+    # Advisory while it proves stable across a few PRs (phase-5-prep chunk 1);
+    # flip to blocking once trusted. Shared-runner TCG timing is the flake risk.
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install QEMU + aarch64 UEFI firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-efi-aarch64
+          qemu-system-aarch64 --version
+      - name: Fetch Limine bootloader (pinned commit)
+        run: make -C external/limine
+      - name: Build kernel
+        run: cargo kernel-aarch64
+      - name: Boot in QEMU (45 s wall clock)
+        env:
+          QEMU_EFI_AARCH64: /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+        run: |
+          # The kernel runs forever (WFE idle); timeout(1) is the terminator,
+          # so exit 124 is the *expected* status of a healthy run. The checker
+          # step below is the pass/fail verdict.
+          status=0
+          timeout 45 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+            &gt; qemu.log 2&gt;&amp;1 || status=$?
+          echo "qemu run finished with status $status (124 = timeout, expected)"
+      - name: Check boot log
+        run: tools/check-boot-log.sh qemu.log
+      - name: Upload boot log
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: qemu-boot-log
+          path: qemu.log
+          if-no-files-found: error
+```
+
+Artifact upload is `if: always()` (not failure-only): a *green* advisory run's log is exactly what's needed to judge flipping the job to blocking, and to tune the 45 s window. `permissions: contents: read` suffices (coverage already uploads under it).
+
+## Deliverable 5 — Documentation edits
+
+**A. `CLAUDE.md` CI section (lines 57–65):**
+- Line 57–59: "Seven gates run in parallel — `fmt`, …, `coverage` (…)" → "Eight gates run in parallel — `fmt`, …, `coverage` (…), `qemu-smoke` (aarch64 QEMU boot smoke)".
+- Line 64 bullet: "`geiger` and `miri` are **advisory**" → "`geiger`, `miri`, and `qemu-smoke` are **advisory** (`continue-on-error`); the rest block." Add a bullet after it: `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner, boots the kernel for 45 s wall clock via the cargo runner, then `tools/check-boot-log.sh` greps the serial log (`grep -aF`) against `tests/qemu-boot.expected` / `tests/qemu-boot.forbidden`; keep expectations timing-robust (first occurrences, never counts — CI TCG is slower than local); flip to blocking once stable across a few PRs.
+- Optional one-liner at line 138's "QEMU is the primary verification for kernel code": append "(CI now smoke-boots it in the advisory `qemu-smoke` job)".
+
+**B. `docs/plans/phase-5-prep.md`:**
+- Line 7: "Chunks 1–5 are independent" → "Chunks 1–5 and 7 are independent and can land in any order; chunk 6 … must come last (chunk 7 does not gate Phase 5)."
+- Line 16: `## Chunk 1: CI QEMU smoke job ◀ next` → `## Chunk 1: CI QEMU smoke job ◀ ready (branch feature/ci-qemu-smoke, pending merge)` (chunk 2 thereby becomes the first remaining `◀ next`).
+- After chunk 1's Proof paragraph (line 41), insert the investigation verdict:
+
+&gt; **Notes (investigation, resolved):** blog_os-style `custom_test_frameworks` in-QEMU unit tests were evaluated and deliberately deferred. The approach ports to aarch64 — the unstable feature is still live; QEMU exit works via a semihosting `SYS_EXIT` (`HLT #0xF000`) plus `-semihosting-config enable=on,target=native`, replacing x86's `isa-debug-exit`; the `qemu-exit` / taiki-e `semihosting` crates are MIT/Apache-2.0 — but it is the wrong tool for this chunk's assertion (full-system serial-log properties, not per-function unit results) and would not remove the kernel's `#[cfg(target_os = "none")]` gating either (see chunk 7). Revisit as a future in-QEMU unit-test chunk.
+
+- Append before "Drive-by notes":
+
+&gt; `## Chunk 7: De-host the kernel crate (investigation) ◀ next`
+&gt;
+&gt; **Goal:** every kernel module is `#[cfg(target_os = "none")]`-gated so host workspace builds see an empty crate — which is why kernel code is invisible to the blocking lint gates. Investigate removing the kernel crate from host builds entirely so the per-item gates can go away.
+&gt;
+&gt; **Scope:** exclude `minixrs-kernel` from host workspace builds (e.g. workspace `default-members` or splitting host-visible pieces) so `cargo clippy --workspace` / `cargo test` no longer compile it on the host; drop the per-item `cfg` gates once nothing host-builds the crate; add an aarch64-target clippy CI job (`cargo clippy -p minixrs-kernel --target aarch64-unknown-none`) — this absorbs chunk 5's "optional non-blocking kernel clippy job" bullet, coordinate if chunk 5 lands first; triage the pre-existing kernel-target lints (nomem-asm pointers, `manual_is_multiple_of`, interior-mutable-const) — fix or `#[allow]` + rationale.
+&gt;
+&gt; **Proof:** host gates green with the kernel excluded; `cargo kernel-aarch64` and the QEMU smoke job unchanged; kernel-target clippy visible in CI.
+
+**C. `docs/plan.md` (lines 494–500):** extend the chunk list prose to "…a toolchain bump, a kernel-crate de-hosting investigation, and — gating Phase 5 — …", and append a status sentence: "Chunk 1 (the CI QEMU smoke job) is `◀ ready` (branch `feature/ci-qemu-smoke`, pending merge)." (plan.md has no per-chunk markers; the section header's `◀ next` stays until the whole cleanup phase completes.)
+
+## Verification
+
+Local:
+1. `shellcheck tools/check-boot-log.sh` (if installed).
+2. `cargo kernel-aarch64`; `timeout 30 cargo run -p minixrs-kernel --target aarch64-unknown-none --release &gt; /tmp/qemu.log 2&gt;&amp;1 || true`; `tools/check-boot-log.sh /tmp/qemu.log` → `PASS … 24 marker checks` (19 expected + 5 forbidden).
+3. Negative — truncation: `head -c 2000 /tmp/qemu.log &gt; /tmp/qemu-trunc.log; tools/check-boot-log.sh /tmp/qemu-trunc.log` → exit 1, `MISSING` lines for the late markers (alarm, D chain, fork cycle).
+4. Negative — injected panic: `{ cat /tmp/qemu.log; echo '!!! KERNEL PANIC: injected'; } &gt; /tmp/qemu-panic.log; tools/check-boot-log.sh /tmp/qemu-panic.log` → exit 1, `FORBIDDEN !!! KERNEL PANIC:` with the hit line.
+5. Gate hygiene: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` (no Rust changed; cheap insurance).
+
+CI:
+6. Push branch, open PR; confirm `QEMU boot smoke (advisory)` ran green in the checks tab; download the `qemu-boot-log` artifact and eyeball boot-to-first-alarm wall time (tune 45 s later if lavish).
+7. Chunk-1 proof (optional but matches the tracker's proof clause): push one temporary commit adding a bogus line (e.g. `THIS MUST FAIL`) to `tests/qemu-boot.expected`, observe the red advisory job, revert. Cite both run URLs in the PR body.
+
+Final pre-PR steps per repo convention: run the `revise-claude-md` skill and get user confirmation before opening the PR.
+
+## Risks / edge cases addressed
+
+- **CI TCG timing:** only first occurrences asserted (`[alarm 1]`, first fork/exec/exit, one D chain); never counts. 45 s window with 4–8x margin.
+- **`[ksys SYS_EXIT] target=D nr=14` head-carve race** (the one residual timing assertion): `EXIT_TRACE_HEAD = 6`, so D's exit must be among the first 6 exits. Boot interleaving makes this near-certain (stub D faults in its first quantum; a worker cycle needs several SENDRECs + an image load), but if it ever flakes in CI, drop that single line — `[pf] proc=D` (unsampled) and the `SYS_KILL … sig=11` line (kills are rare, always head-carved) already pin the chain.
+- **`grep -f` any-match trap:** avoided by design — per-line `grep -aqF` loop asserts all.
+- **Buffering:** QEMU writes the chardev unbuffered; redirect-to-file is the CLAUDE.md-sanctioned workflow. `[ksys]`/`[pf]` lines are written with IRQs masked, so tick bytes can't split them mid-line.
+- **Limine fetch needs network:** isolated in its own CI step so a GitHub/network failure reads as "Fetch Limine" red, not a mystery boot failure; the commit is pinned in `external/limine/Makefile`. Optional later improvement: `actions/cache` on `external/limine/dist` keyed by `LIMINE_COMMIT`.
+- **First-run build time:** `timeout-minutes: 20` covers a cold cross-build of kernel + nested server/init/worker builds on the 4-core arm runner; `rust-cache` warms subsequent runs.
+- **Exit 124:** run step tolerates any status and just logs it; a QEMU-won't-start failure (e.g. firmware missing, runner exit 69) surfaces as an empty log → checker fails listing every marker, artifact shows why.
+
+## Could not verify (flagged)
+
+- Actual TCG speed / firmware boot latency on the shared `ubuntu-24.04-arm` runner — the 45 s choice is margin-based; observe the first artifact and tune.
+- The exact live log text (planning mode is read-only; no boot was run, no saved log exists). Every substring is derived from the format strings read above; implementation Step 0 re-validates against a real log before freezing the file.
+- That the `qemu-system-arm` apt package ships the `qemu-system-aarch64` binary on noble arm64 (standard Debian/Ubuntu packaging, but not directly checked the way the firmware filelist was) — the `qemu-system-aarch64 --version` line in the install step catches it immediately if wrong.
+
+### Critical Files for Implementation
+- /Users/kevinbarnard/src/minixrs/.github/workflows/ci.yml
+- /Users/kevinbarnard/src/minixrs/tools/qemu-run.sh
+- /Users/kevinbarnard/src/minixrs/docs/plans/phase-5-prep.md
+- /Users/kevinbarnard/src/minixrs/CLAUDE.md
+- /Users/kevinbarnard/src/minixrs/docs/plan.md
+
+(New files created by the PR: `/Users/kevinbarnard/src/minixrs/tests/qemu-boot.expected`, `/Users/kevinbarnard/src/minixrs/tests/qemu-boot.forbidden`, `/Users/kevinbarnard/src/minixrs/tools/check-boot-log.sh`.)</result>
+<usage><subagent_tokens>68727</subagent_tokens><tool_uses>36</tool_uses><duration_ms>591576</duration_ms></usage>
+</task-notification>
