@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "173d2052abdb",
+  "session_id": "eb88b06e-dc73-4a23-81c3-853743e699f5",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-24T15:22:08.370651Z",
+  "branch": "docs/book-port-kernel",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/plan.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "de8eba7cd2f7",
+  "checkpoint_transcript_start": 467,
+  "transcript_lines_at_start": 467,
+  "token_usage": {
+    "input_tokens": 13,
+    "cache_creation_tokens": 6112,
+    "cache_read_tokens": 2242063,
+    "output_tokens": 3628,
+    "api_call_count": 7
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-24T15:22:08.349754Z",
+    "agent_lines": 3,
+    "agent_removed": 2,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 3,
+    "total_lines_changed": 5,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
