@@ -4,6 +4,7 @@
 > source (`kernel/src/ipc/`, `minix-ipc/`) as the corresponding code
 > stabilizes._
 
-minix.rs processes communicate exclusively through six message-passing
-primitives: `SEND`, `RECEIVE`, `SENDREC`, `NOTIFY`, `SENDNB`, and `SENDA`.
-Message layout, endpoints, and call numbers are preserved from MINIX 3.
+minix.rs processes communicate exclusively through message passing. Five of
+MINIX 3's six primitives are live — `SEND`, `RECEIVE`, `SENDREC`, `NOTIFY`,
+`SENDNB` — with `SENDA` still stubbed (`ENOSYS`). Message layout, endpoints,
+and call numbers are preserved from MINIX 3.
