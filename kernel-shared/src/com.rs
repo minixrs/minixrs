@@ -105,6 +105,20 @@ const _: () = assert!(STUB_A_PROC_NR.get() as usize == NR_BOOT_PROCS);
 const _: () = assert!(STUB_D_PROC_NR.get() as usize == NR_BOOT_PROCS + NR_STUB_PROCS - 1);
 const _: () = assert!((STUB_D_PROC_NR.get() as usize) < NR_PROCS);
 
+/// Exclusive upper bound on the kernel proc numbers that the user-space servers
+/// (PM, VM, SCHED) keep per-process state for. All three server tables are keyed
+/// by proc number over the same range `[0, NR_SERVED_PROCS)` — the boot procs
+/// `[0, NR_BOOT_PROCS)`, the demo-stub slots, and the fork pool
+/// `[NR_BOOT_PROCS + NR_STUB_PROCS, NR_SERVED_PROCS)`. Sizing PM's `mproc` table,
+/// VM's `ClientRegions` table, and SCHED's policy table from this one constant
+/// (rather than three independent numbers that merely happen to agree) keeps
+/// them from silently skewing. Bounded above by the kernel's user-proc range
+/// (`NR_PROCS`); the fork pool must be non-empty above the boot + stub slots.
+pub const NR_SERVED_PROCS: usize = 32;
+
+const _: () = assert!(NR_SERVED_PROCS <= NR_PROCS);
+const _: () = assert!(NR_SERVED_PROCS > NR_BOOT_PROCS + NR_STUB_PROCS);
+
 /// Sentinel `proc_nr` for an MXBI archive module that is **not** a boot server:
 /// it is packed only so `SYS_EXEC` can resolve it by name (slice 4.7's `worker`
 /// binary), and the boot loader skips any module with a negative proc number

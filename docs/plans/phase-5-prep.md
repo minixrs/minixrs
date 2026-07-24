@@ -76,7 +76,7 @@ present). Port with an accuracy pass; retire the legacy files.
 **Proof:** `mdbook build book` green; legacy files gone; book pages describe
 only what boots today.
 
-## Chunk 3: Stub A–D disable flag ◀ ready (branch feature/boot-stubs-flag, pending merge)
+## Chunk 3: Stub A–D disable flag ✓ shipped (PR #35, merged 2026-07-24)
 
 **Goal:** stubs A–D are the live regression battery (IPC ping-pong, SCHED
 delegation, VM fault paths) but they consume ASIDs/priv slots and flood traces
@@ -98,7 +98,7 @@ the battery.
 **Proof:** `--no-default-features`-style boot shows only servers + init/worker
 `[as]` lines and no stub traffic; default boot unchanged.
 
-## Chunk 4: Capacity ceilings ◀ next
+## Chunk 4: Capacity ceilings ◀ ready (branch feature/capacity-ceilings, pending merge)
 
 **Goal:** the effective user-process capacity is spread across three silent
 constants — PM `NR_MPROCS` (32), VM `MAX_CLIENTS` (32), and the SCHED table
