@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bz9imfmk4</task-id>
+<tool-use-id>toolu_01RBEvuyb6BVERsbCkYSRgAX</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/f38be5ad-a4fe-4792-82a4-13b2f0bc440c/tasks/bz9imfmk4.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll for qemu-smoke result on fixed head" completed (exit code 0)</summary>
+</task-notification>
