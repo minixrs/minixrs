@@ -6,12 +6,12 @@
 
 // The kernel builds for bare-metal targets only (`target_os = "none"`): the
 // ELF-only `link_section` attributes, the `_start` entry path, the panic
-// handler, and `build.rs`'s assembled `.S` objects all require it. The
-// workspace excludes this crate from host builds via `default-members`, so
-// nothing host-compiles it and no module needs a `cfg` gate. `build.rs` emits
-// `cargo::error=` on a host target and aborts before rustc gets here; this
-// `compile_error!` states the same invariant at the source, mirroring
-// `arch/mod.rs`'s arch guard.
+// handler, and `build.rs`'s assembled `.S` objects all require it. Cargo.toml's
+// `forced-target` pins this package to aarch64-unknown-none for every cargo
+// invocation, so nothing ever host-compiles it and no module needs a `cfg`
+// gate. This `compile_error!` states the invariant at the source (mirroring
+// `arch/mod.rs`'s arch guard) and, with `build.rs`'s `cargo::error=`, is
+// defense-in-depth should `forced-target` ever stop taking effect.
 #[cfg(not(target_os = "none"))]
 compile_error!(
     "minixrs-kernel is bare-metal only; build it with `cargo kernel-aarch64` \

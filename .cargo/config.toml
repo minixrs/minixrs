@@ -11,10 +11,15 @@
 runner = "tools/qemu-run.sh"
 rustflags = ["-C", "link-arg=-Tkernel/src/arch/aarch64/linker.ld"]
 
+# x86_64 is Phase 8 scaffolding: there is no kernel/src/arch/x86_64/ and no
+# linker script for it yet, and `kernel/Cargo.toml`'s `forced-target` pins the
+# kernel to aarch64 regardless of `--target`. There is deliberately no
+# `kernel-x86_64` alias: it would silently build aarch64 rather than fail, which
+# is worse than not existing. Phase 8 must relax `forced-target` before adding
+# one back.
 [target.x86_64-unknown-none]
 rustflags = ["-C", "link-arg=-Tkernel/src/arch/x86_64/linker.ld"]
 
 # Aliases for common development commands
 [alias]
 kernel-aarch64 = "build -p minixrs-kernel --target aarch64-unknown-none --release"
-kernel-x86_64 = "build -p minixrs-kernel --target x86_64-unknown-none --release"
