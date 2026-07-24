@@ -3,27 +3,23 @@
   "checkpoint_id": "164c9fbce4e0",
   "session_id": "98fb1ebb-2658-4e61-a552-293a6d1537c0",
   "strategy": "manual-commit",
-  "created_at": "2026-07-24T06:01:39.64162Z",
+  "created_at": "2026-07-24T06:07:13.705038Z",
   "branch": "feature/ci-qemu-smoke",
-  "checkpoints_count": 4,
+  "checkpoints_count": 1,
   "files_touched": [
-    "tests/qemu-boot.expected",
-    "tests/qemu-boot.forbidden",
-    "tools/check-boot-log.sh",
-    ".github/workflows/ci.yml",
-    "CLAUDE.md",
-    "docs/plans/phase-5-prep.md",
-    "docs/plan.md"
+    ".github/workflows/ci.yml"
   ],
   "agent": "Claude Code",
   "model": "",
-  "turn_id": "024daab66fb0",
+  "turn_id": "c0d26961e23a",
+  "checkpoint_transcript_start": 340,
+  "transcript_lines_at_start": 340,
   "token_usage": {
-    "input_tokens": 77,
-    "cache_creation_tokens": 151743,
-    "cache_read_tokens": 5306009,
-    "output_tokens": 52950,
-    "api_call_count": 40
+    "input_tokens": 18,
+    "cache_creation_tokens": 169175,
+    "cache_read_tokens": 1534206,
+    "output_tokens": 4656,
+    "api_call_count": 9
   },
   "skill_events_version": 1,
   "skill_events": [
@@ -38,7 +34,7 @@
         "signal": "skill_tool_use",
         "confidence": "explicit"
       },
-      "turn_id": "024daab66fb0",
+      "turn_id": "c0d26961e23a",
       "transcript_anchor": {
         "unit": "line",
         "start": 24,
@@ -69,7 +65,7 @@
         "signal": "skill_tool_use",
         "confidence": "explicit"
       },
-      "turn_id": "024daab66fb0",
+      "turn_id": "c0d26961e23a",
       "transcript_anchor": {
         "unit": "line",
         "start": 278,
@@ -88,21 +84,52 @@
         "label": "Skill: claude-md-management:revise-claude-md",
         "default_collapsed": true
       }
+    },
+    {
+      "id": "claude-skill-toolu_017ZtAYdBc1vUUuoc25hZtVj",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:systematic-debugging"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "c0d26961e23a",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 349,
+        "end": 350,
+        "entry_ids": [
+          "5d204c94-802c-4d2f-94b5-b9078a19ebdf"
+        ],
+        "tool_use_id": "toolu_017ZtAYdBc1vUUuoc25hZtVj"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_017ZtAYdBc1vUUuoc25hZtVj"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:systematic-debugging",
+        "default_collapsed": true
+      }
     }
   ],
   "session_metrics": {
-    "turn_count": 4
+    "turn_count": 5
   },
   "initial_attribution": {
-    "calculated_at": "2026-07-24T06:01:39.575936Z",
-    "agent_lines": 218,
-    "agent_removed": 16,
-    "human_added": 0,
+    "calculated_at": "2026-07-24T06:07:13.689045Z",
+    "agent_lines": 3,
+    "agent_removed": 1,
+    "human_added": 175,
     "human_modified": 0,
     "human_removed": 0,
-    "total_committed": 218,
-    "total_lines_changed": 234,
-    "agent_percentage": 100,
+    "total_committed": 178,
+    "total_lines_changed": 195,
+    "agent_percentage": 2.051282051282051,
     "metric_version": 2
   },
   "prompt_attributions": [
