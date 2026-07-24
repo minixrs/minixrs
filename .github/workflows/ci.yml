@@ -35,10 +35,11 @@ jobs:
       - name: Install pinned toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # minixrs-kernel is bare-metal only and is excluded from host builds by
-      # the workspace's `default-members`; `--workspace` overrides that, so the
-      # exclusion must be explicit here. The clippy-kernel job below lints it
-      # on its real target.
+      # minixrs-kernel would build fine here (forced-target cross-compiles it),
+      # but doing so on this x86 runner means clang cross-assembling the .S
+      # files plus 8 nested server builds on a blocking gate. Exclude it for
+      # cost, not correctness: clippy-kernel below lints it natively on arm64,
+      # and a local `cargo clippy --workspace` does lint it.
       - run: cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings
 
   clippy-kernel:
@@ -46,10 +47,11 @@ jobs:
     # Native arm64 so the kernel's .S files assemble without a cross toolchain
     # (same reason qemu-smoke uses this runner).
     runs-on: ubuntu-24.04-arm
-    # Blocking: the kernel crate is excluded from every host gate, so this job
-    # is the ONLY one that both lints and compiles kernel code. The dated
-    # nightly pin in rust-toolchain.toml means a new lint can only appear on a
-    # deliberate bump, so this can't red-X an unrelated PR.
+    # Blocking: the kernel is excluded from the host gates above (for runner
+    # cost), so this job is the only CI job that lints and compiles kernel
+    # code. The dated nightly pin in rust-toolchain.toml means a new lint can
+    # only appear on a deliberate bump, so this can't red-X an unrelated PR.
+    # It also proves the unstable `per-package-target` feature still resolves.
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install pinned toolchain
@@ -193,7 +195,7 @@ jobs:
       - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
         with:
           tool: cargo-llvm-cov
-      # minixrs-kernel is bare-metal only (see the clippy job): it cannot be
+      # minixrs-kernel is bare-metal only: it has no tests and cannot be
       # instrumented on the host. QEMU is its verification; the clippy-kernel
       # job is its compile gate.
       - name: Generate LCOV coverage

@@ -64,8 +64,11 @@ rustflags = ["-C", "link-arg=-Tkernel/src/arch/aarch64/linker.ld"]
 kernel-aarch64 = "build -p minixrs-kernel --target aarch64-unknown-none --release"
 ```
 
-The `x86_64-unknown-none` target and its `kernel-x86_64` alias are scaffolding for
-the planned port; the kernel does not boot on x86_64 yet.
+The `x86_64-unknown-none` target block is scaffolding for the planned port; the
+kernel does not boot on x86_64 yet. There is deliberately **no `kernel-x86_64`
+alias** — `forced-target` (below) pins the kernel to aarch64 and overrides the
+`--target` in an alias, so one would silently build aarch64 rather than fail.
+Phase 8 must relax `forced-target` before adding it back.
 
 ### Assembly and the boot image (`kernel/build.rs`)
 
@@ -113,27 +116,48 @@ on the host so that `cargo check --workspace` stayed green — at the cost of hi
 every module behind `#[cfg(target_os = "none")]`, and therefore hiding all 48 kernel
 source files from every lint gate. That arrangement is gone.
 
-The crate stays a workspace `members` entry — one shared `Cargo.lock` keeps `audit` /
-`deny` covering its dependencies, and `cargo fmt --all` still formats it (cargo-fmt
-enumerates all members, and rustfmt follows `mod` declarations without evaluating
-`cfg`) — but it is **omitted from `default-members`**:
+Rather than hide the crate from workspace commands, `kernel/Cargo.toml` pins its
+build target:
 
-```sh
-cargo clippy --all-targets -- -D warnings          # skips the kernel
-cargo clippy --workspace --all-targets             # DOES build the kernel -> error
-cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings   # ok
+```toml
+cargo-features = ["per-package-target"]
+
+[package]
+forced-target = "aarch64-unknown-none"
+
+[[bin]]
+name = "minixrs-kernel"
+path = "src/main.rs"
+test = false      # no_std/no_main: a --test build needs the `test` crate (std)
+bench = false
 ```
 
-`--workspace` overrides `default-members`, so workspace-wide invocations must pass
-`--exclude minixrs-kernel`; CI's `clippy` and `coverage` jobs do. A host build that
-slips through fails with a single message from `build.rs` naming `cargo kernel-aarch64`
-(a `#[cfg(not(target_os = "none"))] compile_error!` in `main.rs` states the same
-invariant at the source). No `cfg(target_os = ...)` gates remain under `kernel/src/`.
+Every cargo invocation therefore cross-compiles the kernel instead of failing on it —
+bare or `--workspace`, and from any IDE:
 
-> **rust-analyzer:** its default check is `cargo check --workspace`, which will report
-> the kernel's guard as an error. Add
-> `"rust-analyzer.check.extraArgs": ["--exclude", "minixrs-kernel"]` to your editor
-> settings.
+```sh
+cargo check --workspace --all-targets     # ok: kernel cross-compiled
+cargo clippy --workspace --all-targets    # ok, and it genuinely LINTS kernel code
+cargo test --workspace                    # ok: kernel has no test target
+```
+
+That last point is the payoff: kernel code is now visible to the lint gates instead of
+merely hidden from them. `forced-target` wins even over an explicit
+`--target x86_64-apple-darwin`, so a host build is unreachable, and no `--exclude` or
+per-developer editor setting is required.
+
+Three things to know:
+
+- **`per-package-target` is unstable** ([cargo#9406](https://github.com/rust-lang/cargo/issues/9406)),
+  hence the `cargo-features` opt-in and the nightly pin in `rust-toolchain.toml`. If a
+  future bump drops it, cargo fails loudly on the manifest; the fallback is a workspace
+  `default-members` list omitting `"kernel"`.
+- **`test = false` is required.** Without it, `cargo check --all-targets` builds a
+  phantom test harness for the kernel bin and fails with `E0463: can't find crate for test`.
+- `build.rs`'s `cargo::error=` and `main.rs`'s `#[cfg(not(target_os = "none"))] compile_error!`
+  are now unreachable defense-in-depth, kept in case `forced-target` ever stops applying.
+
+No `cfg(target_os = ...)` gates remain under `kernel/src/`.
 
 The `cfg_attr(target_os = "none", …)` attributes in `servers/*` and `userland/*` are a
 different thing: those crates *are* host-built and host-tested, and the attribute only
@@ -163,7 +187,7 @@ in parallel (`sonar` waits on `coverage`):
 | Job | Blocking? | What it checks |
 |-----|-----------|----------------|
 | `fmt` | yes | `cargo fmt --all --check` (covers the kernel too) |
-| `clippy` | yes | `cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings` (host target) |
+| `clippy` | yes | `cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings` (host target; kernel excluded for runner cost, see below) |
 | `clippy-kernel` | yes | `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings`, twice: default features and `--no-default-features` |
 | `audit` | yes | `cargo-audit` advisory scan |
 | `deny` | yes | `cargo-deny` (licenses / bans, config in `deny.toml`) |
@@ -173,9 +197,12 @@ in parallel (`sonar` waits on `coverage`):
 | `coverage` | yes | `cargo-llvm-cov` → `lcov.info` (kernel excluded) |
 | `sonar` | — | feeds LCOV to SonarQube Cloud |
 
-Notes: since the kernel is excluded from every host gate, **`clippy-kernel` is the only
-job that compiles kernel code** — which is why it blocks and runs on a native
-`ubuntu-24.04-arm` runner (no cross toolchain needed for the `.S` files). It passes no
+Notes: CI's `clippy` and `coverage` exclude the kernel for **runner cost, not
+correctness** — `forced-target` means they could build it, but only by having the x86
+runner cross-assemble the `.S` files and run 8 nested server builds on a blocking gate.
+So **`clippy-kernel` is the only CI job that compiles kernel code** (a local
+`cargo clippy --workspace` does lint it) — which is why it blocks and runs on a native
+`ubuntu-24.04-arm` runner. It passes no
 `--all-targets`: the kernel is `no_std`/`no_main`, so there is no test harness to build.
 `qemu-smoke` (also `ubuntu-24.04-arm`) boots for 45 s wall clock, requires exit status
 124 — the `timeout(1)` status a healthy, never-exiting kernel must produce — and then

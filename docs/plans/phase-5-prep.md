@@ -179,11 +179,30 @@ the per-item gates can go away.
 the `clippy-kernel` job and cleared the named lints; only bullet 1 remained,
 plus the follow-through that job's own comment nominated):
 
-- Exclude `minixrs-kernel` from host workspace builds via workspace
-  `default-members`; it stays a `members` entry so one `Cargo.lock` keeps
-  `audit`/`deny` and `cargo fmt --all` covering it. **`--workspace` overrides
-  `default-members`**, so CI's `clippy` and `coverage` jobs pass
-  `--exclude minixrs-kernel`, and `geiger`'s per-package sweep filters it out.
+- Stop host-building `minixrs-kernel` by pinning its target in its own manifest:
+  `forced-target = "aarch64-unknown-none"` under
+  `cargo-features = ["per-package-target"]`, plus `test = false`/`bench = false`
+  on the bin (a `--test` build needs the `test` crate → `E0463`). Every cargo
+  invocation then cross-compiles it — bare, `--workspace`, or from an IDE — and
+  a host build is unreachable even with an explicit `--target`.
+  - This replaced a first attempt that used workspace `default-members` +
+    `--exclude minixrs-kernel` in CI. That worked for CI but broke RustRover,
+    whose linter runs `cargo check --all-targets --workspace --features
+    minixrs-kernel/…`; `--exclude` is rejected outright when features name the
+    excluded package, so there was no one-setting IDE fix. A nested workspace
+    (`exclude = ["kernel"]`) was also prototyped and rejected — it breaks the
+    relative linker-script path in `.cargo/config.toml`, needs the release
+    profile duplicated, a second committed `Cargo.lock`, and extra
+    `fmt`/`audit`/`deny` CI invocations.
+  - Cost accepted: `per-package-target` is unstable (cargo#9406), contained by
+    the dated nightly pin and failing loudly (manifest error) if ever dropped.
+    It also overrides `--target` in an alias, so the `kernel-x86_64` alias is
+    removed; Phase 8 must relax `forced-target` before restoring it.
+  - CI's `clippy`/`coverage` keep `--exclude minixrs-kernel` for runner cost
+    (clang cross-assembly + 8 nested server builds on an x86 blocking gate),
+    and `geiger`'s per-package sweep filters it out. A local
+    `cargo clippy --workspace` *does* lint kernel code — the blind spot is
+    closed, not relocated.
 - Drop all 15 `cfg(target_os = "none")` gates from `kernel/src/main.rs`
   (unconditional `no_std`/`no_main`, no host `fn main() {}` fallback). Two
   guards make an accidental host build one clear message: `build.rs` emits
