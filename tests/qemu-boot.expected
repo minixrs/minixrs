@@ -38,3 +38,4 @@ minix.rs booting on aarch64
 # RS's periodic kernel alarm: assert only the FIRST fire (always inside the
 # head carve-out) -- timing-robust under slow CI TCG, unlike a fire count
 [alarm 1] owner=r nr=2 at=
+THIS MARKER MUST NOT EXIST -- ci red-proof
