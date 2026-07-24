@@ -92,7 +92,7 @@ pushes refresh the whole-project picture.
 See `docs/architecture.md` for the full system design. Key concepts:
 
 - **Microkernel:** Only IPC, scheduling, interrupt dispatch, and memory protection in kernel
-- **Message passing:** 6 IPC primitives (SEND, RECEIVE, SENDREC, NOTIFY, SENDNB, SENDA)
+- **Message passing:** MINIX 3's 6 IPC primitives — 5 live (SEND, RECEIVE, SENDREC, NOTIFY, SENDNB); SENDA still an `ENOSYS` stub
 - **User-space servers:** All OS services (file system, process management, memory management) run as separate processes communicating via IPC
 - **Privilege model:** Fine-grained bitmaps control which processes can communicate and what kernel calls they can make
 
@@ -154,13 +154,16 @@ Canonical docs are an **mdBook in `book/`** (content under `book/src/`, TOC in
 `book/src/SUMMARY.md`), published to GitHub Pages on push to `main` via
 `.github/workflows/docs.yml` (path-filtered to `book/**`; mdBook pinned to 0.5.3; Pages
 actions SHA-pinned like `ci.yml`). Write new documentation there, derived from source —
-the `docs/*.md` files are legacy bootstrap notes being retired (with `docs/plan.md` still
-the live slice tracker, below). Build locally with `mdbook build book`; output `book/book/`
-is gitignored.
+the `docs/*.md` files are legacy bootstrap notes being retired. The planning tree is the
+exception and stays: `docs/plan.md` is the lean live tracker (phase status + slice
+summaries), and `docs/plans/` holds the full per-phase slice histories
+(`phase-2-ipc.md` / `phase-3-vm.md` / `phase-4-servers.md`) plus the pre-Phase-5 cleanup
+tracker (`phase-5-prep.md` — one PR-sized chunk per session, same markers). Build locally
+with `mdbook build book`; output `book/book/` is gitignored.
 
 mdBook isn't installed by default. Install the **prebuilt** binary pinned to CI's 0.5.3
 (`cargo install mdbook` compiles slowly from source) — for Apple Silicon:
 `curl -fsSL https://github.com/rust-lang/mdBook/releases/download/v0.5.3/mdbook-v0.5.3-aarch64-apple-darwin.tar.gz | tar xz && mv mdbook ~/.cargo/bin/`.
 Live preview with reload: `mdbook serve book -n 127.0.0.1 -p 3000`.
 
-`docs/plan.md` tracks slice status with three markers: `◀ next` (unstarted), `◀ ready (branch ..., pending merge)` (implemented but unmerged), `✓ shipped (PR #N, merged YYYY-MM-DD)` (merged). Flip the previous slice forward and slide `◀ next` ahead as part of each slice's PR. When opening a new slice PR, also reconcile any older `◀ ready` markers against `git log` — stale "pending merge" labels on already-merged PRs accumulate otherwise.
+`docs/plan.md` and the `docs/plans/*` files track slice/chunk status with three markers: `◀ next` (unstarted), `◀ ready (branch ..., pending merge)` (implemented but unmerged), `✓ shipped (PR #N, merged YYYY-MM-DD)` (merged). Flip the previous slice forward and slide `◀ next` ahead as part of each slice's PR — in **both** plan.md's summary line and the corresponding `docs/plans/` detail file. When opening a new slice PR, also reconcile any older `◀ ready` markers against `git log` — stale "pending merge" labels on already-merged PRs accumulate otherwise.

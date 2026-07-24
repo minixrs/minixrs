@@ -16,8 +16,8 @@ servers, user-space drivers, and a fine-grained privilege model — while droppi
 
 - **Microkernel in Rust** (`no_std`, `no_main`) — only IPC, scheduling,
   interrupt dispatch, and memory protection live in the kernel.
-- **Message passing** — six IPC primitives (SEND, RECEIVE, SENDREC, NOTIFY,
-  SENDNB, SENDA).
+- **Message passing** — MINIX 3's six IPC primitives; five are live (SEND,
+  RECEIVE, SENDREC, NOTIFY, SENDNB), SENDA is still a stub.
 - **User-space servers** — PM, VFS, VM, RS, DS, SCHED run as separate processes.
 - **User-space drivers** — VirtIO (MMIO on aarch64, PCI on x86_64).
 - **aarch64 first** (Apple Silicon / QEMU virt), x86_64 secondary.
