@@ -29,15 +29,18 @@ use minixrs_kernel_shared::com::{
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, ProcNr};
 
-/// Table capacity. Slots `0..NR_BOOT_PROCS + NR_STUB_PROCS` (= 15 since stub E's
-/// slice-4.8 retirement) are seeded at init; the pool above that
+/// Table capacity. Slots `0..FORK_POOL_BASE` (= 15), reserved for boot servers
+/// plus demo stubs, are seeded at init — though the stub slots 11..=14 are only
+/// *occupied* when the `boot-stubs` feature is on. The pool above that
 /// ([`FORK_POOL_BASE`]`..NR_MPROCS`) is where 4.6's fork allocates children.
 pub const NR_MPROCS: usize = 32;
 
-/// First slot fork may allocate. Boot servers + demo stubs own `[0, 15)`; forked
-/// children land in `[FORK_POOL_BASE, NR_MPROCS)`. A child's slot index is also
-/// its kernel proc number, so this range must stay within the kernel proc table
-/// and within VM's `MAX_CLIENTS` region-table cap (both hold).
+/// First slot fork may allocate. Boot servers + reserved stub slots own
+/// `[0, FORK_POOL_BASE)`; forked children land in `[FORK_POOL_BASE, NR_MPROCS)`.
+/// Constant regardless of `boot-stubs` (`NR_STUB_PROCS` is fixed), so child proc
+/// numbers don't shift when stubs are disabled — slots 11..=14 are just left
+/// empty. A child's slot index is also its kernel proc number, so this range
+/// must stay within the kernel proc table and VM's `MAX_CLIENTS` cap (both hold).
 pub const FORK_POOL_BASE: usize = NR_BOOT_PROCS + NR_STUB_PROCS;
 
 /// Entry holds a live process.
@@ -141,8 +144,11 @@ fn seed_in(t: &mut [MProc; NR_MPROCS]) {
         next_pid += 1;
     }
 
-    // Demo stubs: ordinary user processes, parented to INIT, pids continuing
-    // past the servers (slots 11..=15 land on pids 11..=15).
+    // Demo stubs (`boot-stubs` feature, default-on): ordinary user processes,
+    // parented to INIT, pids continuing past the servers (slots 11..=14 → pids
+    // 11..=14). Skipped entirely when the feature is off, leaving 11..=14 empty
+    // to match the stub-free kernel; `FORK_POOL_BASE` (15) is unaffected.
+    #[cfg(feature = "boot-stubs")]
     for (slot, e) in t
         .iter_mut()
         .enumerate()

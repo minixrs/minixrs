@@ -25,6 +25,11 @@ cargo kernel-aarch64
 # Build + boot under QEMU. The kernel runs indefinitely once EL0 starts, so a
 # timeout is mandatory. Redirect to a file when you need to grep the log.
 timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+
+# Clean, stub-free boot for debugging: --no-default-features disables the
+# `boot-stubs` feature, so only the servers + init/worker boot (no demo stubs
+# A-D flooding the trace). See "Boot stubs" under Cargo workspace below.
+timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
 ```
 
 `cargo run` invokes the cargo runner (`tools/qemu-run.sh`), which stages an ESP
@@ -66,12 +71,34 @@ The kernel's `build.rs` does two build-time jobs:
 - **Assembly** — it uses the `cc` crate to assemble the kernel's `.S` files. It
   skips this when `CARGO_CFG_TARGET_OS != "none"`, so `cargo check` / `cargo test`
   on the host keep working (the kernel's real modules are `#[cfg(target_os =
-  "none")]`-gated anyway).
+  "none")]`-gated anyway). The demo-stub blob `user_stub.S` is assembled only when
+  the `boot-stubs` feature is on (see [Boot stubs](#boot-stubs-boot-stubs-feature)).
 - **Boot-image packing** — it builds each boot server for the EL0 user target in
   its own isolated `CARGO_TARGET_DIR`, packs the ELFs into the MXBI archive
   (`pack_mxbi`), and emits `BOOT_IMAGE_PATH` for the kernel to `include_bytes!`.
   There is no separate `mkbootimage` tool. See [Boot](boot/overview.md) for the
   archive format and module set.
+
+### Boot stubs (`boot-stubs` feature)
+
+The kernel installs four hand-written EL0 demo stubs A–D at boot — a live
+regression battery for the IPC primitives (A↔B ping-pong), SCHED delegation (C),
+and the VM page-fault / SIGSEGV path (D). They are useful but noisy: stub C's
+`SYS_GETINFO` loop floods the trace. The **`boot-stubs` cargo feature (default-on)**
+gates them, so `--no-default-features` yields a clean boot of servers + init/worker
+only.
+
+The feature lives on two crates — the **kernel** (gates the stub code in
+`arch::aarch64::userland`) and **PM** (gates the stub `mproc` seeding). Because
+`build.rs` builds each server in a *separate* nested cargo invocation with its own
+feature resolution, it reads `CARGO_FEATURE_BOOT_STUBS` and, when the kernel is
+stub-free, passes `--no-default-features` to the nested PM build too — keeping the
+two in lockstep. The feature is intentionally **not** placed on `kernel-shared`: a
+shared-crate default feature is force-enabled by other dependents (`minix-ipc`,
+`server-rt`) through cargo *feature unification* and could not be turned off. So
+`NR_STUB_PROCS` (= 4) and `FORK_POOL_BASE` (= 15) are constant regardless of the
+feature — disabling stubs merely leaves proc slots 11–14 unoccupied; it does not
+renumber the fork pool.
 
 ## Host tests
 
@@ -138,6 +165,12 @@ behavior is observed through kernel-side traces (`[as]`, `[ipc]`, `[ksys]`,
   against `tests/qemu-boot.expected` and `tests/qemu-boot.forbidden` — the same
   check the `qemu-smoke` CI job runs. Update those marker files in the same change
   when trace formats or the boot roster shift.
+- **Quiet the stubs.** Stub C's `SYS_GETINFO` loop dominates the `[ipc]`/`[ksys]`
+  sample stream. When you're chasing a server or init/musl issue, boot
+  `--no-default-features` to drop the demo stubs A–D entirely (see
+  [Boot stubs](#boot-stubs-boot-stubs-feature)) — the trace then shows only the
+  servers + init/worker. Note the `qemu-smoke` markers assume the default
+  (stubs-on) boot, so don't run `check-boot-log.sh` against a stub-free log.
 
 ## Debugging with GDB
 

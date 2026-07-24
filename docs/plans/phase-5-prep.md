@@ -52,7 +52,7 @@ MIT/Apache-2.0 — but it is the wrong tool for this chunk's assertion
 not remove the kernel's `#[cfg(target_os = "none")]` gating either (see
 chunk 7). Revisit as a future in-QEMU unit-test chunk.
 
-## Chunk 2: mdBook content port + legacy docs retirement ◀ ready (branch docs/book-port-kernel, pending merge)
+## Chunk 2: mdBook content port + legacy docs retirement ✓ shipped (PR #34, merged 2026-07-24)
 
 **Goal:** the mdBook in `book/` is the canonical documentation, but its
 architecture/IPC pages are stubs while the real content sits in legacy
@@ -76,7 +76,7 @@ present). Port with an accuracy pass; retire the legacy files.
 **Proof:** `mdbook build book` green; legacy files gone; book pages describe
 only what boots today.
 
-## Chunk 3: Stub A–D disable flag ◀ next
+## Chunk 3: Stub A–D disable flag ◀ ready (branch feature/boot-stubs-flag, pending merge)
 
 **Goal:** stubs A–D are the live regression battery (IPC ping-pong, SCHED
 delegation, VM fault paths) but they consume ASIDs/priv slots and flood traces
