@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "469cc6e791f0",
+  "strategy": "manual-commit",
+  "branch": "chore/phase-4-closeout-plan-restructure",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "README.md",
+    "book/src/introduction.md",
+    "book/src/ipc/overview.md",
+    "docs/plan.md",
+    "docs/plans/phase-2-ipc.md",
+    "docs/plans/phase-3-vm.md",
+    "docs/plans/phase-4-servers.md",
+    "docs/plans/phase-5-prep.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/46/9cc6e791f0/0/metadata.json",
+      "transcript": "/46/9cc6e791f0/0/full.jsonl",
+      "content_hash": "/46/9cc6e791f0/0/content_hash.txt",
+      "prompt": "/46/9cc6e791f0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 78,
+    "cache_creation_tokens": 172223,
+    "cache_read_tokens": 5895887,
+    "output_tokens": 57380,
+    "api_call_count": 40
+  }
+}

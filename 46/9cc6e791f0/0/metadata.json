@@ -1,0 +1,137 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "469cc6e791f0",
+  "session_id": "f38be5ad-a4fe-4792-82a4-13b2f0bc440c",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-24T04:22:08.618183Z",
+  "branch": "chore/phase-4-closeout-plan-restructure",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "README.md",
+    "book/src/introduction.md",
+    "book/src/ipc/overview.md",
+    "docs/plan.md",
+    "docs/plans/phase-2-ipc.md",
+    "docs/plans/phase-3-vm.md",
+    "docs/plans/phase-4-servers.md",
+    "docs/plans/phase-5-prep.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8",
+  "turn_id": "e13856579af7",
+  "token_usage": {
+    "input_tokens": 78,
+    "cache_creation_tokens": 172223,
+    "cache_read_tokens": 5895887,
+    "output_tokens": 57380,
+    "api_call_count": 40
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01Tf6aubETnVJgpmsERvrm1W",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "e13856579af7",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 27,
+        "end": 28,
+        "entry_ids": [
+          "7abd03eb-99a6-4434-9b96-87b0d99b7c83"
+        ],
+        "tool_use_id": "toolu_01Tf6aubETnVJgpmsERvrm1W"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01Tf6aubETnVJgpmsERvrm1W"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01AyPTrPamvRE8fLp2YyjKGS",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "e13856579af7",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 282,
+        "end": 283,
+        "entry_ids": [
+          "3e8a709e-6abe-4296-b4e0-33092e3a3047"
+        ],
+        "tool_use_id": "toolu_01AyPTrPamvRE8fLp2YyjKGS"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01AyPTrPamvRE8fLp2YyjKGS"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-24T04:22:08.602045Z",
+    "agent_lines": 1011,
+    "agent_removed": 693,
+    "human_added": 0,
+    "human_modified": 2,
+    "human_removed": 0,
+    "total_committed": 1012,
+    "total_lines_changed": 1706,
+    "agent_percentage": 99.88276670574443,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 275,
+      "user_lines_removed": 1,
+      "agent_lines_added": 1013,
+      "agent_lines_removed": 694,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274,
+        "docs/plan.md": 1
+      },
+      "user_removed_per_file": {
+        "docs/plan.md": 1
+      }
+    }
+  ]
+}
