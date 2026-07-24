@@ -157,11 +157,10 @@ fn unblock_dependents(
     dead_nr: ProcNr,
     dead_priv_id: Option<minixrs_kernel_shared::PrivId>,
 ) {
-    for idx in 0..N_PROC_SLOTS {
+    for (idx, p) in proc_table.iter_mut().enumerate() {
         if idx == target_idx {
             continue;
         }
-        let p = &mut proc_table[idx];
         let rts = p.rts_flags.load(Ordering::Relaxed);
         if rts & RTS_SLOT_FREE != 0 {
             continue;

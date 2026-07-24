@@ -253,6 +253,9 @@ unsafe extern "C" {
 ///
 /// SAFETY: `p` must be the slot whose number is currently parked in
 /// `CURRENT_PROC_NR`. Caller must hold the single-threaded invariant.
+// The asm stores the pointer *value* into `TPIDR_EL1` and never dereferences
+// it, so `options(nomem)` is accurate; the type-based lint is a false positive.
+#[allow(clippy::pointers_in_nomem_asm_block)]
 unsafe fn set_tpidr_to(p: &mut Proc) {
     let regs_ptr: *mut ArchRegisterFrame = &mut p.regs;
     // SAFETY: TPIDR_EL1 is EL1-only and used only by our own SVC + IRQ stubs

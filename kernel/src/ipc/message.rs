@@ -41,7 +41,7 @@ fn user_va_ok(va: u64, len: usize) -> bool {
     if va < core::mem::align_of::<Message>() as u64 {
         return false;
     }
-    if va % (core::mem::align_of::<Message>() as u64) != 0 {
+    if !va.is_multiple_of(core::mem::align_of::<Message>() as u64) {
         return false;
     }
     match va.checked_add(len as u64) {

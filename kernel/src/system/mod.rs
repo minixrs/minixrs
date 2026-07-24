@@ -143,7 +143,7 @@ pub fn kernel_call_sendrec(
     }
 
     let n = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if n % KCALL_TRACE_EVERY == 0 {
+    if n.is_multiple_of(KCALL_TRACE_EVERY) {
         let call_idx = original_m_type - KERNEL_CALL;
         let mut uart = Uart::new();
         let _ = writeln!(

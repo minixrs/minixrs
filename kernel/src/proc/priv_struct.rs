@@ -27,7 +27,7 @@ pub const IPC_MAP_CHUNKS: usize = NR_SYS_PROCS / 32;
 /// Number of `u32` chunks needed to cover `NR_SYS_CALLS` bits.
 pub const K_CALL_MASK_CHUNKS: usize = NR_SYS_CALLS / 32;
 
-const _: () = assert!(NR_SYS_PROCS % 32 == 0);
+const _: () = assert!(NR_SYS_PROCS.is_multiple_of(32));
 
 /// I/O port range a privileged process may access.
 #[derive(Copy, Clone, Debug, Default)]
