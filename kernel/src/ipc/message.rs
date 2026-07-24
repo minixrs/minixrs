@@ -22,33 +22,7 @@
 //! `copy_from_user` once per-process page tables exist.
 
 use minixrs_kernel_shared::error::EFAULT;
-use minixrs_kernel_shared::message::Message;
-
-/// One past the highest user VA reachable through TTBR0. Limine programs
-/// `TCR_EL1.T0SZ = 16`, giving a 48-bit user VA space (`[0, 2^48)`); the
-/// kernel's HHDM lives in the very high half via TTBR1 and is unreachable
-/// from this range.
-pub const USER_VA_TOP: u64 = 1 << 48;
-
-/// Bounds check for a user pointer of length `len` starting at `va`.
-///
-/// Rejects:
-///   - NULL or sub-alignment-of-`Message` addresses (a NULL pointer or an
-///     unaligned `read_volatile` is UB even before the access faults).
-///   - Pointers whose range extends past `USER_VA_TOP`.
-#[inline]
-fn user_va_ok(va: u64, len: usize) -> bool {
-    if va < core::mem::align_of::<Message>() as u64 {
-        return false;
-    }
-    if !va.is_multiple_of(core::mem::align_of::<Message>() as u64) {
-        return false;
-    }
-    match va.checked_add(len as u64) {
-        Some(end) => end <= USER_VA_TOP,
-        None => false,
-    }
-}
+use minixrs_kernel_shared::message::{Message, user_va_ok};
 
 /// Copy a [`Message`] out of user memory at `va`.
 ///
@@ -80,35 +54,4 @@ pub(crate) fn copy_msg_to_user(va: u64, m: &Message) -> Result<(), i32> {
         core::ptr::write_volatile(va as *mut Message, *m);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn user_va_ok_rejects_null() {
-        assert!(!user_va_ok(0, core::mem::size_of::<Message>()));
-    }
-
-    #[test]
-    fn user_va_ok_rejects_unaligned() {
-        assert!(!user_va_ok(0x10001, core::mem::size_of::<Message>()));
-    }
-
-    #[test]
-    fn user_va_ok_rejects_at_top() {
-        assert!(!user_va_ok(USER_VA_TOP, core::mem::size_of::<Message>()));
-    }
-
-    #[test]
-    fn user_va_ok_rejects_overflow() {
-        assert!(!user_va_ok(u64::MAX - 7, core::mem::size_of::<Message>()));
-    }
-
-    #[test]
-    fn user_va_ok_accepts_aligned_in_range() {
-        // 8 MiB — where the slice's stub stacks live.
-        assert!(user_va_ok(0x80_0000, core::mem::size_of::<Message>()));
-    }
 }

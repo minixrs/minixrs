@@ -1,44 +1,40 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // minix.rs Microkernel
-#![cfg_attr(target_os = "none", no_std)]
-#![cfg_attr(target_os = "none", no_main)]
+#![no_std]
+#![no_main]
 
-// The kernel crate is only meaningful on bare-metal targets (`target_os =
-// "none"`). When `cargo check --workspace` runs against the host target
-// (macos / linux), we collapse to a no-op `main` so the workspace stays
-// checkable; the ELF-only `link_section` attributes, the `_start` entry
-// path, and the panic handler all rely on the bare-metal target.
+// The kernel builds for bare-metal targets only (`target_os = "none"`): the
+// ELF-only `link_section` attributes, the `_start` entry path, the panic
+// handler, and `build.rs`'s assembled `.S` objects all require it. The
+// workspace excludes this crate from host builds via `default-members`, so
+// nothing host-compiles it and no module needs a `cfg` gate. `build.rs` emits
+// `cargo::error=` on a host target and aborts before rustc gets here; this
+// `compile_error!` states the same invariant at the source, mirroring
+// `arch/mod.rs`'s arch guard.
+#[cfg(not(target_os = "none"))]
+compile_error!(
+    "minixrs-kernel is bare-metal only; build it with `cargo kernel-aarch64` \
+     (or `--target aarch64-unknown-none`)"
+);
 
-#[cfg(target_os = "none")]
 mod arch;
-#[cfg(target_os = "none")]
 mod boot_image;
-#[cfg(target_os = "none")]
 mod clock;
-#[cfg(target_os = "none")]
 mod ipc;
-#[cfg(target_os = "none")]
 mod mm;
-#[cfg(target_os = "none")]
 mod panic;
-#[cfg(target_os = "none")]
 mod proc;
-#[cfg(target_os = "none")]
 mod system;
-#[cfg(target_os = "none")]
 mod uart;
 
-#[cfg(target_os = "none")]
 use core::fmt::Write;
 
 /// Scheduler tick rate (Hz). 100 Hz → 10 ms ticks, matching the classic
 /// MINIX 3 cadence. Combined with the per-stub `quantum_ms = 5`, each task
 /// gets ~50 ms of CPU before preemption.
-#[cfg(target_os = "none")]
 const TICK_HZ: u64 = 100;
 
-#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
     // Resolve the UART MMIO virtual address before any output. Limine maps
@@ -100,6 +96,3 @@ extern "C" fn kmain() -> ! {
     // eret transitions from EL1 boot context into EL0 user execution.
     unsafe { proc::sched::run() }
 }
-
-#[cfg(not(target_os = "none"))]
-fn main() {}

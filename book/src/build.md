@@ -24,12 +24,15 @@ cargo kernel-aarch64
 
 # Build + boot under QEMU. The kernel runs indefinitely once EL0 starts, so a
 # timeout is mandatory. Redirect to a file when you need to grep the log.
-timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+# Budget ~5 s for the rebuild + UEFI firmware startup before the kernel's first
+# byte -- `timeout 8` can yield a log with no kernel output at all, so use 25 s
+# for anything you intend to verify.
+timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # Clean, stub-free boot for debugging: --no-default-features disables the
 # `boot-stubs` feature, so only the servers + init/worker boot (no demo stubs
 # A-D flooding the trace). See "Boot stubs" under Cargo workspace below.
-timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
+timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
 ```
 
 `cargo run` invokes the cargo runner (`tools/qemu-run.sh`), which stages an ESP
@@ -68,11 +71,12 @@ the planned port; the kernel does not boot on x86_64 yet.
 
 The kernel's `build.rs` does two build-time jobs:
 
-- **Assembly** — it uses the `cc` crate to assemble the kernel's `.S` files. It
-  skips this when `CARGO_CFG_TARGET_OS != "none"`, so `cargo check` / `cargo test`
-  on the host keep working (the kernel's real modules are `#[cfg(target_os =
-  "none")]`-gated anyway). The demo-stub blob `user_stub.S` is assembled only when
-  the `boot-stubs` feature is on (see [Boot stubs](#boot-stubs-boot-stubs-feature)).
+- **Assembly** — it assembles the kernel's `.S` files with `clang` and passes the
+  resulting objects straight to the linker. When `CARGO_CFG_TARGET_OS != "none"` it
+  instead emits a `cargo::error=` line and stops, because a host build of the kernel
+  is always a mistake (see [The kernel is not host-buildable](#the-kernel-is-not-host-buildable)).
+  The demo-stub blob `user_stub.S` is assembled only when the `boot-stubs` feature is
+  on (see [Boot stubs](#boot-stubs-boot-stubs-feature)).
 - **Boot-image packing** — it builds each boot server for the EL0 user target in
   its own isolated `CARGO_TARGET_DIR`, packs the ELFs into the MXBI archive
   (`pack_mxbi`), and emits `BOOT_IMAGE_PATH` for the kernel to `include_bytes!`.
@@ -100,6 +104,41 @@ shared-crate default feature is force-enabled by other dependents (`minix-ipc`,
 feature — disabling stubs merely leaves proc slots 11–14 unoccupied; it does not
 renumber the fork pool.
 
+## The kernel is not host-buildable
+
+`minixrs-kernel` compiles for `target_os = "none"` and nothing else: the ELF-only
+`link_section` attributes, the `_start` entry path, the panic handler, and the
+assembled `.S` objects all require it. It used to collapse to an empty `fn main() {}`
+on the host so that `cargo check --workspace` stayed green — at the cost of hiding
+every module behind `#[cfg(target_os = "none")]`, and therefore hiding all 48 kernel
+source files from every lint gate. That arrangement is gone.
+
+The crate stays a workspace `members` entry — one shared `Cargo.lock` keeps `audit` /
+`deny` covering its dependencies, and `cargo fmt --all` still formats it (cargo-fmt
+enumerates all members, and rustfmt follows `mod` declarations without evaluating
+`cfg`) — but it is **omitted from `default-members`**:
+
+```sh
+cargo clippy --all-targets -- -D warnings          # skips the kernel
+cargo clippy --workspace --all-targets             # DOES build the kernel -> error
+cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings   # ok
+```
+
+`--workspace` overrides `default-members`, so workspace-wide invocations must pass
+`--exclude minixrs-kernel`; CI's `clippy` and `coverage` jobs do. A host build that
+slips through fails with a single message from `build.rs` naming `cargo kernel-aarch64`
+(a `#[cfg(not(target_os = "none"))] compile_error!` in `main.rs` states the same
+invariant at the source). No `cfg(target_os = ...)` gates remain under `kernel/src/`.
+
+> **rust-analyzer:** its default check is `cargo check --workspace`, which will report
+> the kernel's guard as an error. Add
+> `"rust-analyzer.check.extraArgs": ["--exclude", "minixrs-kernel"]` to your editor
+> settings.
+
+The `cfg_attr(target_os = "none", …)` attributes in `servers/*` and `userland/*` are a
+different thing: those crates *are* host-built and host-tested, and the attribute only
+hides an ELF section specifier from a Mach-O host.
+
 ## Host tests
 
 Logic that can run off-target lives in `kernel-shared` and in the host-testable
@@ -109,33 +148,41 @@ server crates:
 cargo test -p minixrs-kernel-shared
 ```
 
-`cargo test -p minixrs-kernel` runs **zero** tests by design — every kernel module
-is gated on `#[cfg(target_os = "none")]`. QEMU is the primary verification for
-kernel code; CI smoke-boots it (below).
+There is no `#[cfg(test)]` code under `kernel/src/` — the crate cannot be host-tested
+and in-QEMU test infrastructure does not exist yet, so such tests would never run.
+Pure predicates over shared ABI types belong in `kernel-shared` instead (`user_va_ok`
+in `kernel-shared/src/message.rs` is the worked example); hardware and raw-pointer
+behaviour stays in the kernel. QEMU is the primary verification for kernel code, and
+CI smoke-boots it (below).
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Nine jobs run
-in parallel:
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Ten jobs run
+in parallel (`sonar` waits on `coverage`):
 
 | Job | Blocking? | What it checks |
 |-----|-----------|----------------|
-| `fmt` | yes | `cargo fmt --all --check` |
-| `clippy` | yes | `cargo clippy --workspace --all-targets -- -D warnings` (host target) |
+| `fmt` | yes | `cargo fmt --all --check` (covers the kernel too) |
+| `clippy` | yes | `cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings` (host target) |
+| `clippy-kernel` | yes | `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings`, twice: default features and `--no-default-features` |
 | `audit` | yes | `cargo-audit` advisory scan |
 | `deny` | yes | `cargo-deny` (licenses / bans, config in `deny.toml`) |
-| `geiger` | advisory | `unsafe` surface report |
+| `geiger` | advisory | `unsafe` surface report (per package, kernel filtered out) |
 | `miri` | advisory | UB check on the host-testable crates |
-| `qemu-smoke` | advisory | boots the kernel and greps the serial log |
-| `coverage` | yes | `cargo-llvm-cov` → `lcov.info` |
+| `qemu-smoke` | yes | boots the kernel and greps the serial log |
+| `coverage` | yes | `cargo-llvm-cov` → `lcov.info` (kernel excluded) |
 | `sonar` | — | feeds LCOV to SonarQube Cloud |
 
-Notes: the blocking `clippy --workspace` gate runs on the **host** target, where
-the kernel's real modules are `cfg`-gated out — so kernel code is not clippy-linted
-by CI; `cargo kernel-aarch64` is the real compile gate for it. `qemu-smoke`
-(`tools/check-boot-log.sh` against `tests/qemu-boot.expected` / `.forbidden`) is
-advisory until it proves stable. `Cargo.lock` is committed so `audit` / `deny` are
-reproducible, and third-party actions are pinned to commit SHAs.
+Notes: since the kernel is excluded from every host gate, **`clippy-kernel` is the only
+job that compiles kernel code** — which is why it blocks and runs on a native
+`ubuntu-24.04-arm` runner (no cross toolchain needed for the `.S` files). It passes no
+`--all-targets`: the kernel is `no_std`/`no_main`, so there is no test harness to build.
+`qemu-smoke` (also `ubuntu-24.04-arm`) boots for 45 s wall clock, requires exit status
+124 — the `timeout(1)` status a healthy, never-exiting kernel must produce — and then
+runs `tools/check-boot-log.sh` against `tests/qemu-boot.expected` / `.forbidden`; keep
+those expectations timing-robust (first occurrences, never counts), because CI's TCG is
+slower than a local run. `Cargo.lock` is committed so `audit` / `deny` are reproducible,
+and third-party actions are pinned to commit SHAs.
 
 ## Debugging: QEMU trace forensics
 

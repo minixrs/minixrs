@@ -35,25 +35,37 @@ jobs:
       - name: Install pinned toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # minixrs-kernel is bare-metal only and is excluded from host builds by
+      # the workspace's `default-members`; `--workspace` overrides that, so the
+      # exclusion must be explicit here. The clippy-kernel job below lints it
+      # on its real target.
+      - run: cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings
 
   clippy-kernel:
-    name: clippy (kernel aarch64, advisory)
-    # Native arm64 so the cc crate assembles the kernel .S files without a
-    # cross toolchain (same reason qemu-smoke uses this runner).
+    name: clippy (kernel aarch64)
+    # Native arm64 so the kernel's .S files assemble without a cross toolchain
+    # (same reason qemu-smoke uses this runner).
     runs-on: ubuntu-24.04-arm
-    # Advisory: the blocking host clippy gate can't see kernel code (its modules
-    # are cfg(target_os = "none")-gated out on host), so this job is the only one
-    # that lints the real compile target. Kept non-blocking so a future
-    # nightly-introduced lint can't red-X an unrelated PR; the tree is clean
-    # today. Chunk 7 can de-host the kernel crate and flip this to blocking.
-    continue-on-error: true
+    # Blocking: the kernel crate is excluded from every host gate, so this job
+    # is the ONLY one that both lints and compiles kernel code. The dated
+    # nightly pin in rust-toolchain.toml means a new lint can only appear on a
+    # deliberate bump, so this can't red-X an unrelated PR.
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install pinned toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings
+      # No --all-targets: the kernel is no_std/no_main, so there is no test
+      # harness to build.
+      - name: clippy (default features, stubs A–D on)
+        run: cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings
+      # The stub-free boot (phase-5-prep chunk 3) is a supported configuration;
+      # nothing else in CI compiles it. Two #[allow]s live only inside
+      # cfg(feature = "boot-stubs") code, so this run covers a distinct surface.
+      - name: clippy (--no-default-features, stub-free)
+        run: |
+          cargo clippy -p minixrs-kernel --target aarch64-unknown-none \
+            --no-default-features -- -D warnings
 
   audit:
     name: cargo-audit
@@ -92,9 +104,12 @@ jobs:
       # cargo-geiger rejects the virtual workspace root, so scan each member
       # package individually. The report is advisory, so a per-crate failure
       # (e.g. a no_std crate geiger can't build on host) must not abort the sweep.
+      # minixrs-kernel is filtered out: it is bare-metal only and its build
+      # script hard-errors on a host target, so scanning it is guaranteed noise.
       - name: Scan unsafe usage per package
         run: |
-          for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
+          for pkg in $(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[].name' | grep -v '^minixrs-kernel$'); do
             echo "::group::geiger $pkg"
             cargo geiger --package "$pkg" || echo "geiger failed for $pkg (advisory)"
             echo "::endgroup::"
@@ -116,12 +131,13 @@ jobs:
       - run: cargo miri test -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm
 
   qemu-smoke:
-    name: QEMU boot smoke (advisory)
+    name: QEMU boot smoke
     # Free arm64 runner for public repos; native-ISA TCG (no KVM available).
     runs-on: ubuntu-24.04-arm
-    # Advisory while it proves stable across a few PRs (phase-5-prep chunk 1);
-    # flip to blocking once trusted. Shared-runner TCG timing is the flake risk.
-    continue-on-error: true
+    # Blocking as of phase-5-prep chunk 7: it stayed green across PRs #33–#37,
+    # satisfying chunk 1's "stable across a few PRs" bar. Keep the expectations
+    # in tests/qemu-boot.expected timing-robust (first occurrences, never
+    # counts) — shared-runner TCG timing is the flake risk.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -144,12 +160,18 @@ jobs:
           QEMU_EFI_AARCH64: /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
         run: |
           # The kernel runs forever (WFE idle); timeout(1) is the terminator,
-          # so exit 124 is the *expected* status of a healthy run. The checker
-          # step below is the pass/fail verdict.
+          # so exit 124 is the *only* healthy status. Any other status means
+          # the build, the runner, or QEMU itself failed — fail here rather
+          # than letting the log checker report a confusing missing-marker
+          # error. The checker step below is the verdict on log content.
           status=0
           timeout 45 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
             > qemu.log 2>&1 || status=$?
           echo "qemu run finished with status $status (124 = timeout, expected)"
+          if [ "$status" -ne 124 ]; then
+            echo "::error::expected exit 124 (timeout); got $status — see the qemu-boot-log artifact"
+            exit 1
+          fi
       - name: Check boot log
         run: tools/check-boot-log.sh qemu.log
       - name: Upload boot log
@@ -171,8 +193,11 @@ jobs:
       - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
         with:
           tool: cargo-llvm-cov
+      # minixrs-kernel is bare-metal only (see the clippy job): it cannot be
+      # instrumented on the host. QEMU is its verification; the clippy-kernel
+      # job is its compile gate.
       - name: Generate LCOV coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --exclude minixrs-kernel --lcov --output-path lcov.info
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lcov
