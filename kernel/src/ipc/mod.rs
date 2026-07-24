@@ -118,7 +118,7 @@ pub extern "C" fn do_ipc(frame: &mut ArchRegisterFrame) {
     frame.x[0] = result as u64;
 
     let n = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if n <= TRACE_HEAD || n % TRACE_EVERY == 0 {
+    if n <= TRACE_HEAD || n.is_multiple_of(TRACE_EVERY) {
         let mut uart = Uart::new();
         let _ = writeln!(
             uart,
@@ -381,7 +381,7 @@ fn fold_earliest(current: u64, at: u64) -> u64 {
 /// complexity bar.
 fn trace_alarm_fire(name0: u8, nr: ProcNr, now: u64) {
     let n = ALARM_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if n > ALARM_TRACE_HEAD && n % ALARM_TRACE_EVERY != 0 {
+    if n > ALARM_TRACE_HEAD && !n.is_multiple_of(ALARM_TRACE_EVERY) {
         return;
     }
     let id = if name0 != 0 { name0 } else { b'?' };

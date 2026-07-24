@@ -52,10 +52,10 @@ pub fn mini_receive(
     // Slots recycle as of slice 4.6: a specific source filter must pass
     // okendpt so receiving from a dead endpoint fails with EDEADSRCDST
     // instead of blocking forever (MINIX 3 proc.c:999).
-    if src_e != ANY {
-        if let Err(e) = okendpt(proc_table, src_e) {
-            return e;
-        }
+    if src_e != ANY
+        && let Err(e) = okendpt(proc_table, src_e)
+    {
+        return e;
     }
 
     // Record buffer VA up-front. Even if we block here, a later deferred
@@ -113,9 +113,7 @@ fn take_pending_notification(
     caller_idx: usize,
     src_e: Endpoint,
 ) -> Option<Endpoint> {
-    let Some(caller_priv_id) = proc_table[caller_idx].priv_id else {
-        return None;
-    };
+    let caller_priv_id = proc_table[caller_idx].priv_id?;
     let caller_priv_idx = caller_priv_id.as_usize();
 
     // Snapshot the caller's notify_pending bitmap so the lookup loop can
@@ -126,21 +124,20 @@ fn take_pending_notification(
     // (endpoint → proc_index → priv_id) and test that single bit, rather
     // than scanning the whole bitmap. Current map is 64 bits so the walk
     // is fine, but cost grows with NR_SYS_PROCS.
-    for chunk_idx in 0..pending_snapshot.len() {
-        let mut chunk = pending_snapshot[chunk_idx];
+    for (chunk_idx, &chunk_val) in pending_snapshot.iter().enumerate() {
+        let mut chunk = chunk_val;
         while chunk != 0 {
             let bit = chunk.trailing_zeros() as usize;
             let sender_priv_idx = chunk_idx * 32 + bit;
-            if sender_priv_idx < NR_SYS_PROCS {
-                if let Some(sender_nr) = priv_table[sender_priv_idx].proc_nr {
-                    if let Some(sender_idx) = proc_index(sender_nr) {
-                        let sender_e = proc_table[sender_idx].endpoint;
-                        if src_e == ANY || src_e == sender_e {
-                            // Clear bit and return.
-                            priv_table[caller_priv_idx].notify_pending[chunk_idx] &= !(1u32 << bit);
-                            return Some(sender_e);
-                        }
-                    }
+            if sender_priv_idx < NR_SYS_PROCS
+                && let Some(sender_nr) = priv_table[sender_priv_idx].proc_nr
+                && let Some(sender_idx) = proc_index(sender_nr)
+            {
+                let sender_e = proc_table[sender_idx].endpoint;
+                if src_e == ANY || src_e == sender_e {
+                    // Clear bit and return.
+                    priv_table[caller_priv_idx].notify_pending[chunk_idx] &= !(1u32 << bit);
+                    return Some(sender_e);
                 }
             }
             chunk &= chunk - 1; // pop lowest set bit and try next
