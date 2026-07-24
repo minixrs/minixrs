@@ -76,6 +76,12 @@ const _: () = assert!(NR_SYS_PROCS >= NR_BOOT_PROCS);
 // real process; A–D remain as the live regression battery for the IPC
 // primitives, SCHED delegation, and the VM page-fault / SIGSEGV paths, none of
 // which init + worker exercise.
+//
+// Slots 11..=14 are reserved for the stubs regardless of the kernel/PM
+// `boot-stubs` feature: with the feature on (default) they are installed and
+// seeded, off they are simply left empty for a clean boot. `NR_STUB_PROCS` (and
+// hence `FORK_POOL_BASE`) is constant either way, so forked-child proc numbers
+// don't shift — only whether 11..=14 are occupied does.
 // ---------------------------------------------------------------------------
 
 /// Stub A — SENDREC ping loop to stub B.
@@ -88,7 +94,10 @@ pub const STUB_C_PROC_NR: ProcNr = ProcNr::new(13);
 /// after its munmap (slice 4.5) to exercise the SIGSEGV → PM kill path.
 pub const STUB_D_PROC_NR: ProcNr = ProcNr::new(14);
 
-/// Number of demo stubs (A–D; the fork-loop stub E was retired in slice 4.8).
+/// Number of stub slots reserved just past the boot image (A–D; the fork-loop
+/// stub E was retired in slice 4.8). Constant regardless of the `boot-stubs`
+/// feature — the feature controls whether these slots are *occupied*, not the
+/// reservation, so `FORK_POOL_BASE` (and forked-child proc numbers) stay stable.
 pub const NR_STUB_PROCS: usize = 4;
 
 // Stubs sit contiguously just past the boot image, well inside the proc table.

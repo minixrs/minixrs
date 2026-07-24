@@ -500,7 +500,9 @@ usual markers in [`docs/plans/phase-5-prep.md`](plans/phase-5-prep.md);
 chunks land one per session/PR, in any order except the design session,
 which must come last. Chunk 1 (the CI QEMU smoke job) is `✓ shipped`
 (PR #33, merged 2026-07-24); chunk 2 (the mdBook content port + legacy
-`docs/` retirement) is `◀ ready` (branch `docs/book-port-kernel`, pending merge).
+`docs/` retirement) is `✓ shipped` (PR #34, merged 2026-07-24); chunk 3 (the
+stub A–D `boot-stubs` disable flag) is `◀ ready` (branch
+`feature/boot-stubs-flag`, pending merge).
 
 ### Phase 5: musl Fork + File Systems
 
