@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "7ca9bc87b5f4",
+  "strategy": "manual-commit",
+  "branch": "feature/ci-qemu-smoke",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "tests/qemu-boot.expected"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7c/a9bc87b5f4/0/metadata.json",
+      "transcript": "/7c/a9bc87b5f4/0/full.jsonl",
+      "content_hash": "/7c/a9bc87b5f4/0/content_hash.txt",
+      "prompt": "/7c/a9bc87b5f4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6,
+    "cache_creation_tokens": 1129,
+    "cache_read_tokens": 600273,
+    "output_tokens": 846,
+    "api_call_count": 3
+  }
+}
