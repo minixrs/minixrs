@@ -25,6 +25,13 @@ members = [
     "minixrs",
 ]
 
+# NOTE: there is deliberately no `default-members` here. `minixrs-kernel` pins
+# its own build target via `forced-target` (see `kernel/Cargo.toml`), so every
+# workspace-wide command cross-compiles it for `aarch64-unknown-none` instead of
+# trying — and failing — to build it for the host. Excluding it from
+# `default-members` would only hide kernel code from a bare `cargo clippy`
+# again, which is the blind spot phase-5-prep chunk 7 set out to remove.
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

@@ -504,7 +504,10 @@ which must come last. Chunk 1 (the CI QEMU smoke job) is `✓ shipped`
 stub A–D `boot-stubs` disable flag) is `✓ shipped` (PR #35, merged
 2026-07-24); chunk 4 (capacity-ceiling unification into `NR_SERVED_PROCS`) is
 `✓ shipped` (PR #36, merged 2026-07-24); chunk 5 (the toolchain bump + kernel
-clippy debt) is `◀ ready` (branch `feature/toolchain-bump`, pending merge).
+clippy debt) is `✓ shipped` (PR #37, merged 2026-07-24); chunk 7 (de-hosting the
+kernel crate, which also flips `clippy-kernel` and `qemu-smoke` to blocking) is
+`◀ ready` (branch `feature/dehost-kernel`, pending merge). Chunk 6, the Phase 5
+design + slicing session, is the only chunk left and is `◀ next`.
 
 ### Phase 5: musl Fork + File Systems
 

@@ -14,13 +14,26 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Host builds (cargo check / cargo test on macOS or Linux) compile the
-    // kernel crate as a no-op (main.rs gates every real module on
-    // `target_os = "none"`). Skip assembly entirely for those — the ELF .o
-    // files clang would produce here aren't link-compatible with the
-    // host's mach-o or glibc-flavored ELF and would only break tests.
+    // The kernel is bare-metal only. It used to collapse to a no-op `main` on
+    // host targets so `cargo check --workspace` stayed green, at the cost of
+    // hiding every module behind `#[cfg(target_os = "none")]` — and therefore
+    // from every lint gate.
+    //
+    // `forced-target` in Cargo.toml now pins this package to
+    // aarch64-unknown-none for *every* cargo invocation, so in practice this
+    // arm is unreachable. It stays as defense-in-depth: if that unstable
+    // feature is ever dropped, this turns a cascade of `no_main` /
+    // unset-`BOOT_IMAGE_PATH` errors into one actionable message, and it fires
+    // before rustc runs.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "none" {
+        println!(
+            "cargo::error=minixrs-kernel is a bare-metal crate (target_os = \"none\"); it \
+             cannot be built for the host (got target_os = \"{target_os}\"). Build it with \
+             `cargo kernel-aarch64`. If you are seeing this at all, the `forced-target` key \
+             in kernel/Cargo.toml is not taking effect — check that cargo still supports the \
+             unstable `per-package-target` feature."
+        );
         return;
     }
 
