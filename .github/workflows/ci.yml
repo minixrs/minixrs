@@ -97,6 +97,51 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo miri test -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm
 
+  qemu-smoke:
+    name: QEMU boot smoke (advisory)
+    # Free arm64 runner for public repos; native-ISA TCG (no KVM available).
+    runs-on: ubuntu-24.04-arm
+    # Advisory while it proves stable across a few PRs (phase-5-prep chunk 1);
+    # flip to blocking once trusted. Shared-runner TCG timing is the flake risk.
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install QEMU + aarch64 UEFI firmware
+        run: |
+          sudo apt-get update
+          # ipxe-qemu ships efi-virtio.rom, which QEMU needs for the virtio ESP
+          # drive; it is a Recommends skipped by --no-install-recommends.
+          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-efi-aarch64 ipxe-qemu
+          qemu-system-aarch64 --version
+      - name: Fetch Limine bootloader (pinned commit)
+        run: make -C external/limine
+      - name: Build kernel
+        run: cargo kernel-aarch64
+      - name: Boot in QEMU (45 s wall clock)
+        env:
+          QEMU_EFI_AARCH64: /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+        run: |
+          # The kernel runs forever (WFE idle); timeout(1) is the terminator,
+          # so exit 124 is the *expected* status of a healthy run. The checker
+          # step below is the pass/fail verdict.
+          status=0
+          timeout 45 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+            > qemu.log 2>&1 || status=$?
+          echo "qemu run finished with status $status (124 = timeout, expected)"
+      - name: Check boot log
+        run: tools/check-boot-log.sh qemu.log
+      - name: Upload boot log
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: qemu-boot-log
+          path: qemu.log
+          if-no-files-found: error
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest
