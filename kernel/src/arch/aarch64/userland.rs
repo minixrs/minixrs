@@ -31,43 +31,64 @@
 
 use core::sync::atomic::Ordering;
 
+#[cfg(feature = "boot-stubs")]
+use minixrs_kernel_shared::PrivId;
+use minixrs_kernel_shared::ProcNr;
+#[cfg(feature = "boot-stubs")]
 use minixrs_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
+#[cfg(feature = "boot-stubs")]
 use minixrs_kernel_shared::com::{
     RS_PROC_NR, SCHED_PROC_NR, STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR, STUB_D_PROC_NR,
     SYSTEM, VM_PROC_NR, boot_endpoint,
 };
-use minixrs_kernel_shared::{PrivId, ProcNr};
 
 use crate::arch::aarch64::addrspace::{AddrSpace, Prot, walk_leaves};
 use crate::arch::aarch64::asid::alloc_asid;
-use crate::arch::aarch64::mmu::{self, PAGE_SIZE, flush_icache_range};
-use crate::mm::{Frame, alloc_frame, free_frame, phys_to_hhdm};
+#[cfg(feature = "boot-stubs")]
+use crate::arch::aarch64::mmu::flush_icache_range;
+use crate::arch::aarch64::mmu::{self, PAGE_SIZE};
+#[cfg(feature = "boot-stubs")]
+use crate::mm::phys_to_hhdm;
+use crate::mm::{Frame, alloc_frame, free_frame};
+#[cfg(feature = "boot-stubs")]
 use crate::proc::bitmap::{set_call_bit, set_sys_bit};
+#[cfg(feature = "boot-stubs")]
 use crate::proc::flags::{BILLABLE, PREEMPTIBLE, RTS_NO_PRIV, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
-use crate::proc::table::{priv_slot_mut, proc_index, proc_slot_mut, proc_table_ref};
+use crate::proc::table::proc_slot_mut;
+#[cfg(feature = "boot-stubs")]
+use crate::proc::table::{priv_slot_mut, proc_index, proc_table_ref};
+#[cfg(feature = "boot-stubs")]
 use crate::proc::{HeapWindow, Priv, Proc};
 
-// ----- EL0 virtual addresses ------------------------------------------------
+// ----- EL0 virtual addresses (stubs A–D; `boot-stubs` feature) --------------
 
 /// VA at which stub A's code page is mapped.
+#[cfg(feature = "boot-stubs")]
 pub const USER_CODE_VA_A: u64 = 0x0040_0000; // 4 MiB
 /// VA at which stub A's stack page is mapped.
+#[cfg(feature = "boot-stubs")]
 pub const USER_STACK_VA_A: u64 = 0x0080_0000; // 8 MiB
 
 /// VA at which stub B's code page is mapped.
+#[cfg(feature = "boot-stubs")]
 pub const USER_CODE_VA_B: u64 = 0x0041_0000;
 /// VA at which stub B's stack page is mapped.
+#[cfg(feature = "boot-stubs")]
 pub const USER_STACK_VA_B: u64 = 0x0081_0000;
 
 /// VA at which stub C's code page is mapped.
+#[cfg(feature = "boot-stubs")]
 pub const USER_CODE_VA_C: u64 = 0x0042_0000;
 /// VA at which stub C's stack page is mapped.
+#[cfg(feature = "boot-stubs")]
 pub const USER_STACK_VA_C: u64 = 0x0082_0000;
 
 /// VA at which stub D's code page is mapped.
+#[cfg(feature = "boot-stubs")]
 pub const USER_CODE_VA_D: u64 = 0x0043_0000;
 /// VA at which stub D's stack page is mapped.
+#[cfg(feature = "boot-stubs")]
 pub const USER_STACK_VA_D: u64 = 0x0083_0000;
 
 // Stub D's heap VA (`0x0100_0000`) lives only in `user_stub.S`'s stub D blob
@@ -83,9 +104,13 @@ pub const USER_STACK_VA_D: u64 = 0x0083_0000;
 /// 0..=15; 16, 17, 18, and 19 are the first free entries. The next slot up
 /// (`proc::table::USER_PRIV_ID` = 20) is the shared USER priv that init (PID 1)
 /// and every forked child use — no stub owns it.
+#[cfg(feature = "boot-stubs")]
 const STUB_A_PRIV_ID: PrivId = PrivId::new(16);
+#[cfg(feature = "boot-stubs")]
 const STUB_B_PRIV_ID: PrivId = PrivId::new(17);
+#[cfg(feature = "boot-stubs")]
 const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
+#[cfg(feature = "boot-stubs")]
 const STUB_D_PRIV_ID: PrivId = PrivId::new(19);
 
 // SPSR_EL1 to install on each stub's `eret`. Matches slice 2.4: IRQs
@@ -94,7 +119,10 @@ const STUB_D_PRIV_ID: PrivId = PrivId::new(19);
 pub(crate) const STUB_SPSR_EL0: u64 = 0x340;
 
 // ----- EL0 stub blobs (linked into the kernel image by `user_stub.S`) ------
+// Assembled only when `boot-stubs` is on — `kernel/build.rs` drops `user_stub.S`
+// from the source list otherwise, so these externs must be gated to match.
 
+#[cfg(feature = "boot-stubs")]
 unsafe extern "C" {
     static _user_stub_a_start: u8;
     static _user_stub_a_end: u8;
@@ -164,8 +192,27 @@ pub unsafe fn userland_bootstrap() {
         }
     }
 
-    // 3. Build each stub. Sequential calls — each build_stub allocates
-    //    fresh frames + a fresh AddrSpace and writes its proc slot.
+    // 3. Install the demo stubs A–D (`boot-stubs` feature, default-on): build
+    //    each address space, pre-delegate stub C to SCHED, install their priv
+    //    slots, enqueue them, and dump a per-proc AS summary. With the feature
+    //    off the whole battery is gone — a clean boot of servers + init/worker.
+    // SAFETY: single-threaded boot; sole writer of the stub proc/priv slots and
+    // the frame allocator; no other PROC_TABLE / RUNQ borrow is live here.
+    #[cfg(feature = "boot-stubs")]
+    unsafe {
+        install_boot_stubs();
+    }
+}
+
+/// Build the four demo stubs A–D and make them runnable — factored out of
+/// [`userland_bootstrap`] so the whole battery drops behind one `#[cfg]`.
+///
+/// SAFETY: single-threaded boot; the sole writer of the stub proc/priv slots and
+/// the frame allocator, with no other PROC_TABLE / RUNQ borrow live.
+#[cfg(feature = "boot-stubs")]
+unsafe fn install_boot_stubs() {
+    // Build each stub. Sequential calls — each build_stub allocates
+    // fresh frames + a fresh AddrSpace and writes its proc slot.
     // SAFETY: single-threaded boot; build_stub only touches its own
     // allocated state + the named proc slot.
     unsafe {
@@ -403,6 +450,7 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
 /// SAFETY: single-threaded boot; this is the only writer of `nr`'s proc
 /// slot. `stub_start..stub_end` must be a valid contiguous rodata range
 /// in the kernel image; the linker guarantees both.
+#[cfg(feature = "boot-stubs")]
 unsafe fn build_stub(
     nr: ProcNr,
     priv_id: Option<PrivId>,
@@ -469,6 +517,7 @@ unsafe fn build_stub(
 /// SAFETY: `frame` must be exclusively owned (not yet mapped anywhere)
 /// and the HHDM mapping for its PA must be live. `stub_start..stub_end`
 /// must be a valid byte range in the kernel image.
+#[cfg(feature = "boot-stubs")]
 unsafe fn copy_stub_into_frame(frame: Frame, stub_start: *const u8, stub_end: *const u8) {
     // SAFETY: end >= start by linker layout; offset_from is well-defined
     // on a single rodata symbol pair.
@@ -485,6 +534,7 @@ unsafe fn copy_stub_into_frame(frame: Frame, stub_start: *const u8, stub_end: *c
 
 /// Write all per-stub fields into `p`. Extends slice 2.5's helper with
 /// `ttbr0_pa` and `asid` — the rest mirrors slice 2.6.
+#[cfg(feature = "boot-stubs")]
 fn populate_stub_slot(
     p: &mut Proc,
     nr: ProcNr,
@@ -545,6 +595,7 @@ fn populate_stub_slot(
 ///
 /// SAFETY: single-threaded boot; touches priv-table slots 16, 17, 18
 /// sequentially.
+#[cfg(feature = "boot-stubs")]
 unsafe fn install_stub_privs() {
     // SAFETY: sequential mutable borrow.
     unsafe {
@@ -570,6 +621,7 @@ unsafe fn install_stub_privs() {
 ///
 /// SAFETY: single-threaded boot; mutates only priv-table slot
 /// `STUB_C_PRIV_ID`.
+#[cfg(feature = "boot-stubs")]
 unsafe fn install_stub_c_priv() {
     let system_priv_id = {
         // SAFETY: read-only snapshot; no live `&mut Proc` here.
@@ -612,6 +664,7 @@ unsafe fn install_stub_c_priv() {
 ///
 /// SAFETY: single-threaded boot; mutates priv-table slots `STUB_D_PRIV_ID`
 /// and VM's slot, one mutable borrow at a time.
+#[cfg(feature = "boot-stubs")]
 unsafe fn install_stub_d_priv() {
     // Resolve VM's priv id from a read-only snapshot (mirrors stub C resolving
     // SYSTEM). No live `&mut Proc`/`&mut Priv` is held here.
@@ -652,6 +705,7 @@ unsafe fn install_stub_d_priv() {
 /// `ipc_to`).
 ///
 /// SAFETY: single-threaded boot; mutates only the priv slot at `id`.
+#[cfg(feature = "boot-stubs")]
 unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId) {
     // SAFETY: priv index in-range; no overlapping reference held.
     let pr: &mut Priv = unsafe { priv_slot_mut(id).expect("stub priv slot in range") };
@@ -672,6 +726,7 @@ unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId)
 /// per-proc address space.
 ///
 /// SAFETY: single-threaded boot; read-only borrows on proc slots 11..=14.
+#[cfg(feature = "boot-stubs")]
 unsafe fn print_addrspace_summary() {
     use crate::arch::aarch64::uart::Pl011;
     use core::fmt::Write;

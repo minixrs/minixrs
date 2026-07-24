@@ -27,15 +27,23 @@ fn main() {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH unset");
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR unset"));
 
+    // The `boot-stubs` feature (default-on) gates the demo stubs A–D. Build
+    // scripts can't see `#[cfg(feature = ...)]`, so read the env var cargo sets
+    // for enabled features. Off ⇒ skip `user_stub.S` assembly and build PM
+    // stub-free so the two crates agree on `NR_STUB_PROCS`.
+    let stubs = std::env::var_os("CARGO_FEATURE_BOOT_STUBS").is_some();
+
     match arch.as_str() {
         "aarch64" => {
-            let sources = [
+            let mut sources = vec![
                 "src/arch/aarch64/entry.S",
                 "src/arch/aarch64/vectors.S",
                 "src/arch/aarch64/trap.S",
                 "src/arch/aarch64/interrupt.S",
-                "src/arch/aarch64/user_stub.S",
             ];
+            if stubs {
+                sources.push("src/arch/aarch64/user_stub.S");
+            }
             for src in &sources {
                 println!("cargo:rerun-if-changed={src}");
                 let stem = std::path::Path::new(src)
@@ -65,7 +73,7 @@ fn main() {
             // the MXBI boot-image archive, and emit `BOOT_IMAGE_PATH` for
             // `boot_image` to `include_bytes!` (slice 4.2, generalizing the
             // slice-3.4 single-VM embed).
-            build_boot_image(&out_dir);
+            build_boot_image(&out_dir, stubs);
         }
         "x86_64" => {
             // Phase 8 territory -- nothing to assemble yet.
@@ -82,7 +90,7 @@ fn main() {
 /// which proc number; the proc numbers must match `kernel-shared/src/com.rs`.
 /// VM is built first so it takes ASID 1 and is enqueued first (its
 /// `RECEIVE(ANY)` blocks immediately, matching the pre-4.2 boot behavior).
-fn build_boot_image(out_dir: &std::path::Path) {
+fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     let manifest =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR unset"));
     let workspace = manifest.parent().expect("kernel manifest has no parent");
@@ -117,7 +125,16 @@ fn build_boot_image(out_dir: &std::path::Path) {
 
     let mut modules: Vec<(i32, String, Vec<u8>)> = Vec::with_capacity(servers.len());
     for (crate_name, crate_dir, proc_nr) in &servers {
-        let elf = build_server(crate_name, crate_dir, workspace, out_dir);
+        // PM seeds mproc slots for the stubs, so it must resolve the same
+        // `NR_STUB_PROCS` as the kernel. This nested build has its own cargo
+        // feature resolution, so when the kernel is stub-free force PM's
+        // `boot-stubs` off too. Only PM (of the servers) depends on the count.
+        let extra: &[&str] = if !stubs && *crate_name == "minixrs-pm" {
+            &["--no-default-features"]
+        } else {
+            &[]
+        };
+        let elf = build_server(crate_name, crate_dir, workspace, out_dir, extra);
         let bytes = std::fs::read(&elf)
             .unwrap_or_else(|e| panic!("reading {crate_name} ELF {}: {e}", elf.display()));
         let name = crate_name.strip_prefix("minixrs-").unwrap_or(crate_name);
@@ -145,6 +162,7 @@ fn build_server(
     crate_dir: &std::path::Path,
     workspace: &std::path::Path,
     out_dir: &std::path::Path,
+    extra_args: &[&str],
 ) -> PathBuf {
     let user_ld = crate_dir.join("user.ld");
     let target_dir = out_dir.join(format!("{crate_name}-target"));
@@ -175,6 +193,7 @@ fn build_server(
             "aarch64-unknown-none",
             "--release",
         ])
+        .args(extra_args)
         .env("CARGO_TARGET_DIR", &target_dir)
         .env_remove("RUSTFLAGS")
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags)

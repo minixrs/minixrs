@@ -43,6 +43,11 @@ pub(crate) fn clear_sys_bit(map: &mut [u32], id: PrivId) {
 }
 
 /// Set bit `call_idx` in a call-indexed bitmap (`k_call_mask`).
+///
+/// Currently reached only by the stub-C priv install (`boot-stubs` feature), so
+/// it is unused in a stub-free build; tolerate that without masking real dead
+/// code in the default config.
+#[cfg_attr(not(feature = "boot-stubs"), allow(dead_code))]
 #[inline]
 pub(crate) fn set_call_bit(map: &mut [u32], call_idx: usize) {
     set_bit(map, call_idx);
