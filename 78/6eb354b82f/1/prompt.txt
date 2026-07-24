@@ -1,0 +1,376 @@
+work on @docs/plans/phase-5-prep.md chunk 2
+
+---
+
+<task-notification>
+<task-id>aef15ab40cedffe40</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/eb88b06e-dc73-4a23-81c3-853743e699f5/tasks/aef15ab40cedffe40.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore book/ current state" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have a complete map of the book. Here are my findings.
+
+## 1. `book/src/SUMMARY.md` (full contents)
+
+```markdown
+# Summary
+
+[Introduction](introduction.md)
+
+- [Architecture](architecture/overview.md)
+- [IPC](ipc/overview.md)
+- [Memory Management](memory/overview.md)
+- [Servers](servers/overview.md)
+- [Build &amp; Toolchain](build.md)
+```
+
+Six referenced pages: one prefix chapter (Introduction) plus five numbered chapters.
+
+## 2. Per-chapter status
+
+| Chapter | Path | Lines | Status |
+|---|---|---|---|
+| Introduction | `/Users/kevinbarnard/src/minixrs/book/src/introduction.md` | 41 | **Real** — complete |
+| Architecture | `/Users/kevinbarnard/src/minixrs/book/src/architecture/overview.md` | 10 | **Stub** |
+| IPC | `/Users/kevinbarnard/src/minixrs/book/src/ipc/overview.md` | 10 | **Stub** |
+| Memory Management | `/Users/kevinbarnard/src/minixrs/book/src/memory/overview.md` | 148 | **Real** — complete |
+| Servers | `/Users/kevinbarnard/src/minixrs/book/src/servers/overview.md` | 178 | **Real** — complete |
+| Build &amp; Toolchain | `/Users/kevinbarnard/src/minixrs/book/src/build.md` | 19 | **Stub** (has a code block, but body is a stub disclaimer) |
+
+None are empty. First ~10 lines of each:
+
+**Introduction** (`introduction.md`) — real:
+```markdown
+# minix.rs
+
+&gt; **MINIX 3, in Rust, for the 64-bit era**
+
+A 64-bit-only reimplementation of MINIX 3 in Rust, preserving the original ABI.
+
+minix.rs is a learning operating system built around a greenfield Rust
+microkernel. It keeps MINIX 3's architecture — message-passing IPC, user-space
+servers, user-space drivers, and a fine-grained privilege model — while dropping
+32-bit legacy and targeting modern 64-bit platforms under QEMU.
+```
+Full front matter: Highlights, Status (Phases 0–4 complete as of 2026-07-18, Phase 5 next), and an "About this book" section that flags `docs/` as historical bootstrap notes being retired.
+
+**Architecture** (`architecture/overview.md`) — stub. The whole file:
+```markdown
+# Architecture
+
+&gt; _This page is a stub. The architecture documentation will be written from the
+&gt; kernel source (`kernel/`, `kernel-shared/`) as the corresponding code
+&gt; stabilizes._
+
+minix.rs is a microkernel: only IPC, scheduling, interrupt dispatch, and memory
+protection live in the kernel. Every other OS service — process management, the
+file system, memory management — runs as a separate user-space server that
+communicates over message-passing IPC.
+```
+
+**IPC** (`ipc/overview.md`) — stub. The whole file:
+```markdown
+# IPC
+
+&gt; _This page is a stub. The IPC documentation will be written from the kernel
+&gt; source (`kernel/src/ipc/`, `minix-ipc/`) as the corresponding code
+&gt; stabilizes._
+
+minix.rs processes communicate exclusively through message passing. Five of
+MINIX 3's six primitives are live — `SEND`, `RECEIVE`, `SENDREC`, `NOTIFY`,
+`SENDNB` — with `SENDA` still stubbed (`ENOSYS`). Message layout, endpoints,
+and call numbers are preserved from MINIX 3.
+```
+
+**Memory Management** (`memory/overview.md`) — real. First 10 lines:
+```markdown
+# Memory Management
+
+minix.rs splits memory management the way MINIX 3 does — *mechanism* in the
+kernel, *policy* in a user-space server — but moves physical-frame ownership
+into the kernel. The kernel owns the frame allocator and performs every page
+table write; the user-space **VM server** decides *what* should be mapped where
+and drives the kernel through a single privileged kernel call (`SYS_VMCTL`).
+
+This chapter describes the subsystem as it stands at the end of Phase 3: a
+physical frame allocator, per-process address spaces with hardware-tagged TLBs,
+```
+Substantial: covers the physical frame allocator (`kernel/src/mm/`), per-process address spaces/ASIDs, context switch, the page-fault path, a `SYS_VMCTL` subcall table, and VM server region tracking (`brk`/`mmap`/`munmap`). Scoped "end of Phase 3."
+
+**Servers** (`servers/overview.md`) — real, the most detailed chapter. First 10 lines:
+```markdown
+# Servers
+
+minix.rs keeps the microkernel tiny — IPC, scheduling, memory protection, and a
+small set of privileged kernel calls — and runs every operating-system *service*
+as an ordinary user-space process, exactly as MINIX 3 does. These **servers**
+talk to each other and to the kernel only through message passing. A server never
+shares memory with a client; it acts on a request, replies, and the kernel
+enforces who may talk to whom via per-process privilege bitmaps.
+
+This chapter describes the servers as they stand at the end of Phase 4: a common
+```
+Covers SEF runtime, request-number ranges (table), DS, SCHED, RS, PM (with detailed fork/exec/exit/wait lifecycle and minimal signals), skeletal VFS, and init (PID 1). Scoped "end of Phase 4."
+
+**Build &amp; Toolchain** (`build.md`) — stub. The whole file:
+```markdown
+# Build &amp; Toolchain
+
+&gt; _This page is a stub. The build documentation will be written from the actual
+&gt; build system (`Cargo.toml` aliases, `kernel/build.rs`, `rust-toolchain.toml`,
+&gt; `tools/`) as it stabilizes._
+
+```sh
+# Build the kernel for aarch64 (primary target)
+cargo kernel-aarch64
+...
+```
+It carries a working code block of build commands, but is explicitly labeled a stub.
+
+## 3. Structure of `book/src/`
+
+```
+book/src/
+  SUMMARY.md
+  introduction.md
+  build.md
+  architecture/overview.md
+  ipc/overview.md
+  memory/overview.md
+  servers/overview.md
+```
+
+Four subdirectories (`architecture/`, `ipc/`, `memory/`, `servers/`), each holding a single `overview.md`. `introduction.md`, `build.md`, and `SUMMARY.md` sit at the `src/` root. There is no `README.md`, no draft/unlinked pages, and no assets/images directory.
+
+## 4. `book.toml`
+
+Full contents at `/Users/kevinbarnard/src/minixrs/book/book.toml`:
+```toml
+[book]
+title = "minix.rs"
+description = "MINIX 3, in Rust, for the 64-bit era"
+authors = ["Kevin Barnard and minix.rs Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+site-url = "/minixrs/"
+git-repository-url = "https://github.com/minixrs/minixrs"
+edit-url-template = "https://github.com/minixrs/minixrs/edit/main/book/{path}"
+default-theme = "navy"
+```
+Notes: No explicit mdBook version pin in `book.toml` itself — but the `mdbook-preview` skill listed in this environment pins **mdBook 0.5.3** for building/serving. Default theme is `navy`. No `[preprocessor.*]`, no `[output.html.search]`, no custom `[build]` settings, no additional-css/theme overrides. Standard single-output HTML build.
+
+## 5. Chapters that already look complete/accurate
+
+Three are fleshed-out, source-derived chapters (not stubs):
+
+- **`book/src/servers/overview.md`** (178 lines) — the chapter noted as created in slice 4.8. Confirmed complete and detailed: SEF/DS/SCHED/RS/PM/VFS/init, request-number table, full PM lifecycle. Scoped to "end of Phase 4."
+- **`book/src/memory/overview.md`** (148 lines) — complete and detailed. Scoped to "end of Phase 3."
+- **`book/src/introduction.md`** (41 lines) — complete landing page with Highlights/Status/About sections.
+
+The three remaining pages — **Architecture**, **IPC**, and **Build &amp; Toolchain** — are explicit self-labeled stubs (each opens with a `&gt; _This page is a stub..._` blockquote and a short paragraph) and are the natural candidates for the documentation port.
+
+## Additional note
+
+There is a sibling **`book/book/`** directory — the generated mdBook HTML output (`index.html`, `print.html`, per-chapter `.html`, CSS/JS/fonts, search index). It is build output, not source; the rendered `architecture/overview.html`, `ipc/overview.html`, etc. mirror the current stub/real state of the `src/` files. If the port regenerates the book, this directory will be overwritten.</result>
+<usage><subagent_tokens>26705</subagent_tokens><tool_uses>11</tool_uses><duration_ms>53505</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ad06525b345871f64</task-id>
+<tool-use-id>toolu_01XofR2FaGbKKMYmTx2sVeGm</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/eb88b06e-dc73-4a23-81c3-853743e699f5/tasks/ad06525b345871f64.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore legacy docs/ files" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything I need. Here is my complete findings report.
+
+---
+
+# Legacy `docs/*.md` port survey — minix.rs
+
+## Complete list of `.md` files directly in `docs/`
+
+Eleven files total. Ten are in scope; `docs/plan.md` (29k, the only recently-modified one, dated 2026-07-24) is explicitly out of scope, and everything under `docs/plans/` (`phase-2-ipc.md`, `phase-3-vm.md`, `phase-4-servers.md`, `phase-5-prep.md`) is out of scope.
+
+| File | Lines |
+|------|------:|
+| `/Users/kevinbarnard/src/minixrs/docs/architecture.md` | 271 |
+| `/Users/kevinbarnard/src/minixrs/docs/ipc.md` | 398 |
+| `/Users/kevinbarnard/src/minixrs/docs/servers.md` | 407 |
+| `/Users/kevinbarnard/src/minixrs/docs/boot.md` | 230 |
+| `/Users/kevinbarnard/src/minixrs/docs/build.md` | 286 |
+| `/Users/kevinbarnard/src/minixrs/docs/memory-layout.md` | 187 |
+| `/Users/kevinbarnard/src/minixrs/docs/syscalls.md` | 300 |
+| `/Users/kevinbarnard/src/minixrs/docs/drivers.md` | 195 |
+| `/Users/kevinbarnard/src/minixrs/docs/musl.md` | 245 |
+| `/Users/kevinbarnard/src/minixrs/docs/minix3-mapping.md` | 144 |
+| `docs/plan.md` (out of scope) | 636 |
+
+## Ground-truth I verified against the tree (Phase 4 reality)
+
+This calibrates every "aspirational" flag below. Note `book/src/` already contains ports of some of this material (see final section).
+
+- **musl: does not exist.** There is no `musl/` directory anywhere. The only match for "musl" in the tree is `docs/musl.md` itself.
+- **All drivers are 5-line `fn main() { // TODO: Implement }` stubs**: `drivers/virtio-blk`, `drivers/virtio-net`, `drivers/virtio-console`, `drivers/memory` are each 5 lines. `drivers/driver-rt/src/lib.rs` is 4 lines (empty) — it does NOT contain the `BlockDriver`/`CharDriver` traits or `virtio` module the docs describe, and `block.rs`/`char.rs` do not exist.
+- **File systems are stubs**: `fs/mfs/src/main.rs` and `fs/pfs/src/main.rs` are 5 lines each.
+- **Servers that are real**: PM (~1156 lines), VM (~834), SCHED (~534), RS (~408), DS (~390).
+- **VFS is a thin skeleton**: `servers/vfs/src/main.rs` is the only source file, 80 lines. The multi-threaded worker design, vnode/vmnt/filp/dmap tables, REQ_* routing, and socket calls described in the docs are not implemented. This confirms your "VFS(?)".
+- **Userland**: `init` (98 lines, real PID 1), `worker` (79 lines, a test process — not in any doc), `sh` and `coreutils` are 5-line stubs. No interactive shell.
+- **Kernel IPC is real**: `kernel/src/ipc/` has `send.rs`, `receive.rs`, `notify.rs`, `senda.rs`, `deadlock.rs`, `mod.rs`. `kernel-shared/src/` has `message.rs`, `endpoint.rs`, `ipc_const.rs`, `callnr.rs`, `com.rs`, `error.rs`, `signal.rs`, `sys_limits.rs`. SENDA exists as `senda.rs` but is stubbed per your brief.
+
+---
+
+## Per-file reports
+
+### 1. `architecture.md` (271 lines) — MOSTLY ACCURATE, some aspirational
+
+**Headings:** Overview → What Makes MINIX a Microkernel; Relation to MINIX 3; System Components (The Microkernel; System Servers; Device Drivers; File Systems; C Library (musl fork)); The System Call Path (POSIX System Calls; Kernel Calls); Privilege Model; Memory Layout; Boot Sequence; Crate Structure; Further Reading.
+
+**Aspirational content to fix:**
+- The big ASCII stack diagram (lines 27-53) shows `CoW`, `virtio-blk/net/con`, `pageflt`, `musl-libc` user programs as live — none of the drivers do I/O, no CoW, no musl.
+- "targeting modern 64-bit hardware (aarch64, x86_64)" — x86_64 is not ported (aarch64-only).
+- "C Library (musl fork)" section (lines 145-162) and the `read()`→musl→VFS trace — musl does not exist.
+- "File Systems / MFS / PFS" (lines 136-144) — both are stubs.
+- "Device Drivers" table (virtio-blk/net/console/memory with protocols) — all stubs.
+- Boot sequence summary (lines 229-239): "12 server/driver ELF binaries", the `DS -&gt; RS -&gt; ... -&gt; MFS -&gt; init` order, and "init opens /dev/console and spawns a shell" — shell is a stub, MFS/tty are stubs.
+- Crate structure block (lines 245-254) lists `musl` implicitly via C library and lists drivers/fs/userland that are stubs (structurally present, functionally empty).
+
+**Verdict:** The microkernel philosophy, MINIX-3 comparison table, privilege model, and kernel-call vs POSIX-call distinction are accurate and portable. Trim the driver/fs/musl/CoW/x86_64 claims to present tense reality. Note `book/src/architecture/overview.md` already exists — this is a re-accuracy pass, not a fresh port.
+
+### 2. `ipc.md` (398 lines) — HIGHLY ACCURATE (best-grounded file)
+
+**Headings:** Message Structure (Payload Size; Rust Representation; MINIX 3 Comparison); The Six IPC Primitives (SEND; RECEIVE; SENDREC; NOTIFY; SENDNB; SENDA); Endpoint System; Deadlock Detection; Privilege Model (trap_mask; ipc_to; k_call_mask; I/O and IRQ permissions; Grant Table); IPC Status; IPC Register ABI (aarch64; x86_64); Key Data Structures in Kernel (Process IPC State; Run Queue Integration); MINIX 3 Source Reference.
+
+**Aspirational content to fix:**
+- SENDA "asynchronous send table" (lines 156-168) is presented as working; per your brief it is stubbed — add a status caveat.
+- The x86_64 register ABI subsection (lines 336-347) describes an unported arch. Keep as design intent but flag secondary.
+- Grant-table flow example (lines 298-304) uses VFS→MFS→`sys_safecopyfrom` with a real disk read — the mechanism (grants, safecopy) is real in the kernel, but the VFS/MFS actors in that specific example are stubs. Minor.
+- Includes a careful, already-correct disclaimer (lines 30-39) about "64-bit MINIX 3" being the author's personal prototype — keep this verbatim; it is an accuracy asset.
+
+**Verdict:** Almost entirely accurate against `kernel/src/ipc/*` and `kernel-shared`. This is your gold-standard file — port nearly as-is, only annotate SENDA-stubbed and x86_64-secondary. `book/src/ipc/overview.md` already exists.
+
+### 3. `servers.md` (407 lines) — MIXED: PM/VM/RS/DS/SCHED accurate, VFS + boot order aspirational
+
+**Headings:** PM (Responsibilities; mproc; Coordination with VFS; Coordination with VM; MINIX 3 Reference); VFS (Responsibilities; Multi-Threaded Design; Key Data Structures; Request Routing; MINIX 3 Reference); VM (Responsibilities; Memory Regions; Page Fault Flow; MINIX 3 Reference); RS (Responsibilities; Service Commands; Crash Recovery Flow; MINIX 3 Reference); DS (Responsibilities; Operations; Role in Recovery; MINIX 3 Reference); SCHED (Responsibilities; Kernel-SCHED Interaction; MINIX 3 Reference); SEF (Core Functions; Callbacks; MINIX 3 Reference); Server Message Loop Pattern; Boot Order (Why This Order Matters; Circular Dependency Avoidance).
+
+**Aspirational content to fix:**
+- **VFS section (lines 61-107)**: multi-threaded worker pool, vnode/vmnt/filp/fproc/dmap tables, full `VFS_READ → REQ_READ → BDEV_READ` routing — VFS is an 80-line skeleton; this describes a system that isn't built.
+- PM "Coordination with VM" (lines 48-53): "duplicates the parent's page tables using copy-on-write" — no CoW.
+- VM "Page Fault Flow" / "Memory Regions" describe CoW resolution and file-backed mmap — VM is real but CoW and file-backed mappings are not done.
+- **Boot Order (lines 349-408)**: the `DS -&gt; RS -&gt; PM -&gt; SCHED -&gt; VFS -&gt; memory -&gt; tty -&gt; VM -&gt; PFS -&gt; MFS -&gt; init` chain includes `memory`, `tty` (virtio-console), `PFS`, `MFS` which are stubs; the dependency rationale for MFS/PFS/tty is aspirational. Init is real; PM/VM/RS/DS/SCHED are real.
+- SEF `init_restart`/DS-recovery live-update flow — RS/DS exist, but full live-update/crash-recovery loop should be verified against the ~408-line RS before asserting.
+
+**Verdict:** ~65% solid. Port PM/VM/RS/DS/SCHED/SEF/message-loop nearly intact; heavily rewrite VFS to "skeleton, routing not yet implemented," strip CoW, and mark the stub servers in the boot order. `book/src/servers/overview.md` already exists.
+
+### 4. `boot.md` (230 lines) — MIXED: boot mechanics accurate, disk/module set aspirational
+
+**Headings:** Bootloader: Limine (Why Limine; Limine Protocol Rev 3); Boot Flow (aarch64 Primary; x86_64 Secondary; CPU State at Kernel Entry); Embedded Boot Image (Boot Image Format; Build Process; Boot Process Table); Disk Image Layout (limine.conf); QEMU Launch (aarch64; x86_64); MINIX 3 Reference.
+
+**Aspirational content to fix:**
+- x86_64 boot flow subsection (lines 80-88, 99-106, 214-220) — unported arch.
+- "12 server/driver ELF binaries" and the **Boot Process Table** (lines 144-166): includes slot 6 `tty`, slot 7 `mib` (Management Information Base — **there is no `mib` crate in the tree at all**), slots 9/10 `pfs`/`mfs` — all stubs or nonexistent. The real boot set is far smaller.
+- **Disk Image Layout** (lines 170-193) with FAT32 ESP + MinixFS root partition, `/bin /sbin /etc /dev` — no MinixFS, no such image; the current runner uses QEMU's directory-as-FAT ESP (per build.md), not a partitioned MinixFS disk.
+- QEMU launch shows `-drive ... if=virtio` block device and `virtio-net-device` as if functional — drivers are stubs.
+
+**Verdict:** Limine protocol, aarch64 `_start`→`kmain` flow, CPU-entry state, boot-image MXBI format, and the embedded-image concept are accurate and valuable. Rewrite the boot-module table to actual modules, drop `mib`, and replace the MinixFS disk-image section with the real ESP-directory approach.
+
+### 5. `build.md` (286 lines) — MIXED: Phase-1 quick-start accurate, musl/image/CI aspirational
+
+**Headings:** Overview; Prerequisites; Quick Start (UEFI firmware); Cargo Workspace (Custom Targets; Build Commands; Assembly in build.rs); musl-libc Build; Boot Image Packing; Disk Image Creation; QEMU Launch Scripts (qemu-run.sh; qemu-run-x86_64.sh; Debug with GDB); CI; Directory Structure Reference.
+
+**Aspirational content to fix:**
+- **"musl-libc Build" (lines 144-158)** — no musl exists; entire section is fiction.
+- "Make for the musl-libc fork" in Overview (lines 5-8) and musl in Prerequisites — remove.
+- **Disk Image Creation** (lines 193-204): GPT + FAT32 + MinixFS + `limine bios-install` — no MinixFS, no such script.
+- Boot Image Packing example (lines 160-180) lists `minixrs-virtio-console`, `minixrs-mfs`, `minixrs-pfs` binaries as packed modules — they build but are stubs.
+- x86_64 target specs and `qemu-run-x86_64.sh` (lines 76-78, 221-232) — secondary/unported.
+- "CI" section (line 248) explicitly labeled "Future CI pipeline" — aspirational by its own admission.
+- Note: the Quick-Start `cargo run -p minixrs-kernel --target aarch64-unknown-none --release` and the `tools/qemu-run.sh` ESP-staging description (lines 20-47) read as accurate present-tense Phase-1 content — good to keep. Verify `tools/qemu-run.sh` still exists before asserting.
+
+**Verdict:** ~50%. The Cargo-workspace, custom-target, build.rs-assembly, and aarch64 quick-start material is portable; drop the entire musl build, the MinixFS disk-image pipeline, and treat x86_64/CI as future. Note `book/src/build.md` already exists.
+
+### 6. `memory-layout.md` (187 lines) — MOSTLY ACCURATE, CoW/VM-frame claims aspirational
+
+**Headings:** aarch64 QEMU virt (Physical Memory Map; Virtual Address Space; Translation Tables; HHDM); x86_64 (Virtual Address Space; Page Tables); Per-Process Memory; Kernel Memory; Physical Memory Management; MINIX 3 Reference.
+
+**Aspirational content to fix:**
+- x86_64 subsections (lines 100-133) — secondary arch.
+- "Physical Memory Management" (lines 168-178): "Physical frames are tracked by the VM server... CoW (copy-on-write) tracking for fork'd pages" — no CoW; verify current frame ownership (kernel vs VM) against the ~834-line VM before asserting.
+- Per-process page-fault flow (lines 152-156) is plausible against VM but the mmap/file-backed region claims overreach.
+
+**Verdict:** The aarch64 physical map, virtual-address layout, 4-level translation tables, TTBR0/TTBR1 split, and HHDM math are solid and portable. Only trim CoW and x86_64. `book/src/memory/overview.md` already exists.
+
+### 7. `syscalls.md` (300 lines) — LARGELY ACCURATE AS A CATALOG, with routing caveats
+
+**Headings:** The System Call Path (User-Space System Calls; Kernel Calls); 1. PM Calls; 2. VFS Calls; 3. Kernel Calls (SYS_*) (Kernel Call Categories); Safe Copy and Grants; MINIX 3 Source References.
+
+**Aspirational content to fix:**
+- The path diagrams (lines 16-46) route through "musl libc wrapper" — no musl; the user→server path is not yet exercised end-to-end.
+- The VFS call table (lines 124-190) is a full 0-63 catalog including sockets (49-63); VFS is a skeleton, so most of these are numbers-only, not handled. Present it as "interface catalog / ABI reference," not "supported calls."
+- PM table (48 slots) and SYS_* table (58 slots) are ABI/number references derived from MINIX 3 — accurate as a reference but far ahead of what PM/kernel actually dispatch today. Frame as ABI catalog.
+- No x86_64-specific content here (arch-neutral) — good.
+
+**Verdict:** Valuable as a reference catalog and worth porting largely intact, but must be reframed from "system calls in minix.rs" (implies implemented) to "the MINIX ABI catalog minix.rs targets," with a note on which subset is live. Cross-check numbers against `kernel-shared/src/callnr.rs` and `com.rs` during the port. No book page exists yet for this — it's a fresh port.
+
+### 8. `drivers.md` (195 lines) — HEAVILY ASPIRATIONAL
+
+**Headings:** Overview; Driver Types (Block Drivers BDEV; Character Drivers CDEV); Driver Lifecycle (Interrupt Handling); VirtIO Drivers (VirtIO Transport; Virtqueues; virtio-blk; virtio-net; virtio-console; memory); Driver Runtime Library (driver-rt); Device Registration; MINIX 3 Reference.
+
+**Aspirational content:** Essentially the entire document. All four drivers are 5-line TODO stubs and `driver-rt/src/lib.rs` is a 4-line empty file:
+- BDEV/CDEV protocol handling, the driver lifecycle/announce/message-loop, `sys_irqctl` interrupt handling, VirtIO MMIO/PCI transport, virtqueue rings, virtio-blk/net/console operation, and the memory driver's `/dev/null`/`/dev/zero`/ramdisk — none implemented.
+- The `BlockDriver`/`CharDriver` traits and `virtio` module shown as living in `driver-rt` (lines 132-172) **do not exist** — `driver-rt` is empty.
+- x86_64 VirtIO PCI path — doubly aspirational (arch + drivers).
+
+**Verdict:** One of the two most aspirational files. Either drop from the initial port or convert wholesale into a clearly-labeled "Planned / Design" chapter. No real content to preserve beyond design intent. No book page exists.
+
+### 9. `musl.md` (245 lines) — 100% ASPIRATIONAL
+
+**Headings:** Overview; What Changes (The Key Difference: Linux vs MINIX; Files to Add; Files to Modify; Include Bridge cbindgen); The _syscall() Function; IPC Assembly Stubs (aarch64; x86_64); Example: How open() Works; Cross-Compilation (Building musl for aarch64; Using the sysroot with Rust); MINIX 3 Reference.
+
+**Aspirational content:** All of it. There is no `musl/` directory; nothing described here exists. The `_syscall.c`, `_ipc_aarch64.S`, ~100 POSIX wrappers, `syscall_arch.h` edits, cbindgen header bridge, and sysroot cross-compilation are pure plan. The doc even self-describes as a plan ("The musl fork should be a clean checkout... with a working branch").
+
+**Verdict:** The most aspirational file. Do not port as documentation of the system. Either drop it or relocate it as an explicitly-labeled future design/RFC note. Zero present-tense accuracy.
+
+### 10. `minix3-mapping.md` (144 lines) — MIXED: kernel/server rows accurate, driver/fs/musl rows aspirational
+
+**Headings:** Kernel; Shared Headers; Libraries; Servers; Drivers; File Systems; Build System; Concepts Unchanged; Concepts Changed. (Plus the same author-prototype disclaimer as ipc.md — keep it.)
+
+**Aspirational content to fix (this is a path-mapping table, so verify each target path against the tree):**
+- **Libraries** rows point to `musl/src/minix/_syscall.c`, `_ipc_aarch64.S`, `open.c`, `read.c`, `fork.c` — none exist (no musl). Also `drivers/driver-rt/src/block.rs` and `char.rs` — do not exist (driver-rt has only an empty `lib.rs`).
+- **Drivers** section: all four `drivers/*` targets are stubs.
+- **File Systems**: `fs/mfs/`, `fs/pfs/` are stubs.
+- **Servers** rows list per-file Rust paths (`servers/vfs/src/open.rs`, `read.rs`, `path.rs`, `mount.rs`, `worker.rs`) — VFS has only `main.rs`, so those VFS rows are aspirational; PM/VM/RS/DS/SCHED rows are plausible but should be spot-checked against the real multi-file layouts.
+- "Concepts Unchanged" lists REQ_* FS protocol, BDEV/CDEV, RS heartbeat, DS pub/sub as carried over — several (FS protocol, driver protocols) are not yet realized.
+- Kernel and Shared-Headers rows are the most reliable and largely match the real `kernel/src/ipc/*` and `kernel-shared/src/*` layout.
+
+**Verdict:** Useful navigational aid but the mapping table currently points at many files that don't exist. Port only after verifying each target path; strip or "planned"-tag the musl, driver-rt trait, VFS-sub-file, and fs rows. No book page exists.
+
+---
+
+## Summary: how much needs rewriting
+
+| File | Accuracy | Port effort |
+|------|----------|-------------|
+| `ipc.md` | High | Light — annotate SENDA-stubbed, x86_64-secondary |
+| `memory-layout.md` | Mostly accurate | Light — drop CoW + x86_64 |
+| `architecture.md` | Mostly accurate | Medium — strip musl/drivers/fs/CoW/x86_64 from diagrams |
+| `syscalls.md` | Accurate as ABI catalog | Medium — reframe as "targeted ABI," mark live subset |
+| `servers.md` | ~65% (PM/VM/RS/DS/SCHED good) | Medium-heavy — rewrite VFS, strip CoW, fix boot order |
+| `boot.md` | ~60% (mechanics good) | Medium-heavy — fix module table (drop `mib`), replace MinixFS disk section |
+| `build.md` | ~50% (quick-start good) | Heavy — delete musl + MinixFS-image sections |
+| `minix3-mapping.md` | Kernel rows good, rest stale | Heavy — verify every path, tag missing ones |
+| `drivers.md` | Heavily aspirational | Very heavy — drop or convert to "Planned" |
+| `musl.md` | 100% aspirational | Drop or relocate as future RFC |
+
+**Most aspirational (rewrite/drop):** `musl.md` (no musl at all), `drivers.md` (all stubs + empty driver-rt). **Partially aspirational:** `servers.md` (VFS), `boot.md` (disk/modules), `build.md` (musl/image), `minix3-mapping.md` (driver/fs/musl rows). **Mostly accurate:** `ipc.md`, `memory-layout.md`, `architecture.md`, `syscalls.md`.
+
+**Already ported to `book/src/`** (so these need the accuracy pass, not a fresh port): architecture (`architecture/overview.md`), ipc (`ipc/overview.md`), memory (`memory/overview.md`), servers (`servers/overview.md`), build (`build.md`), plus `introduction.md`. **Not yet in the book (fresh ports needed):** boot, syscalls, drivers, musl, minix3-mapping. The current `book/src/SUMMARY.md` has no entries for boot/syscalls/drivers/musl/mapping.
+
+Cross-cutting aspirational themes to scrub everywhere: **musl** (nonexistent), **CoW fork**, **real driver I/O / VirtIO virtqueues**, **MFS/PFS file systems + MinixFS disk image**, **interactive shell**, **x86_64 port**, and **SENDA as functional** (it is stubbed).</result>
+<usage><subagent_tokens>70015</subagent_tokens><tool_uses>16</tool_uses><duration_ms>192745</duration_ms></usage>
+</task-notification>

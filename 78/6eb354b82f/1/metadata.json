@@ -1,0 +1,110 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "786eb354b82f",
+  "session_id": "eb88b06e-dc73-4a23-81c3-853743e699f5",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-24T15:20:48.229529Z",
+  "branch": "docs/book-port-kernel",
+  "checkpoints_count": 3,
+  "save_step_count": 3,
+  "files_touched": [
+    "CLAUDE.md",
+    "book/src/SUMMARY.md",
+    "book/src/architecture/overview.md",
+    "book/src/boot/overview.md",
+    "book/src/build.md",
+    "book/src/introduction.md",
+    "book/src/ipc/overview.md",
+    "book/src/memory/overview.md",
+    "book/src/reference/minix3-mapping.md",
+    "book/src/reference/syscalls.md",
+    "book/src/roadmap.md",
+    "docs/architecture.md",
+    "docs/boot.md",
+    "docs/build.md",
+    "docs/drivers.md",
+    "docs/ipc.md",
+    "docs/memory-layout.md",
+    "docs/minix3-mapping.md",
+    "docs/musl.md",
+    "docs/plans/phase-5-prep.md",
+    "docs/servers.md",
+    "docs/syscalls.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "de8eba7cd2f7",
+  "token_usage": {
+    "input_tokens": 132,
+    "cache_creation_tokens": 296038,
+    "cache_read_tokens": 14243747,
+    "output_tokens": 117617,
+    "api_call_count": 72
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-24T15:20:48.194663Z",
+    "agent_lines": 1197,
+    "agent_removed": 2696,
+    "human_added": 0,
+    "human_modified": 16,
+    "human_removed": 27,
+    "total_committed": 1206,
+    "total_lines_changed": 3936,
+    "agent_percentage": 98.90752032520325,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 291,
+      "user_lines_removed": 29,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/skills/mdbook-preview/SKILL.md": 11,
+        "CLAUDE.md": 6,
+        "RECOMMEND.md": 274
+      },
+      "user_removed_per_file": {
+        "CLAUDE.md": 29
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 17,
+      "agent_lines_removed": 29,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 17,
+      "agent_lines_removed": 29,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 282,
+      "user_lines_removed": 7,
+      "agent_lines_added": 1258,
+      "agent_lines_removed": 2732,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274,
+        "book/src/architecture/overview.md": 8
+      },
+      "user_removed_per_file": {
+        "book/src/architecture/overview.md": 7
+      }
+    }
+  ]
+}
