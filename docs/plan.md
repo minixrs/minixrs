@@ -489,42 +489,68 @@ Aggregate scope (Phase 4 as a whole):
 - **Milestone:** Full server boot sequence completes; init process starts —
   **reached; Phase 4 complete (slice 4.8, 2026-07-18).**
 
-### Pre-Phase-5 cleanup ◀ next
+### Pre-Phase-5 cleanup (complete pending chunk-6 merge)
 
 Phase 4's close-out review identified PR-sized cleanup/prep chunks to land
-before Phase 5 starts: a CI QEMU smoke job, the mdBook content port + legacy
-`docs/` retirement, a stub A–D disable flag, capacity-ceiling unification, a
-toolchain bump, a kernel-crate de-hosting investigation, and — gating
-Phase 5 — a dedicated Phase 5 design + slicing session. Tracked with the
-usual markers in [`docs/plans/phase-5-prep.md`](plans/phase-5-prep.md);
-chunks land one per session/PR, in any order except the design session,
-which must come last. Chunk 1 (the CI QEMU smoke job) is `✓ shipped`
-(PR #33, merged 2026-07-24); chunk 2 (the mdBook content port + legacy
-`docs/` retirement) is `✓ shipped` (PR #34, merged 2026-07-24); chunk 3 (the
-stub A–D `boot-stubs` disable flag) is `✓ shipped` (PR #35, merged
-2026-07-24); chunk 4 (capacity-ceiling unification into `NR_SERVED_PROCS`) is
-`✓ shipped` (PR #36, merged 2026-07-24); chunk 5 (the toolchain bump + kernel
-clippy debt) is `✓ shipped` (PR #37, merged 2026-07-24); chunk 7 (de-hosting the
-kernel crate, which also flips `clippy-kernel` and `qemu-smoke` to blocking) is
-`◀ ready` (branch `feature/dehost-kernel`, pending merge). Chunk 6, the Phase 5
-design + slicing session, is the only chunk left and is `◀ next`.
+before Phase 5 starts, tracked with the usual markers in
+[`docs/plans/phase-5-prep.md`](plans/phase-5-prep.md). All seven are done:
+chunks 1–5 (CI QEMU smoke job; mdBook content port + legacy `docs/`
+retirement; stub A–D `boot-stubs` disable flag; capacity-ceiling unification
+into `NR_SERVED_PROCS`; toolchain bump + kernel clippy debt) are `✓ shipped`
+(PRs #33–#37, merged 2026-07-24); chunk 7 (de-hosting the kernel crate, which
+also flipped `clippy-kernel` and `qemu-smoke` to blocking) is `✓ shipped`
+(PR #38, merged 2026-07-24); chunk 6 — the Phase 5 design + slicing session
+that gates Phase 5 and produced the slice plan below — is `◀ ready` (branch
+`feature/phase-5-plan`, pending merge).
 
 ### Phase 5: musl Fork + File Systems
 
-On deck after the pre-Phase-5 cleanup. The slice decomposition and design
-decisions (console/stdio sink, root-image strategy, grant model, ELF-loading
-authority, cbindgen/ABI-freeze timing) come out of the design session tracked
-in [`docs/plans/phase-5-prep.md`](plans/phase-5-prep.md); this section is
-rewritten as a slice list when that lands. Grants/safecopy and a fault-safe
-user copy are the expected opening slices — they are Phase 5 feature work.
+Next up. Designed and sliced by the chunk-6 session (2026-07-24) — full
+design record with locked decisions, rationale, and per-slice scope/proof in
+[`docs/plans/phase-5-musl-fs.md`](plans/phase-5-musl-fs.md). Headline
+decisions: a minimal TX-only TTY server is the stdio sink (with a real
+`SYS_DIAGCTL` as the servers' debug channel); the root image is an
+MFS-formatted blob in the MXBI archive served by the `memory` ramdisk driver
+over a new BDEV band; real MINIX-style grants (direct + magic, table in the
+granter's address space) plus `SYS_COPY`, all copying via explicit
+page-table walks through the HHDM — which also makes the fault-safe user
+copy exception-fixup-free; the kernel keeps ELF-loading authority with a
+grant-sourced `SYS_EXEC` form; `error.rs` is renumbered to classic-MINIX
+(≡ Linux/musl) values before any C exists; C headers are generated from
+`kernel-shared` by a hand-rolled host tool; musl enters as a submodule at
+`external/musl` built with clang `--target` + rust-lld. PFS/pipes moved out
+to Phase 7; TTY input/IRQs to Phase 6.
 
-- Add `src/minix/` to musl fork with IPC wrappers
-- Generate C headers from `kernel-shared` via cbindgen
-- `fs/mfs/`: MINIX File System server (Rust, MinixFS v3 on-disk format)
-- `fs/pfs/`: Pipe File System
-- `drivers/memory/`: /dev/null, /dev/zero, ramdisk
-- initramfs for early boot before disk driver
-- **Milestone:** C "Hello World" compiled against musl runs on minix.rs
+- **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ◀ next
+- **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL`
+- **5.2** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY`
+- **5.3** TTY server (TX-only, boot-premapped PL011) + CDEV band
+- **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS
+- **5.5** exec ABI: SysV initial stack + minimal auxv
+- **5.6** musl submodule + `src/minix` port + boot-embedded hello — **milestone A**
+- **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob
+- **5.8** MFS server (read-only) + FS band + VFS mount/open/read
+- **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5 complete**
+- **5.10** stretch: MFS write path
+- **5.11** stretch: `/dev/null` + `/dev/zero`
+
+Aggregate scope:
+
+- Kernel: PT-walk user/cross-AS copy engine; bodies for the six remaining
+  `ENOSYS` kernel-call stubs' Phase-5 subset (`SYS_DIAGCTL`, `SYS_SETGRANT`,
+  `SYS_SAFECOPY`, `SYS_COPY`) — zero new kernel-call numbers; device-memory
+  user mappings + boot premap for TTY; ramdisk blob copy/map + `SYS_GETINFO`
+  selector; SysV exec stack + auxv; grant-sourced chunked ELF loading
+- `kernel-shared`: `GrantEntry` + CPF flags + grant-id packing; four new
+  request bands (VFS `0x800`, FS `0x900`, BDEV `0xA00`, CDEV `0xB00`); errno
+  renumber + missing FS errnos
+- Servers/drivers: `drivers/tty` (TX-only PL011), `drivers/memory` (ramdisk
+  over BDEV), `fs/mfs` (host-tested on-disk lib + read-only server), VFS
+  grows fd table, console routing, mount/open/read, exec staging
+- Tooling: `tools/gen-c-headers`, `tools/mkfs-mfs`, `tools/build-musl.sh`;
+  musl fork submodule with `src/minix/` syscall layer; `userland/hello`
+- **Milestone:** C "Hello World" compiled against musl, exec'd from the MFS
+  root image, prints to serial through VFS→TTY
 
 ### Phase 6: VirtIO Drivers
 
