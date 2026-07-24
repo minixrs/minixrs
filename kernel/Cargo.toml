@@ -5,6 +5,17 @@ edition = "2024"
 license = "BSD-3-Clause"
 publish = false
 
+[features]
+# `boot-stubs` (default-on) installs the demo stubs A–D at boot. Off
+# (`--no-default-features`) gives a stub-free boot for cleaner debugging. Gates
+# the kernel's stub code (`arch::aarch64::userland`), and `build.rs` reads
+# `CARGO_FEATURE_BOOT_STUBS` to skip `user_stub.S` and build PM stub-free. The
+# flag is deliberately NOT forwarded to kernel-shared: a shared-crate default
+# feature gets force-enabled by other dependents via cargo feature unification,
+# which would make it impossible to turn off. `NR_STUB_PROCS` stays constant.
+default = ["boot-stubs"]
+boot-stubs = []
+
 [dependencies]
 minixrs-kernel-shared = { path = "../kernel-shared" }
 arrayvec = { version = "0.7", default-features = false }

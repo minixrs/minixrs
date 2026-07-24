@@ -9,6 +9,15 @@ publish = false
 name = "minixrs-pm"
 path = "src/main.rs"
 
+[features]
+# `boot-stubs` (default-on) must match the kernel's setting: it gates PM's demo
+# stub mproc seeding so PM doesn't seed slots for stubs the kernel didn't install.
+# `kernel/build.rs` passes `--no-default-features` to this nested build when the
+# kernel is stub-free. Self-contained (no forward to kernel-shared) so PM being
+# the build root, nothing re-enables it via feature unification.
+default = ["boot-stubs"]
+boot-stubs = []
+
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minix-ipc" }
