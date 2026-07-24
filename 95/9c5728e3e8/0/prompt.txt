@@ -1,0 +1,1 @@
+resequence errno earlier so we don't have to change things when we renumber to linux numbering codes
