@@ -1,0 +1,15 @@
+This solution works I get problems in the RustRover ide not being able to compile.  /Users/kevinbarnard/.cargo/bin/cargo check --color=always --message-format json-diagnostic-rendered-ansi --all-targets --workspace --features minixrs-kernel/boot-stubs,minixrs-kernel/default --keep-going
+   Compiling minixrs-kernel v0.1.0 (/Users/kevinbarnard/src/minixrs/kernel)
+
+error: minixrs-kernel@0.1.0: minixrs-kernel is a bare-metal crate (target_os = "none"); it cannot be built for the host (got target_os = "macos"). Use `cargo kernel-aarch64`, or pass `--target aarch64-unknown-none`. Workspace-wide host gates must pass `--exclude minixrs-kernel`.
+
+error: build script logged errors.  I have a working copy of blog_os at @../learn/blog_os/ I'm not sure if the way they handle the build using a target would help solve the issue, but it does seem a little better than what we are doing to de-host the kernel
+
+---
+
+Still get error /Users/kevinbarnard/.cargo/bin/cargo check --color=always --message-format json-diagnostic-rendered-ansi --all-targets --workspace --features minixrs-kernel/boot-stubs,minixrs-kernel/default --keep-going
+   Compiling minixrs-kernel v0.1.0 (/Users/kevinbarnard/src/minixrs/kernel)
+
+error: minixrs-kernel@0.1.0: minixrs-kernel is a bare-metal crate (target_os = "none"); it cannot be built for the host (got target_os = "macos"). Use `cargo kernel-aarch64`, or pass `--target aarch64-unknown-none`. Workspace-wide host gates must pass `--exclude minixrs-kernel`.
+
+error: build script logged errors
