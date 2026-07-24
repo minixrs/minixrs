@@ -4,9 +4,11 @@
 //! drivers, and the user-space `minix-ipc` library.
 //!
 //! Everything in this crate is `#![no_std]` and must remain so. Behaviour
-//! belongs in the kernel or in `minix-ipc` / `server-rt`, not here. Values
-//! are pinned to MINIX 3's ABI where possible (see per-module docs for the
-//! specific reference header).
+//! belongs in the kernel or in `minix-ipc` / `server-rt`, not here — the one
+//! carve-out is a pure predicate over an ABI shape defined in this crate (e.g.
+//! [`message::user_va_ok`]), which lives here so it stays host-testable.
+//! Values are pinned to MINIX 3's ABI where possible (see per-module docs for
+//! the specific reference header).
 
 #![no_std]
 

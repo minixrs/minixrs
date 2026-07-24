@@ -1,9 +1,26 @@
+# `per-package-target` is an UNSTABLE cargo feature (rust-lang/cargo#9406). It
+# is what lets this one package pin its own build target while the rest of the
+# workspace stays host-native, so `cargo check/clippy/test --workspace` — and
+# every IDE that runs them, e.g. RustRover's external linter — just works with
+# no per-developer configuration. It requires nightly, which
+# `rust-toolchain.toml` already pins; if a future bump ever drops the feature,
+# cargo fails loudly on this manifest and the fallback is a workspace
+# `default-members` list that omits "kernel".
+cargo-features = ["per-package-target"]
+
 [package]
 name = "minixrs-kernel"
 version = "0.1.0"
 edition = "2024"
 license = "BSD-3-Clause"
 publish = false
+# The kernel is bare-metal only: the ELF-only `link_section` attributes, the
+# `_start` entry path, the panic handler, and build.rs's assembled `.S` objects
+# all require `target_os = "none"`. Pinning the target here means a host build
+# is not merely discouraged, it is unreachable — this wins even over an explicit
+# `--target x86_64-apple-darwin`. NOTE: it also overrides the `kernel-x86_64`
+# alias, so Phase 8's x86_64 port must revisit this line.
+forced-target = "aarch64-unknown-none"
 
 [features]
 # `boot-stubs` (default-on) installs the demo stubs A–D at boot. Off
@@ -15,6 +32,16 @@ publish = false
 # which would make it impossible to turn off. `NR_STUB_PROCS` stays constant.
 default = ["boot-stubs"]
 boot-stubs = []
+
+[[bin]]
+name = "minixrs-kernel"
+path = "src/main.rs"
+# No test/bench harness. The kernel is `no_std`/`no_main`, so a `--test` build
+# would need the `test` crate (which needs std) and fails with E0463. Without
+# these, `cargo check --all-targets --workspace` — what RustRover runs — breaks
+# on the kernel's phantom test target.
+test = false
+bench = false
 
 [dependencies]
 minixrs-kernel-shared = { path = "../kernel-shared" }
