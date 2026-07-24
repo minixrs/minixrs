@@ -25,6 +25,38 @@ members = [
     "minixrs",
 ]
 
+# `minixrs-kernel` is a member (so one `Cargo.lock` keeps `cargo audit` / `cargo
+# deny` / `cargo fmt --all` covering it) but is deliberately NOT a default
+# member: it only compiles for `target_os = "none"`, so a host build of it is
+# always a mistake. Bare `cargo check` / `test` / `clippy` at the root therefore
+# skip it, and CI's `--workspace` gates pass `--exclude
+# minixrs-kernel` (`--workspace` overrides `default-members`). Explicit
+# selection still works: `cargo kernel-aarch64`, `cargo run -p minixrs-kernel
+# --target aarch64-unknown-none`.
+default-members = [
+    "kernel-shared",
+    "minix-ipc",
+    "server-rt",
+    "servers/pm",
+    "servers/vfs",
+    "servers/vm",
+    "servers/rs",
+    "servers/ds",
+    "servers/sched",
+    "drivers/driver-rt",
+    "drivers/virtio-blk",
+    "drivers/virtio-net",
+    "drivers/virtio-console",
+    "drivers/memory",
+    "fs/mfs",
+    "fs/pfs",
+    "userland/init",
+    "userland/sh",
+    "userland/coreutils",
+    "userland/worker",
+    "minixrs",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

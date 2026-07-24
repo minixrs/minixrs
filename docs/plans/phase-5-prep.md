@@ -5,10 +5,10 @@ Phase 4 shipped in full (slice 4.8, PR #31, merged 2026-07-18). Before Phase 5
 PR-sized cleanup/prep chunks so Phase 5 does not build on soft ground.
 
 **How to use this file:** each chunk is one session / one PR. Chunks 1–5 and 7
-are independent and can land in any order; chunk 6 (the Phase 5 design +
+were independent and could land in any order; chunk 6 (the Phase 5 design +
 slicing session) must come last — it gates starting Phase 5 proper (chunk 7
-does not gate Phase 5). Markers follow the
-`docs/plan.md` convention: `◀ next` (unstarted), `◀ ready (branch …, pending
+did not gate Phase 5). **Chunk 6 is now the only chunk left.** Markers follow
+the `docs/plan.md` convention: `◀ next` (unstarted), `◀ ready (branch …, pending
 merge)`, `✓ shipped (PR #N, merged YYYY-MM-DD)`. Flip a chunk's marker as part
 of its own PR, and move `◀ next` to whichever chunk you intend to take next.
 
@@ -117,7 +117,7 @@ constants — PM `NR_MPROCS` (32), VM `MAX_CLIENTS` (32), and the SCHED table
 **Proof:** host tests green; QEMU boot + fork/exec loop unchanged; a
 deliberate mismatched-constant build fails at compile time.
 
-## Chunk 5: Toolchain bump + kernel clippy debt ◀ ready (branch feature/toolchain-bump, pending merge)
+## Chunk 5: Toolchain bump + kernel clippy debt ✓ shipped (PR #37, merged 2026-07-24)
 
 **Goal:** the pinned nightly (`rust-toolchain.toml`) is ~2 months old; bump it
 deliberately *before* Phase 5 churn, not mid-slice. Same session: deal with
@@ -168,29 +168,41 @@ implementation) producing `docs/plans/phase-5-musl-fs.md`:
 **Proof:** the design doc exists with every decision above resolved (not
 "TBD"), and plan.md's Phase 5 section is a slice table.
 
-## Chunk 7: De-host the kernel crate (investigation) ◀ next
+## Chunk 7: De-host the kernel crate ◀ ready (branch feature/dehost-kernel, pending merge)
 
-**Goal:** every kernel module is `#[cfg(target_os = "none")]`-gated so host
-workspace builds see an empty crate — which is why kernel code is invisible to
-the blocking lint gates. Investigate removing the kernel crate from host
-builds entirely so the per-item gates can go away.
+**Goal:** every kernel module was `#[cfg(target_os = "none")]`-gated so host
+workspace builds saw an empty crate — which is why kernel code was invisible to
+the blocking lint gates. Remove the kernel crate from host builds entirely so
+the per-item gates can go away.
 
-**Scope:**
+**Scope** (the original bullets 2 and 3 were absorbed by chunk 5, which shipped
+the `clippy-kernel` job and cleared the named lints; only bullet 1 remained,
+plus the follow-through that job's own comment nominated):
 
-- Exclude `minixrs-kernel` from host workspace builds (e.g. workspace
-  `default-members`) so `cargo clippy --workspace` / `cargo test` no longer
-  compile it on the host; drop the per-item `cfg` gates once nothing
-  host-builds the crate.
-- Add an aarch64-target clippy CI job
-  (`cargo clippy -p minixrs-kernel --target aarch64-unknown-none`) — this
-  absorbs chunk 5's "optional non-blocking kernel clippy job" bullet;
-  coordinate if chunk 5 lands first.
-- Triage the pre-existing kernel-target lints (nomem-asm pointers,
-  `manual_is_multiple_of`, interior-mutable-const) — fix or `#[allow]` +
-  rationale.
+- Exclude `minixrs-kernel` from host workspace builds via workspace
+  `default-members`; it stays a `members` entry so one `Cargo.lock` keeps
+  `audit`/`deny` and `cargo fmt --all` covering it. **`--workspace` overrides
+  `default-members`**, so CI's `clippy` and `coverage` jobs pass
+  `--exclude minixrs-kernel`, and `geiger`'s per-package sweep filters it out.
+- Drop all 15 `cfg(target_os = "none")` gates from `kernel/src/main.rs`
+  (unconditional `no_std`/`no_main`, no host `fn main() {}` fallback). Two
+  guards make an accidental host build one clear message: `build.rs` emits
+  `cargo::error=` before rustc runs, and `main.rs` carries a `compile_error!`
+  mirroring `arch/mod.rs`'s arch guard.
+- Flip `clippy-kernel` to **blocking** — with the kernel out of every host gate
+  it is the only CI job that compiles kernel code at all — and give it a second
+  `--no-default-features` run so chunk 3's stub-free config is guarded too.
+- Flip `qemu-smoke` to **blocking** (green across PRs #33–#37, satisfying
+  chunk 1's "stable across a few PRs" bar) and require its boot step to exit 124.
+- Drive-by: `user_va_ok` + `USER_VA_TOP` and their 5 tests move from
+  `kernel/src/ipc/message.rs` to `kernel-shared/src/message.rs`. The tests had
+  never executed (the module was cfg-gated out on host); de-hosting would have
+  made that permanent. `kernel-shared` goes 49 → 54 running tests, and
+  `arch/aarch64/addrspace.rs`'s duplicate `USER_VA_TOP` literal folds in.
 
-**Proof:** host gates green with the kernel excluded; `cargo kernel-aarch64`
-and the QEMU smoke job unchanged; kernel-target clippy visible in CI.
+**Proof:** host gates green with the kernel excluded; `cargo check --workspace`
+fails with exactly one actionable error; `cargo kernel-aarch64` and both QEMU
+boots (default + stub-free) unchanged; kernel-target clippy blocking in CI.
 
 ---
 

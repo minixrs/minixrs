@@ -30,6 +30,7 @@ use crate::arch::aarch64::mmu::{
     PTE_TABLE, PTE_UXN, PTE_VALID, PTES_PER_LEVEL, pte_attr_idx,
 };
 use crate::mm::{FRAME_SIZE, Frame, alloc_frame, free_frame, phys_to_hhdm};
+use minixrs_kernel_shared::message::USER_VA_TOP;
 
 /// User-page permission. Maps onto the aarch64 stage-1 descriptor's AP +
 /// PXN + UXN bits; kernel callers describe intent here and `prot_attrs()`
@@ -284,9 +285,6 @@ fn is_table_desc(desc: u64) -> bool {
 
 /// Mask selecting the PA bits of a descriptor (47:12).
 const PA_MASK: u64 = 0x0000_FFFF_FFFF_F000;
-
-/// One 48-bit user VA past the last legal address: `1 << 48`.
-const USER_VA_TOP: u64 = 1 << 48;
 
 fn check_va(va: u64) -> Result<(), MapError> {
     if va & (FRAME_SIZE as u64 - 1) != 0 {

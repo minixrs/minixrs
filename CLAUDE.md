@@ -39,58 +39,78 @@ cargo kernel-aarch64
 # Redirect to a file when you need to grep tick output -- live tail loses lines.
 # The log interleaves raw single-char tick bytes; grep it with `grep -a`
 # (force text) or matches read as "Binary file matches".
-# QEMU under TCG advances *guest* time slower than wall-clock, so a `timeout N`
-# run reaches far fewer than N x 100 ticks. For time-based features (alarms,
-# quantum/scheduling) read uptime-stamped traces (e.g. `[alarm ... at=N]`) as the
-# real clock, and run 20-25 s to observe several periods.
-timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+# Budget ~5 s of every run for the cargo rebuild + UEFI firmware startup before
+# the kernel's first byte: `timeout 8` yields a log with NO kernel output at all
+# (check-boot-log.sh then fails all 24 markers). Use 25 s for anything you mean
+# to verify. QEMU under TCG also advances *guest* time slower than wall-clock, so
+# a `timeout N` run reaches far fewer than N x 100 ticks. For time-based features
+# (alarms, quantum/scheduling) read uptime-stamped traces (e.g. `[alarm ... at=N]`)
+# as the real clock, and run 20-25 s to observe several periods.
+timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # Clean, stub-free boot for debugging (servers + init/worker only, no demo
 # stubs A-D): add --no-default-features to disable the `boot-stubs` feature.
-timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
+timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
 
 # Verify a captured boot log against the standard acceptance markers:
 #   tools/check-boot-log.sh <log>   (tests/qemu-boot.expected/.forbidden;
 # update those marker files in the same PR when trace formats or the boot
 # roster change, or the qemu-smoke CI job goes red)
 
-# Build kernel for x86_64
+# Build kernel for x86_64 (scaffolding only -- arch/mod.rs compile_error!s;
+# there is no kernel/src/arch/x86_64/ yet. Phase 8.)
 cargo kernel-x86_64
 
 # Run host-side unit tests (note the package name, not the dir name)
 cargo test -p minixrs-kernel-shared
 ```
 
+The kernel crate is **bare-metal only** and is excluded from host builds by the
+workspace's `default-members` (see the conventions list). Bare `cargo check` / `test` /
+`clippy` at the root skip it; `cargo <verb> --workspace` does **not** (that flag overrides
+`default-members`) and needs `--exclude minixrs-kernel`. A host build fails with one
+`cargo::error=` line from `kernel/build.rs` pointing at `cargo kernel-aarch64`.
+(Separately and pre-existing: bare `cargo build` fails on the *server*/userland crates —
+they are `#![no_main]` ELFs that can't link against the host libc. `check`/`clippy`/`test`
+are the host gates, not `build`.)
+
 ## CI
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Eight gates run in
-parallel — `fmt`, `clippy`, `audit` (cargo-audit), `deny` (cargo-deny, config in `deny.toml`),
-`geiger`, `miri`, `qemu-smoke` (aarch64 QEMU boot smoke), `coverage` (cargo-llvm-cov →
-`lcov.info`) — then a `sonar` job feeds the LCOV report to SonarQube Cloud (org `minixrs`,
-project `minixrs_minixrs`, config in `sonar-project.properties`). The Sonar scan auto-detects
-PR vs branch: PRs get decoration, `main` pushes refresh the whole-project picture.
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Nine gates run in
+parallel — `fmt`, `clippy`, `clippy-kernel` (aarch64 kernel lint + compile), `audit`
+(cargo-audit), `deny` (cargo-deny, config in `deny.toml`), `geiger`, `miri`, `qemu-smoke`
+(aarch64 QEMU boot smoke), `coverage` (cargo-llvm-cov → `lcov.info`) — then a `sonar` job
+feeds the LCOV report to SonarQube Cloud (org `minixrs`, project `minixrs_minixrs`, config in
+`sonar-project.properties`). The Sonar scan auto-detects PR vs branch: PRs get decoration,
+`main` pushes refresh the whole-project picture.
 
-- `geiger`, `miri`, and `qemu-smoke` are **advisory** (`continue-on-error`); the rest block. miri
+- Only `geiger` and `miri` are **advisory** (`continue-on-error`); the other seven block. miri
   only covers the host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm`) —
-  `minix-ipc` has inline asm
+  `minix-ipc` has inline asm. `geiger`'s per-package sweep filters out `minixrs-kernel` (it can't
+  host-build)
 - `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner: boots the kernel for 45 s wall clock
-  via the cargo runner, then `tools/check-boot-log.sh` greps the serial log (`grep -aF`) against
-  `tests/qemu-boot.expected` / `tests/qemu-boot.forbidden`. Keep expectations timing-robust —
-  first occurrences only, never counts (CI TCG is slower than local). Flip to blocking once
-  stable across a few PRs
-- Before pushing, the blocking gates must be green: `cargo fmt --all --check` and
-  `cargo clippy --workspace --all-targets -- -D warnings`. Run `cargo fmt --all` to fix formatting
-- The blocking `clippy --workspace` gate runs on the **host** target, where the kernel's real
-  modules are `#[cfg(target_os = "none")]`-gated out — so kernel code is *not* linted by that gate.
-  The **advisory** `clippy-kernel` CI job (`ubuntu-24.04-arm`, `continue-on-error`) runs
-  `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings` — the real
-  kernel-lint surface. It is **clean as of the phase-5-prep chunk-5 bump** (the former pre-existing
-  lints are fixed or carry a per-item `#[allow(clippy::…)]` + rationale: the `nomem`-asm pointer in
-  `sched::set_tpidr_to` is a value-not-deref false positive, `Proc::EMPTY` must stay `const` for its
-  array-repeat init, the two `mem::forget(aspace)` are defensively future-`Drop`-safe, and the
-  many-arg boot helpers mirror the `elf.rs` precedent). Keep it clean when touching kernel code; the
-  job is advisory only so a *future* nightly-introduced lint can't red-X an unrelated PR.
-  `cargo kernel-aarch64` is the real compile gate for kernel code
+  via the cargo runner (asserting exit 124, the timeout status a healthy run must produce), then
+  `tools/check-boot-log.sh` greps the serial log (`grep -aF`) against `tests/qemu-boot.expected` /
+  `tests/qemu-boot.forbidden`. Keep expectations timing-robust — first occurrences only, never
+  counts (CI TCG is slower than local). **Blocking** as of phase-5-prep chunk 7
+- Before pushing, the blocking gates must be green: `cargo fmt --all --check`,
+  `cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings`, and
+  `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings` (plus the same
+  with `--no-default-features`). Run `cargo fmt --all` to fix formatting
+- The kernel crate is **excluded from every host gate** (phase-5-prep chunk 7): `clippy` and
+  `coverage` pass `--exclude minixrs-kernel` because `--workspace` overrides `default-members`.
+  The **blocking** `clippy-kernel` job (`ubuntu-24.04-arm`) is therefore the *only* CI job that
+  compiles kernel code at all, and it runs twice — default features and `--no-default-features`
+  (the stub-free config, whose two `#[allow]`s live inside `cfg(feature = "boot-stubs")` code).
+  No `--all-targets` there: the kernel is `no_std`/`no_main`, so there is no test harness to
+  build. It is **clean as of the chunk-5 bump** (former lints fixed or carrying a per-item
+  `#[allow(clippy::…)]` + rationale: the `nomem`-asm pointer in `sched::set_tpidr_to` is a
+  value-not-deref false positive, `Proc::EMPTY` must stay `const` for its array-repeat init, the
+  two `mem::forget(aspace)` are defensively future-`Drop`-safe, and the many-arg boot helpers
+  mirror the `elf.rs` precedent). Keep it clean when touching kernel code — it now blocks
+- `cargo fmt --all` still covers the kernel: cargo-fmt enumerates all workspace *members* (not
+  just default ones), and rustfmt follows `mod` declarations without evaluating `cfg`. Likewise
+  `audit`/`deny` still see the kernel's deps, because it remains a member sharing one `Cargo.lock`
 - The toolchain is **pinned to a dated nightly** in `rust-toolchain.toml` (bare `nightly` let new
   lints/fmt rules break CI with no code change); bump it deliberately, not incidentally
 - `Cargo.lock` **is committed** (so audit/deny are reproducible) — do not re-add it to `.gitignore`
@@ -134,11 +154,11 @@ See `docs/architecture.md` for the full system design. Key concepts:
 - PM-driven exec (slice 4.7): a user proc `SENDREC`s `PM_EXEC` (`PM_RQ_BASE + 4 = 0x704`, `NR_PM_MSGS` 4→5) to PM; PM issues `SYS_EXEC` naming that proc as the **target** (POSIX shape — exec is done *to* the caller, so `SYS_EXEC` moved from the caller-local arm to the target-taking `match` beside `SYS_FORK` in `kernel_call_dispatch`; `SYS_EXEC` was already numbered `0x603` and blanket-granted to PM by the SRV_T `k_call_mask` fill, so `NR_KERN_CALLS_PHASE4` stays 18 and no priv wiring changes). `kernel/src/system/do_exec.rs`: resolve the target (reject `SELF`/self-target — the active-TTBR0 teardown hazard, the `do_exit` stance), read the binary name from payload `4..4+EXEC_NAME_LEN` (16, new in `callnr.rs`; MINIX-renames the proc to it — `EXEC_NAME_LEN <= PROC_NAME_LEN`), resolve it via `BootImage::module_by_name`, gate the target exactly like `do_fork`'s parent (a clean `RTS_RECEIVING` receiver — in the live flow mid-`SENDREC` to PM), build the new AS via `userland::load_exec_image`, reset the frame (`ArchRegisterFrame::EMPTY` + `elr_el1`/`sp_el0`/`spsr_el1 = STUB_SPSR_EL0`), swap `(ttbr0_pa, asid)`, `do_exit::teardown_addrspace` (now `pub(super)`) the **old** image (safe: target ≠ caller), then `sched::rts_unset(RTS_RECEIVING)` to resume it at `_start`. exec preserves pid/priv/scheduler; the target gets **no reply** on success (kernel resumes it at the new entry), errno reply on failure — so PM's `handle_exec` replies only on `rc != OK`. `userland::load_exec_image(elf) -> Option<ExecImage>` is factored out of `load_boot_server` (`AddrSpace::new` + `elf::load_into` + one RW stack page at `SERVER_STACK_VA` + `alloc_asid`, `mem::forget` the tree; `None` + `destroy_addrspace_with_leaves` cleanup on OOM — the `do_fork` copy_addrspace no-leak contract). The exec target is a freestanding `userland/worker` ELF (getpid loop + `PM_EXIT`; **no** `server-rt`/SEF — a plain user program, deps `minix-ipc` + `kernel-shared` only), packed into the MXBI archive by `build.rs` with sentinel proc_nr `com::EXEC_ONLY_PROC_NR = -1` — the boot loader (`userland.rs` load loop) skips any negative proc_nr, so `worker` is resolvable by name but **never boot-loaded** (no `[as]` line, no proc/priv slot). PM's `execve` hardcodes `EXEC_TARGET = "worker"` for the demo (a user-supplied path arrives with Phase-5 musl/filesystem; the kernel path is already name-driven). Stub E's child branch flips `PM_EXIT` → `PM_EXEC`: fork → child execs `worker` → worker exits → parent reaps → loop, so a `[ksys SYS_EXEC] target=16 name=worker` per cycle sits between the `SYS_FORK`/`SYS_EXIT nr=16` twins with a monotonically advancing endpoint generation + recycled ASID (exec teardown + reap proof). `userland/**/src/main.rs` added to `sonar.coverage.exclusions` (freestanding entry point, QEMU-verified, no host-testable logic — like the server `main.rs`es)
 - init + Phase-4 wrap-up (slice 4.8): `init` (PID 1, `INIT_PROC_NR = 10`) becomes a **real boot process**, replacing the slice-4.6/4.7 demo stub E. The `userland/init` crate is a freestanding fork/exec/wait respawn loop (`minix-ipc` + `kernel-shared` only, **no** `server-rt`/SEF — a plain user program like `worker`; `_start` shim + panic handler `not(test)`-gated; `user.ld` is `worker`'s verbatim) — `loop { PM_FORK; if reply m_type==0 → PM_EXEC (child becomes `worker`); elif >0 → PM_WAIT (reap); else brief spin }`. It is packed into the MXBI archive by adding `("minixrs-init", …/init, 10)` to `build.rs`'s `servers` array (bump `; 7`→`; 8`); the ordinary `userland.rs` load loop then loads it, clears `RTS_NO_PRIV`, and enqueues it — **no** PM hand-release (contrast stub E's `PRIVCTL_SET_USER`). **User-grade priv:** init's `IMAGE` `BootEntry.trap_mask` is `SRV_T`→`USR_T`, and `init_boot_image` special-cases `entry.nr == INIT_PROC_NR` to point its proc slot at the shared `USER_PRIV_ID` (slot 20, filled by `populate_user_priv`, which already opens the PM↔USER edge) instead of populating a dedicated server-grade slot — so init SENDRECs PM only and makes no kernel calls, exactly the forked-child profile; its would-be dedicated priv slot 15 stays free. `MF_PRIV_PROC` stays set on init's `mproc` seed (unkillable PID 1 — that flag gates only the kill path, not fork/wait/getpid, so PM still serves init as a client). **Stub E retired (only E; A–D kept** as the live regression battery for IPC primitives / SCHED delegation / VM page-faults, which init+worker don't exercise): removed its `user_stub.S` blob, `userland.rs` `build_stub` call + `USER_CODE/STACK_VA_E` + `_user_stub_e_*` externs + `print_addrspace_summary` line, `com.rs` `STUB_E_PROC_NR` + `NR_STUB_PROCS` 5→4 (which shifts `FORK_POOL_BASE = NR_BOOT_PROCS + NR_STUB_PROCS` 16→15, so forked-child kernel proc-nrs now start at 15), and PM `pm_init`'s `privctl_set_user(SYSTEM, STUB_E)` release. `mproc` host tests that keyed on stub E (slot 15) rebase onto stub D (slot 14, the new last-seeded proc) or `INIT`. Docs: new mdBook `book/src/servers/overview.md` chapter + `SUMMARY.md` entry. **Phase 4 complete.**
 - QEMU trace forensics: the `[ipc]` modulo sampler almost never catches low-rate callers — a blocking SENDREC client (e.g. stub E's fork/wait loop) round-trips once per band-8 rotation, thousands of times rarer than stub C's synchronous kernel-call flood — and a server packed late in the MXBI archive (PM) boots after C's flood starts, so its SEF handshake never lands in `TRACE_HEAD` either. Zero sampled lines for such a caller is NOT evidence it's stuck: verify via its downstream head-carve `[ksys …]` traces (e.g. `[ksys SYS_FORK]`/`SYS_EXIT` are head-carved at 6, so raise the head const temporarily to count real cycles), or a temporary unconditional `[DBG]` trace in `ipc::do_ipc` keyed on the caller nr (remove before committing)
-- `kernel/build.rs` skips assembly when `CARGO_CFG_TARGET_OS != "none"` so `cargo check --workspace` / `cargo test --workspace` keep working on host. The kernel's real modules are gated by `#[cfg(target_os = "none")]` in `main.rs` regardless
+- The kernel crate is **bare-metal only and never host-built** (phase-5-prep chunk 7). It stays a workspace `members` entry (one `Cargo.lock` for `audit`/`deny`, and `cargo fmt --all` still reaches it) but is omitted from `default-members`, so bare `cargo check`/`test`/`clippy` skip it; `--workspace` overrides `default-members`, so those invocations need `--exclude minixrs-kernel` (CI's `clippy` and `coverage` jobs do exactly that). Two guards make a mistaken host build one clear message instead of a cascade: `kernel/build.rs` emits `cargo::error=` when `CARGO_CFG_TARGET_OS != "none"` (fires before rustc), and `main.rs` carries a `#[cfg(not(target_os = "none"))] compile_error!` mirroring `arch/mod.rs`'s arch guard. Consequently **no `#[cfg(target_os = "none")]` gates remain in `kernel/src/`** — do not reintroduce them; a new kernel module is just `mod foo;`. (The `cfg_attr(target_os = "none", unsafe(link_section = …))` attributes in `servers/*`/`userland/*` are unrelated — those crates *are* host-built and host-tested; the attribute only hides an ELF section specifier from a Mach-O host.) rust-analyzer's default check is `cargo check --workspace`, which will flag the kernel — set `"rust-analyzer.check.extraArgs": ["--exclude", "minixrs-kernel"]`
 - The demo stubs A–D are gated behind a **`boot-stubs` cargo feature (default-on)** — `--no-default-features` gives a clean, stub-free boot (servers + init/worker only) for debugging (chunk-3 prep). The feature lives on **two crates**, the kernel (gates `arch::aarch64::userland`'s stub code) and PM (gates `mproc::seed`'s stub loop), because those are the only two that install/seed stubs. `kernel/build.rs` reads `CARGO_FEATURE_BOOT_STUBS` to (a) drop `user_stub.S` from the assembly `sources` and (b) pass `--no-default-features` to the *nested* PM build (the nested build has its own feature resolution, so the flag must be threaded through), keeping kernel and PM in lockstep. The feature is deliberately **not** on `kernel-shared`: a shared-crate default feature gets force-enabled by other dependents (`minix-ipc`, `server-rt`) via cargo **feature unification**, making it impossible to turn off — so `NR_STUB_PROCS` stays a constant `4` and `FORK_POOL_BASE` (= 15) is stable; disabling stubs just leaves slots 11–14 unoccupied, it doesn't renumber the fork pool
 - User-process capacity is one shared constant (chunk-4 prep): `kernel-shared::com::NR_SERVED_PROCS` (= 32) is the exclusive proc-nr ceiling the user-space servers track, and all three per-process server tables derive their size from it — PM `mproc` (`NR_MPROCS = NR_SERVED_PROCS`, proc-nr-indexed), VM `ClientRegions` (`MAX_CLIENTS = NR_SERVED_PROCS`, proc-nr-indexed), and SCHED `policy` (`CAP = NR_SERVED_PROCS`, an *associative* count, not proc-nr-indexed, so `NR_SERVED_PROCS` over-covers the delegatable set). Never reintroduce independent capacity literals: each crate carries a `const _: () = assert!(… >= NR_SERVED_PROCS)` guard (plus `NR_SERVED_PROCS <= NR_PROCS` and `> NR_BOOT_PROCS + NR_STUB_PROCS` in com.rs) so an under-sized local edit fails at compile time. VM `MAX_REGIONS` (regions per client, heap + mmaps) is a separate knob (= 16), unrelated to the kernel frame allocator's like-named `MAX_REGIONS` in `mm/frame.rs`
 - Feature-toggle debugging: when a `--no-default-features` build doesn't actually drop a feature, suspect cargo **feature unification** — diagnose with `cargo tree -p <crate> --no-default-features -e features -i <shared-crate>` (inverted tree shows *who* still activates it) or `cargo tree -p <crate> -f "{p} {f}"` (feature set per crate)
-- `cargo test -p minixrs-kernel` runs zero tests by design — every kernel module is gated on `#[cfg(target_os = "none")]` and host-test infra is not yet built; host-runnable tests live in `kernel-shared`. QEMU is the primary verification for kernel code (`timeout 8 cargo run -p minixrs-kernel --target aarch64-unknown-none --release`; CI smoke-boots it in the advisory `qemu-smoke` job)
+- `cargo test -p minixrs-kernel` does not run — the crate is bare-metal only (see above) and in-QEMU test infra is not yet built, so **there is no `#[cfg(test)]` code under `kernel/src/`**. Host-runnable logic belongs in `kernel-shared`: chunk 7 moved `user_va_ok` + `USER_VA_TOP` there (`kernel-shared/src/message.rs`) precisely because its 5 tests had never executed while the module was cfg-gated. Put new pure predicates over shared ABI types there — the crate doc carries a narrow carve-out for exactly that — and keep raw-pointer/hardware behaviour (e.g. `copy_msg_from_user`) in the kernel. QEMU is the primary verification for kernel code (`timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release`; CI smoke-boots it in the blocking `qemu-smoke` job)
 - `no_std` library crates that host-test via `#![cfg_attr(not(test), no_std)]` get linted in their std test-config too (`clippy --all-targets`): a const-only `assert!(A > B)` trips `assertions_on_constants` (use a module-level `const _: () = assert!(…)` like `callnr.rs`), and a bare `loop {}` in a function present under `test` trips `empty_loop` (use `loop { core::hint::spin_loop() }`; the `#[cfg(not(test))]` panic handler's `loop {}` is exempt because it's absent under test)
 - The blocking `clippy --workspace` gate runs `-D warnings`: a doc-comment line starting with `+ ` (or `- `/`* `) parses as a markdown bullet and trips `doc_lazy_continuation` on the following lines — reword so continuation lines don't begin with a list marker
 - User-space servers build as freestanding `#![no_std]`/`#![no_main]` ELFs linked with their own `user.ld` (page-aligned PT_LOADs, base `0x10_0000`; kernel sets `sp_el0` so `_start` needs no stack setup). The kernel's `build.rs` builds them for `aarch64-unknown-none` in a *separate* `CARGO_TARGET_DIR` (dodges the nested-cargo build-lock deadlock), overrides the kernel linker script via `CARGO_ENCODED_RUSTFLAGS` → the server's `user.ld`, and emits `VM_ELF_PATH` so `kernel/src/boot_image/mod.rs` can `include_bytes!` it. `boot_image/elf.rs` is the minimal ET_EXEC/AArch64 loader (PT_LOAD → `alloc_frame` + HHDM copy + map; BSS via zeroed frames). The multi-module MXBI archive is deferred until Phase 4 loads more than one server
