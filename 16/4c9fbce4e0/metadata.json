@@ -3,15 +3,9 @@
   "checkpoint_id": "164c9fbce4e0",
   "strategy": "manual-commit",
   "branch": "feature/ci-qemu-smoke",
-  "checkpoints_count": 4,
+  "checkpoints_count": 1,
   "files_touched": [
-    ".github/workflows/ci.yml",
-    "CLAUDE.md",
-    "docs/plan.md",
-    "docs/plans/phase-5-prep.md",
-    "tests/qemu-boot.expected",
-    "tests/qemu-boot.forbidden",
-    "tools/check-boot-log.sh"
+    ".github/workflows/ci.yml"
   ],
   "sessions": [
     {
@@ -22,10 +16,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 77,
-    "cache_creation_tokens": 151743,
-    "cache_read_tokens": 5306009,
-    "output_tokens": 52950,
-    "api_call_count": 40
+    "input_tokens": 18,
+    "cache_creation_tokens": 169175,
+    "cache_read_tokens": 1534206,
+    "output_tokens": 4656,
+    "api_call_count": 9
   }
 }
