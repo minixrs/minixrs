@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "5caaec28f75d",
+  "strategy": "manual-commit",
+  "branch": "feature/dehost-kernel",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "CLAUDE.md",
+    "Cargo.toml",
+    "book/src/build.md",
+    "docs/plan.md",
+    "docs/plans/phase-5-prep.md",
+    "kernel-shared/src/lib.rs",
+    "kernel-shared/src/message.rs",
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/addrspace.rs",
+    "kernel/src/ipc/message.rs",
+    "kernel/src/main.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5c/aaec28f75d/0/metadata.json",
+      "transcript": "/5c/aaec28f75d/0/full.jsonl",
+      "content_hash": "/5c/aaec28f75d/0/content_hash.txt",
+      "prompt": "/5c/aaec28f75d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6481,
+    "cache_creation_tokens": 185955,
+    "cache_read_tokens": 11450952,
+    "output_tokens": 75014,
+    "api_call_count": 74
+  }
+}

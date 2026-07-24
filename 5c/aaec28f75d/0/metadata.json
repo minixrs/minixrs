@@ -1,0 +1,91 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "5caaec28f75d",
+  "session_id": "aad46bf1-763c-42d7-85fa-d98499b21fc8",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-24T21:01:05.96443Z",
+  "branch": "feature/dehost-kernel",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "Cargo.toml",
+    "kernel/build.rs",
+    "kernel/src/main.rs",
+    "kernel-shared/src/message.rs",
+    "kernel-shared/src/lib.rs",
+    "kernel/src/ipc/message.rs",
+    "kernel/src/arch/aarch64/addrspace.rs",
+    ".github/workflows/ci.yml",
+    "CLAUDE.md",
+    "book/src/build.md",
+    "docs/plans/phase-5-prep.md",
+    "docs/plan.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "9d2711a38b03",
+  "token_usage": {
+    "input_tokens": 6481,
+    "cache_creation_tokens": 185955,
+    "cache_read_tokens": 11450952,
+    "output_tokens": 75014,
+    "api_call_count": 74
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01EqAs4hugFLjRHwfaQ7TcK6",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "9d2711a38b03",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 403,
+        "end": 404,
+        "entry_ids": [
+          "ca09e160-5e61-4e0e-909b-0c577e85783f"
+        ],
+        "tool_use_id": "toolu_01EqAs4hugFLjRHwfaQ7TcK6"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01EqAs4hugFLjRHwfaQ7TcK6"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "initial_attribution": {
+    "calculated_at": "2026-07-24T21:01:05.949996Z",
+    "agent_lines": 330,
+    "agent_removed": 191,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 330,
+    "total_lines_changed": 521,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    }
+  ]
+}
