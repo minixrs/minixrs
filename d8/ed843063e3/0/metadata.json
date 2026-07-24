@@ -1,0 +1,99 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "d8ed843063e3",
+  "session_id": "ab47fcc5-3ffd-45e4-a439-8ef4f015d090",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-24T17:28:13.602456Z",
+  "branch": "feature/capacity-ceilings",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/plans/phase-5-prep.md",
+    "kernel-shared/src/com.rs",
+    "servers/pm/src/mproc.rs",
+    "servers/sched/src/policy.rs",
+    "servers/vm/src/region.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "f57c28c9f12d",
+  "token_usage": {
+    "input_tokens": 3261,
+    "cache_creation_tokens": 130221,
+    "cache_read_tokens": 4504122,
+    "output_tokens": 46470,
+    "api_call_count": 37
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01179jQ9Tmp6zeLEVPvzcTxz",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "f57c28c9f12d",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 218,
+        "end": 219,
+        "entry_ids": [
+          "10f68ecc-c03e-4cb2-8419-b841191941d5"
+        ],
+        "tool_use_id": "toolu_01179jQ9Tmp6zeLEVPvzcTxz"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01179jQ9Tmp6zeLEVPvzcTxz"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-24T17:28:13.593089Z",
+    "agent_lines": 59,
+    "agent_removed": 21,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 59,
+    "total_lines_changed": 80,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 59,
+      "agent_lines_removed": 21,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    }
+  ]
+}
