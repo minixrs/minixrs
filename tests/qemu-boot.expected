@@ -1,0 +1,40 @@
+# tests/qemu-boot.expected -- required substrings for a healthy QEMU boot log.
+# One literal substring per line; blank lines and '#' comments are ignored.
+# Checked by tools/check-boot-log.sh via `grep -aF` (the log interleaves raw
+# single-char tick bytes, so it must be forced to text). Substrings stop just
+# before the first run-variable field (ttbr0_pa / child_e / entry / freed / at);
+# nr= values are fixed boot-table slots (kernel-shared/src/com.rs).
+
+# Kernel banner (kernel/src/main.rs)
+minix.rs booting on aarch64
+
+# Address-space bring-up: 7 servers + init (arch/aarch64/userland.rs)
+[as] vm nr=7 ttbr0_pa=
+[as] ds nr=5 ttbr0_pa=
+[as] vfs nr=1 ttbr0_pa=
+[as] sched nr=9 ttbr0_pa=
+[as] rs nr=2 ttbr0_pa=
+[as] pm nr=0 ttbr0_pa=
+[as] init nr=10 ttbr0_pa=
+
+# ...plus the 4 boot stubs (11 [as] lines total)
+[as] stub A nr=11 ttbr0_pa=
+[as] stub B nr=12 ttbr0_pa=
+[as] stub C nr=13 ttbr0_pa=
+[as] stub D nr=14 ttbr0_pa=
+
+# init's fork/exec/wait cycle (head-carved kernel traces; slot 15 is the
+# fork-pool base, recycled every cycle; exec renames the child to "worker")
+[ksys SYS_FORK] parent=i nr=10 child_nr=15
+[ksys SYS_EXEC] target=15 name=worker entry=
+[ksys SYS_EXIT] target=w nr=15 freed=
+
+# Stub D's designed SIGSEGV chain: page fault -> VM -> SYS_KILL sig=11 -> PM
+# tears the stub down with SYS_EXIT
+[pf] proc=D far=
+[ksys SYS_KILL] target=D nr=14 sig=11 -> pm
+[ksys SYS_EXIT] target=D nr=14 freed=
+
+# RS's periodic kernel alarm: assert only the FIRST fire (always inside the
+# head carve-out) -- timing-robust under slow CI TCG, unlike a fire count
+[alarm 1] owner=r nr=2 at=

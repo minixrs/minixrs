@@ -4,16 +4,17 @@ Phase 4 shipped in full (slice 4.8, PR #31, merged 2026-07-18). Before Phase 5
 (musl + file systems) starts, the close-out review identified a set of
 PR-sized cleanup/prep chunks so Phase 5 does not build on soft ground.
 
-**How to use this file:** each chunk is one session / one PR. Chunks 1–5 are
-independent and can land in any order; chunk 6 (the Phase 5 design + slicing
-session) must come last — it gates starting Phase 5 proper. Markers follow the
+**How to use this file:** each chunk is one session / one PR. Chunks 1–5 and 7
+are independent and can land in any order; chunk 6 (the Phase 5 design +
+slicing session) must come last — it gates starting Phase 5 proper (chunk 7
+does not gate Phase 5). Markers follow the
 `docs/plan.md` convention: `◀ next` (unstarted), `◀ ready (branch …, pending
 merge)`, `✓ shipped (PR #N, merged YYYY-MM-DD)`. Flip a chunk's marker as part
 of its own PR, and move `◀ next` to whichever chunk you intend to take next.
 
 ---
 
-## Chunk 1: CI QEMU smoke job ◀ next
+## Chunk 1: CI QEMU smoke job ◀ ready (branch feature/ci-qemu-smoke, pending merge)
 
 **Goal:** the kernel's `target_os = "none"` modules currently have zero CI
 coverage — every Phase 2–4 regression was caught by hand-running QEMU. One
@@ -39,6 +40,17 @@ smoke job closes that gap cheaply.
 
 **Proof:** a PR that deliberately breaks boot (or the expected file) fails the
 job; a green run greps every expected marker.
+
+**Notes (investigation, resolved):** blog_os-style `custom_test_frameworks`
+in-QEMU unit tests were evaluated and deliberately deferred. The approach
+ports to aarch64 — the unstable feature is still live; QEMU exit works via a
+semihosting `SYS_EXIT` (`HLT #0xF000`) plus
+`-semihosting-config enable=on,target=native`, replacing x86's
+`isa-debug-exit`; the `qemu-exit` / taiki-e `semihosting` crates are
+MIT/Apache-2.0 — but it is the wrong tool for this chunk's assertion
+(full-system serial-log properties, not per-function unit results) and would
+not remove the kernel's `#[cfg(target_os = "none")]` gating either (see
+chunk 7). Revisit as a future in-QEMU unit-test chunk.
 
 ## Chunk 2: mdBook content port + legacy docs retirement ◀ next
 
@@ -155,6 +167,30 @@ implementation) producing `docs/plans/phase-5-musl-fs.md`:
 
 **Proof:** the design doc exists with every decision above resolved (not
 "TBD"), and plan.md's Phase 5 section is a slice table.
+
+## Chunk 7: De-host the kernel crate (investigation) ◀ next
+
+**Goal:** every kernel module is `#[cfg(target_os = "none")]`-gated so host
+workspace builds see an empty crate — which is why kernel code is invisible to
+the blocking lint gates. Investigate removing the kernel crate from host
+builds entirely so the per-item gates can go away.
+
+**Scope:**
+
+- Exclude `minixrs-kernel` from host workspace builds (e.g. workspace
+  `default-members`) so `cargo clippy --workspace` / `cargo test` no longer
+  compile it on the host; drop the per-item `cfg` gates once nothing
+  host-builds the crate.
+- Add an aarch64-target clippy CI job
+  (`cargo clippy -p minixrs-kernel --target aarch64-unknown-none`) — this
+  absorbs chunk 5's "optional non-blocking kernel clippy job" bullet;
+  coordinate if chunk 5 lands first.
+- Triage the pre-existing kernel-target lints (nomem-asm pointers,
+  `manual_is_multiple_of`, interior-mutable-const) — fix or `#[allow]` +
+  rationale.
+
+**Proof:** host gates green with the kernel excluded; `cargo kernel-aarch64`
+and the QEMU smoke job unchanged; kernel-target clippy visible in CI.
 
 ---
 
