@@ -521,11 +521,11 @@ grant-sourced `SYS_EXEC` form; `error.rs` is renumbered to classic-MINIX
 `external/musl` built with clang `--target` + rust-lld. PFS/pipes moved out
 to Phase 7; TTY input/IRQs to Phase 6.
 
-- **5.0** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL` ◀ next
-- **5.1** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY`
-- **5.2** TTY server (TX-only, boot-premapped PL011) + CDEV band
-- **5.3** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS
-- **5.4** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers`
+- **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ◀ next
+- **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL`
+- **5.2** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY`
+- **5.3** TTY server (TX-only, boot-premapped PL011) + CDEV band
+- **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS
 - **5.5** exec ABI: SysV initial stack + minimal auxv
 - **5.6** musl submodule + `src/minix` port + boot-embedded hello — **milestone A**
 - **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob
