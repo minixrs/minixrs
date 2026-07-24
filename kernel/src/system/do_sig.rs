@@ -154,8 +154,7 @@ pub(super) fn do_getksig(
     //
     // Both conditions matter: the RTS bit alone would re-return a proc whose
     // bitmap was already handed off but not yet ENDKSIG-acknowledged.
-    for idx in 0..N_PROC_SLOTS {
-        let p = &mut proc_table[idx];
+    for p in proc_table.iter_mut() {
         if p.rts_flags.load(Ordering::Relaxed) & RTS_SIG_PENDING != 0 && p.sig_pending != 0 {
             let map = p.sig_pending;
             p.sig_pending = 0; // handed off; RTS state stays until ENDKSIG

@@ -81,11 +81,16 @@ PR vs branch: PRs get decoration, `main` pushes refresh the whole-project pictur
 - Before pushing, the blocking gates must be green: `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings`. Run `cargo fmt --all` to fix formatting
 - The blocking `clippy --workspace` gate runs on the **host** target, where the kernel's real
-  modules are `#[cfg(target_os = "none")]`-gated out — so kernel code is *not* clippy-linted by CI.
-  `cargo clippy -p minixrs-kernel --target aarch64-unknown-none` surfaces those lints, but it
-  currently reports pre-existing ones that ship on `main` (nomem-asm pointers, `manual_is_multiple_of`,
-  interior-mutable-const); don't "fix" them as part of an unrelated slice. `cargo kernel-aarch64` is
-  the real compile gate for kernel code
+  modules are `#[cfg(target_os = "none")]`-gated out — so kernel code is *not* linted by that gate.
+  The **advisory** `clippy-kernel` CI job (`ubuntu-24.04-arm`, `continue-on-error`) runs
+  `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings` — the real
+  kernel-lint surface. It is **clean as of the phase-5-prep chunk-5 bump** (the former pre-existing
+  lints are fixed or carry a per-item `#[allow(clippy::…)]` + rationale: the `nomem`-asm pointer in
+  `sched::set_tpidr_to` is a value-not-deref false positive, `Proc::EMPTY` must stay `const` for its
+  array-repeat init, the two `mem::forget(aspace)` are defensively future-`Drop`-safe, and the
+  many-arg boot helpers mirror the `elf.rs` precedent). Keep it clean when touching kernel code; the
+  job is advisory only so a *future* nightly-introduced lint can't red-X an unrelated PR.
+  `cargo kernel-aarch64` is the real compile gate for kernel code
 - The toolchain is **pinned to a dated nightly** in `rust-toolchain.toml` (bare `nightly` let new
   lints/fmt rules break CI with no code change); bump it deliberately, not incidentally
 - `Cargo.lock` **is committed** (so audit/deny are reproducible) — do not re-add it to `.gitignore`

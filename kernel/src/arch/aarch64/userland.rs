@@ -370,6 +370,9 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
     // SAFETY: single-threaded EL1 context; sole accessor of the ASID pool.
     let asid = unsafe { alloc_asid() };
     // The page-table tree is durable via `ttbr0_pa`; don't run `destroy`.
+    // `forget` (not drop) defends against a future `AddrSpace: Drop` freeing
+    // the tree that stays live via `ttbr0_pa`.
+    #[allow(clippy::forget_non_drop)]
     core::mem::forget(aspace);
     Some(ExecImage {
         ttbr0_pa,
@@ -451,6 +454,9 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
 /// slot. `stub_start..stub_end` must be a valid contiguous rodata range
 /// in the kernel image; the linker guarantees both.
 #[cfg(feature = "boot-stubs")]
+// Boot-time stub setup fans many independent parameters into one proc slot;
+// bundling them into a struct would add ceremony without clarity.
+#[allow(clippy::too_many_arguments)]
 unsafe fn build_stub(
     nr: ProcNr,
     priv_id: Option<PrivId>,
@@ -508,6 +514,7 @@ unsafe fn build_stub(
     // value without running its (no-op-today, but defensively forget'd)
     // destructor — leaving `AddrSpace::destroy` reserved for exit/exec
     // paths that actually want to tear an AS down.
+    #[allow(clippy::forget_non_drop)]
     core::mem::forget(aspace);
 }
 
@@ -526,7 +533,7 @@ unsafe fn copy_stub_into_frame(frame: Frame, stub_start: *const u8, stub_end: *c
     // SAFETY: caller's invariants hold; we have the sole pointer to this
     // frame, and HHDM is the only mapping.
     unsafe {
-        let dst = phys_to_hhdm(frame.addr()) as *mut u8;
+        let dst = phys_to_hhdm(frame.addr());
         core::ptr::copy_nonoverlapping(stub_start, dst, len);
         flush_icache_range(dst as u64, len);
     }
@@ -535,6 +542,8 @@ unsafe fn copy_stub_into_frame(frame: Frame, stub_start: *const u8, stub_end: *c
 /// Write all per-stub fields into `p`. Extends slice 2.5's helper with
 /// `ttbr0_pa` and `asid` — the rest mirrors slice 2.6.
 #[cfg(feature = "boot-stubs")]
+// Per-stub slot fields are independent scalars; a struct would not clarify them.
+#[allow(clippy::too_many_arguments)]
 fn populate_stub_slot(
     p: &mut Proc,
     nr: ProcNr,

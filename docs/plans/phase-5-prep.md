@@ -98,7 +98,7 @@ the battery.
 **Proof:** `--no-default-features`-style boot shows only servers + init/worker
 `[as]` lines and no stub traffic; default boot unchanged.
 
-## Chunk 4: Capacity ceilings ◀ ready (branch feature/capacity-ceilings, pending merge)
+## Chunk 4: Capacity ceilings ✓ shipped (PR #36, merged 2026-07-24)
 
 **Goal:** the effective user-process capacity is spread across three silent
 constants — PM `NR_MPROCS` (32), VM `MAX_CLIENTS` (32), and the SCHED table
@@ -117,7 +117,7 @@ constants — PM `NR_MPROCS` (32), VM `MAX_CLIENTS` (32), and the SCHED table
 **Proof:** host tests green; QEMU boot + fork/exec loop unchanged; a
 deliberate mismatched-constant build fails at compile time.
 
-## Chunk 5: Toolchain bump + kernel clippy debt ◀ next
+## Chunk 5: Toolchain bump + kernel clippy debt ◀ ready (branch feature/toolchain-bump, pending merge)
 
 **Goal:** the pinned nightly (`rust-toolchain.toml`) is ~2 months old; bump it
 deliberately *before* Phase 5 churn, not mid-slice. Same session: deal with
