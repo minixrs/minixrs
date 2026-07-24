@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "ba81e3239693",
+  "strategy": "manual-commit",
+  "branch": "feature/toolchain-bump",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "CLAUDE.md",
+    "docs/plan.md",
+    "docs/plans/phase-5-prep.md",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/ipc/message.rs",
+    "kernel/src/ipc/mod.rs",
+    "kernel/src/ipc/receive.rs",
+    "kernel/src/proc/priv_struct.rs",
+    "kernel/src/proc/proc_struct.rs",
+    "kernel/src/proc/sched.rs",
+    "kernel/src/system/do_exit.rs",
+    "kernel/src/system/do_sig.rs",
+    "kernel/src/system/mod.rs",
+    "rust-toolchain.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ba/81e3239693/0/metadata.json",
+      "transcript": "/ba/81e3239693/0/full.jsonl",
+      "content_hash": "/ba/81e3239693/0/content_hash.txt",
+      "prompt": "/ba/81e3239693/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 138,
+    "cache_creation_tokens": 296925,
+    "cache_read_tokens": 9026862,
+    "output_tokens": 68224,
+    "api_call_count": 75
+  }
+}
