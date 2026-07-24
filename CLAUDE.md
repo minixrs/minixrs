@@ -181,9 +181,11 @@ actions SHA-pinned like `ci.yml`). Write new documentation there, derived from s
 the `docs/*.md` files are legacy bootstrap notes being retired. The planning tree is the
 exception and stays: `docs/plan.md` is the lean live tracker (phase status + slice
 summaries), and `docs/plans/` holds the full per-phase slice histories
-(`phase-2-ipc.md` / `phase-3-vm.md` / `phase-4-servers.md`) plus the pre-Phase-5 cleanup
-tracker (`phase-5-prep.md` — one PR-sized chunk per session, same markers). Build locally
-with `mdbook build book`; output `book/book/` is gitignored.
+(`phase-2-ipc.md` / `phase-3-vm.md` / `phase-4-servers.md`), the pre-Phase-5 cleanup
+tracker (`phase-5-prep.md` — one PR-sized chunk per session, same markers), and the
+Phase 5 design + slice plan (`phase-5-musl-fs.md` — locked decisions D1–D13 and slices
+5.0–5.11 with per-slice scope/proof; read it before starting any Phase 5 slice). Build
+locally with `mdbook build book`; output `book/book/` is gitignored.
 
 To install mdBook or preview the book locally, use the `mdbook-preview` skill.
 
