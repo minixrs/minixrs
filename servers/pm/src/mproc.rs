@@ -25,7 +25,8 @@
 use core::cell::UnsafeCell;
 
 use minixrs_kernel_shared::com::{
-    INIT_PROC_NR, NR_BOOT_PROCS, NR_STUB_PROCS, PM_PROC_NR, RS_PROC_NR, boot_endpoint,
+    INIT_PROC_NR, NR_BOOT_PROCS, NR_SERVED_PROCS, NR_STUB_PROCS, PM_PROC_NR, RS_PROC_NR,
+    boot_endpoint,
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, ProcNr};
 
@@ -33,7 +34,9 @@ use minixrs_kernel_shared::endpoint::{Endpoint, ProcNr};
 /// plus demo stubs, are seeded at init — though the stub slots 11..=14 are only
 /// *occupied* when the `boot-stubs` feature is on. The pool above that
 /// ([`FORK_POOL_BASE`]`..NR_MPROCS`) is where 4.6's fork allocates children.
-pub const NR_MPROCS: usize = 32;
+/// Sized from the shared [`NR_SERVED_PROCS`] ceiling so PM's mproc table, VM's
+/// `ClientRegions` table, and SCHED's policy table cannot silently disagree.
+pub const NR_MPROCS: usize = NR_SERVED_PROCS;
 
 /// First slot fork may allocate. Boot servers + reserved stub slots own
 /// `[0, FORK_POOL_BASE)`; forked children land in `[FORK_POOL_BASE, NR_MPROCS)`.
@@ -42,6 +45,9 @@ pub const NR_MPROCS: usize = 32;
 /// empty. A child's slot index is also its kernel proc number, so this range
 /// must stay within the kernel proc table and VM's `MAX_CLIENTS` cap (both hold).
 pub const FORK_POOL_BASE: usize = NR_BOOT_PROCS + NR_STUB_PROCS;
+
+// The fork pool must leave at least one slot above the boot + stub reservations.
+const _: () = assert!(FORK_POOL_BASE < NR_MPROCS);
 
 /// Entry holds a live process.
 pub const MF_IN_USE: u8 = 1 << 0;

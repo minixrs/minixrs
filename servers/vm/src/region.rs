@@ -16,14 +16,17 @@
 //! own (IRQs trap into the kernel, never into VM), so the table is only ever
 //! touched from VM's straight-line receive loop.
 //!
-//! `MAX_CLIENTS = 16` covers every boot process (proc numbers `0..=15`,
-//! including stub D at `14`). Phase 4's `fork` will churn proc numbers past
-//! this cap and revisit the keying; a 1024-slot table (`NR_PROCS`) would burn
-//! ~512 KiB of BSS — 128 frames the ELF loader would map at boot — for no
-//! benefit while only the boot stubs exist.
+//! `MAX_CLIENTS` is sized from the shared [`NR_SERVED_PROCS`] ceiling so the
+//! table covers the whole proc-number range the user-space servers track: the
+//! boot procs and stubs `0..15` plus PM's fork pool `[15, NR_SERVED_PROCS)`
+//! (`VM_FORK` records a child's inherited regions keyed by its proc number). A
+//! full `NR_PROCS`-slot table would burn hundreds of KiB of BSS the ELF loader
+//! must map at boot; the shared ceiling keeps it right-sized and in lockstep
+//! with PM's mproc table.
 
 use core::cell::UnsafeCell;
 
+use minixrs_kernel_shared::com::NR_SERVED_PROCS;
 use minixrs_kernel_shared::error::{EINVAL, ENOMEM};
 
 /// Fixed heap origin. Until PM supplies a real per-process memory layout
@@ -44,15 +47,20 @@ pub const MMAP_BASE: u64 = 0x0200_0000;
 /// aarch64 4 KiB page.
 const PAGE_SIZE: u64 = 4096;
 
-/// Proc-number range the table can key. Boot procs are `0..=15`; PM allocates
-/// forked children from the pool above that (kernel proc-nr = PM mproc slot,
-/// `[16, 32)` — see `servers/pm/src/mproc.rs`), so the table must cover the
-/// whole fork pool for `VM_FORK` to record a child's inherited regions.
-const MAX_CLIENTS: usize = 32;
+/// Proc-number range the table can key. Boot procs and stubs occupy `0..15`; PM
+/// allocates forked children from the pool above that (kernel proc-nr = PM mproc
+/// slot, `[15, NR_SERVED_PROCS)` — see `servers/pm/src/mproc.rs`), so the table
+/// must cover the whole fork pool for `VM_FORK` to record a child's inherited
+/// regions. Derived from the shared ceiling; the guard below rejects any local
+/// under-sizing that would leave a PM-allocatable child unaddressable here.
+const MAX_CLIENTS: usize = NR_SERVED_PROCS;
 
-/// Regions tracked per process: one heap plus a few `mmap` regions in the
-/// spare slots.
-const MAX_REGIONS: usize = 4;
+const _: () = assert!(MAX_CLIENTS >= NR_SERVED_PROCS);
+
+/// Regions tracked per process: one heap plus several `mmap` regions in the
+/// spare slots. Sixteen leaves room for a loader's segments, a heap, a stack,
+/// and a handful of anonymous mmaps once Phase 5 runs real programs.
+const MAX_REGIONS: usize = 16;
 
 /// What a region is for. `Unused` marks a free slot.
 #[derive(Copy, Clone, PartialEq, Eq)]

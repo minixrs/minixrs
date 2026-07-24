@@ -26,6 +26,8 @@
 
 use core::cell::UnsafeCell;
 
+use minixrs_kernel_shared::com::NR_SERVED_PROCS;
+
 /// Managed priority band. Matches the kernel's `SRV_Q` so a CPU-bound managed
 /// proc round-robins with the kernel-scheduled boot procs / stubs rather than
 /// sinking behind them (see the module note on deferred priority aging).
@@ -35,10 +37,17 @@ pub const USER_Q: u8 = 8;
 /// often, making the delegation round-trip visible in the boot trace.
 pub const QUANTUM: i32 = 5;
 
-/// Per-proc policy-state table capacity. Covers every boot proc plus the stubs;
-/// no allocator, so this is a hard cap (a new proc past it is simply left
-/// unmanaged — it stays blocked, the user-space equivalent of "can't schedule").
-const CAP: usize = 16;
+/// Per-proc policy-state table capacity. Unlike PM's mproc table and VM's region
+/// table, this one is associative (it stores `proc_nr` as a field and scans),
+/// not proc-nr-indexed — so `CAP` is a count of concurrently-managed procs. It
+/// is sized from the shared [`NR_SERVED_PROCS`] ceiling, which over-covers the
+/// delegatable set (every delegatable proc-nr lies in `[0, NR_SERVED_PROCS)`, and
+/// boot procs plus SCHED itself stay kernel-scheduled and never land here). No
+/// allocator, so this is a hard cap: a new proc past it is simply left unmanaged
+/// — it stays blocked, the user-space equivalent of "can't schedule".
+const CAP: usize = NR_SERVED_PROCS;
+
+const _: () = assert!(CAP >= NR_SERVED_PROCS);
 
 /// One managed proc's scheduling state. `in_use == false` marks a free slot.
 #[derive(Copy, Clone)]
