@@ -134,6 +134,9 @@ impl Proc {
     ///
     /// The slot is marked `RTS_SLOT_FREE` so the scheduler can recognize it
     /// as unallocated until [`super::init`] populates the boot-image slots.
+    // `Proc` embeds `rts_flags: AtomicU32`, but this must stay a `const` for the
+    // `[const { Proc::EMPTY }; N]` array-repeat init in `table.rs`.
+    #[allow(clippy::declare_interior_mutable_const)]
     pub const EMPTY: Self = Self {
         regs: ArchRegisterFrame::EMPTY,
         nr: ProcNr::new(0),
