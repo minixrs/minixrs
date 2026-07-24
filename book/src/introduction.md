@@ -16,8 +16,9 @@ servers, user-space drivers, and a fine-grained privilege model — while droppi
 - **Message passing** — MINIX 3's six IPC primitives; five are live (SEND,
   RECEIVE, SENDREC, NOTIFY, SENDNB), SENDA is still a stub.
 - **User-space servers** — PM, VFS, VM, RS, DS, SCHED run as separate processes.
-- **User-space drivers** — VirtIO (MMIO on aarch64, PCI on x86_64).
-- **aarch64 first** (Apple Silicon / QEMU virt), x86_64 secondary.
+- **User-space drivers** — VirtIO drivers as separate processes (planned; see the
+  [Roadmap](roadmap.md)).
+- **aarch64 first** (Apple Silicon / QEMU virt); x86_64 planned.
 - **ABI-preserving** — message layout, endpoints, and call numbers track MINIX 3.
 
 ## Status
@@ -32,10 +33,12 @@ in QEMU. Phase 5 — a musl libc fork and the first file systems, ending in a C
 
 ## About this book
 
-This book is the canonical, source-derived documentation for minix.rs. It is
-being written page by page from the actual kernel and server code.
+This book is the canonical, source-derived documentation for minix.rs, written
+from the actual kernel and server code. Chapters describe the system in the
+present tense only for what boots today; forward-looking design is collected in
+the [Roadmap](roadmap.md).
 
-> **Note:** The repository's `docs/` directory holds the original hand-written
-> bootstrap notes used to plan the project. Those are historical reference
-> material and will be retired as the corresponding source-driven pages land
-> here.
+> **Note:** The repository's `docs/` directory once held hand-written bootstrap
+> notes used to plan the project; those have been ported into this book and
+> retired. Only the planning tree remains there — `docs/plan.md` (the live phase
+> tracker) and `docs/plans/` (per-phase slice histories).
