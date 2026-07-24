@@ -14,7 +14,7 @@ of its own PR, and move `◀ next` to whichever chunk you intend to take next.
 
 ---
 
-## Chunk 1: CI QEMU smoke job ◀ ready (branch feature/ci-qemu-smoke, pending merge)
+## Chunk 1: CI QEMU smoke job ✓ shipped (PR #33, merged 2026-07-24)
 
 **Goal:** the kernel's `target_os = "none"` modules currently have zero CI
 coverage — every Phase 2–4 regression was caught by hand-running QEMU. One
@@ -52,7 +52,7 @@ MIT/Apache-2.0 — but it is the wrong tool for this chunk's assertion
 not remove the kernel's `#[cfg(target_os = "none")]` gating either (see
 chunk 7). Revisit as a future in-QEMU unit-test chunk.
 
-## Chunk 2: mdBook content port + legacy docs retirement ◀ next
+## Chunk 2: mdBook content port + legacy docs retirement ◀ ready (branch docs/book-port-kernel, pending merge)
 
 **Goal:** the mdBook in `book/` is the canonical documentation, but its
 architecture/IPC pages are stubs while the real content sits in legacy
