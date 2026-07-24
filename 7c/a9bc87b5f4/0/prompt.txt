@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b6cj7wwe2</task-id>
+<tool-use-id>toolu_01GYLY6uvApZycjr1YGjXTEu</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/f38be5ad-a4fe-4792-82a4-13b2f0bc440c/tasks/b6cj7wwe2.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll for red-proof qemu-smoke result" completed (exit code 0)</summary>
+</task-notification>
