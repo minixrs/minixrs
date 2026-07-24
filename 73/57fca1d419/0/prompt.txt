@@ -1,0 +1,392 @@
+work on @docs/plans/phase-5-prep.md chunk 6
+
+---
+
+<task-notification>
+<task-id>acddf3cd808571bdf</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/243de110-a82f-4595-a741-db0a3434ffa4/tasks/acddf3cd808571bdf.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore kernel internals for Phase 5" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Findings below.
+
+## 1. User-memory copy paths
+
+**The entire user-copy surface is two functions**, both in `/Users/kevinbarnard/src/minixrs/kernel/src/ipc/message.rs`:
+- `copy_msg_from_user(va) -&gt; Result&lt;Message, i32&gt;` — message.rs:35, a bounds check then `core::ptr::read_volatile(va as *const Message)` (message.rs:41)
+- `copy_msg_to_user(va, &amp;Message)` — message.rs:48, `write_volatile` (message.rs:54)
+
+Both are **direct dereferences of the active TTBR0** — no HHDM walk, no cross-AS translation. There is no `copy_from_user`/`copy_to_user` for arbitrary buffers, and no cross-address-space copy helper anywhere. A grep for `read_volatile|write_volatile|copy_nonoverlapping` outside UART/GIC/MMU turns up only these two plus three *kernel-side* HHDM copies (`elf.rs:189`, `do_fork.rs:218`, `userland.rs:537`) — all of which copy into freshly-allocated frames via `phys_to_hhdm`, not into a live user AS.
+
+**Validation** is `user_va_ok(va, len)` at `/Users/kevinbarnard/src/minixrs/kernel-shared/src/message.rs:64`: rejects `va &lt; 8`, non-8-aligned, and `va + len &gt; USER_VA_TOP` (`1 &lt;&lt; 48`). It is a **pure range/alignment predicate — it does not consult the page tables.**
+
+**Call sites:**
+- Send/sendrec request read: `/Users/kevinbarnard/src/minixrs/kernel/src/ipc/send.rs:75`
+- Kernel-call request read + reply write: `/Users/kevinbarnard/src/minixrs/kernel/src/system/mod.rs:122` and `mod.rs:141`
+- Receive: stashes the VA only — `/Users/kevinbarnard/src/minixrs/kernel/src/ipc/receive.rs:64` sets `deliver_msg_vir = user_msg_va`
+- **Deferred flush:** `flush_deliver_msg(p)` at `/Users/kevinbarnard/src/minixrs/kernel/src/ipc/mod.rs:276-286`, called from `/Users/kevinbarnard/src/minixrs/kernel/src/proc/sched.rs:321` — **after** `switch_ttbr0_with_asid` on line 320. The ordering is load-bearing and commented at sched.rs:311: the flush writes through the newly-installed TTBR0, so it only works because the receiver's AS is already live. Result is `let _ = ...` — errors are silently dropped (mod.rs:280-284 acknowledges there's no place to signal; notes phase 3 "adds MF_MSGFAILED", which does not exist).
+
+**Bad pointer today → kernel panic, no recovery.** The doc comment at message.rs:18-22 and :29-34 states this outright: in-range-but-unmapped VAs are expected to fault and panic. There is **no fault fixup / exception table** anywhere (`grep fixup|extable|__ex_table` in kernel/src returns nothing).
+
+**Same-EL vectors:** `/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/vectors.S`. Slots 4-7 (Current EL with SP_ELx, i.e. where an EL1 data abort from a user-copy lands) are `EXC_ENTRY el1h_sync, 4` etc. (vectors.S:80-86) — the generic macro that dumps registers and calls `exception_entry`, which is `-&gt; !` and `panic!`s unconditionally (`/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/exception.rs:54-75`). **It does not inspect ELR to see if the fault was inside a user-copy, and there is no way to return.** Only slot 8 (`el0_64_sync` → `trap.S`) and slot 9 (`el0_64_irq` → `interrupt.S`) are wired to real handlers; `do_page_fault` (exception.rs:148) is EL0-only and explicitly bails to `el0_sync_unexpected` for any EC other than 0x20/0x24, and also for permission faults (exception.rs:176-178).
+
+So for Phase 5: a fault-recovering copy needs (a) a real `el1h_sync` handler, (b) an ELR fixup table or a "current copy in progress" per-CPU marker, and (c) an `MF_MSGFAILED`-equivalent to report the failure back.
+
+## 2. Kernel call surface
+
+Numbers: `/Users/kevinbarnard/src/minixrs/kernel-shared/src/callnr.rs`, `KERNEL_CALL = 0x600` (callnr.rs:11). All 18 exist as numbers:
+
+| # | call | line | status |
+|---|---|---|---|
+| +0 | SYS_GETINFO | :14 | **real** (`do_getinfo.rs`, GET_WHOAMI only) |
+| +1 | SYS_PRIVCTL | :15 | **real** (4.5) |
+| +2 | SYS_FORK | :16 | **real** (4.6) |
+| +3 | SYS_EXEC | :24 | **real** (4.7) |
+| +4 | SYS_EXIT | :25 | **real** (4.5) |
+| +5 | **SYS_COPY** | :26 | **ENOSYS stub** |
+| +6 | **SYS_SAFECOPY** | :27 | **ENOSYS stub** |
+| +7 | **SYS_IRQCTL** | :28 | **ENOSYS stub** |
+| +8 | SYS_VMCTL | :29 | **real** (3.3) |
+| +9 | SYS_SCHEDULE | :30 | **real** (4.3) |
+| +10 | SYS_SETALARM | :31 | **real** (4.4) |
+| +11 | **SYS_TIMES** | :32 | **ENOSYS stub** |
+| +12 | **SYS_DIAGCTL** | :33 | **ENOSYS stub** |
+| +13 | **SYS_SETGRANT** | :34 | **ENOSYS stub** |
+| +14 | SYS_SCHEDCTL | :40 | **real** |
+| +15 | SYS_KILL | :47 | **real** (4.5) |
+| +16 | SYS_GETKSIG | :53 | **real** |
+| +17 | SYS_ENDKSIG | :56 | **real** |
+
+All six stubs are one-line `ENOSYS` macros in `/Users/kevinbarnard/src/minixrs/kernel/src/system/stubs.rs:25-38`.
+
+**Dispatch** (`/Users/kevinbarnard/src/minixrs/kernel/src/system/mod.rs`):
+- Entry `kernel_call_sendrec` (mod.rs:91) — SENDREC-to-SYSTEM fast path, diverted from `ipc::dispatch` (mod.rs:179-188 of ipc/mod.rs). Checks `ipc_to` bit for SYSTEM (mod.rs:115-120), copies request in, stamps `m_source` with the verified caller endpoint (mod.rs:130), dispatches, writes reply back to the same VA.
+- `kernel_call_dispatch` (mod.rs:171) — range-checks `m_type - KERNEL_CALL` against `NR_SYS_CALLS`, gates on `k_call_mask` (mod.rs:188), then **two arms**:
+  - **target-taking** match at mod.rs:194-206 — gets `&amp;mut [Proc; N_PROC_SLOTS]` + `&amp;mut [Priv]` + `caller_nr`: VMCTL, SCHEDULE, SCHEDCTL, KILL, GETKSIG, ENDKSIG, EXIT, FORK, EXEC, PRIVCTL (10 calls). Target resolution via `resolve_target` (mod.rs:65).
+  - **caller-local** `dispatch_caller_local(caller: &amp;mut Proc, caller_priv: &amp;Priv, msg)` at mod.rs:219 — GETINFO, COPY, SAFECOPY, IRQCTL, SETALARM, TIMES, DIAGCTL, SETGRANT (8 calls).
+- Guard: `const _: () = assert!(NR_KERN_CALLS_PHASE4 == 18, ...)` at mod.rs:220-223 — **adding a SYS_\* is a compile error until you add an arm.** Note it also implicitly forces new calls to be caller-local unless you also touch the target arm.
+
+**Sizing:** `NR_KERN_CALLS_PHASE4 = 18` (callnr.rs:72), `NR_SYS_CALLS = 32` (callnr.rs:77, asserted `&gt;= NR_KERN_CALLS_PHASE4` and multiple-of-32). `K_CALL_MASK_CHUNKS = NR_SYS_CALLS / 32 = 1` (`/Users/kevinbarnard/src/minixrs/kernel/src/proc/priv_struct.rs:28`) — so `k_call_mask` is a single `u32` today. **14 free call slots before the mask needs a second word.**
+
+**Who gets what:** `SRV_T` privs get `fill_bits(&amp;mut pr.k_call_mask, NR_KERN_CALLS_PHASE4)` — all 18 (`/Users/kevinbarnard/src/minixrs/kernel/src/proc/table.rs:485`). The shared USER priv gets `k_call_mask.fill(0)` — **zero kernel calls**, `trap_mask = USR_T`, `ipc_to = {PM}` only (table.rs:410-413). init runs on the USER priv (table.rs:454-462).
+
+## 3. ELF loader
+
+`/Users/kevinbarnard/src/minixrs/kernel/src/boot_image/elf.rs`:
+- **Interface:** `pub fn load_into(elf: &amp;[u8], aspace: &amp;mut AddrSpace) -&gt; Result&lt;u64, ElfError&gt;` (elf.rs:90) — returns `e_entry`. **Input is a plain byte slice; it does not care where the bytes came from.** All field reads are explicit `from_le_bytes` (elf.rs:70-86) precisely because the input carries no alignment guarantee (elf.rs:13-15).
+- **Assumptions:** `ET_EXEC` only (elf.rs:103, `BadType`), ELFCLASS64 + LSB + EM_AARCH64, `e_phentsize == 56`. Per segment: **`p_vaddr` AND `p_offset` must both be 4 KiB-aligned** and `p_filesz &lt;= p_memsz` (elf.rs:148, `Misaligned`); `p_offset + p_filesz &lt;= elf.len()`; **W^X enforced** (elf.rs:162, `WriteExec`). No PIE/ET_DYN, no relocations, no PT_INTERP, no PT_TLS handling, no `p_align` respect beyond page.
+- **Mapping:** one `alloc_frame()` per page of `p_memsz`, copy via `phys_to_hhdm`, `flush_icache_range` if executable, `aspace.map_page` (elf.rs:172-197). BSS is free because frames are zeroed on hand-out.
+
+Wrapper: `/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/userland.rs:339` — `pub(crate) unsafe fn load_exec_image(elf: &amp;[u8]) -&gt; Option&lt;ExecImage&gt;`; `ExecImage { ttbr0_pa, asid, entry, sp_top }` (userland.rs:319-324). Builds `AddrSpace::new()`, loads, maps **exactly one** RW stack page at `SERVER_STACK_VA`, allocates an ASID, `mem::forget`s the AddrSpace. On any failure it runs `destroy_addrspace_with_leaves` (userland.rs:389) so nothing leaks. **`sp_top = SERVER_STACK_VA + PAGE_SIZE` — a single 4 KiB stack, no argv/envp/auxv construction at all.**
+
+`SYS_EXEC` (`/Users/kevinbarnard/src/minixrs/kernel/src/system/do_exec.rs:71`): payload is `[0..4] = target endpoint`, `[4..4+EXEC_NAME_LEN] = NUL-padded name`. It resolves the name via `BootImage::get().module_by_name(name)` (do_exec.rs:106) which returns a `&amp;'static [u8]` into the `include_bytes!`-embedded MXBI archive (`/Users/kevinbarnard/src/minixrs/kernel/src/boot_image/mod.rs:34, :113`). Rejects `SELF`/caller (active-TTBR0 hazard), requires target be a clean `RTS_RECEIVING` blocked receiver with no `MF_DELIVERMSG` (do_exec.rs:116). Loads new image first (untouched-on-failure), then swaps, tears down old AS via `do_exit::teardown_addrspace`, `rts_unset(RTS_RECEIVING)`.
+
+**Could it load ELF bytes from a user-space server?** The loader itself, yes — it takes `&amp;[u8]` and makes no static-lifetime demand. What's missing:
+1. **A way to get the bytes.** There is no bulk user→kernel copy. You'd need `SYS_SAFECOPY`/grants or a VM-mapped shared buffer, plus the fault-recovering copy from §1.
+2. **Kernel-side staging.** No kernel heap (`no_std`, no allocator visible) — you'd need to stage into frames from `mm::alloc_frame` and hand `load_into` a slice over the HHDM alias, or teach it a chunked/reader interface.
+3. **Hardening.** Today `ElfError` variants are documented as "all fatal at boot (the embedded VM ELF is produced by our own build, so any of these means a build/loader bug)" (elf.rs:23-24) — the checks exist and are sound, but a hostile-input review is warranted (notably `e_phoff + i*56` arithmetic is checked only by `rd_*`'s slice `get`, which is fine, and `p_memsz.div_ceil(PAGE_SIZE)` has no cap → a huge `p_memsz` is a frame-exhaustion DoS, bounded only by `alloc_frame` returning `None`).
+4. `ET_EXEC` + `p_offset` page-alignment means musl-produced binaries need `-static` and a linker script matching `servers/*/user.ld`; a stock musl static link will usually satisfy `ET_EXEC` but **not necessarily the `p_offset` page-alignment requirement** — that's the likeliest breakage.
+5. The `SYS_EXEC` payload carries a 16-byte name, not a pointer/length — the message ABI would need a new sub-form.
+
+## 4. Console output
+
+- `/Users/kevinbarnard/src/minixrs/kernel/src/uart.rs` is 9 lines: `pub use crate::arch::Uart;`.
+- Backend `/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/uart.rs`: `Pl011` at phys `0x0900_0000` (uart.rs:24), reached via HHDM; `set_base(virt)` called once from `main.rs:45`. `putc` polls `FR.TXFF` then writes `DR`; **drops bytes silently if base is 0** (uart.rs:48-50). `impl fmt::Write` does LF→CRLF (uart.rs:64-74).
+- **There are no `print!`/`println!`/`kprint!` macros.** Every site is `writeln!(Uart::new(), ...)` or `writeln!(Pl011::new(), ...)`. `Uart::new()` is stateless (just reloads the atomic base), so it's constructed ad-hoc everywhere. Adding a macro layer is a clean, low-risk Phase 5 nicety.
+- **There is no user/server path to the console. None.** `SYS_DIAGCTL` exists as number `KERNEL_CALL+12` and is dispatched (mod.rs:234) but returns `ENOSYS` (stubs.rs:37). Grepping all of `servers/`, `drivers/`, `userland/`, `server-rt/`, `minix-ipc/` for `uart|Uart|PL011|0x0900_0000` returns **zero hits**, and for `DIAGCTL|SYS_COPY|SAFECOPY|SETGRANT|SYS_TIMES|IRQCTL` also **zero hits**. Servers are observable only through kernel-emitted traces (`[ksys N]` at mod.rs:149, `[pf]` at exception.rs:211, per-call traces in `do_exec.rs:169` etc.).
+- `drivers/virtio-console/src/main.rs` is a 5-line placeholder. `servers/vfs/src/main.rs` is 80 lines; `fs/mfs`, `fs/pfs`, `userland/sh`, `userland/coreutils` are all 5-line stubs.
+
+So **`SYS_DIAGCTL` is the natural first Phase 5 deliverable** — it's already numbered, already in the `k_call_mask` (SRV_T gets all 18), already routed to a caller-local arm with the right signature, and needs only a body. But note the payload is 96 bytes inline, so a message-inline `diagctl(buf[..N])` needs no user-copy machinery at all — an important sequencing point: **you can get server printf working before you build grants.**
+
+## 5. Grant plumbing
+
+`Priv` **already has both fields**, unused: `/Users/kevinbarnard/src/minixrs/kernel/src/proc/priv_struct.rs:81` `pub grant_table: u64` (documented "Address of the grant table within the owner's address space (set by `SYS_SETGRANT`); slice 2.6 starts honoring this" — that never happened) and `:83` `pub grant_entries: u32`. Both zeroed in `Priv::EMPTY` (priv_struct.rs:101-102). The file carries a blanket `#![allow(dead_code)]` at priv_struct.rs:6 covering exactly these forward declarations.
+
+**Nothing else exists.** Full grep for `grant|Grant|safecopy|SAFECOPY|GRANT` across `kernel/src/` yields only: those two fields + their EMPTY initializers, the two stub names (`stubs.rs:26, :38`), the two dispatch arms (`mod.rs:227, :235`), the import list (`mod.rs:38-39`), and incidental prose uses of the English word "granted" in `do_privctl.rs:13`, `do_sig.rs:27`, `do_schedule.rs:21,24`, `do_vmctl.rs:22`. **No `GrantEntry` type, no CPF flags, no grant validation, no `verify_grant`, nothing in `kernel-shared`.** `callnr.rs:287` explicitly notes DS's protocol was designed so "no grants / cross-AS copy are needed."
+
+## Phase 5 implications (condensed)
+
+Three independent gaps, in increasing order of cost:
+1. **Console for servers** — `SYS_DIAGCTL` with an inline-payload buffer. No new infrastructure needed; the number, the mask bit, and the dispatch arm all already exist.
+2. **Grants/safecopy** — `Priv.grant_table`/`grant_entries` are declared but there is no grant type, no `SYS_SETGRANT` body, and no cross-AS copy primitive. `AddrSpace::walk_pt` (`/Users/kevinbarnard/src/minixrs/kernel/src/arch/aarch64/addrspace.rs:129`) plus `map_page_in`'s "all table access is via HHDM; the target AS need not be the active one" property (addrspace.rs:172) gives you the mechanism for a page-at-a-time cross-AS copy without switching TTBR0.
+3. **Fault-recoverable kernel access to user memory** — currently absent by design and by hardware wiring. Requires a real `el1h_sync` handler replacing `EXC_ENTRY el1h_sync, 4` (vectors.S:80), plus a fixup mechanism. This is the prerequisite for trusting *any* user-supplied pointer, and also for making `flush_deliver_msg`'s currently-swallowed error (`ipc/mod.rs:284`) meaningful.</result>
+<usage><subagent_tokens>77956</subagent_tokens><tool_uses>37</tool_uses><duration_ms>194154</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a3230e5f35797eff1</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/243de110-a82f-4595-a741-db0a3434ffa4/tasks/a3230e5f35797eff1.output</output-file>
+<status>completed</status>
+<summary>Agent "Survey local musl fork state" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## musl-minix fork survey (`/Users/kevinbarnard/src/learn/musl-minix/`)
+
+### 1. Git state
+
+- **Current branch:** `main` (clean, up to date with `origin/main`); one untracked file: `linux-inventory.md`.
+- **Branches:** `main` (working, tracks `origin/main`) and `master` (tracks `upstream/master`). Remotes: `origin` (your fork) + `upstream` (`git.musl-libc.org/git/musl`), which also carries `upstream/rs-1.0`.
+- **Custom commits:** exactly **1** commit on `main` beyond `master` — `cd9dde01 add CLAUDE.md with fork workflow documentation` (62-line CLAUDE.md, only file changed). `main` is not behind `master`.
+- **Upstream position:** `master` == `upstream/master` == `v1.2.5-102-g1b76ff07`, i.e. **102 upstream commits past the `v1.2.5` tag** (`VERSION` file still says `1.2.5`). `main` is `v1.2.5-103`.
+- **MINIX-specific files:** **none yet.** No `src/minix/`, no `arch/*/minix`, no arch changes, no `.c`/`.h`/build modifications at all. The only MINIX-related artifact is the untracked `/Users/kevinbarnard/src/learn/musl-minix/linux-inventory.md` (533 lines) — a prior, quite thorough Linux-dependency inventory keyed to x86_64 + aarch64 (sections: syscall infra, per-subsystem syscall usage, `src/linux/`, hardcoded `/proc` and `/dev` paths, vDSO, auxv, ldso, CRT, arch asm, and a "porting priority" summary). Worth reading into the Phase 5 session; note one stale detail — it claims `src/thread/aarch64/__set_thread_area.s`, but in this tree (post-1.2.5) it is `__set_thread_area.**c**`.
+- No build artifacts present: no `obj/`, no `lib/`, no `config.mak` — repo is pristine/unbuilt.
+
+### 2. Build shape
+
+- Classic musl: `./configure` (hand-written sh, not autoconf) writes `config.mak`, then GNU `make`. `make install` → `--prefix` (default `/usr/local/musl`). No test suite in-tree.
+- Source globbing in `/Users/kevinbarnard/src/learn/musl-minix/Makefile` (lines 21–29): `SRC_DIRS = src/* src/malloc/$(MALLOC_DIR) crt ldso`, arch overrides via `src/&lt;sub&gt;/$(ARCH)/*.[csS]`, and `REPLACED_OBJS = $(subst /$(ARCH)/,/,$(ARCH_OBJS))` filters the generic twin out. **This path-substitution rule is the natural hook for MINIX overrides** — an `ARCH=aarch64-minix`-style arch dir would pick up replacements for free.
+- Also: `-include $(srcdir)/arch/$(ARCH)/arch.mak` (Makefile ~line 79) is a per-arch build hook; `arch/aarch64/` has **no** `arch.mak` today, so that file is a free extension point.
+- **Important constraint for a MINIX port:** `configure` has *no OS dimension*. Lines 324–343 derive `ARCH` from the CPU portion of the triple only (`aarch64*) ARCH=aarch64`), and the `-linux-musl` OS component is discarded. There is no `--target=aarch64-minix` path; a MINIX variant has to arrive as a new `ARCH` name, a `config.mak` override, or added case arms.
+- **Arch dirs (19):** `aarch64 arm generic i386 loongarch64 m68k microblaze mips mips64 mipsn32 or1k powerpc powerpc64 riscv32 riscv64 s390x sh x32 x86_64`. `aarch64` is present and complete.
+- **`syscall_arch.h` for aarch64:** `/Users/kevinbarnard/src/learn/musl-minix/arch/aarch64/syscall_arch.h` (79 lines). Shape: `__SYSCALL_LL_E/O` identity macros, then `__asm_syscall(...)` expanding to `__asm__ __volatile__("svc 0" : "=r"(x0) : __VA_ARGS__ : "memory","cc")`, wrapped by seven `static inline long __syscall0..__syscall6` that pin `x8` = syscall number and `x0..x5` = args. Tail of file defines `VDSO_USEFUL`, `VDSO_CGT_SYM "__kernel_clock_gettime"`, `VDSO_CGT_VER "LINUX_2.6.39"`, and `IPC_64 0`.
+  - **A MINIX port guts exactly this file**: replace the `svc 0` register ABI with MINIX's trap/IPC mechanism, drop the three `VDSO_*` defines (no vDSO on MINIX — `src/internal/vdso.c` keys off `VDSO_USEFUL`).
+  - Two companions must move with it: `/Users/kevinbarnard/src/learn/musl-minix/src/internal/syscall.h` (421 lines — variadic `__syscall`/`syscall` dispatch, `__syscall_cp*`, socketcall, time64 remaps, `__sys_open` → `openat` fallback, `__sys_pause` → `SYS_pause`-or-`SYS_ppoll`) and `/Users/kevinbarnard/src/learn/musl-minix/src/internal/syscall_ret.c`, which hardcodes the Linux error convention `if (r &gt; -4096UL) { errno = -r; return -1; }`.
+  - Syscall numbers come from `/Users/kevinbarnard/src/learn/musl-minix/arch/aarch64/bits/syscall.h.in` (307 lines) — the Makefile `sed`s `__NR_` → `SYS_` into `obj/include/bits/syscall.h`.
+
+### 3. Size / licensing
+
+- **19 MB total**, of which **7.4 MB is `.git`** (~11 MB working tree). 1537 `.c` files, 304 `.s/.S` files, 68 files under `src/linux/`.
+- **License: MIT.** `/Users/kevinbarnard/src/learn/musl-minix/COPYRIGHT` opens "musl as a whole is licensed under the following standard MIT license… Copyright © 2005-2020 Rich Felker, et al."
+- **No GPL anywhere**: `grep -ril "GNU General Public"` across the tree (excluding `.git`) returns zero hits. Vendoring into minix.rs is license-clean; the COPYRIGHT file lists BSD-2-clause/public-domain provenance for a few math and string routines, all permissive.
+
+### 4. CRT files and the entry path (aarch64)
+
+- `/Users/kevinbarnard/src/learn/musl-minix/crt/crt1.c` (static, non-PIE — the one you want), plus `Scrt1.c` (dynamic PIE) and `rcrt1.c` (static PIE, pulls in `ldso/dlstart.c`). aarch64 `.init`/`.fini` glue: `/Users/kevinbarnard/src/learn/musl-minix/crt/aarch64/crti.s` and `crtn.s` (trivial `stp x29,x30`/`ldp` frame push/pop).
+- **Entry chain:**
+  1. `_start` is generated by the asm string in `/Users/kevinbarnard/src/learn/musl-minix/arch/aarch64/crt_arch.h`: zeroes `x29`/`x30`, `mov x0, sp`, takes `_DYNAMIC`'s address into `x1` (weak/hidden), aligns `sp` to 16, `b _start_c`.
+  2. `_start_c(long *p)` in `crt1.c` reads `argc = p[0]`, `argv = p+1`, calls `__libc_start_main(main, argc, argv, _init, _fini, 0)`.
+  3. `/Users/kevinbarnard/src/learn/musl-minix/src/env/__libc_start_main.c`: `__init_libc(envp, argv[0])` → walks `envp` to find **auxv** immediately after it, caches `AT_HWCAP`/`AT_SYSINFO`/`AT_PAGESZ`/`AT_EXECFN`, calls `__init_tls(aux)` and `__init_ssp(aux[AT_RANDOM])`, and — only when setuid/`AT_SECURE` — does a `SYS_poll`/`SYS_ppoll` + `__sys_open("/dev/null")` fd-sanitizing dance. Then stage2 runs `__libc_start_init()` (`_init()` + `.init_array`) and `exit(main(argc, argv, envp))`.
+- **What a MINIX port must touch for a static hello-world:**
+  - **Initial stack layout.** `_start`/`_start_c`/`__init_libc` assume the Linux SysV layout `[argc][argv...][NULL][envp...][NULL][auxv pairs][0]`. If MINIX hands over a different layout, either the kernel/exec side matches Linux or `crt_arch.h` + `__init_libc` need adaptation. This is the single biggest CRT decision.
+  - **auxv.** `static_init_tls()` in `/Users/kevinbarnard/src/learn/musl-minix/src/env/__init_tls.c` needs `AT_PHDR`/`AT_PHNUM`/`AT_PHENT` to find `PT_TLS` and `PT_GNU_STACK`; `libc.page_size` comes from `AT_PAGESZ`. Without a real auxv you must synthesize one or patch `__init_tls`.
+  - **TLS/thread pointer.** Good news for aarch64: `/Users/kevinbarnard/src/learn/musl-minix/src/thread/aarch64/__set_thread_area.c` is a plain `msr tpidr_el0, %0` — **no syscall**. (It does iterate `libc.auxv` to mask SME `AT_HWCAP` bits, so `libc.auxv` must be a valid, NULL-terminated array.) Contrast x86_64, whose `__set_thread_area.s` needs `SYS_arch_prctl`. **aarch64 is materially the easier first target.**
+  - **`__init_ssp`** is a weak no-op unless built with stack protector — leave it.
+  - No dynamic linker involvement: link `crt1.o crti.o … crtn.o` + `libc.a`, `_DYNAMIC` stays weak-undefined/zero, `src/ldso/` and `ldso/` never enter the link.
+
+### 5. Minimal STATIC hello-world: what actually links
+
+- **Yes, the build produces `lib/libc.a`** (`STATIC_LIBS = lib/libc.a`, rule at Makefile:165 → `$(AR) rc`), alongside `lib/crt1.o`, `lib/crti.o`, `lib/crtn.o`, `lib/Scrt1.o`, `lib/rcrt1.o`, empty stub archives (`libm.a`, `libpthread.a`, …), and `lib/libc.so`. **`./configure --disable-shared` is supported** (configure lines 35/158) — use it to skip the whole `src/ldso` + `libc.so` link, which is the right Phase 5 posture.
+- **The stdio write path is `writev`, not `write`:** `/Users/kevinbarnard/src/learn/musl-minix/src/stdio/__stdio_write.c` builds a 2-element `struct iovec` (buffered residue + caller data) and loops on `syscall(SYS_writev, f-&gt;fd, iov, iovcnt)`. Plain `write()` (`src/unistd/write.c`, `syscall_cp(SYS_write, …)`) is only linked if the program calls `write()`/`fwrite` on an unbuffered path directly. **So `writev` is the first wrapper to implement, not `write`.**
+- **`stdout`'s initial `.write` is `__stdout_write`, not `__stdio_write`** (`/Users/kevinbarnard/src/learn/musl-minix/src/stdio/stdout.c`). On the *first* write it does a raw `__syscall(SYS_ioctl, f-&gt;fd, TIOCGWINSZ, &amp;wsz)` to decide line-buffered vs. full-buffered (`/Users/kevinbarnard/src/learn/musl-minix/src/stdio/__stdout_write.c`), then rebinds `f-&gt;write = __stdio_write`. This is the isatty-equivalent — **`ioctl(TIOCGWINSZ)` is on the hot path even though `isatty()` is never called.** A MINIX stub returning nonzero/error simply forces full buffering, which is harmless.
+- **Link-closure syscall set** for `int main(){puts("hi");}` statically linked (aarch64), tracing referenced objects rather than executed paths:
+
+  | Syscall | Pulled in by | Runtime-critical? |
+  |---|---|---|
+  | `writev` | `__stdio_write` ← `stdout.write` | **yes** |
+  | `ioctl` (`TIOCGWINSZ`) | `__stdout_write` first-write probe | **yes** (may fail benignly) |
+  | `exit_group`, then `exit` in a loop | `/Users/kevinbarnard/src/learn/musl-minix/src/exit/_Exit.c` | **yes** |
+  | `set_tid_address` | `__init_tp` in `__init_tls.c` | **yes** (return value becomes `td-&gt;tid`) |
+  | `mmap` (`SYS_mmap2`→`SYS_mmap`) | `static_init_tls` when `libc.tls_size &gt; sizeof builtin_tls` | only if the program has real TLS; hello-world uses `builtin_tls`, but the code is linked |
+  | `lseek` | `__stdio_seek` ← `stdout.seek`, reached from `__stdio_exit`'s `close_file` when a read buffer is dirty | linked always; not hit for write-only stdout |
+  | `close` | `__stdio_close` ← `stdout.close` | linked always; not hit for `stdout` |
+  | `ppoll` (twice over) | `__init_libc`'s AT_SECURE fd check (aarch64 has no `SYS_poll`) **and** `__sys_pause()` in `exit()`'s recursive-exit guard | linked always; executed only in setuid / double-exit cases |
+  | `openat` | `__sys_open("/dev/null")` in the same AT_SECURE branch | linked, not executed |
+  | `futex` | `__lockfile`/`__unlockfile` → `__futexwait`/`__wake` (`src/thread/__wait.c`, `__wake.c`), reachable because `puts` uses `FLOCK(stdout)` | linked always; `stdout.lock == -1` means single-threaded programs never trap |
+
+- **Malloc is NOT pulled in.** `printf`/`vfprintf`/`puts`/`fputs`/`fwrite` contain zero `malloc`/`free` references (`grep` on `src/stdio/vfprintf.c` is empty) and `stdout`'s buffer is a static `unsigned char buf[BUFSIZ+UNGET]`. So **no `brk`, no `mmap`-for-heap, no `madvise`/`mremap`/`munmap`** for a pure hello-world. The moment the test program calls `malloc`, mallocng (`src/malloc/mallocng/`) drags in `mmap`/`munmap`/`mremap`/`madvise` — worth keeping out of the Phase 5 milestone-1 scope deliberately.
+- **Cancellation machinery is cheap here.** `writev()`'s `syscall_cp` resolves through `/Users/kevinbarnard/src/learn/musl-minix/src/thread/__syscall_cp.c`, whose `__syscall_cp_c` is a **weak alias to a plain `__syscall` passthrough** unless `pthread_create` is linked. So `src/thread/aarch64/syscall_cp.s` (which hardcodes `svc 0`) does not enter a static hello-world link — but it *will* need porting the moment threads appear.
+- **Suggested minimal MINIX wrapper set, in order:** `writev` → `exit_group`/`exit` → `set_tid_address` (can return a constant tid) → `ioctl` (may return `-ENOTTY`) → then `close`, `lseek`, `ppoll`, `openat`, `mmap`, `futex` as link-satisfying stubs that need only be *present*, not correct, for milestone 1.</result>
+<usage><subagent_tokens>48852</subagent_tokens><tool_uses>23</tool_uses><duration_ms>217787</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a4b6b13c827603b8d</task-id>
+<tool-use-id>toolu_017B5zPmpKx8oEopBR7RT87h</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/243de110-a82f-4595-a741-db0a3434ffa4/tasks/a4b6b13c827603b8d.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore shared ABI and servers" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have a complete picture. Here's the structured summary.
+
+---
+
+# minix.rs — Phase 5 (musl + FS) reconnaissance
+
+## 1. `kernel-shared` crate layout
+
+`/Users/kevinbarnard/src/minixrs/kernel-shared/src/` — 8 modules, 1586 lines, `#![no_std]`, no dependencies. Re-exports at `lib.rs:24-25`: `Endpoint, GenNr, PrivId, ProcNr, SysId, Message`.
+
+| Module | Lines | Defines |
+|---|---|---|
+| `message.rs` | 128 | `Message`, `USER_VA_TOP`, `user_va_ok()` |
+| `com.rs` | 204 | Proc numbers, `NR_*` counts, `boot_endpoint()` |
+| `callnr.rs` | 704 | All `m_type` numbering: kernel calls + PM/VM/SEF/DS/SCHED request bases |
+| `endpoint.rs` | 301 | `Endpoint`/`GenNr` aliases, `ProcNr`/`PrivId` newtypes, gen/proc packing |
+| `error.rs` | 96 | 27 negative errnos |
+| `ipc_const.rs` | 62 | `SEND`/`RECEIVE`/`SENDREC`/`NOTIFY`/`SENDNB`/`SENDA`, `NOTIFY_MESSAGE` |
+| `signal.rs` | 47 | `SIGKILL=9`, `SIGSEGV=11`, `SIGTERM=15`, `NSIG=32` (only 3 signals!) |
+| `sys_limits.rs` | 19 | `NR_IO_RANGE=16`, `NR_IRQ=8`, `NR_MEM_RANGE=8` |
+
+### Message layout — `message.rs:33-46`
+```
+#[repr(C, align(8))]
+struct Message { m_source: Endpoint /*i32*/, m_type: i32, payload: [u8; 96] }
+```
+104 bytes, align 8, payload at offset 8 — all three locked by `const _: () = assert!` (`:45-46`) and host tests (`:82-101`). **There are no typed payload accessors** — every server hand-marshals with `payload[a..b].copy_from_slice(&amp;x.to_ne_bytes())` (see `server-rt/src/ds.rs:41`, `sef.rs:49`). Note `to_ne_bytes`/`from_ne_bytes` (native-endian), while MXBI uses explicit LE. Doc comment at `message.rs:23-28` says typed accessors (`as_vfs_read()`) are deferred to servers/userland crates — that decision is still open and directly relevant to a VFS protocol.
+
+### `com.rs` endpoints — **all FS/driver slots already exist**
+Tasks (`:30-38`): `ASYNCM -5`, `IDLE -4`, `CLOCK -3`, `SYSTEM -2`, `HARDWARE -1`.
+Servers (`com.rs:48-58`), contiguous from 0 (deliberately renumbered vs MINIX 3):
+
+`PM 0`, **`VFS 1`**, `RS 2`, **`MEM 3`**, **`TTY 4`**, `DS 5`, **`MFS 6`**, `VM 7`, **`PFS 8`**, `SCHED 9`, `INIT 10`.
+
+- `NR_BOOT_PROCS = 11` (`com.rs:62`), `NR_SERVED_PROCS = 32` (`com.rs:117`, bounds PM's mproc / VM's ClientRegions / SCHED's policy table — all three keyed off this one constant).
+- `NR_PROCS = 1024`, `NR_SYS_PROCS = 64`, `NR_TASKS = 5` (`com.rs:14-18`).
+- Stubs A–D at 11–14 (`:88-95`), `NR_STUB_PROCS = 4`.
+- `EXEC_ONLY_PROC_NR: i32 = -1` (`com.rs:127`) — sentinel for non-boot-server archive modules.
+- **No driver endpoints beyond MEM/TTY.** No BDEV/CDEV/virtio proc numbers, no LOG (RS spawns on demand per `:44-45`).
+
+**Key finding:** `kernel/src/proc/table.rs:140-294` already has full `BootEntry` rows for `memory`(3), `tty`(4), `mfs`(6), `pfs`(8) — `SYS_PROC | PREEMPTIBLE`, `SRV_T` traps, `SRV_Q`. `init_boot_image` (`:448-467`) populates their proc+priv slots at boot; `populate_priv` (`:479-486`) gives every `SRV_T` slot `ipc_to` open to all 16 image slots and the full kernel-call mask. So MFS/MEM already have kernel-side identity, privileges, and IPC rights — they are simply never *loaded* because `kernel/build.rs` doesn't pack an ELF for them.
+
+### `callnr.rs` request-number map and **free ranges**
+
+| Base | Value | Used | File:line |
+|---|---|---|---|
+| `KERNEL_CALL` | `0x600` | `0x600`–`0x611` (18 calls, `NR_KERN_CALLS_PHASE4=18`) | `callnr.rs:11-56` |
+| `PM_RQ_BASE` | `0x700` | `0x700`–`0x704` (`NR_PM_MSGS=5`) | `callnr.rs:172-214` |
+| `VM_RQ_BASE` | `0xC00` | `0xC00`–`0xC04` | `callnr.rs:233-272` |
+| `SEF_RQ_BASE` | `0xD00` | `0xD00`–`0xD01` | `callnr.rs:345-358` |
+| `DS_RQ_BASE` | `0xE00` | `0xE00`–`0xE02` | `callnr.rs:296-319` |
+| `SCHED_RQ_BASE` | `0xF00` | `0xF00`–`0xF03` | `callnr.rs:382-406` |
+| `NOTIFY_MESSAGE` | `0x1000` | hard ceiling | `ipc_const.rs:28` |
+
+**FREE for a VFS/FS/BDEV protocol: `0x800`, `0x900`, `0xA00`, `0xB00`** — four clean 256-wide bands between PM and VM, plus `0x705–0x7FF` and `0x612–0x6FF`. Everything must stay `&lt; NOTIFY_MESSAGE (0x1000)` or `server-rt`'s `classify` misroutes it. Natural allocation: VFS `0x800`, FS/MFS (VFS↔FS protocol) `0x900`, BDEV `0xA00`, CDEV/TTY `0xB00`. Each existing base carries `const _: () = assert!` ordering guards (e.g. `callnr.rs:218-220`, `324-325`, `411-413`) — new bases should follow the same pattern.
+
+### `error.rs` — **the musl bridge's biggest ABI risk**
+Present: `OK 0`, `EGENERIC -1`, `EPERM -2`, `ENOENT -3`, `ESRCH -4`, `EINTR -5`, `EIO -6`, `ENXIO -7`, `E2BIG -8`, `ENOEXEC -9`, `EBADF -10`, `ECHILD -11`, `EAGAIN -12`, `ENOMEM -13`, `EACCES -14`, **`EFAULT -15`**, `EINVAL -21`, `EDEADLK -29`, **`ENOSYS -44`**; IPC block `ELOCKED -101` … **`EDEADSRCDST -105`** … `EDONTREPLY -109` (`error.rs:9-41`).
+
+Missing and needed by any FS: `EEXIST`, `EISDIR`, `ENOTDIR`, `ENOTEMPTY`, `ENOSPC`, `EMFILE`, `ENFILE`, `EXDEV`, `EROFS`, `ESPIPE`, `EPIPE`, `ENAMETOOLONG`, `ELOOP`, `EBUSY`, `ENODEV`, `ENOTTY`, `EMLINK`, `EFBIG`, `ERANGE`, `EDOM`.
+
+**Numbering caveat worth an explicit design decision:** the header claims "Values match MINIX 3 `include/minix/errno.h`" (`error.rs:6`), but the first block is uniformly *one greater in magnitude* than POSIX/Linux (`EPERM -2` vs 1, `EFAULT -15` vs 14) while later values don't follow that offset (`EINVAL -21` vs 22, `EDEADLK -29` vs 35, `ENOSYS -44` vs 38). Whatever the intent, these must be reconciled against real MINIX 3 values *before* cbindgen emits `&lt;errno.h&gt;` for musl — musl's own errno tables assume Linux numbering.
+
+### C-friendliness / cbindgen readiness
+**Clean:**
+- `Message` — `#[repr(C, align(8))]`, three POD fields. Emits perfectly.
+- `Endpoint`/`GenNr` are `pub type … = i32` (`endpoint.rs:26,29`) → plain typedefs.
+- `callnr.rs`, `error.rs`, `ipc_const.rs`, `signal.rs`, `sys_limits.rs` — all plain `i32`/`usize` consts, at most simple arithmetic on other consts (`KERNEL_CALL + 3`). cbindgen handles these.
+- No generics, no `Option` in public data types, no enums-with-data anywhere in `kernel-shared`.
+
+**Will choke / needs config:**
+- `ProcNr` and `PrivId` are `#[repr(transparent)]` newtypes (`endpoint.rs:38-40, 63-65`) with `const fn new/get` and `impl Display`. cbindgen emits a wrapper struct unless you configure transparent→typedef.
+- **All of `com.rs`'s endpoint constants are `ProcNr::new(N)` calls** (`com.rs:30-58`), and `ANY`/`NONE`/`SELF` are `make_endpoint(...)` calls (`endpoint.rs:105-112`). cbindgen cannot const-evaluate these — it will skip them or emit invalid C. This is *the* item to resolve for the header bridge: either add plain `i32` mirror consts, or emit `com.h` by a different mechanism.
+- `const _: () = assert!(…)` blocks are ignored (harmless).
+- `SefEvent` (`server-rt/src/classify.rs:19-28`) is an enum with data — but it's in `server-rt`, outside the C bridge scope.
+
+## 2. VFS server — current state
+
+`/Users/kevinbarnard/src/minixrs/servers/vfs/src/main.rs` — **80 lines, does nothing but exist.**
+- `_start` → `main()` (`:31-33`), freestanding aarch64, `#![no_std]`/`#![no_main]` gated `not(test)`.
+- `sef_startup` with `init_fresh: Some(vfs_init)`, `signal_handler: None` (`:41-44`); on failure it spins forever (`:45-49`).
+- `vfs_init` (`:69-71`) is one line: `sef_publish_to_ds(name)`.
+- Main loop (`:56-62`): `let _ = sef.receive(&amp;mut msg);` — **receives and discards every application message.** Zero message types handled, no dispatch table, no fd table, no vnodes.
+- Deps (`servers/vfs/Cargo.toml`): `minixrs-kernel-shared`, `minixrs-ipc`, `minixrs-server-rt`. No `arrayvec` or anything else.
+- `servers/vfs/user.ld` — static ET_EXEC, load base `0x0010_0000`, three page-aligned PT_LOADs (text R+X / rodata R / data RW), no dynamic sections; identical script across all servers.
+
+**`fs/mfs`, `fs/pfs`, `drivers/memory` are 5-line placeholders** — literally `fn main() { // TODO: Implement }` (`fs/mfs/src/main.rs:3-5` etc.). They are workspace members, but they're *host* binaries with no `user.ld`, no `[[bin]]` path, and no `no_std`. `drivers/driver-rt/src/lib.rs` is 4 lines: `#![no_std]` + a comment "Driver runtime library (BDEV/CDEV protocol + VirtIO transport)".
+
+## 3. `minix-ipc`
+
+`/Users/kevinbarnard/src/minixrs/minix-ipc/src/lib.rs` — 127 lines, sole dep `minixrs-kernel-shared`.
+
+Wrappers: `ipc_send` (`:28`), `ipc_receive` (`:35`), `ipc_sendrec` (`:42`), `ipc_sendnb` (`:49`), `ipc_notify` (`:58`). **No `ipc_senda`** — `SENDA` is `ENOSYS` *and* blocked by the `trap_mask: u16` gate (bit 16 doesn't fit), per `docs/plans/phase-5-prep.md:235-237`.
+
+Trap ABI (`lib.rs:66-83`):
+```
+x0 = endpoint (in) / result (out)   x1 = primitive   x2 = *mut Message   svc #0
+options(nostack)   // NOT nomem — kernel reads request and writes reply through *msg
+```
+`ipc_notify` routes through a separate `ipc_trap_no_msg` (`:92-110`) passing `x2 = 0`, marked `nomem`. Both are `#[cfg(target_arch = "aarch64")]`; non-aarch64 fallbacks (`:117, :124`) are `unreachable!()` so the crate stays `cargo check`-able on host. **Nothing x86_64 exists** — Phase 8 will need a second `ipc_trap` (`docs/plan.md:548` reserves `musl/src/minix/_ipc_x86_64.S`).
+
+Note a doc drift: `kernel-shared/src/ipc_const.rs:3` says the primitive goes in "`r1`/`x16`" but the real ABI (and `minix-ipc/src/lib.rs:12`) is `x1`. Worth fixing before the musl asm stub is written against the wrong comment.
+
+## 4. `server-rt` — what a new server needs to boot
+
+`/Users/kevinbarnard/src/minixrs/server-rt/src/` — 416 lines across `lib.rs`(44), `sef.rs`(139), `classify.rs`(162), `ds.rs`(48), `init.rs`(13), `signal.rs`(10).
+
+- `SefConfig { init_fresh: Option&lt;SefInitCb&gt;, signal_handler: Option&lt;SefSignalCb&gt; }` (`sef.rs:18-23`).
+- `SefInitCb = fn(Endpoint, &amp;[u8; 16]) -&gt; i32` (`init.rs:13`); `SefSignalCb = fn(i32)` (`signal.rs:10`).
+- `sef_startup(cfg) -&gt; Result&lt;Sef, i32&gt;` (`sef.rs:40-81`): SENDREC `SYS_GETINFO(GET_WHOAMI)` to `boot_endpoint(SYSTEM)` with selector in `payload[0..4]`; kernel replies in-place — endpoint `0..4`, priv flags `4..8`, init flags `8..12`, name `12..28`. Then runs `init_fresh`.
+- `Sef` is `Copy` — endpoint + 16-byte name + optional signal fn ptr (`sef.rs:29-34`).
+- `Sef::receive(&amp;mut Message) -&gt; i32` (`sef.rs:99-138`): loops on `ipc_receive(ANY, …)`, runs `classify`, transparently handles `Ping` (notify RS back) / `Signal` / `Init`, and returns `OK` only when an `Application` message is in the buffer.
+- `classify` (`classify.rs:50-66`) is pure and host-tested — gates every control event on `m_source` (RS or PM), not `m_type` alone. **A new FS request band at `0x800`/`0x900` falls straight through to `Application` with no change to classify.**
+- `sef_publish_to_ds(name)` (`ds.rs:35-48`): builds `DS_PUBLISH` with key in `payload[0..16]`, SENDRECs to `boot_endpoint(DS_PROC_NR)`, returns DS's `m_type`. DS itself must *not* call this (self-SENDREC deadlock, `ds.rs:8-9`).
+
+**Minimum for a new server** (e.g. MFS): a `no_std`/`no_main` crate with `_start` in `.text._start`, a `user.ld` copy, a panic handler, `sef_startup` + `sef_publish_to_ds`, a `receive` loop with an `m_type` match — and the two boot-side registrations in §5.
+
+Two live TODOs in `sef.rs`: the RS-heartbeat ack needs the reverse `ipc_to` bit opened (`:112-117`), and the `SEF_INIT` reply contract is undecided (`:129-134`).
+
+## 5. MXBI boot archive + adding a module
+
+### `kernel/build.rs`
+- Servers array at `build.rs:128-137`: `[(&amp;str, PathBuf, i32); 8]` — **fixed-size array, must bump the length to add anything.** Order matters: VM first (takes ASID 1, blocks on `RECEIVE(ANY)` immediately). Current rows: `vm 7, ds 5, vfs 1, sched 9, rs 2, pm 0, init 10, worker -1`.
+- **Proc numbers are hardcoded integer literals with `// VM_PROC_NR`-style comments** — build.rs can't depend on `kernel-shared`, so this is an unguarded drift surface. Adding `mfs 6` / `memory 3` means duplicating those literals correctly.
+- `build_server` (`:173-226`) builds each crate with a *nested* cargo invocation: `--target aarch64-unknown-none --release`, isolated `CARGO_TARGET_DIR`, `CARGO_ENCODED_RUSTFLAGS = -Clink-arg=-T&lt;crate&gt;/user.ld` (which *replaces* the workspace's kernel linker-script rustflags). Every new server therefore needs its own `user.ld` and pays a full nested build on every kernel build.
+- `rerun-if-changed` covers `minix-ipc/src`, `server-rt/src`, `kernel-shared/src` as directories (`:115-121`) plus each crate's `src/`, `user.ld`, `Cargo.toml` (`:187-193`).
+
+### `pack_mxbi` (`build.rs:238-278`) — record format
+```
+header 16B: magic 0x4942584D "MXBI" | version=1 | entry_count:u32 | total_size:u32
+record 32B × N: proc_nr:i32 | offset:u32 | len:u32 | name:[u8;20]
+payloads back-to-back at recorded offsets
+```
+All fields little-endian. Name must be `&lt; 20` bytes (asserted `:253-256`). Signature is `&amp;[(i32, String, Vec&lt;u8&gt;)]`.
+
+### **Can a non-ELF blob be packed?** — Yes, with no format change.
+1. `pack_mxbi` takes opaque `Vec&lt;u8&gt;` and does **zero** content validation (`build.rs:238-278`).
+2. `BootImage::get()` validates only magic/version/table-bounds and per-record `offset + len &lt;= bytes.len()` (`boot_image/mod.rs:53-77`) — never touches payload content.
+3. The boot loader **explicitly skips negative `proc_nr`**: `kernel/src/arch/aarch64/userland.rs:184-190` — `if nr.get() &lt; 0 { continue; }`, comment cites `com::EXEC_ONLY_PROC_NR`. So a module tagged `-1` is never ELF-parsed at boot.
+4. `BootImage::module_by_name(&amp;str) -&gt; Option&lt;&amp;'static [u8]&gt;` (`mod.rs:113-119`) returns **raw bytes with no ELF check**. Only `do_exec.rs:106` feeds the result to `elf::load_into`, which is where `ElfError::BadMagic/BadClass/BadType` (`boot_image/elf.rs:29-40`) would fire.
+
+So an initramfs / MFS disk image can be packed today as `("initramfs", bytes, -1)` and retrieved by name. Constraints to design around:
+- The whole archive is `include_bytes!`'d into kernel `.rodata` (`mod.rs:34`), landing in Limine's `EXECUTABLE_AND_MODULES` region — **never freed, and it inflates the kernel binary 1:1** with the image size. A multi-MiB FS image is a real cost.
+- `offset`/`len` are `u32` → 4 GiB cap (fine).
+- `build_server` assumes every module is a cargo crate; a raw blob needs a separate `std::fs::read` path in `build_boot_image`.
+- Name field is 20 bytes NUL-padded, but `EXEC_NAME_LEN = 16` (`callnr.rs:66`) bounds what `SYS_EXEC` can carry — a longer blob name is reachable only from kernel-internal callers.
+- Consider whether the FS image should instead be a Limine module (separate file, not embedded) — nothing in the current design forecloses that, but nothing supports it either.
+
+## 6. Workspace / CI shape
+
+### Root `Cargo.toml`
+23 members, resolver 3, edition 2024, BSD-3-Clause, `panic = "abort"` in both profiles, `opt-level='s'` release. **`fs/mfs`, `fs/pfs`, `drivers/memory`, `drivers/virtio-{blk,net,console}`, `userland/{sh,coreutils}` are already members** — new FS crates need no workspace edit, just real content. There is deliberately **no `default-members`** (long comment explains: kernel uses `forced-target = "aarch64-unknown-none"` via unstable `per-package-target`).
+
+`minixrs/Cargo.toml` is a publishable umbrella crate re-exporting `kernel-shared` + `ipc` + `server-rt` + `driver-rt` — **a new publishable library (e.g. an `fs-shared`) would want adding here**, and note the four libs carry `version.workspace`/`description`/`keywords`/`categories` (publish-ready) while the servers carry `publish = false`.
+
+### `sonar-project.properties`
+- `sonar.sources=.`; `sonar.exclusions=target/**,external/**,**/*.S,**/*.ld`.
+- **`external/**` is already excluded** — `external/limine/` exists today (`dist/BOOTAA64.EFI`, tarball, `limine.h`). **A vendored musl tree dropped at `external/musl/` is excluded from Sonar analysis for free.** If it goes anywhere else (e.g. a top-level `musl/` as `docs/plan.md:164` sketches), the exclusion list must be extended, plus `**/*.c`/`**/*.h` handling.
+- `sonar.coverage.exclusions=servers/**/src/main.rs,drivers/**/src/main.rs,userland/**/src/main.rs,minix-ipc/src/**,server-rt/src/sef.rs,server-rt/src/ds.rs`. **Note `fs/**` is NOT covered by any glob** — `fs/mfs/src/main.rs` will be measured for coverage the moment it becomes a real IPC-trapping server. Add `fs/**/src/main.rs` when MFS lands.
+- The documented convention (`sonar-project.properties` comment block): IPC-trapping entry points are excluded; testable logic lives in *measured submodules* — `servers/vm/src/region.rs`, `servers/ds/src/registry.rs`, `server-rt/src/classify.rs`. A VFS/MFS design should follow this: pure inode/path/superblock logic in submodules with host unit tests, trap glue in `main.rs`.
+
+### `deny.toml`
+- `[licenses] allow = ["BSD-3-Clause","MIT","Apache-2.0","Unicode-3.0","Unicode-DFS-2016"]`, confidence 0.9. **musl is MIT** (`docs/plan.md:322`) → already allowed *if* it appears as a cargo dependency. cargo-deny only walks the cargo graph, so a vendored C tree built by its own Makefile (`docs/plan.md:370`) is invisible to it — license attribution for musl needs a non-cargo mechanism.
+- `[advisories] yanked = "deny"`; `[bans] multiple-versions = "warn"`, `wildcards = "allow"`; `[sources] unknown-registry/unknown-git = "deny"`.
+
+### `.github/workflows/ci.yml`
+| Job | Blocking | Notes |
+|---|---|---|
+| `rustfmt` | yes | |
+| `clippy` | yes | `--workspace --exclude minixrs-kernel --all-targets -- -D warnings` (`:43`) |
+| `clippy-kernel` | yes | two runs: default features and `--no-default-features` (`:62-71`) |
+| `cargo-audit` | yes | |
+| `cargo-deny` | yes | `cargo deny check` (`:90`) |
+| `cargo-geiger` | **advisory** (`continue-on-error`) | per-package sweep over `cargo metadata … jq '.packages[].name' \| grep -v '^minixrs-kernel$'` (`:112-118`) — **any new workspace member is auto-included**, and per-crate failures are tolerated |
+| `miri` | **advisory** | hardcoded `-p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm` (`:133`) — a new pure-logic FS crate should be added to this list explicitly |
+| `qemu-smoke` | yes | 45s `timeout`, must exit 124; checks `tests/qemu-boot.expected` / `.forbidden` |
+| `coverage` | yes | `cargo llvm-cov --workspace --exclude minixrs-kernel --lcov` (`:202`) |
+| `sonarcloud` | | consumes the lcov artifact |
+
+**Adding-a-crate checklist** distilled: workspace member (mostly pre-existing), `user.ld` + `build.rs` servers array + array length bump, `sonar.coverage.exclusions` glob for `fs/**/src/main.rs`, optionally the `miri` package list, `tests/qemu-boot.expected` boot-trace line, and `minixrs/Cargo.toml` if it's a publishable lib. geiger and deny need nothing. A vendored C tree at `external/musl/` needs nothing for Sonar; anywhere else needs an exclusion.
+
+## Loose ends that touch Phase 5 design
+
+- `SYS_SAFECOPY` and `SYS_SETGRANT` are **`enosys_stub!` macros** (`kernel/src/system/stubs.rs:26,38`) dispatched at `kernel/src/system/mod.rs:227,235`. `Priv` has a grant-related field commented "slice 2.6 starts honoring this" (`kernel/src/proc/priv_struct.rs:80`). There is no grant table anywhere. Every cross-AS FS data path depends on this.
+- Only 3 signals exist (`signal.rs:11-16`).
+- `phase-5-prep.md:141-170` (chunk 6) is the design session this feeds, and it already names the exact open decisions: console/stdio sink, root-image strategy (initramfs vs MXBI-embedded), grant model, ELF-loading authority for FS-backed exec, cbindgen/ABI-freeze timing, musl vendoring policy + CI scan exclusions. Chunk 7 (de-host kernel) is on branch `feature/dehost-kernel`, merged into the tree you're reading.
+- `RECOMMEND.md:223` independently flags the ABI-freeze-before-wrappers point: "write `PM_*` / `VFS_*` / `VM_*` field layouts once in `kernel-shared` and generate C headers when the first C file lands, not after twenty wrappers."</result>
+<usage><subagent_tokens>94854</subagent_tokens><tool_uses>46</tool_uses><duration_ms>306479</duration_ms></usage>
+</task-notification>

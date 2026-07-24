@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "7357fca1d419",
+  "strategy": "manual-commit",
+  "branch": "feature/phase-5-plan",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/plan.md",
+    "docs/plans/phase-5-musl-fs.md",
+    "docs/plans/phase-5-prep.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/73/57fca1d419/0/metadata.json",
+      "transcript": "/73/57fca1d419/0/full.jsonl",
+      "content_hash": "/73/57fca1d419/0/content_hash.txt",
+      "prompt": "/73/57fca1d419/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 78,
+    "cache_creation_tokens": 205367,
+    "cache_read_tokens": 6120418,
+    "output_tokens": 89571,
+    "api_call_count": 40
+  }
+}
