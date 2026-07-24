@@ -1,0 +1,135 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "c17b9a484977",
+  "session_id": "98fb1ebb-2658-4e61-a552-293a6d1537c0",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-24T06:12:23.258855Z",
+  "branch": "feature/ci-qemu-smoke",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "tests/qemu-boot.expected"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "f1e31d9ea23c",
+  "checkpoint_transcript_start": 441,
+  "transcript_lines_at_start": 441,
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01B5qPG3a9WNFmRfwAhSGAud",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "f1e31d9ea23c",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 24,
+        "end": 25,
+        "entry_ids": [
+          "9e8f8d62-1ade-434a-ab1c-e10a4c085b81"
+        ],
+        "tool_use_id": "toolu_01B5qPG3a9WNFmRfwAhSGAud"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01B5qPG3a9WNFmRfwAhSGAud"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01UFqqpx4j7QNKb5wGUVxg3r",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "f1e31d9ea23c",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 278,
+        "end": 279,
+        "entry_ids": [
+          "12b67311-0b5d-469f-b108-a5c104c4fb39"
+        ],
+        "tool_use_id": "toolu_01UFqqpx4j7QNKb5wGUVxg3r"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01UFqqpx4j7QNKb5wGUVxg3r"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_017ZtAYdBc1vUUuoc25hZtVj",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:systematic-debugging"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "f1e31d9ea23c",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 349,
+        "end": 350,
+        "entry_ids": [
+          "5d204c94-802c-4d2f-94b5-b9078a19ebdf"
+        ],
+        "tool_use_id": "toolu_017ZtAYdBc1vUUuoc25hZtVj"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_017ZtAYdBc1vUUuoc25hZtVj"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:systematic-debugging",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 7
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-24T06:12:23.24494Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "total_lines_changed": 0,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}
