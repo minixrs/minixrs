@@ -7,7 +7,9 @@ PR-sized cleanup/prep chunks so Phase 5 does not build on soft ground.
 **How to use this file:** each chunk is one session / one PR. Chunks 1–5 and 7
 were independent and could land in any order; chunk 6 (the Phase 5 design +
 slicing session) must come last — it gates starting Phase 5 proper (chunk 7
-did not gate Phase 5). **Chunk 6 is now the only chunk left.** Markers follow
+did not gate Phase 5). **All seven chunks are now done** (chunk 6 pending
+merge); the next work is Phase 5 slice 5.0, tracked in
+[`phase-5-musl-fs.md`](phase-5-musl-fs.md). Markers follow
 the `docs/plan.md` convention: `◀ next` (unstarted), `◀ ready (branch …, pending
 merge)`, `✓ shipped (PR #N, merged YYYY-MM-DD)`. Flip a chunk's marker as part
 of its own PR, and move `◀ next` to whichever chunk you intend to take next.
@@ -138,7 +140,7 @@ the known kernel-target clippy lints that CI never sees.
 **Proof:** all blocking gates green on the new nightly; kernel-target clippy
 clean or every remaining lint carries an explicit allow + rationale.
 
-## Chunk 6: Phase 5 design + slicing session (gates Phase 5) ◀ next
+## Chunk 6: Phase 5 design + slicing session (gates Phase 5) ◀ ready (branch feature/phase-5-plan, pending merge)
 
 **Goal:** Phase 5 in `docs/plan.md` is six bullets and a milestone. Phases 2–4
 succeeded because each slice was PR-sized, independently bootable, and left a
@@ -168,7 +170,7 @@ implementation) producing `docs/plans/phase-5-musl-fs.md`:
 **Proof:** the design doc exists with every decision above resolved (not
 "TBD"), and plan.md's Phase 5 section is a slice table.
 
-## Chunk 7: De-host the kernel crate ◀ ready (branch feature/dehost-kernel, pending merge)
+## Chunk 7: De-host the kernel crate ✓ shipped (PR #38, merged 2026-07-24)
 
 **Goal:** every kernel module was `#[cfg(target_os = "none")]`-gated so host
 workspace builds saw an empty crate — which is why kernel code was invisible to
