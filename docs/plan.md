@@ -498,8 +498,9 @@ toolchain bump, a kernel-crate de-hosting investigation, and — gating
 Phase 5 — a dedicated Phase 5 design + slicing session. Tracked with the
 usual markers in [`docs/plans/phase-5-prep.md`](plans/phase-5-prep.md);
 chunks land one per session/PR, in any order except the design session,
-which must come last. Chunk 1 (the CI QEMU smoke job) is `◀ ready`
-(branch `feature/ci-qemu-smoke`, pending merge).
+which must come last. Chunk 1 (the CI QEMU smoke job) is `✓ shipped`
+(PR #33, merged 2026-07-24); chunk 2 (the mdBook content port + legacy
+`docs/` retirement) is `◀ ready` (branch `docs/book-port-kernel`, pending merge).
 
 ### Phase 5: musl Fork + File Systems
 

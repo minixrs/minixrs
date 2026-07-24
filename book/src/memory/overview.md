@@ -6,10 +6,57 @@ into the kernel. The kernel owns the frame allocator and performs every page
 table write; the user-space **VM server** decides *what* should be mapped where
 and drives the kernel through a single privileged kernel call (`SYS_VMCTL`).
 
-This chapter describes the subsystem as it stands at the end of Phase 3: a
+This chapter describes the subsystem as it stands at the end of Phase 3 — a
 physical frame allocator, per-process address spaces with hardware-tagged TLBs,
 a page-fault path that delegates to VM, and the VM server's region tracking for
-`brk`, `mmap`, and `munmap`.
+`brk`, `mmap`, and `munmap` — plus the region-cloning that PM-driven `fork` added
+in Phase 4.
+
+## Memory map (aarch64 QEMU `virt`)
+
+The QEMU `virt` machine has a fixed device layout. With `-m 256M`, RAM sits at
+`0x4000_0000`:
+
+| Physical range | Device |
+|----------------|--------|
+| `0x0800_0000`–`0x0800_FFFF` | GICv3 distributor |
+| `0x080A_0000`–`0x080B_FFFF` | GICv3 redistributor |
+| `0x0900_0000`–`0x0900_0FFF` | PL011 UART |
+| `0x0A00_0000`+ | VirtIO MMIO devices |
+| `0x4000_0000`+ | RAM (256 MB default) |
+
+The virtual address space splits at the canonical hole. `TTBR1_EL1` (the upper
+half) holds the kernel image and Limine's direct map; `TTBR0_EL1` (the lower
+half) holds the current process:
+
+```text
+0xFFFF_FFFF_........   kernel image (.text / .rodata / .data / .bss, embedded boot image)
+0xFFFF_8000_0000_0000   HHDM base — all physical memory mapped at phys + hhdm_offset
+        ... non-canonical hole ...
+0x0000_7FFF_FFFF_FFFF   user ceiling (stack region, grows down)
+0x0000_0000_0200_0000   MMAP_BASE — anonymous mmap arena (bump-allocated up)
+0x0000_0000_0100_0000   HEAP_BASE — heap region (brk grows up)
+0x0000_0000_0010_0000   user load base — text/rodata/data/bss (servers, init, worker)
+0x0000_0000_0000_0000
+```
+
+### Translation tables
+
+minix.rs uses a 4 KB granule with 4-level translation:
+
+| Level | VA bits | Each entry maps |
+|-------|---------|-----------------|
+| L0 | [47:39] | 512 GB |
+| L1 | [38:30] | 1 GB |
+| L2 | [29:21] | 2 MB |
+| L3 | [20:12] | 4 KB |
+
+`TTBR0_EL1` holds the current process's tables and is swapped (tagged with the
+process's ASID) on every context switch; `TTBR1_EL1` holds the shared kernel
+mapping and never changes. Limine maps all physical memory contiguously at
+`hhdm_offset`, so the kernel reaches any physical address as `phys + hhdm_offset`
+with no temporary mapping windows — every free frame, page table, and message
+buffer the kernel touches is addressed this way.
 
 ## Physical frame allocator
 
@@ -117,10 +164,12 @@ virtual range `[start, end)` tagged with a `Kind`:
 A page fault is satisfied **only** if its address lies inside one of the
 faulting process's regions: VM consults the table, and on a hit issues
 `SYS_VMCTL(VMCTL_PT_MAP)` then `SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT)`. A fault
-outside every region is a SIGSEGV — VM leaves the process blocked on
-`RTS_PAGEFAULT` (the only "kill" available until PM and signals arrive in
-Phase 4). VM runs at EL0 with no console, so this path is silent; the symptom is
-a process that stops making progress.
+outside every region is a segmentation fault: VM raises
+`SYS_KILL(faulter, SIGSEGV)`, and the faulter stays blocked on `RTS_PAGEFAULT`
+until PM terminates it (the minimal-signals path that made this a real kill
+landed in Phase 4; before that VM could only leave the process wedged). VM runs
+at EL0 with no console, so it is silent from the server's side — the kill surfaces
+in the kernel signal trace.
 
 ### `brk`
 
@@ -144,5 +193,9 @@ ignores. The match is keyed on the region's base address and the unmap sweep is
 capped at the region's own end, so an over-stated length can never reach into a
 neighboring region or the heap.
 
-The arena is bump-only for now — `munmap` does not return addresses to it. Real
-address reuse and a PM-supplied per-process memory layout arrive in Phase 4.
+The arena is bump-only for now — `munmap` does not return addresses to it.
+Address reuse within the arena remains future work. PM-driven `fork` (Phase 4)
+already clones a parent's entire region set into the child: after the kernel
+copies the child's page tables via `SYS_FORK`, PM issues `VM_FORK`, and VM copies
+its own `ClientRegions` bookkeeping so the child's later `brk` / `mmap` / fault
+lookups see the inherited heap and mmap regions.
