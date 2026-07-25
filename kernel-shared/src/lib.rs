@@ -16,6 +16,7 @@ pub mod callnr;
 pub mod com;
 pub mod endpoint;
 pub mod error;
+pub mod grant;
 pub mod ipc_const;
 pub mod message;
 pub mod signal;

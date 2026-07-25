@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! `minix/callnr.h` — kernel-call numbers and the server request bands.
 
-use minixrs_kernel_shared::callnr;
+use minixrs_kernel_shared::{callnr, grant};
 
 use crate::builder::CFile;
 
@@ -33,6 +33,27 @@ fn kernel_calls() -> [(&'static str, i32); 18] {
     ]
 }
 
+/// The CPF grant flags, in numeric order.
+fn cpf_flags() -> [(&'static str, u32); 8] {
+    [
+        ("CPF_READ", grant::CPF_READ),
+        ("CPF_WRITE", grant::CPF_WRITE),
+        ("CPF_TRY", grant::CPF_TRY),
+        ("CPF_USED", grant::CPF_USED),
+        ("CPF_DIRECT", grant::CPF_DIRECT),
+        ("CPF_INDIRECT", grant::CPF_INDIRECT),
+        ("CPF_MAGIC", grant::CPF_MAGIC),
+        ("CPF_VALID", grant::CPF_VALID),
+    ]
+}
+
+/// An arbitrary `(idx, seq)` pair and its packed id, used by the header's
+/// round-trip `_Static_assert`s. Both fields are non-zero and unequal, so a
+/// macro that dropped or swapped one would fail the check.
+const GRANT_PROBE_IDX: u32 = 1234;
+const GRANT_PROBE_SEQ: u32 = 56;
+const GRANT_PROBE_ID: i32 = grant::grant_id(GRANT_PROBE_IDX, GRANT_PROBE_SEQ);
+
 /// A server request band: base constant, its members, and the count constant
 /// that bounds it (`None` for VM, which has no `NR_*` on the Rust side).
 ///
@@ -61,6 +82,7 @@ fn bands() -> [Band; 5] {
                 ("PM_EXIT", callnr::PM_EXIT),
                 ("PM_WAIT", callnr::PM_WAIT),
                 ("PM_EXEC", callnr::PM_EXEC),
+                ("PM_GRANT_TEST", callnr::PM_GRANT_TEST),
             ],
         },
         Band {
@@ -174,6 +196,55 @@ pub fn render() -> String {
     );
     f.define_dec("DIAG_TEXT_OFF", callnr::DIAG_TEXT_OFF as i64);
     f.define_dec("DIAG_TEXT_MAX", callnr::DIAG_TEXT_MAX as i64);
+
+    f.section("grants: SYS_SETGRANT / SYS_SAFECOPY");
+    f.block_comment(&[
+        "The grant ABI (slice 5.2). The grant-entry layout itself is deliberately",
+        "not emitted yet: no C consumes it before the musl slice, and a dedicated",
+        "<minix/safecopies.h> would need its own builder and CI syntax check. The",
+        "flag values and the id packing are here because a C caller needs them to",
+        "read a grant id out of a message payload.",
+    ]);
+    f.define_dec("SAFECOPY_FROM", callnr::SAFECOPY_FROM.into());
+    f.define_dec("SAFECOPY_TO", callnr::SAFECOPY_TO.into());
+    f.blank();
+    for (name, value) in cpf_flags() {
+        f.define_hex(name, value.into());
+    }
+    f.blank();
+    f.define_dec("GRANT_SHIFT", grant::GRANT_SHIFT.into());
+    f.define_hex("GRANT_MAX_IDX", grant::GRANT_MAX_IDX.into());
+    f.define_hex("GRANT_MAX_SEQ", grant::GRANT_MAX_SEQ.into());
+    f.define_dec("GRANT_INVALID", grant::GRANT_INVALID.into());
+    f.blank();
+    f.define_raw(
+        "GRANT_ID(idx, seq)",
+        "((int) ((((unsigned) (seq) & GRANT_MAX_SEQ) << GRANT_SHIFT) \\\n                                 | ((unsigned) (idx) & GRANT_MAX_IDX)))",
+    );
+    f.define_raw("GRANT_IDX(g)", "((unsigned) (g) & GRANT_MAX_IDX)");
+    f.define_raw(
+        "GRANT_SEQ(g)",
+        "(((unsigned) (g) >> GRANT_SHIFT) & GRANT_MAX_SEQ)",
+    );
+    f.define_raw("GRANT_VALID(g)", "((g) >= 0)");
+    f.blank();
+    // Check the C packing against the Rust one rather than trusting that the
+    // two expressions were transcribed the same way.
+    f.static_assert(
+        &format!(
+            "GRANT_ID(GRANT_MAX_IDX, GRANT_MAX_SEQ) == {}",
+            grant::grant_id(grant::GRANT_MAX_IDX, grant::GRANT_MAX_SEQ)
+        ),
+        "the C grant-id packing disagrees with the Rust one",
+    );
+    f.static_assert(
+        &format!("GRANT_IDX({GRANT_PROBE_ID}) == {GRANT_PROBE_IDX}"),
+        "GRANT_IDX does not invert GRANT_ID",
+    );
+    f.static_assert(
+        &format!("GRANT_SEQ({GRANT_PROBE_ID}) == {GRANT_PROBE_SEQ}"),
+        "GRANT_SEQ does not invert GRANT_ID",
+    );
 
     f.section("SYS_VMCTL subcalls");
     f.define_dec("VMCTL_PT_MAP", callnr::VMCTL_PT_MAP.into());
@@ -340,6 +411,75 @@ mod tests {
             "the SEF ordering assert names the VM band's last member"
         );
         assert!(render().contains("SEF_RQ_BASE > VM_FORK"));
+    }
+
+    #[test]
+    fn grant_constants_render_from_live_constants() {
+        let text = render();
+        for (name, value) in cpf_flags() {
+            assert_eq!(
+                builder::define_value(&text, name).as_deref(),
+                Some(format!("0x{value:X}").as_str()),
+                "{name} did not render from its Rust constant"
+            );
+        }
+        assert_eq!(
+            builder::define_value(&text, "GRANT_SHIFT").as_deref(),
+            Some(grant::GRANT_SHIFT.to_string().as_str())
+        );
+        assert_eq!(
+            builder::define_value(&text, "GRANT_MAX_IDX").as_deref(),
+            Some(format!("0x{:X}", grant::GRANT_MAX_IDX).as_str())
+        );
+        assert_eq!(
+            builder::define_value(&text, "GRANT_MAX_SEQ").as_deref(),
+            Some(format!("0x{:X}", grant::GRANT_MAX_SEQ).as_str())
+        );
+        // Negative values render parenthesized, so a `-1` cannot be pasted into
+        // a larger expression and change its meaning.
+        assert_eq!(
+            builder::define_value(&text, "GRANT_INVALID").as_deref(),
+            Some("(-1)")
+        );
+    }
+
+    /// The C grant-id macros are a second implementation of the Rust packing, so
+    /// the header carries `_Static_assert`s tying them together. Check the
+    /// asserted values come from the Rust helpers rather than being transcribed.
+    #[test]
+    fn the_grant_id_macro_asserts_use_rust_computed_values() {
+        let text = render();
+        let max = grant::grant_id(grant::GRANT_MAX_IDX, grant::GRANT_MAX_SEQ);
+        assert!(text.contains(&format!("GRANT_ID(GRANT_MAX_IDX, GRANT_MAX_SEQ) == {max}")));
+        assert!(text.contains(&format!("GRANT_IDX({GRANT_PROBE_ID}) == {GRANT_PROBE_IDX}")));
+        assert!(text.contains(&format!("GRANT_SEQ({GRANT_PROBE_ID}) == {GRANT_PROBE_SEQ}")));
+        // The probe must actually exercise both fields.
+        assert_eq!(grant::grant_idx(GRANT_PROBE_ID), GRANT_PROBE_IDX);
+        assert_eq!(grant::grant_seq(GRANT_PROBE_ID), GRANT_PROBE_SEQ);
+        assert_ne!(GRANT_PROBE_IDX, GRANT_PROBE_SEQ);
+    }
+
+    #[test]
+    fn safecopy_selectors_render_from_live_constants() {
+        let text = render();
+        assert_eq!(
+            builder::define_value(&text, "SAFECOPY_FROM").as_deref(),
+            Some(callnr::SAFECOPY_FROM.to_string().as_str())
+        );
+        assert_eq!(
+            builder::define_value(&text, "SAFECOPY_TO").as_deref(),
+            Some(callnr::SAFECOPY_TO.to_string().as_str())
+        );
+    }
+
+    /// `GrantEntry` is deliberately not emitted as a C struct until a C caller
+    /// needs it (slice 5.6). Nothing may quietly add one here — that belongs in
+    /// its own `<minix/safecopies.h>` with its own CI syntax check.
+    #[test]
+    fn no_grant_struct_is_emitted_yet() {
+        let text = render();
+        assert!(!text.contains("cp_grant_entry"));
+        assert!(!text.contains("struct "));
     }
 
     /// The C name and the Rust name must stay identical. The Rust constant was

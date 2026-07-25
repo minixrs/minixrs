@@ -31,6 +31,7 @@
 //!
 //! Target-taking (routed beside `SYS_FORK` in `kernel_call_dispatch`); trust
 //! model identical to `do_fork` — the `k_call_mask` gate is the only check.
+//! Takes `priv_table` to drop the old image's grant-table registration.
 //!
 //! ## Message payload layout (offsets within `Message::payload`)
 //!
@@ -44,6 +45,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::EXEC_NAME_LEN;
+use minixrs_kernel_shared::com::NR_SYS_PROCS;
 use minixrs_kernel_shared::endpoint::{NONE, SELF};
 use minixrs_kernel_shared::error::{EINVAL, ENOENT, ENOMEM, OK};
 use minixrs_kernel_shared::message::Message;
@@ -53,7 +55,7 @@ use crate::arch::aarch64::userland;
 use crate::proc::flags::{MF_DELIVERMSG, RTS_RECEIVING, RTS_SENDING};
 use crate::proc::proc_struct::PROC_NAME_LEN;
 use crate::proc::table::{N_PROC_SLOTS, proc_index};
-use crate::proc::{Proc, sched};
+use crate::proc::{Priv, Proc, sched};
 use crate::uart::Uart;
 
 // The exec name field fits in a proc-name slot, so a successful exec can rename
@@ -70,6 +72,7 @@ static EXEC_COUNT: AtomicU64 = AtomicU64::new(0);
 /// for the target, discard its old image, and resume it at the new entry point.
 pub(super) fn do_exec(
     proc_table: &mut [Proc; N_PROC_SLOTS],
+    priv_table: &mut [Priv; NR_SYS_PROCS],
     caller_nr: ProcNr,
     msg: &mut Message,
 ) -> i32 {
@@ -126,6 +129,21 @@ pub(super) fn do_exec(
         Some(img) => img,
         None => return ENOMEM,
     };
+
+    // Point of no return. Drop any grant-table registration the *old* image
+    // made (slice 5.2): `grant_table` is a VA in the address space about to be
+    // discarded, and exec preserves the privilege slot, so leaving it would aim
+    // `verify_grant` at whatever the new image happens to map there. Only a
+    // dedicated slot is cleared — a shared one (`USER_PRIV_ID`) belongs to every
+    // user process collectively and can hold no table anyway (`do_setgrant`
+    // rejects it). Same reasoning, and same guard, as `do_exit`'s slot teardown.
+    if let Some(pid) = proc_table[target_idx].priv_id {
+        let pidx = pid.as_usize();
+        if pidx < NR_SYS_PROCS && priv_table[pidx].proc_nr == Some(proc_table[target_idx].nr) {
+            priv_table[pidx].grant_table = 0;
+            priv_table[pidx].grant_entries = 0;
+        }
+    }
 
     // Swap the new image onto the target and reset its frame to a clean EL0
     // start. Capture the old AS + trace fields, then end the borrow.

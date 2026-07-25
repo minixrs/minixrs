@@ -18,14 +18,17 @@
 //! [`ipc::dispatch`]: crate::ipc
 //! [`ipc::send::mini_send`]: crate::ipc
 
+mod do_copy;
 mod do_diagctl;
 mod do_exec;
 mod do_exit;
 mod do_fork;
 mod do_getinfo;
 mod do_privctl;
+mod do_safecopy;
 mod do_schedule;
 mod do_setalarm;
+mod do_setgrant;
 mod do_sig;
 mod do_vmctl;
 mod stubs;
@@ -181,9 +184,12 @@ pub fn kernel_call_sendrec(
 /// (`SYS_KILL` / `SYS_GETKSIG` / `SYS_ENDKSIG`) act on a *target* proc named in
 /// the message, so they take the whole `proc_table` + `caller_nr` (and
 /// `do_kill` / `do_exit` additionally write `notify_pending` bitmaps, which is
-/// why `priv_table` is `&mut`). Every other handler acts only on the caller,
-/// so it gets a single caller slot re-borrowed inside its arm (see
-/// [`dispatch_caller_local`]).
+/// why `priv_table` is `&mut`). Slice 5.2's grant trio joins that arm for
+/// related but distinct reasons: `SYS_COPY` / `SYS_SAFECOPY` name other
+/// processes' address spaces, and `SYS_SETGRANT` — caller-local in effect —
+/// needs `&mut Priv`, which [`dispatch_caller_local`] cannot hand out. Every
+/// other handler acts only on the caller, so it gets a single caller slot
+/// re-borrowed inside its arm (see [`dispatch_caller_local`]).
 fn kernel_call_dispatch(
     proc_table: &mut [Proc; N_PROC_SLOTS],
     priv_table: &mut [Priv; NR_SYS_PROCS],
@@ -216,8 +222,19 @@ fn kernel_call_dispatch(
         SYS_ENDKSIG => return do_sig::do_endksig(proc_table, caller_nr, msg),
         SYS_EXIT => return do_exit::do_exit(proc_table, priv_table, caller_nr, msg),
         SYS_FORK => return do_fork::do_fork(proc_table, caller_nr, msg),
-        SYS_EXEC => return do_exec::do_exec(proc_table, caller_nr, msg),
+        SYS_EXEC => return do_exec::do_exec(proc_table, priv_table, caller_nr, msg),
         SYS_PRIVCTL => return do_privctl::do_privctl(proc_table, caller_nr, msg),
+        SYS_COPY => return do_copy::do_copy(proc_table, caller_nr, msg),
+        SYS_SAFECOPY => {
+            return do_safecopy::do_safecopy(proc_table, priv_table, caller_nr, msg);
+        }
+        SYS_SETGRANT => {
+            return do_setgrant::do_setgrant(
+                &mut priv_table[caller_priv_id.as_usize()],
+                caller_nr,
+                msg,
+            );
+        }
         _ => {}
     }
 
@@ -239,16 +256,15 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
     );
     match msg.m_type {
         SYS_GETINFO => do_getinfo::do_getinfo(caller, caller_priv, msg),
-        SYS_COPY => stubs::do_copy(caller, caller_priv, msg),
-        SYS_SAFECOPY => stubs::do_safecopy(caller, caller_priv, msg),
         SYS_IRQCTL => stubs::do_irqctl(caller, caller_priv, msg),
         // SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL / SYS_KILL / SYS_GETKSIG /
-        // SYS_ENDKSIG / SYS_EXIT / SYS_FORK / SYS_EXEC / SYS_PRIVCTL are handled
-        // in `kernel_call_dispatch` (they act on a target proc and need the table).
+        // SYS_ENDKSIG / SYS_EXIT / SYS_FORK / SYS_EXEC / SYS_PRIVCTL / SYS_COPY /
+        // SYS_SAFECOPY / SYS_SETGRANT are handled in `kernel_call_dispatch` (they
+        // act on a target proc, or need the privilege table, so they need more
+        // than a single caller slot).
         SYS_SETALARM => do_setalarm::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
         SYS_DIAGCTL => do_diagctl::do_diagctl(caller, caller_priv, msg),
-        SYS_SETGRANT => stubs::do_setgrant(caller, caller_priv, msg),
         _ => EBADREQUEST,
     }
 }

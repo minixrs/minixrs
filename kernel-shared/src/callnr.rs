@@ -23,7 +23,22 @@ pub const SYS_FORK: i32 = KERNEL_CALL + 2;
 /// image with no reply; failures return a negative errno to PM.
 pub const SYS_EXEC: i32 = KERNEL_CALL + 3;
 pub const SYS_EXIT: i32 = KERNEL_CALL + 4;
+/// Raw privileged cross-address-space copy (MINIX 3 `sys_datacopy`), real as of
+/// slice 5.2. Payload: source endpoint in `0..4` (i32, `SELF` allowed),
+/// destination endpoint in `4..8` (i32), source address in `16..24` (u64),
+/// destination address in `24..32` (u64), byte count in `32..40` (u64).
+/// No grant is involved and there is no per-target authorization — the
+/// `k_call_mask` gate is the whole check, the `SYS_VMCTL` trust stance. Used
+/// for small control-plane reads (e.g. VFS fetching a caller's path string).
 pub const SYS_COPY: i32 = KERNEL_CALL + 5;
+/// Grant-mediated cross-address-space copy, real as of slice 5.2. One call
+/// number covers both directions via the selector in payload `0..4`
+/// ([`SAFECOPY_FROM`] / [`SAFECOPY_TO`]). Payload: direction in `0..4` (i32),
+/// granter endpoint in `4..8` (i32), grant id in `8..12` (i32), offset within
+/// the granted range in `16..24` (u64), the *caller's* buffer address in
+/// `24..32` (u64), and the byte count in `32..40` (u64). The kernel reads the
+/// grant entry out of the granter's own address space and validates kind,
+/// access, grantee, sequence, and range before copying.
 pub const SYS_SAFECOPY: i32 = KERNEL_CALL + 6;
 pub const SYS_IRQCTL: i32 = KERNEL_CALL + 7;
 pub const SYS_VMCTL: i32 = KERNEL_CALL + 8;
@@ -39,6 +54,15 @@ pub const SYS_TIMES: i32 = KERNEL_CALL + 11;
 /// so the debug channel needs no user-copy machinery and cannot fault — it has
 /// to work while the copy engine and grants are themselves under construction.
 pub const SYS_DIAGCTL: i32 = KERNEL_CALL + 12;
+/// Server → kernel: register the caller's grant table (slice 5.2). Payload:
+/// entry count in `4..8` (i32; 0 clears the registration) and the table's base
+/// address *in the caller's own address space* in `16..24` (u64). The kernel
+/// records `(addr, entries)` in the caller's `Priv` and reads entries back out
+/// of that address space on each `SYS_SAFECOPY`, so the granter pays no kernel
+/// memory and may revoke unilaterally. Caller-local in effect, but it mutates
+/// the caller's privilege slot, so it is routed with the target-taking calls.
+/// A process on a *shared* privilege slot is rejected (`EPERM`): one table
+/// address cannot describe several processes' memory.
 pub const SYS_SETGRANT: i32 = KERNEL_CALL + 13;
 /// Scheduler claim/release. A user-space scheduler (SCHED) calls this to take a
 /// target proc under its management (`target.scheduler = caller`) or hand it
@@ -67,6 +91,22 @@ pub const SYS_ENDKSIG: i32 = KERNEL_CALL + 17;
 /// (`target.scheduler = NONE`). Absent → the caller claims the target as its
 /// own scheduler. Matches MINIX 3 `SCHEDCTL_FLAG_KERNEL` (`include/minix/com.h`).
 pub const SCHEDCTL_FLAG_KERNEL: i32 = 1 << 0;
+
+// ---------------------------------------------------------------------------
+// `SYS_SAFECOPY` direction selector (payload `0..4`).
+//
+// One kernel-call number covers both directions, MINIX-style, because the
+// validation and the copy engine are identical either way — only the source and
+// destination swap. Numbered from 1 so a zeroed payload is an obvious
+// "invalid", the `VMCTL_*` / `PRIVCTL_*` / `DIAGCTL_*` convention.
+// ---------------------------------------------------------------------------
+
+/// Copy *out of* the granted range into the caller's buffer. Requires
+/// `CPF_READ` on the grant.
+pub const SAFECOPY_FROM: i32 = 1;
+/// Copy *into* the granted range from the caller's buffer. Requires
+/// `CPF_WRITE` on the grant.
+pub const SAFECOPY_TO: i32 = 2;
 
 /// Length of the boot-embedded binary name carried in the `SYS_EXEC` payload
 /// (`4..4+EXEC_NAME_LEN`), NUL-padded. Sized to fit the MXBI record name field
@@ -253,9 +293,32 @@ pub const PM_WAIT: i32 = PM_RQ_BASE + 3;
 /// path arrives with the filesystem/musl wrappers in Phase 5. (slice 4.7)
 pub const PM_EXEC: i32 = PM_RQ_BASE + 4;
 
+/// VFS → PM: the slice-5.2 grant demo. Carries a grant id in-band, which is how
+/// grant ids really travel — slice 5.3's `CDEV_WRITE {minor, granter, grant_id,
+/// len}` is the same shape. (DS cannot carry one: `DS_PUBLISH` deliberately
+/// registers the kernel-stamped `m_source` and ignores the payload, which is
+/// precisely its anti-spoof property.)
+///
+/// Payload: grant id in `0..4` (i32), granted length in `4..8` (i32), a second
+/// grant id in `8..12` (i32) that deliberately claims `CPF_WRITE` over the same
+/// read-only buffer for PM's denial probe, and the granter's raw buffer address
+/// in `16..24` (u64) for the ungranted `SYS_COPY` comparison.
+///
+/// The **granter is not in the payload**: PM takes it from the kernel-stamped
+/// `m_source`, the same anti-spoof property `DS_PUBLISH` relies on. It matters
+/// here because PM holds `SYS_COPY` / `SYS_SAFECOPY` and its clients do not — a
+/// caller-supplied granter endpoint would let any PM client aim a privileged
+/// copy at a third party's address space through PM (a confused deputy). PM
+/// additionally serves this request only when `m_source` is VFS.
+///
+/// Sent with `ipc_send`, so the sender blocks until PM's loop picks it up and
+/// the demo is self-synchronizing; PM sends no reply. **Demo-only** — retire it
+/// when a real grant consumer (CDEV, slice 5.3) lands.
+pub const PM_GRANT_TEST: i32 = PM_RQ_BASE + 5;
+
 /// Number of PM server requests defined so far. Locks the PM server's
 /// dispatch coverage the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_PM_MSGS: usize = 5;
+pub const NR_PM_MSGS: usize = 6;
 
 // The PM range sits strictly above the kernel-call range and strictly below
 // VM's (and therefore every other) server request range and the NOTIFY marker.
@@ -709,6 +772,16 @@ mod tests {
     }
 
     #[test]
+    fn safecopy_directions_are_contiguous_from_one() {
+        // Selector 0 is reserved as "invalid" (a zeroed payload), the VMCTL
+        // convention — `do_safecopy` must reject it rather than defaulting to
+        // a direction.
+        assert_eq!(SAFECOPY_FROM, 1);
+        assert_eq!(SAFECOPY_TO, 2);
+        assert_ne!(SAFECOPY_FROM, SAFECOPY_TO);
+    }
+
+    #[test]
     fn privctl_set_user_is_nonzero() {
         // Subcode 0 is reserved as "invalid" (a zeroed payload), the VMCTL
         // convention.
@@ -719,7 +792,7 @@ mod tests {
     fn pm_msgs_contiguous_from_base() {
         // PM requests are contiguous from PM_RQ_BASE; NR_PM_MSGS locks the PM
         // server's dispatch coverage.
-        let msgs = [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC];
+        let msgs = [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC, PM_GRANT_TEST];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, PM_RQ_BASE + i as i32);
         }
@@ -734,7 +807,7 @@ mod tests {
         // Each PM request must stay distinct from the VM/DS/SEF/SCHED request
         // ranges and the KERNEL_CALL range, and below NOTIFY_MESSAGE — so a
         // server's m_type dispatcher and the SEF classifier never collide.
-        for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC] {
+        for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC, PM_GRANT_TEST] {
             for other in [
                 VM_PAGEFAULT,
                 VM_BRK,
