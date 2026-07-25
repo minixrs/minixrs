@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! IPC subsystem — the heart of the MINIX microkernel.
 //!
-//! Slice 2.5 lights up the real IPC engine. `do_ipc` is the single SVC
+//! `do_ipc` is the single SVC
 //! entry point; it materializes mutable borrows of `PROC_TABLE` and
 //! `PRIV_TABLE`, performs trap-mask gating, and dispatches to one of the
 //! per-primitive handlers (`mini_send`, `mini_receive`, `mini_notify`,
@@ -36,11 +36,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
-use minixrs_kernel_shared::error::{EBADCALL, ECALLDENIED, ETRAPDENIED, OK};
+use minixrs_kernel_shared::error::{EBADCALL, ECALLDENIED, EFAULT, ETRAPDENIED, OK};
 use minixrs_kernel_shared::ipc_const::{NOTIFY, RECEIVE, SEND, SENDA, SENDNB, SENDREC};
 
 use crate::arch::ArchRegisterFrame;
-use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND};
+use crate::proc::flags::{MF_DELIVERMSG, MF_MSGFAILED, MF_REPLY_PEND};
 use crate::proc::sched::{self, CURRENT_PROC_NR};
 use crate::proc::table::{N_PROC_SLOTS, priv_table_mut_slice, proc_index, proc_table_mut_slice};
 use crate::proc::{Priv, Proc};
@@ -53,27 +53,26 @@ use send::SendFlags;
 /// intervals for the boot-time observability trace.
 static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Cadence of the boot-time IPC trace. ~600 IPC ops/sec under the
-/// slice-2.5 ping-pong demo → ~6 trace lines/sec; well under PL011's
-/// ~290 lines/sec ceiling at 115200 baud.
-///
-/// TODO(phase 4): once servers come online and per-second IPC rate
-/// jumps an order of magnitude, this needs to become a runtime knob
-/// (DS_SUBSCRIBE-driven) or scale by load.
+/// Cadence of the boot-time IPC trace. Stub C's synchronous kernel-call loop
+/// dominates the count by orders of magnitude, so in practice this samples C —
+/// every other caller is far too rare to hit the modulus. Making the cadence a
+/// runtime knob (DS-driven, or load-scaled) has been considered repeatedly and
+/// never been worth it: the per-handler head-carved `[ksys SYS_*]` traces are
+/// what actually answer "did X happen", and they are unsampled.
 const TRACE_EVERY: u64 = 100;
 
 /// Number of leading SVCs to trace unconditionally, regardless of
 /// [`TRACE_EVERY`]. Gives the early-boot output enough granularity to
 /// show each stub's first IPC call — slice 2.6 added a third stub (C)
 /// whose fast-path SENDRECs to SYSTEM outpace stubs A and B by orders
-/// of magnitude, so without this aid the slice-2.5 ping-pong looks like
-/// it regressed even though A↔B are still cooperating fine. Slice 4.5
+/// of magnitude, so without this aid the ping-pong looks like it
+/// regressed even though A↔B are still cooperating fine. Slice 4.5
 /// widened 12 → 24: six boot servers' startup SENDRECs (GET_WHOAMI +
 /// DS publish + replies + RS's first heartbeat round) exceed the old
 /// window. PM itself boots after stub C's kernel-call flood begins, so
-/// its handshake still lands past any practical head window — the
-/// `[ksys SYS_PRIVCTL] target=E` trace is PM's boot evidence instead
-/// (it can only fire after PM's GET_WHOAMI + DS publish succeeded).
+/// its handshake still lands past any practical head window — since
+/// slice 5.1 its `[diag pm] sef ready` line is the boot evidence instead
+/// (it can only fire after PM's GET_WHOAMI succeeded).
 const TRACE_HEAD: u64 = 24;
 
 /// IPC dispatch. Called from `trap.S` immediately after the SVC entry
@@ -117,6 +116,20 @@ pub extern "C" fn do_ipc(frame: &mut ArchRegisterFrame) {
 
     frame.x[0] = result as u64;
 
+    // EFAULT is produced by nothing but the user-message copy helpers, so a
+    // result-keyed trace here unambiguously names a bad user pointer and
+    // covers all three immediate copy sites (`mini_send`, and the kernel-call
+    // request/reply copies, whose errors propagate up through `dispatch`).
+    // Uncounted, for the reason `trace_deliver_efault` documents.
+    if result == EFAULT {
+        let _ = writeln!(
+            Uart::new(),
+            "[efault] proc={} nr={} call={call_nr} va={user_msg_va:#x}",
+            proc_name0(proc_table, caller_nr) as char,
+            caller_nr.get()
+        );
+    }
+
     let n = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if n <= TRACE_HEAD || n.is_multiple_of(TRACE_EVERY) {
         let mut uart = Uart::new();
@@ -124,6 +137,15 @@ pub extern "C" fn do_ipc(frame: &mut ArchRegisterFrame) {
             uart,
             "[ipc {n}] caller={caller_nr} call={call_nr} target={src_dst_e:#x} result={result}",
         );
+    }
+}
+
+/// First byte of a proc's name — the one-char id the `[as]` / `[pf]` / `[ksys]`
+/// traces use. `?` when the slot is out of range or unnamed.
+fn proc_name0(proc_table: &[Proc; N_PROC_SLOTS], nr: ProcNr) -> u8 {
+    match proc_index(nr) {
+        Some(idx) if proc_table[idx].name[0] != 0 => proc_table[idx].name[0],
+        _ => b'?',
     }
 }
 
@@ -273,16 +295,52 @@ fn do_sendrec(
 /// Copy a pending IPC message out to the user buffer recorded at
 /// RECEIVE-time and clear `MF_DELIVERMSG`. Called from
 /// `sched::schedule_next` on every EL1 → EL0 transition.
+///
+/// The copy walks `p`'s page tables rather than the active TTBR0 (slice 5.1),
+/// so this works whether or not `p` is the process the kernel is about to
+/// resume.
+///
+/// On failure the message is still consumed — there is no sender left to
+/// re-queue it against — and `EFAULT` is patched into the receiver's parked
+/// `x0`: the receiver asked for delivery into a buffer it does not have mapped
+/// (or cannot write), and that is its error to see. `MF_MSGFAILED` records the
+/// outcome for a future signals slice; nothing reads it yet.
 pub fn flush_deliver_msg(p: &mut Proc) {
     if p.misc_flags & MF_DELIVERMSG == 0 {
         return;
     }
-    // Best-effort; if the user buffer is bad, slice 2.5 has no place to
-    // signal that (the receiver hasn't returned yet). Phase 3 adds
-    // MF_MSGFAILED + signal delivery to handle this. The bounds check
-    // in `copy_msg_to_user` keeps an out-of-range VA from faulting EL1.
-    let _ = message::copy_msg_to_user(p.deliver_msg_vir, &p.deliver_msg);
+    let rc = message::copy_msg_to_user(p.ttbr0_pa, p.deliver_msg_vir, &p.deliver_msg);
     p.misc_flags &= !MF_DELIVERMSG;
+    match rc {
+        Ok(()) => p.misc_flags &= !MF_MSGFAILED,
+        Err(e) => {
+            // The MINIX `retreg` pattern: write the error into the saved SVC
+            // frame the trap restore path hands back on `eret`. Same mechanism
+            // `do_exit::unblock_dependents` uses for EDEADSRCDST. When the
+            // receiver is the *current* proc (an immediate delivery inside its
+            // own RECEIVE), `p.regs` is the very frame `do_ipc` just wrote OK
+            // into — this write lands last and wins, which is what we want.
+            p.regs.x[0] = e as i64 as u64;
+            p.misc_flags |= MF_MSGFAILED;
+            trace_deliver_efault(p.name[0], p.nr, p.deliver_msg_vir);
+        }
+    }
+}
+
+/// Emit the `[efault deliver]` trace for a failed deferred delivery.
+///
+/// Uncounted, unlike the sampled `[ipc {n}]` line: this can only fire on a
+/// receiver that named a bad buffer, so every occurrence is worth seeing — and
+/// an unsampled marker is stable enough for `tests/qemu-boot.expected`, which
+/// the counted forms are not.
+fn trace_deliver_efault(name0: u8, nr: ProcNr, va: u64) {
+    let id = if name0 != 0 { name0 } else { b'?' };
+    let _ = writeln!(
+        Uart::new(),
+        "[efault deliver] proc={} nr={} va={va:#x}",
+        id as char,
+        nr.get()
+    );
 }
 
 /// Kernel-originated page-fault notification: send `VM_PAGEFAULT` to the VM

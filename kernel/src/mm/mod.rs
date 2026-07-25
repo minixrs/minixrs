@@ -18,6 +18,7 @@
 //! within a fault path.
 
 pub mod frame;
+pub mod uaccess;
 
 pub use frame::{FRAME_SIZE, Frame, alloc_frame, free_frame, init_from_limine_memmap};
 

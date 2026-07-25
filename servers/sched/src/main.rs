@@ -82,7 +82,7 @@ fn main() -> ! {
         payload: [0u8; 96],
     };
     loop {
-        if sef.receive(&mut msg) != 0 {
+        if sef.receive(&mut msg) != OK {
             continue;
         }
         match msg.m_type {

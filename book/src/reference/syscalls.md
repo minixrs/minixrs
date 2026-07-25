@@ -53,7 +53,7 @@ control in the driver era). The dispatch table is `kernel/src/system/mod.rs`.
 | `0x609` | `SYS_SCHEDULE` | live | Set a process's priority and quantum. |
 | `0x60A` | `SYS_SETALARM` | live | Arm/cancel a per-process one-shot alarm. |
 | `0x60B` | `SYS_TIMES` | stub | Process accounting times — placeholder. |
-| `0x60C` | `SYS_DIAGCTL` | stub | Diagnostic output control — placeholder. |
+| `0x60C` | `SYS_DIAGCTL` | live | Print inline text to the console (see subcodes below). |
 | `0x60D` | `SYS_SETGRANT` | stub | Register the caller's grant table — Phase 5. |
 | `0x60E` | `SYS_SCHEDCTL` | live | Claim/release a process for a user-space scheduler. |
 | `0x60F` | `SYS_KILL` | live | Raise a signal on a target (queues toward PM). |
@@ -75,6 +75,34 @@ The subcall selector is in the first payload word; the target process (endpoint,
 | `VMCTL_VMINHIBIT_SET` / `_CLEAR` (5/6) | Gate scheduling while VM mutates the target's AS. |
 
 See [Memory Management](../memory/overview.md) for how VM uses these.
+
+### `SYS_DIAGCTL` subcodes
+
+`SYS_DIAGCTL` is the servers' debug channel. Servers run at EL0 with no console
+of their own, so without it their behavior is only observable indirectly, through
+kernel-side traces. `server-rt::diag_print` is the client side.
+
+Unlike MINIX 3, which passes a `(buf, len)` user pointer and copies the text in,
+minix.rs carries the text **inline in the message payload**: the subcode in
+payload `0..4`, the length in `4..8`, and up to `DIAG_TEXT_MAX` (88) text bytes
+from `DIAG_TEXT_OFF` (8). The channel therefore needs no user-copy machinery and
+cannot fault — it has to keep working while the copy engine and grants are
+themselves under construction. `diag_print` splits longer strings across
+successive calls, one console line each.
+
+| Subcode | Effect |
+|---------|--------|
+| `DIAGCTL_CODE_DIAG` (1) | Print the inline text as one `[diag <name>] …` line. |
+| `DIAGCTL_CODE_STACKTRACE` (2) | Reserved (MINIX 3) — `EINVAL`. |
+| `DIAGCTL_CODE_REGISTER` / `_UNREGISTER` (3/4) | Reserved (MINIX 3 kernel-message subscription) — `EINVAL`. |
+
+The `<name>` prefix is the caller's name as the *kernel* knows it, never
+anything from the payload, so a server can only ever identify itself. Text is
+restricted to printable ASCII, which keeps one call to exactly one line — the
+boot-marker checks in `tests/qemu-boot.expected` depend on that framing. No extra
+privilege gate is needed: `Priv::k_call_mask` already limits kernel calls to
+server-grade privileges, and the shared USER privilege has an empty mask, so
+ordinary user processes cannot reach this call.
 
 ## Server request ranges — live today
 

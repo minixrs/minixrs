@@ -3,6 +3,12 @@
 # ignored. These are the kernel's halt-path banners (panic.rs, exception.rs,
 # irq.rs). Designed [pf] faults from stubs C/D are healthy and NOT listed.
 !!! KERNEL PANIC:
+# Same-EL (EL1) exception -- what a kernel dereference of a bad user pointer
+# produced before slice 5.1's PT-walk copy engine. `!!! KERNEL PANIC:` catches
+# it transitively (exception_entry panics), but this is the sharper canary for
+# exactly the regression that slice prevents, and it can never appear in a
+# healthy boot.
+!!! kernel exception (vector index
 !!! unexpected EL0 sync exception
 !!! EL0 instruction abort
 !!! EL0 data abort
