@@ -184,7 +184,10 @@ jobs:
           rustup show
           rustup component add miri
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo miri test -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm
+      # `minixrs-tty` qualifies despite owning volatile MMIO: its only `unsafe`
+      # lives in `pl011.rs`, which no test reaches — the measured logic is
+      # `cdev.rs`'s pure parse/validate.
+      - run: cargo miri test -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm -p minixrs-tty
 
   qemu-smoke:
     name: QEMU boot smoke

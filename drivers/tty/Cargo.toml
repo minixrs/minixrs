@@ -1,0 +1,20 @@
+[package]
+name = "minixrs-tty"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "minixrs-tty"
+path = "src/main.rs"
+
+# Deliberately NOT `minixrs-driver-rt`: it is a 4-line placeholder today, and
+# depending on it would mean adding `drivers/driver-rt/src` to the shared
+# `rerun-if-changed` list in `kernel/build.rs` for zero benefit. Phase 6, when
+# driver-rt grows a real IRQ/DMA runtime, is when that dependency (and the watch
+# entry) should be added.
+[dependencies]
+minixrs-kernel-shared = { path = "../../kernel-shared" }
+minixrs-ipc = { path = "../../minix-ipc" }
+minixrs-server-rt = { path = "../../server-rt" }

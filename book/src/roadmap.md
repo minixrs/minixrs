@@ -1,11 +1,14 @@
 # Roadmap
 
-> **Planned — not yet implemented.** Everything in this chapter is design intent
-> for phases beyond Phase 4. None of it boots today: there is no musl fork, the
-> VirtIO drivers and file-system servers are empty stubs, and there is no x86_64
-> port. The rest of this book describes what *does* run; this chapter describes
-> where the project is headed. For live phase status and slice tracking, see the
-> repository's `docs/plan.md`.
+> **Mostly planned — parts of Phase 5 now boot.** This chapter is design intent for
+> phases beyond Phase 4, but Phase 5 has begun landing and the sections below are no
+> longer uniformly future tense: grants and the fault-safe copy engine are live
+> (slices 5.1–5.2), and so is the first user-space driver — TTY, which owns the
+> PL011 and serves `CDEV_WRITE` (slice 5.3, see [Drivers](drivers/overview.md)).
+> Still absent: the musl fork, the VirtIO drivers, the file-system servers, and any
+> x86_64 port. The rest of this book describes what *does* run; this chapter
+> describes where the project is headed. For live phase status and slice tracking,
+> see the repository's `docs/plan.md`.
 
 ## Grants and safe copy (Phase 5, first)
 

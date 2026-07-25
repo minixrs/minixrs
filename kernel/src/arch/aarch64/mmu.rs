@@ -12,12 +12,16 @@
 //!   TTBR1 settings Limine programmed for the higher-half kernel; using the
 //!   same granule for TTBR0 lets us reuse Limine's MAIR indices unchanged.
 //! - We never write `MAIR_EL1` — Limine has already placed `Normal WB` at
-//!   AttrIdx 0. We read once at boot and assert that invariant.
+//!   AttrIdx 0. We read once at boot and assert that invariant. Slice 5.3's
+//!   Device (MMIO) attribute is obtained the same read-only way: `MAIR_EL1` is
+//!   *scanned* for an index that already encodes a Device type, never written.
+//!   See the "Device (MMIO) memory attributes" block below for why.
 //! - We touch only the `*0` field-set bits of `TCR_EL1` (T0SZ / IRGN0 /
 //!   ORGN0 / SH0 / TG0 / EPD0) — the `*1` fields govern TTBR1, which is the
 //!   kernel's own translation regime and must not be perturbed.
 
 use core::arch::asm;
+use core::sync::atomic::AtomicU64;
 
 /// 4 KiB page size, in bytes.
 pub const PAGE_SIZE: usize = 4096;
@@ -58,11 +62,129 @@ pub const fn pte_attr_idx(idx: u64) -> u64 {
     (idx & 0b111) << 2
 }
 
+/// Recover the MAIR attribute index from a descriptor — the inverse of
+/// [`pte_attr_idx`]. Used by `addrspace::pte_prot` to recognize a device leaf
+/// without any side table: the kernel emits exactly two indices, so
+/// "not [`ATTR_IDX_NORMAL`]" *is* "device".
+pub const fn pte_attr_idx_of(pte: u64) -> u64 {
+    (pte >> 2) & 0b111
+}
+
 /// MAIR_EL1 AttrIdx 0 — must encode Normal memory, Write-Back, RAWA. Limine
 /// programs this; slice 2.3 only verifies.
 pub const ATTR_IDX_NORMAL: u64 = 0;
 /// Expected MAIR_EL1[7:0] for AttrIdx 0.
 pub const MAIR_NORMAL_BYTE: u8 = 0xFF;
+
+// ----- Device (MMIO) memory attributes -------------------------------------
+//
+// Slice 5.3 maps the PL011's MMIO page into the TTY driver's address space, and
+// that mapping must be Device memory, not Normal-WB.
+//
+// **The kernel must not write `MAIR_EL1`.** Changing byte *i* retroactively
+// changes the memory type of every live mapping that uses `AttrIndx=i` — and
+// that includes Limine's TTBR1 kernel and HHDM mappings, whose indices this
+// repo has no way to enumerate. Turning the HHDM into Device memory would be
+// silent, unrecoverable corruption.
+//
+// So we read and reuse instead. The observation that makes that sufficient: an
+// *unprogrammed* MAIR byte reads `0x00`, and `0x00` is itself a valid MMIO
+// encoding (Device-nGnRnE). "An index that already encodes a Device type" and
+// "an index nobody uses" therefore coincide — either way, installing a Device
+// mapping through it is correct. Reading changes nothing, so no barrier or TLBI
+// is needed.
+
+/// MAIR encoding for Device-nGnRE: non-Gathering, non-Reordering,
+/// Early-write-acknowledgement. What D1 specifies for the PL011.
+pub const MAIR_DEVICE_NGNRE: u8 = 0x04;
+
+/// MAIR encoding for Device-nGnRnE — the same, minus early write ack. Strictly
+/// stronger than [`MAIR_DEVICE_NGNRE`], so it is accepted; it is also what an
+/// unprogrammed MAIR byte reads as.
+///
+/// Only these two encodings qualify. Device-nGRE would let two `DR` stores
+/// *gather* into one, losing a character; Device-GRE would additionally let the
+/// `DR` store be reordered ahead of the `FR` poll that gates it.
+pub const MAIR_DEVICE_NGNRNE: u8 = 0x00;
+
+/// The MAIR index device mappings use, chosen once at boot by
+/// [`init_device_attr_idx`].
+///
+/// [`ATTR_IDX_NORMAL`] (0) doubles as "not chosen yet": index 0 can never be the
+/// answer, because [`assert_mair_normal_wb`] pins MAIR byte 0 to Normal-WB. That
+/// is what makes `prot_attrs`' `idx != ATTR_IDX_NORMAL` assert catch a device
+/// mapping attempted before this ran.
+static DEVICE_ATTR_IDX: AtomicU64 = AtomicU64::new(ATTR_IDX_NORMAL);
+
+/// Pick the MAIR index device mappings will use, and record it for
+/// [`device_attr_idx`]. Call once from `userland_bootstrap`, before any
+/// `Prot::DEVICE_RW` mapping is installed.
+///
+/// Scans MAIR bytes **1..8** (byte 0 is Normal-WB, verified separately),
+/// preferring an exact [`MAIR_DEVICE_NGNRE`] and falling back to the first
+/// [`MAIR_DEVICE_NGNRNE`]. Panics if the bootloader somehow left all seven bytes
+/// programmed to non-Device types — see the message for the recovery recipe.
+pub fn init_device_attr_idx() {
+    use crate::arch::aarch64::uart::Pl011;
+    use core::fmt::Write;
+
+    let mair: u64;
+    // SAFETY: MAIR_EL1 is readable at EL1; no side effects, and a read cannot
+    // perturb any live mapping.
+    unsafe {
+        asm!("mrs {0}, mair_el1", out(reg) mair, options(nomem, nostack, preserves_flags));
+    }
+    let byte_at = |i: u32| ((mair >> (8 * i)) & 0xFF) as u8;
+
+    // Prefer nGnRE, then nGnRnE. Two passes rather than one, so a board that
+    // happens to program both gets the encoding D1 asked for.
+    let mut found: Option<(u64, u8)> = None;
+    for want in [MAIR_DEVICE_NGNRE, MAIR_DEVICE_NGNRNE] {
+        for i in 1..8u32 {
+            if byte_at(i) == want {
+                found = Some((i as u64, want));
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+
+    let (idx, value) = match found {
+        Some(v) => v,
+        // Hard failure, not a fallback to Normal-WB: a Normal-WB MMIO mapping
+        // would let the CPU cache, gather, and reorder UART register accesses,
+        // which fails silently on real hardware (and, under QEMU's TCG, appears
+        // to work — see the slice-5.3 notes).
+        None => panic!(
+            "MAIR_EL1 = {mair:#018x}: no byte in 1..8 encodes a Device type \
+             ({:#04x} nGnRE or {:#04x} nGnRnE), so there is no index to reuse for \
+             MMIO. Recovery: program a high index (bootloaders fill low ones \
+             first) — set mair[7] = {:#04x}, then `msr mair_el1, x / isb / \
+             dsb ish / tlbi vmalle1is / dsb ish / isb`, and return that index \
+             here. Do NOT overwrite a low byte: it would retroactively change \
+             the memory type of Limine's live TTBR1 kernel and HHDM mappings.",
+            MAIR_DEVICE_NGNRE, MAIR_DEVICE_NGNRNE, MAIR_DEVICE_NGNRE,
+        ),
+    };
+    DEVICE_ATTR_IDX.store(idx, core::sync::atomic::Ordering::Relaxed);
+
+    // Forensic only — deliberately NOT a boot marker. Which index gets picked
+    // depends on what the bootloader programmed, so pinning it in
+    // `tests/qemu-boot.expected` would make the smoke test firmware-dependent.
+    let _ = writeln!(
+        Pl011::new(),
+        "[mair] device attr_idx={idx} byte={value:#04x}"
+    );
+}
+
+/// The MAIR index device mappings use. Valid only after
+/// [`init_device_attr_idx`]; returns [`ATTR_IDX_NORMAL`] before that, which
+/// `addrspace::prot_attrs` asserts against.
+pub fn device_attr_idx() -> u64 {
+    DEVICE_ATTR_IDX.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 // ----- TTBR0 / TCR / MAIR ---------------------------------------------------
 //

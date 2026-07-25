@@ -115,7 +115,7 @@ pub(super) fn do_exit(
 
     unblock_dependents(proc_table, priv_table, target_idx, dead_e, nr, dead_priv_id);
 
-    let freed_pages = teardown_addrspace(ttbr0_pa, dead_asid);
+    let (freed_pages, dev_pages) = teardown_addrspace(ttbr0_pa, dead_asid);
 
     free_slot(&mut proc_table[target_idx]);
 
@@ -123,7 +123,7 @@ pub(super) fn do_exit(
     if n <= EXIT_TRACE_HEAD || n.is_multiple_of(EXIT_TRACE_EVERY) {
         let _ = writeln!(
             Uart::new(),
-            "[ksys SYS_EXIT] target={} nr={} freed={freed_pages} result=0",
+            "[ksys SYS_EXIT] target={} nr={} freed={freed_pages} devs={dev_pages} result=0",
             name0 as char,
             nr.get(),
         );
@@ -211,24 +211,41 @@ fn unblock_dependents(
 }
 
 /// Free every leaf frame in the dead proc's page-table tree, invalidate its
-/// TLB entries, free the tree itself, and recycle the ASID. Returns the leaf
-/// count (the trace's frame-leak canary). No-op for procs that never ran at
-/// EL0 (`ttbr0_pa == 0`: kernel tasks, never-loaded boot servers).
+/// TLB entries, free the tree itself, and recycle the ASID. Returns
+/// `(frames_freed, device_leaves_skipped)` — the first is the trace's frame-leak
+/// canary, the second proves the device arm ran. No-op for procs that never ran
+/// at EL0 (`ttbr0_pa == 0`: kernel tasks, never-loaded boot servers).
+///
+/// A **device** leaf is counted, not freed: its PA is MMIO, outside every USABLE
+/// region, so `free_frame` would panic on it (and, if that bounds check were ever
+/// relaxed, would hand a UART register page out as ordinary memory). TTY is the
+/// only proc with such a leaf today and it never exits, which is exactly why
+/// `userland::device_teardown_selftest` exercises this arm at boot — otherwise it
+/// would be untested code sitting on a live landmine.
 ///
 /// Shared with `do_exec`, which reuses it to reclaim the *old* image's address
 /// space after swapping in the new one — the same "not the active TTBR0"
-/// invariant holds there (exec's target is never the running caller).
-pub(super) fn teardown_addrspace(ttbr0_pa: u64, dead_asid: u8) -> u64 {
+/// invariant holds there (exec's target is never the running caller). It is
+/// `pub(crate)` rather than `pub(super)` so the boot-time selftest can reach it.
+pub(crate) fn teardown_addrspace(ttbr0_pa: u64, dead_asid: u8) -> (u64, u64) {
     if ttbr0_pa == 0 {
-        return 0;
+        return (0, 0);
     }
     let mut freed: u64 = 0;
+    let mut devs: u64 = 0;
     // The leaf walk must precede `destroy` (which frees the tables the walk
     // reads). Leaf frames are exclusively the dead proc's: fork copies pages
     // rather than sharing them, and `VMCTL_PT_MAP` allocates fresh frames.
-    let _ = walk_leaves(ttbr0_pa, &mut |_va, pa, _prot| {
-        free_frame(Frame::from_addr(pa));
-        freed += 1;
+    let _ = walk_leaves(ttbr0_pa, &mut |_va, pa, prot| {
+        if prot.device {
+            // MMIO, shared by construction — nothing to reclaim. `map_page_in`'s
+            // RAM/device invariant guarantees `prot.device` and `is_usable_pa`
+            // disagree on every leaf, so this branch is exactly the non-RAM set.
+            devs += 1;
+        } else {
+            free_frame(Frame::from_addr(pa));
+            freed += 1;
+        }
         Ok(())
     });
     // SAFETY: single-threaded EL1; the dead proc's AS is never the active
@@ -239,7 +256,7 @@ pub(super) fn teardown_addrspace(ttbr0_pa: u64, dead_asid: u8) -> u64 {
     // SAFETY: this ASID's TLB entries were invalidated just above, so the
     // next `alloc_asid` may hand it to a fresh address space.
     unsafe { asid::free_asid(dead_asid) };
-    freed
+    (freed, devs)
 }
 
 /// Reset the slot for reuse: bump the endpoint generation (every stale

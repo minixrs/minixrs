@@ -209,6 +209,18 @@ fn copy_addrspace(parent_ttbr0: u64) -> Result<(u64, u64), MapError> {
     let mut pages: u64 = 0;
 
     let result = walk_leaves(parent_ttbr0, &mut |va, pa, prot| {
+        if prot.device {
+            // A device leaf is **re-mapped, not copied**. Two reasons, either of
+            // which is sufficient: MMIO is inherently shared, so there is no
+            // "copy" of a UART's registers to make; and `alloc_frame` +
+            // `copy_nonoverlapping` here would `memcpy` 4 KiB of live device
+            // registers *through a cacheable HHDM alias*, reading side-effecting
+            // registers and writing the result into RAM. `map_page_in` re-checks
+            // the RAM/device invariant on the child's leaf.
+            child.map_page(va, pa, prot)?;
+            pages += 1;
+            return Ok(());
+        }
         let frame = alloc_frame().ok_or(MapError::OutOfMemory)?;
         let new_pa = frame.addr();
         // SAFETY: both PAs came from the frame allocator, so both are
@@ -245,9 +257,13 @@ fn copy_addrspace(parent_ttbr0: u64) -> Result<(u64, u64), MapError> {
         Err(e) => {
             // Unwind: free the pages the partial copy installed, then the
             // tree. The child never had an ASID, so there is nothing to
-            // flush or recycle.
-            let _ = walk_leaves(child.ttbr0_pa, &mut |_va, pa, _prot| {
-                free_frame(Frame::from_addr(pa));
+            // flush or recycle. A device leaf the loop above re-mapped is
+            // skipped for the same reason `teardown_addrspace` skips one: the PA
+            // is MMIO the allocator never owned.
+            let _ = walk_leaves(child.ttbr0_pa, &mut |_va, pa, prot| {
+                if !prot.device {
+                    free_frame(Frame::from_addr(pa));
+                }
                 Ok(())
             });
             child.destroy();

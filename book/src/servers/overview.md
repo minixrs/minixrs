@@ -21,19 +21,31 @@ their own `user.ld` (page-aligned segments based at `0x0010_0000`). The kernel's
 into a single **MXBI archive** embedded in the kernel image; the boot loader
 (`kernel/src/arch/aarch64/userland.rs`) walks the archive and loads each module
 into the proc slot named by its record. Each server gets its own per-process
-TTBR0, so they all share the same low load base with no collision. Because a
-server runs at EL0 with no console, its behavior is observed through kernel-side
-traces (`[ipc]`, `[ksys]`, `[pf]`, `[alarm]`), never `println`.
+TTBR0, so they all share the same low load base with no collision.
+
+A server has no `println`. Its behaviour is observed through kernel-side traces
+(`[ipc]`, `[ksys]`, `[pf]`, `[alarm]`), and since slice 5.1 it can also emit a
+line itself through the kernel debug channel — `server-rt`'s `diag_print` /
+`diag_fmt` issue a `SYS_DIAGCTL` carrying the text inline, which the kernel prints
+prefixed with the caller's own name (`[diag vfs] …`). That is deliberately a
+*debug* channel, not stdio: it exists to keep working while stdio itself is under
+construction. Real console output arrives via the TTY driver (see
+[Drivers](../drivers/overview.md)) — slice 5.3 put the first EL0-composed text on
+the serial line, and slice 5.4 puts a process's fd 1 and 2 on top of it.
 
 ## Request-number ranges
 
 Every server's request numbers occupy a distinct band below `NOTIFY_MESSAGE`, so
 a message type unambiguously identifies both its server and its meaning
-(`kernel-shared/src/callnr.rs`, const-asserted disjoint):
+(`kernel-shared/src/callnr.rs`, const-asserted disjoint). The bands are listed —
+and rendered into the generated C header — in ascending numeric order, so
+`0x800` / `0x900` / `0xA00` are reserved for the three bands Phase 5 still owes:
+VFS, BDEV, and MFS.
 
 | Base | Value | Server / purpose |
 |------|-------|------------------|
 | `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC` |
+| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK` |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init) |
 | `DS_RQ_BASE`    | `0xE00` | DS: `DS_PUBLISH` / `RETRIEVE` / `CHECK` |
@@ -153,6 +165,15 @@ for a user process is termination.
 file operations yet: its receive loop drops any application message it gets. File
 descriptors, the PM↔VFS work protocol, and real filesystem I/O require the
 Phase-5 musl fork and file-system servers.
+
+It is, however, already the system's first *grant* client and its first *console*
+client. At startup it direct-grants a read-only buffer to PM (proving the
+cross-address-space copy engine, slice 5.2), then looks TTY up in DS and drives
+`CDEV_WRITE` — a real write, a deliberately over-long write that must come back
+short, and two requests that must be refused (slice 5.3). Both are demo wiring in
+the sense that no client asks for them yet, but neither is throwaway: slice 5.4
+puts VFS's fd 1 and 2 on the same `CDEV_WRITE` path, using a magic grant over the
+*caller's* buffer so the data still moves in a single copy.
 
 ## init: PID 1
 

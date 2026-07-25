@@ -12,6 +12,7 @@ members = [
     "servers/ds",
     "servers/sched",
     "drivers/driver-rt",
+    "drivers/tty",
     "drivers/virtio-blk",
     "drivers/virtio-net",
     "drivers/virtio-console",

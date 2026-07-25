@@ -13,6 +13,10 @@
 //! Like [`crate::sef`] and [`crate::ds`], this issues an IPC trap, so it is
 //! excluded from host coverage and verified by the QEMU boot trace. The chunk
 //! arithmetic is factored out as a pure helper and unit-tested.
+//!
+//! [`diag_fmt`] is the formatted variant, for lines that carry a value
+//! (`diag_fmt(format_args!("cdev.write ok match={m}"))`). It renders through a
+//! fixed stack buffer sized to exactly one console line.
 
 use minixrs_ipc::ipc_sendrec;
 use minixrs_kernel_shared::Message;
@@ -59,6 +63,67 @@ fn chunk_len(remaining: usize) -> usize {
         remaining
     } else {
         DIAG_TEXT_MAX
+    }
+}
+
+/// Longest formatted line [`diag_fmt`] can build. One
+/// `SYS_DIAGCTL(DIAGCTL_CODE_DIAG)` carries [`DIAG_TEXT_MAX`] (88) bytes, and
+/// matching that exactly keeps one formatted line to one console line — which is
+/// what the boot-log marker contract in `tests/qemu-boot.expected` depends on.
+pub const DIAG_LINE_MAX: usize = DIAG_TEXT_MAX;
+
+/// Print formatted text on the kernel debug channel: `diag_fmt(format_args!(…))`.
+///
+/// [`diag_print`] takes a `&str` and servers have no allocator, so formatted
+/// output renders through a fixed stack buffer. Truncation is **silent** — a debug
+/// line is not worth an error path, and the alternative (returning `Err` from a
+/// trace call) would put failure handling at every call site.
+///
+/// Promoted from PM's private `diag_line` in slice 5.3, when TTY and VFS both
+/// needed it. Callers pass `format_args!` rather than taking a `#[macro_export]`
+/// macro so the crate exports plain functions only.
+pub fn diag_fmt(args: core::fmt::Arguments<'_>) {
+    let mut buf = DiagBuf {
+        buf: [0u8; DIAG_LINE_MAX],
+        len: 0,
+    };
+    // `write_fmt` returns `Err` once the buffer fills; that is the truncation
+    // signal, and it is deliberately ignored (see above).
+    let _ = core::fmt::Write::write_fmt(&mut buf, args);
+    let _ = diag_print(buf.as_str());
+}
+
+/// A [`core::fmt::Write`] sink over a fixed stack buffer.
+struct DiagBuf {
+    buf: [u8; DIAG_LINE_MAX],
+    len: usize,
+}
+
+impl DiagBuf {
+    fn as_str(&self) -> &str {
+        // Callers write ASCII (the kernel sanitizes to printable ASCII anyway), so
+        // this cannot fail; an empty string is a harmless fallback if it somehow
+        // did — better than a panic inside a trace call.
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Write for DiagBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let room = self.buf.len() - self.len;
+        let n = if bytes.len() < room {
+            bytes.len()
+        } else {
+            room
+        };
+        self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+        self.len += n;
+        if n < bytes.len() {
+            Err(core::fmt::Error)
+        } else {
+            Ok(())
+        }
     }
 }
 

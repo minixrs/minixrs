@@ -20,7 +20,9 @@
 pub mod frame;
 pub mod uaccess;
 
-pub use frame::{FRAME_SIZE, Frame, alloc_frame, free_frame, init_from_limine_memmap};
+pub use frame::{
+    FRAME_SIZE, Frame, alloc_frame, free_frame, init_from_limine_memmap, is_usable_pa,
+};
 
 use core::cell::UnsafeCell;
 

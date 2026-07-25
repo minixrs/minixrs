@@ -21,6 +21,7 @@ pub mod ipc_const;
 pub mod message;
 pub mod signal;
 pub mod sys_limits;
+pub mod uspace;
 
 pub use endpoint::{Endpoint, GenNr, PrivId, ProcNr, SysId};
 pub use message::Message;

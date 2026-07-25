@@ -294,10 +294,11 @@ pub const PM_WAIT: i32 = PM_RQ_BASE + 3;
 pub const PM_EXEC: i32 = PM_RQ_BASE + 4;
 
 /// VFS → PM: the slice-5.2 grant demo. Carries a grant id in-band, which is how
-/// grant ids really travel — slice 5.3's `CDEV_WRITE {minor, granter, grant_id,
-/// len}` is the same shape. (DS cannot carry one: `DS_PUBLISH` deliberately
-/// registers the kernel-stamped `m_source` and ignores the payload, which is
-/// precisely its anti-spoof property.)
+/// grant ids really travel — slice 5.3's [`CDEV_WRITE`] `{minor, grant_id, len,
+/// offset}` is the same shape, and takes its granter from `m_source` for the same
+/// reason this does. (DS cannot carry a grant id at all: `DS_PUBLISH`
+/// deliberately registers the kernel-stamped `m_source` and ignores the payload,
+/// which is precisely its anti-spoof property.)
 ///
 /// Payload: grant id in `0..4` (i32), granted length in `4..8` (i32), a second
 /// grant id in `8..12` (i32) that deliberately claims `CPF_WRITE` over the same
@@ -321,10 +322,94 @@ pub const PM_GRANT_TEST: i32 = PM_RQ_BASE + 5;
 pub const NR_PM_MSGS: usize = 6;
 
 // The PM range sits strictly above the kernel-call range and strictly below
-// VM's (and therefore every other) server request range and the NOTIFY marker.
+// CDEV's (and therefore every other) server request range and the NOTIFY marker.
 const _: () = assert!(PM_RQ_BASE > KERNEL_CALL + (NR_KERN_CALLS as i32 - 1));
-const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VM_RQ_BASE);
+const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < CDEV_RQ_BASE);
 const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
+// ---------------------------------------------------------------------------
+// CDEV (character device) request numbers — `m_type` values for messages
+// addressed to a character-device driver, TTY being the first (slice 5.3).
+//
+// Like the PM/VM/DS/SEF/SCHED ranges these are *server IPC requests*, not kernel
+// calls. `0xB00` keeps the bands in numeric order between PM (`0x700`) and VM
+// (`0xC00`) while leaving `0x800` / `0x900` / `0xA00` free for the three bands
+// Phase 5 still owes: VFS (slice 5.4), MFS (5.8), and BDEV (5.7). Numbering is
+// minix.rs-specific — MINIX 3 carries `CDEV_*` in `include/minix/com.h` with its
+// own values, which minix.rs does not inherit because its device protocol is
+// narrower (no `CDEV_REPLY` message class; a driver replies to the SENDREC).
+//
+// The payload carries a **grant id**, not a buffer address: a driver's client
+// lives in a different address space, so the bytes move via `SYS_SAFECOPY`. The
+// **granter is deliberately not a payload field** — the driver takes it from the
+// kernel-stamped `m_source`. A caller-supplied granter endpoint would turn any
+// grant-holding driver into a confused deputy, aiming a privileged cross-address-
+// space copy wherever its caller pointed; this is the same anti-spoof rule
+// `DS_PUBLISH` relies on, and it binds every grant-id-carrying request in the
+// CDEV, BDEV, and FS bands.
+// ---------------------------------------------------------------------------
+
+/// Base for character-device driver request `m_type` values.
+pub const CDEV_RQ_BASE: i32 = 0xB00;
+
+/// Client → character driver: write bytes to a device minor.
+///
+/// Payload: minor number in [`CDEV_MINOR_OFF`]`..+4` (i32), grant id in
+/// [`CDEV_GRANT_OFF`]`..+4` (i32), byte count in [`CDEV_LEN_OFF`]`..+4` (i32), and
+/// the offset within the granted range in [`CDEV_OFFSET_OFF`]`..+8` (u64). The
+/// grant must carry `CPF_READ` and name the driver as its grantee; the driver
+/// reads the bytes with `SYS_SAFECOPY(SAFECOPY_FROM, m_source, …)`.
+///
+/// Reply `m_type` is the **number of bytes written** (`>= 0`; `0` is legal), or a
+/// negative errno. A request longer than [`CDEV_MAX_IO`] is a **short write, not
+/// a failure**: the driver moves the first `CDEV_MAX_IO` bytes and reports that
+/// count, and the client re-sends with `offset` advanced. That is POSIX
+/// `write()`'s contract, and it is what lets a driver stage through a small
+/// stack buffer with no allocator.
+///
+/// There is deliberately no `CDEV_READ`: RX needs interrupts (`SYS_IRQCTL`) and
+/// arrives in Phase 6. Slice 5.11's `/dev/null` and `/dev/zero` are new *minors*
+/// of this same request, not new request numbers.
+pub const CDEV_WRITE: i32 = CDEV_RQ_BASE;
+
+/// Number of character-device requests defined so far. Locks a driver's
+/// dispatch coverage the way `NR_DS_REQUESTS` locks the DS server.
+pub const NR_CDEV_MSGS: usize = 1;
+
+/// Offset of the device minor number in a `CDEV_WRITE` payload (i32).
+pub const CDEV_MINOR_OFF: usize = 0;
+/// Offset of the grant id in a `CDEV_WRITE` payload (i32).
+pub const CDEV_GRANT_OFF: usize = 4;
+/// Offset of the requested byte count in a `CDEV_WRITE` payload (i32).
+pub const CDEV_LEN_OFF: usize = 8;
+/// Offset of the byte offset within the granted range in a `CDEV_WRITE` payload
+/// (u64, so 8-aligned relative to the message base — the payload itself starts at
+/// message offset 8, hence 16 rather than 12).
+pub const CDEV_OFFSET_OFF: usize = 16;
+
+/// The console minor: TTY's UART. Any other minor is `ENXIO` until slice 5.11
+/// adds `/dev/null` and `/dev/zero`.
+pub const CDEV_MINOR_CONSOLE: i32 = 0;
+
+/// Largest byte count a character driver moves in one `CDEV_WRITE`. A longer
+/// request is short-written (see [`CDEV_WRITE`]). Sized for a staging buffer in a
+/// driver's `main` frame on a one-page stack.
+pub const CDEV_MAX_IO: usize = 256;
+
+// The CDEV range sits strictly above the PM range and strictly below VM's (and
+// therefore every other server request range) and the NOTIFY marker.
+const _: () = assert!(CDEV_RQ_BASE > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
+const _: () = assert!(CDEV_RQ_BASE + (NR_CDEV_MSGS as i32 - 1) < VM_RQ_BASE);
+const _: () = assert!(CDEV_RQ_BASE + (NR_CDEV_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
+// The `CDEV_WRITE` payload fields are ordered, non-overlapping, and fit the
+// 96-byte payload. `CDEV_OFFSET_OFF` is 8 wide (u64); the rest are 4 (i32).
+const _: () = assert!(CDEV_MINOR_OFF + 4 <= CDEV_GRANT_OFF);
+const _: () = assert!(CDEV_GRANT_OFF + 4 <= CDEV_LEN_OFF);
+const _: () = assert!(CDEV_LEN_OFF + 4 <= CDEV_OFFSET_OFF);
+const _: () = assert!(CDEV_OFFSET_OFF + 8 <= 96);
+// A short write must be expressible in the i32 reply `m_type`.
+const _: () = assert!(CDEV_MAX_IO <= i32::MAX as usize);
 
 // ---------------------------------------------------------------------------
 // VM server request numbers — `m_type` values for messages addressed to VM.
@@ -693,6 +778,7 @@ mod tests {
             for vm in [VM_PAGEFAULT, VM_BRK, VM_MMAP, VM_MUNMAP, VM_FORK] {
                 assert_ne!(r, vm);
             }
+            assert_ne!(r, CDEV_WRITE);
             assert_ne!(r, SEF_INIT);
             assert_ne!(r, SEF_SIGNAL);
             assert!(r > SEF_RQ_BASE + (NR_SEF_MSGS as i32 - 1));
@@ -741,6 +827,7 @@ mod tests {
             SCHEDULING_SET_NICE,
         ] {
             for other in [
+                CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -797,9 +884,9 @@ mod tests {
             assert_eq!(*m, PM_RQ_BASE + i as i32);
         }
         assert_eq!(msgs.len(), NR_PM_MSGS);
-        // The whole PM range stays below VM's (and therefore every other
+        // The whole PM range stays below CDEV's (and therefore every other
         // server request range and the NOTIFY marker).
-        assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VM_RQ_BASE);
+        assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < CDEV_RQ_BASE);
     }
 
     #[test]
@@ -809,6 +896,7 @@ mod tests {
         // server's m_type dispatcher and the SEF classifier never collide.
         for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC, PM_GRANT_TEST] {
             for other in [
+                CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -827,10 +915,131 @@ mod tests {
                 assert_ne!(m, other);
             }
             assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
+            assert!(m < CDEV_RQ_BASE);
+            assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
+            assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn cdev_msgs_contiguous_from_base() {
+        // CDEV requests are contiguous from CDEV_RQ_BASE; NR_CDEV_MSGS locks a
+        // character driver's dispatch coverage.
+        let msgs = [CDEV_WRITE];
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(*m, CDEV_RQ_BASE + i as i32);
+        }
+        assert_eq!(msgs.len(), NR_CDEV_MSGS);
+    }
+
+    #[test]
+    fn cdev_msgs_distinct_from_other_ranges() {
+        // Each CDEV request must stay distinct from every other band and the
+        // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a driver's m_type
+        // dispatcher and the SEF classifier never collide.
+        for m in [CDEV_WRITE] {
+            for other in [
+                PM_GETPID,
+                PM_FORK,
+                PM_EXIT,
+                PM_WAIT,
+                PM_EXEC,
+                PM_GRANT_TEST,
+                VM_PAGEFAULT,
+                VM_BRK,
+                VM_MMAP,
+                VM_MUNMAP,
+                VM_FORK,
+                DS_PUBLISH,
+                DS_RETRIEVE,
+                DS_CHECK,
+                SEF_INIT,
+                SEF_SIGNAL,
+                SCHEDULING_NO_QUANTUM,
+                SCHEDULING_START,
+                SCHEDULING_STOP,
+                SCHEDULING_SET_NICE,
+            ] {
+                assert_ne!(m, other);
+            }
+            assert!(m > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
             assert!(m < VM_RQ_BASE);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
         }
+    }
+
+    #[test]
+    fn cdev_band_sits_at_0xb00_leaving_three_bands_free() {
+        // The band base is load-bearing for numeric ordering: PM (0x700) below,
+        // VM (0xC00) above, with 0x800 / 0x900 / 0xA00 reserved for the three
+        // bands Phase 5 still owes (VFS 5.4, MFS 5.8, BDEV 5.7). Nothing may
+        // claim one of those without also moving whichever band would then be
+        // out of numeric order.
+        assert_eq!(CDEV_RQ_BASE, 0xB00);
+        for reserved in [0x800, 0x900, 0xA00] {
+            for taken in [
+                PM_RQ_BASE,
+                CDEV_RQ_BASE,
+                VM_RQ_BASE,
+                SEF_RQ_BASE,
+                DS_RQ_BASE,
+                SCHED_RQ_BASE,
+            ] {
+                assert_ne!(reserved, taken, "{reserved:#x} is no longer free");
+            }
+        }
+    }
+
+    #[test]
+    fn cdev_write_payload_offsets_are_ordered_and_disjoint() {
+        // Every field the request defines, in declaration order, with its width:
+        // i32 fields are 4 bytes, the u64 offset field is 8.
+        //
+        // There is deliberately NO granter field. The driver takes the granter
+        // from the kernel-stamped `m_source`; a payload granter would let a client
+        // aim the driver's privileged `SYS_SAFECOPY` at a third party's address
+        // space (a confused deputy). This list is the record of that — adding a
+        // field means editing it, and the length assertion below is what makes
+        // "adding a granter" a visible change rather than a quiet one.
+        let fields = [
+            ("minor", CDEV_MINOR_OFF, 4),
+            ("grant", CDEV_GRANT_OFF, 4),
+            ("len", CDEV_LEN_OFF, 4),
+            ("offset", CDEV_OFFSET_OFF, 8),
+        ];
+        assert_eq!(fields.len(), 4, "a CDEV_WRITE payload field was added");
+        assert_eq!(CDEV_MINOR_OFF, 0, "the first field must start the payload");
+
+        for pair in fields.windows(2) {
+            let (name, off, width) = pair[0];
+            let (next_name, next_off, _) = pair[1];
+            assert!(
+                off + width <= next_off,
+                "{name} ({off}..{}) overlaps {next_name} at {next_off}",
+                off + width,
+            );
+        }
+        let (last_name, last_off, last_width) = fields[fields.len() - 1];
+        assert!(
+            last_off + last_width <= 96,
+            "{last_name} runs past the 96-byte payload",
+        );
+
+        // The u64 field must be 8-aligned *within the message*, whose payload
+        // starts at byte 8 — so an even multiple of 8 here.
+        assert_eq!((8 + CDEV_OFFSET_OFF) % 8, 0);
+    }
+
+    #[test]
+    fn cdev_max_io_fits_the_reply() {
+        // The reply `m_type` carries the byte count as an i32, so a full-size
+        // transfer must round-trip through i32 — a count that overflowed would
+        // land in the negative, errno-shaped band and read as a failure.
+        assert_eq!(i32::try_from(CDEV_MAX_IO), Ok(256));
+        assert_eq!(CDEV_MAX_IO, 256);
+        assert_eq!(CDEV_MINOR_CONSOLE, 0);
     }
 
     #[test]
@@ -841,6 +1050,7 @@ mod tests {
         // classifier can never collide. (The base-vs-VM-range ordering is
         // additionally locked by a module-level const-assert.)
         for m in [SEF_INIT, SEF_SIGNAL] {
+            assert_ne!(m, CDEV_WRITE);
             assert_ne!(m, VM_PAGEFAULT);
             assert_ne!(m, VM_BRK);
             assert_ne!(m, VM_MMAP);
