@@ -1,0 +1,17 @@
+Work on next phase 5.1
+
+---
+
+Grok makes the following recommendations on review. Issues
+
+1. [suggestion] kernel-shared/src/message.rs:80 — USER_PAGE_SIZE is hard-coded to 4096 independently of kernel PAGE_SIZE / FRAME_SIZE. A future granule change would desync chunk boundaries from L3 leaves.
+   • Fix: Add const _: () = assert!(USER_PAGE_SIZE == FRAME_SIZE as u64) in uaccess/addrspace.
+
+2. [suggestion] kernel/src/mm/uaccess.rs:70 — Prot::writable rejection on copy_to_user_as is implemented but not exercised by stub-A probes or host tests; a regression dropping that check would still pass the new [efault] markers.
+   • Fix: Add a one-shot RO-destination probe (or host test once infrastructure allows).
+
+3. [nit] CLAUDE.md:177 — SEF example still shows sef.receive(...) != 0 after the != OK sweep.
+   • Fix: Update the example to != OK.
+
+4. [nit] kernel/src/ipc/message.rs:55 — .try_into().expect("payload in range") on fixed-width slices is a panic path if layout constants diverge.
+   • Fix: Prefer type-level infallible indexing so a mismatch is a compile error.
