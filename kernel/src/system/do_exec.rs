@@ -174,7 +174,14 @@ pub(super) fn do_exec(
 
     // Reclaim the old image. Safe: the target is never the running caller (PM),
     // so its old AS is not the active TTBR0.
-    let freed = super::do_exit::teardown_addrspace(old_ttbr0, old_asid);
+    //
+    // The device-leaf count is dropped rather than traced: the new image built by
+    // `load_exec_image` carries no device mapping (the TTY UART pre-map lives in
+    // `load_boot_server`, deliberately outside the image-generic helper), so a
+    // proc that exec'd would *lose* its device window — which is why nothing that
+    // owns one execs. Only `SYS_EXIT` reports the count, where it is the boot
+    // selftest's proof.
+    let (freed, _dev_pages) = super::do_exit::teardown_addrspace(old_ttbr0, old_asid);
 
     // Unblock: clear RTS_RECEIVING so the scheduler resumes the target at the
     // new entry. `rts_unset` enqueues when the last block bit clears.

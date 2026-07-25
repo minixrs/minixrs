@@ -41,7 +41,10 @@ use minixrs_kernel_shared::com::{
     SYSTEM, VM_PROC_NR, boot_endpoint,
 };
 
-use crate::arch::aarch64::addrspace::{AddrSpace, Prot, walk_leaves};
+use minixrs_kernel_shared::com::TTY_PROC_NR;
+use minixrs_kernel_shared::uspace::{TTY_UART_VA, USER_DEVICE_WINDOW_BASE};
+
+use crate::arch::aarch64::addrspace::{AddrSpace, Prot, map_page_in, walk_leaves};
 use crate::arch::aarch64::asid::alloc_asid;
 #[cfg(feature = "boot-stubs")]
 use crate::arch::aarch64::mmu::flush_icache_range;
@@ -140,6 +143,27 @@ unsafe extern "C" {
 /// collision (the same reason `user.ld`'s `0x0010_0000` base is shared).
 const SERVER_STACK_VA: u64 = 0x0020_0000; // 2 MiB
 
+// ----- The device window must clear every VA declared above ------------------
+//
+// `kernel-shared::uspace` documents the whole user VA map and const-asserts the
+// window's internal geometry, but the VAs it has to stay clear of are declared
+// *here* (and, for the mmap arena, in `servers/vm/src/region.rs`, which carries
+// its own guard plus a runtime cap). So the collision checks live here, where a
+// future slice that raises `SERVER_STACK_VA` or adds a stub trips them.
+
+const _: () = assert!(USER_DEVICE_WINDOW_BASE > SERVER_STACK_VA + PAGE_SIZE as u64);
+
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_STACK_VA_A + PAGE_SIZE as u64);
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_STACK_VA_B + PAGE_SIZE as u64);
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_STACK_VA_C + PAGE_SIZE as u64);
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_STACK_VA_D + PAGE_SIZE as u64);
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_CODE_VA_D + PAGE_SIZE as u64);
+
 // ----- Bootstrap ----------------------------------------------------------
 
 /// Build three per-process address spaces (one per EL0 stub), populate
@@ -164,10 +188,25 @@ pub unsafe fn userland_bootstrap() {
     mmu::assert_mair_normal_wb();
     mmu::assert_tcr_el1_ttbr0_ready();
 
+    // 1.5. Pick the MAIR index device (MMIO) mappings will use, by *reading*
+    //      MAIR_EL1 for an index that already encodes a Device type — never
+    //      writing it, which would retroactively retype Limine's live TTBR1
+    //      mappings. Must precede any `Prot::DEVICE_RW` mapping; `prot_attrs`
+    //      asserts if one is attempted first.
+    mmu::init_device_attr_idx();
+
     // 2. Clear TCR_EL1.EPD0 once. Per-proc TTBR0 install happens at every
     //    context switch via `proc::sched::schedule_next`.
     // SAFETY: DAIF still masked from Limine handoff; single-threaded boot.
     unsafe { mmu::enable_ttbr0_walks_once() };
+
+    // 2.25. Prove the device arm of the address-space teardown path works, before
+    //        anything depends on it. Unconditional (so the stub-free boot covers
+    //        it too) and cheap: one throwaway address space, four table frames,
+    //        once.
+    // SAFETY: single-threaded boot; the selftest owns every frame and the ASID it
+    // touches, and its address space is never installed in TTBR0.
+    unsafe { device_teardown_selftest() };
 
     // 2.5. Load every boot server from the embedded MXBI archive (slice 4.2).
     //      VM is packed first so it takes ASID 1 and is enqueued first; its
@@ -201,6 +240,61 @@ pub unsafe fn userland_bootstrap() {
     unsafe {
         install_boot_stubs();
     }
+}
+
+/// Build a throwaway address space holding exactly one device leaf, tear it down
+/// with the real `do_exit::teardown_addrspace`, and assert the outcome.
+///
+/// **Why this exists.** TTY is the only process with a device mapping, and TTY
+/// never exits — so without this, `teardown_addrspace`'s `prot.device` arm would
+/// be dead code sitting on a live landmine. And the failure mode is not a leak: a
+/// missing guard makes `free_frame` panic on the UART's PA, killing the kernel.
+/// So the arm is exercised deterministically at boot, where a regression shows up
+/// as `!!! KERNEL PANIC: free_frame: PA 0x9000000 is outside all USABLE regions`
+/// (which `tests/qemu-boot.forbidden` catches) rather than never.
+///
+/// Prints `[devmap] selftest ok freed=0 devs=1` — deterministic, hence a boot
+/// marker: only the L0/L1/L2/L3 *tables* are reclaimed (by `AddrSpace::destroy`,
+/// not counted), and the single leaf is the device page.
+///
+/// SAFETY: single-threaded boot; the sole caller of the frame allocator and ASID
+/// pool for its duration. Must run after `mm::init_from_limine_memmap` and
+/// `mmu::init_device_attr_idx`.
+unsafe fn device_teardown_selftest() {
+    use crate::arch::aarch64::uart::Pl011;
+    use core::fmt::Write;
+
+    let aspace = AddrSpace::new().expect("selftest AddrSpace::new");
+    let ttbr0_pa = aspace.ttbr0_pa;
+    map_page_in(
+        ttbr0_pa,
+        TTY_UART_VA,
+        crate::arch::aarch64::uart::PL011_PHYS_BASE as u64,
+        Prot::DEVICE_RW,
+    )
+    .expect("selftest device map");
+
+    // Take a real ASID so `teardown_addrspace` can flush and recycle it exactly
+    // as it would for a dying proc. It lands back on the free list, so the first
+    // boot server picks it up — which also exercises the recycle path.
+    // SAFETY: single-threaded boot; sole accessor of the ASID pool.
+    let asid = unsafe { alloc_asid() };
+
+    // The tree is owned via `ttbr0_pa` from here; `teardown_addrspace`
+    // reconstructs its own `AddrSpace` to destroy it, so don't let this value
+    // destroy it first.
+    #[allow(clippy::forget_non_drop)]
+    core::mem::forget(aspace);
+
+    let (freed, devs) = crate::system::do_exit::teardown_addrspace(ttbr0_pa, asid);
+    assert!(
+        freed == 0 && devs == 1,
+        "device teardown selftest: freed={freed} devs={devs}, expected 0/1",
+    );
+    let _ = writeln!(
+        Pl011::new(),
+        "[devmap] selftest ok freed={freed} devs={devs}"
+    );
 }
 
 /// Build the four demo stubs A–D and make them runnable — factored out of
@@ -385,10 +479,18 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
 /// tree itself. Used only on the [`load_exec_image`] error paths, before any
 /// ASID is allocated — so unlike `do_exit::teardown_addrspace` there is nothing
 /// to flush or recycle.
+///
+/// The `prot.device` guard is unreachable today — the only device mapping in the
+/// system is installed by [`load_boot_server`] *after* `load_exec_image` has
+/// already returned successfully, so no error path here can see one. It is here
+/// anyway because this is the leaf sweep that gets forgotten, and forgetting it
+/// is a kernel panic (`free_frame` rejects a non-RAM PA), not a leak.
 fn destroy_addrspace_with_leaves(aspace: AddrSpace) {
     let ttbr0_pa = aspace.ttbr0_pa;
-    let _ = walk_leaves(ttbr0_pa, &mut |_va, pa, _prot| {
-        free_frame(Frame::from_addr(pa));
+    let _ = walk_leaves(ttbr0_pa, &mut |_va, pa, prot| {
+        if !prot.device {
+            free_frame(Frame::from_addr(pa));
+        }
         Ok(())
     });
     aspace.destroy();
@@ -432,6 +534,40 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
             p.ttbr0_pa,
             p.asid,
             img.entry,
+        );
+    }
+
+    // The TTY driver owns the PL011, and there is no way for it to ask for the
+    // mapping: D1 deferred a VM-mediated `VMCTL_MAP_PHYS` to Phase 6, so the
+    // kernel pre-maps the UART's MMIO page here — a one-off bring-up step exactly
+    // like the stack page `load_exec_image` installs.
+    //
+    // Deliberately *not* inside `load_exec_image`: that helper is shared with
+    // `system::do_exec`, so putting it there would hand a device window to every
+    // binary any process ever exec'd.
+    //
+    // **No TLB maintenance is needed**, for two independent reasons: this address
+    // space was built moments ago and has never been installed in TTBR0 (and a
+    // recycled ASID is always clean — `teardown_addrspace` flushes before
+    // `free_asid`), and `mmu::switch_ttbr0_with_asid`, which runs on TTY's first
+    // schedule, already issues `isb; tlbi aside1; dsb ish; isb`. This is the same
+    // reasoning the `SERVER_STACK_VA` mapping above already relies on; do not
+    // diverge from it here.
+    if nr == TTY_PROC_NR {
+        map_page_in(
+            img.ttbr0_pa,
+            TTY_UART_VA,
+            crate::arch::aarch64::uart::PL011_PHYS_BASE as u64,
+            Prot::DEVICE_RW,
+        )
+        .expect("TTY UART pre-map");
+        // SAFETY: single-threaded boot; console write only.
+        let _ = writeln!(
+            Pl011::new(),
+            "[devmap] tty va={:#x} pa={:#x} attr_idx={}",
+            TTY_UART_VA,
+            crate::arch::aarch64::uart::PL011_PHYS_BASE,
+            mmu::device_attr_idx(),
         );
     }
 

@@ -57,7 +57,7 @@ use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{EINVAL, ENOMEM, OK};
 use minixrs_kernel_shared::message::Message;
 
-use crate::arch::aarch64::addrspace::{MapError, Prot, map_page_in, unmap_page_in};
+use crate::arch::aarch64::addrspace::{MapError, Prot, map_page_in, unmap_page_in, walk_pt_in};
 use crate::arch::aarch64::mmu;
 use crate::mm::{Frame, alloc_frame, free_frame};
 use crate::proc::flags::{RTS_PAGEFAULT, RTS_VMINHIBIT};
@@ -117,6 +117,14 @@ fn pt_map(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut Me
     let prot = Prot {
         writable: prot_bits & VMCTL_PROT_WRITE != 0,
         executable: prot_bits & VMCTL_PROT_EXEC != 0,
+        // Always Normal-WB: **VM may not mint device mappings.** D1 rejected a
+        // VM-mediated `VMCTL_MAP_PHYS` for Phase 5 — a subcall that let a
+        // user-space server name an arbitrary physical address would hand it the
+        // whole machine, and the one device mapping Phase 5 needs (TTY's UART) is
+        // installed by the kernel at boot instead. Revisit when Phase 6's
+        // virtio-mmio drivers need to map their own register pages, and gate it on
+        // a per-driver PA whitelist in `Priv` when you do.
+        device: false,
     };
 
     // Snapshot the target's AS coordinates, then drop the borrow before
@@ -163,11 +171,17 @@ fn pt_map(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut Me
     OK
 }
 
-/// `VMCTL_PT_UNMAP` — clear the PTE at `vaddr` and free its backing frame.
+/// `VMCTL_PT_UNMAP` — clear the PTE at `vaddr` and free its backing frame,
+/// unless that leaf maps a device.
 ///
-/// Assumes the leaf is an anonymous, kernel-allocated frame (everything
-/// `PT_MAP` installs is). Mapping a caller-supplied device/shared PA — which
-/// must *not* be freed here — is a future subcall.
+/// Everything `PT_MAP` installs is an anonymous, kernel-allocated frame, so in
+/// practice the free always happens. The device arm is defense-in-depth for the
+/// one leaf kind `PT_MAP` cannot produce: the UART page the kernel pre-maps into
+/// TTY's address space (slice 5.3). Freeing that PA would push MMIO onto the
+/// frame allocator's free list. VM has no reason to unmap a driver's device
+/// window and no `ipc_to` edge that would let it try — but the guard costs one
+/// walk, and `map_page_in`'s RAM/device invariant makes it exact rather than
+/// heuristic.
 fn pt_unmap(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut Message) -> i32 {
     let vaddr = read_u64(msg, 8);
     let (ttbr0_pa, asid, name) = {
@@ -178,10 +192,18 @@ fn pt_unmap(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut 
         return EINVAL;
     }
 
+    // Resolve the leaf's protection *before* clearing it — `unmap_page_in`
+    // returns only the PA, and re-walking afterwards would find nothing. Keeping
+    // the lookup here rather than widening `unmap_page_in`'s return type avoids
+    // signature churn on the three other callers.
+    let device = walk_pt_in(ttbr0_pa, vaddr).is_some_and(|(_pa, prot)| prot.device);
+
     let Some(pa) = unmap_page_in(ttbr0_pa, vaddr) else {
         return EINVAL; // nothing mapped at vaddr
     };
-    free_frame(Frame::from_addr(pa));
+    if !device {
+        free_frame(Frame::from_addr(pa));
+    }
     // SAFETY: ASID-tagged TLBI; same rationale as `pt_map`.
     unsafe { mmu::flush_tlb_asid(asid) };
 

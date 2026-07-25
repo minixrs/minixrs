@@ -31,8 +31,11 @@ Facts the design rests on (verified against source at session time):
   `kernel/src/proc/table.rs` — they are simply never loaded because
   `kernel/build.rs` packs no ELF for them. Loading each is: crate + `user.ld`
   + a `servers` array row + a `qemu-boot.expected` line.
-- Request bands `0x800`, `0x900`, `0xA00`, `0xB00` are free (between PM
-  `0x700` and VM `0xC00`, all below `NOTIFY_MESSAGE = 0x1000`).
+- Request bands `0x800`, `0x900`, `0xA00` are free (between PM `0x700` and VM
+  `0xC00`, all below `NOTIFY_MESSAGE = 0x1000`). `0xB00` was the fourth until
+  slice 5.3 claimed it for CDEV; the remaining three are earmarked VFS (5.4),
+  BDEV (5.7), and MFS (5.8), and `callnr_h.rs`'s
+  `bands_are_in_ascending_numeric_order` test enforces where each one goes.
 - The MXBI archive already supports non-ELF blobs: the boot loader skips
   negative `proc_nr` records and `BootImage::module_by_name` returns raw
   bytes with no ELF validation.
@@ -487,7 +490,7 @@ not rediscover them):
   `let _ =` swallowed a bad one. The guard is a **stub-free boot**
   (`--no-default-features`) grepped for `[efault]`: it must be empty. It is.
 
-### Slice 5.2: grant table + `SYS_SETGRANT` / `SYS_SAFECOPY` / `SYS_COPY` ◀ ready (branch `feature/slice-5.2-grants`, pending merge)
+### Slice 5.2: grant table + `SYS_SETGRANT` / `SYS_SAFECOPY` / `SYS_COPY` ✓ shipped (PR #42, merged 2026-07-25)
 
 **Goal:** the D4 grant model, live end-to-end between two boot servers.
 
@@ -516,8 +519,8 @@ not rediscover them):
   handoff through DS would race besides. VFS `ipc_send`s PM a `PM_GRANT_TEST`
   message carrying `{gid, len, rw_gid, addr}` instead. SEND blocks until PM's
   loop receives, so the demo is self-synchronizing; and this is the shape a grant
-  id really travels in (slice 5.3's `CDEV_WRITE {minor, granter, grant_id, len}`
-  is the same). Cost: one demo-only PM request number (`PM_GRANT_TEST`,
+  id really travels in (slice 5.3's `CDEV_WRITE {minor, grant_id, len, offset}`
+  is the same, and takes its granter from `m_source` for the same reason). Cost: one demo-only PM request number (`PM_GRANT_TEST`,
   `NR_PM_MSGS` 5 → 6), to retire when a real consumer lands.
 - **The granter is `m_source`, never a payload field** — and the same rule binds
   every later band that carries a grant id. Review caught the first draft
@@ -601,23 +604,170 @@ not rediscover them):
 - Traces are head-carved (6) like `do_vmctl`'s, not sampled: these are low-rate
   callers the `[ksys N]` every-100th sampler would never catch.
 
-### Slice 5.3: TTY server (TX-only, premapped PL011) + CDEV band ◀ next
+### Slice 5.3: TTY driver (TX-only, premapped PL011) + CDEV band ◀ ready (branch `feature/slice-5.3-tty-cdev`, pending merge)
 
 **Goal:** D1 — first user-space driver; EL0-originated text on the serial
 console.
 
-**Scope:** `AddrSpace` grows a Device-nGnRE mapping mode; boot pre-maps the
-UART page into TTY's AS at a `kernel-shared` const VA. New `drivers/tty`
-crate (workspace member, `user.ld`, SEF loop, DS publish; polls `FR.TXFF`,
-writes `DR`, LF→CRLF like the kernel writer). `CDEV_RQ_BASE = 0xB00` with
-`CDEV_WRITE {minor, granter, grant_id, len}` → TTY safecopy-reads and
-transmits; replies bytes-written. `kernel/build.rs` `servers` array +1
-(proc_nr 4); `qemu-boot.expected` gains the `[as]` line and the demo marker.
-`CDEV_READ` is deliberately absent (Phase 6).
+**Scope:** the `map_page_in` free-function family grows a device mapping mode
+via `Prot.device` (not a new `AddrSpace` method — the whole family already
+takes a `ttbr0_pa`); boot pre-maps the UART page into TTY's AS at
+`kernel-shared::uspace::TTY_UART_VA`. New `drivers/tty` crate (workspace
+member, `user.ld`, SEF loop, DS publish; polls `FR.TXFF`, writes `DR`,
+LF→CRLF like the kernel writer). `CDEV_RQ_BASE = 0xB00` with
+`CDEV_WRITE {minor, grant_id, len, offset}` → TTY safecopy-reads and
+transmits; replies bytes-written. **No payload `granter`** — the driver takes
+it from the kernel-stamped `m_source`, the 5.2 confused-deputy rule.
+`kernel/build.rs` `servers` array +1 (proc_nr 4, at index 2 so the console is
+serving before its first client); `qemu-boot.expected` gains the `[as]` line
+and the demo markers. `CDEV_READ` is deliberately absent (Phase 6).
 
-**Proof:** PM (or RS) retrieves TTY's endpoint from DS at init and
-`CDEV_WRITE`s a banner via direct grant — the banner reaches serial *from
-EL0* (no kernel trace prefix), distinguishable from kernel output.
+**Proof:** VFS retrieves TTY's endpoint from DS and `CDEV_WRITE`s a banner via
+direct grant — the banner reaches serial *from EL0* (no kernel trace prefix),
+distinguishable from every other line in the log. Plus a short write
+(`CDEV_MAX_IO + 8` requested, `CDEV_MAX_IO` returned) and two denial probes.
+VFS rather than PM/RS because it is already the 5.2 granter, already owns a
+`GrantPool`, and 5.4 puts its fd 1/2 on this exact path.
+
+**As built** (differences from the sketch above, recorded so later slices do
+not rediscover them):
+
+- **The kernel never writes `MAIR_EL1`** — it *reads* it for an index that already
+  encodes a Device type (`mmu::init_device_attr_idx`). Writing byte *i* would
+  retroactively retype every live mapping using `AttrIndx=i`, including Limine's
+  TTBR1 kernel and HHDM mappings, whose indices this repo cannot enumerate; turning
+  the HHDM into Device memory is silent, unrecoverable corruption. Read-and-reuse
+  is sufficient because an *unprogrammed* MAIR byte reads `0x00`, which is itself a
+  valid MMIO encoding (Device-nGnRnE) — so "an index already encoding Device" and
+  "an index nobody uses" coincide. Only `0x04` (nGnRE, preferred per D1) and `0x00`
+  (nGnRnE) qualify: nGRE would let two `DR` stores gather into one lost character,
+  GRE would let the `DR` store pass the `FR` poll. On QEMU/Limine today the scan
+  picks **index 1, byte `0x00`** (`[mair] device attr_idx=1 byte=0x00`) — forensic
+  only, deliberately *not* a boot marker, since the value is firmware-dependent.
+  The write-MAIR fallback recipe (program the high index `mair[7]`, then
+  `msr / isb / dsb ish / tlbi vmalle1is / dsb ish / isb`) lives in the panic
+  message so it is not re-derived.
+- **`Prot` grew a `device` field, and the invariant became total.** Adding the
+  field is a compile error at every struct literal, which is the point — there were
+  exactly two (`pte_prot` and `do_vmctl`'s `pt_map`). `map_page_in` now asserts
+  `prot.device != mm::is_usable_pa(pa)` on every leaf, so each mapped leaf is
+  provably `(RAM ∧ ¬device)` or `(device ∧ ¬RAM)` with no third case. That lemma
+  is what makes `if !prot.device { free_frame(…) }` *sound* rather than merely
+  plausible, and it is why `free_frame` keeps its loud bounds assert: a catch-all
+  that silently skipped non-RAM frames would demote a forged-PA or double-free bug
+  into an untraceable leak. `pte_prot` decodes `device` **statelessly** (AttrIndx ≠
+  `ATTR_IDX_NORMAL`), which is sound because the kernel emits only two indices and
+  byte 0 is pinned to Normal-WB.
+- **Five leaf sweeps needed the guard, not four.** The plan listed
+  `do_exit::teardown_addrspace`, `do_fork::copy_addrspace`, `do_vmctl`'s `pt_unmap`,
+  and `userland::destroy_addrspace_with_leaves`; `copy_addrspace`'s *out-of-memory
+  unwind* sweep is a fifth, distinct from its copy loop. In `copy_addrspace` a device
+  leaf is **re-mapped, not copied** — MMIO is inherently shared, and a `memcpy` of
+  4 KiB of live device registers through a cacheable HHDM alias would read
+  side-effecting registers into RAM. `mm::uaccess` also rejects a device leaf as
+  copy source *or* destination (`EFAULT`, via the new `resolve_copyable`), closing
+  the hole where a server grants its own UART window.
+- **The teardown selftest is load-bearing, not decoration.** TTY never exits, so
+  the `prot.device` arm would be dead code sitting on a live landmine — and a
+  missing guard is a *kernel panic*, not a leak. `userland::device_teardown_selftest`
+  therefore builds a throwaway address space with exactly one device leaf and tears
+  it down at boot, unconditionally (so `--no-default-features` covers it), costing
+  four table frames once. It asserts **both** counts: `freed=0 devs=1` — a guard
+  that skipped every leaf would report `freed=0 devs=0`. It also widened
+  `do_exit::teardown_addrspace` from `pub(super)` to `pub(crate)` (and
+  `system::do_exit` from a private module to `pub(crate) mod`), and changed the
+  return type to `(freed, devs)`, which adds `devs=` to the `[ksys SYS_EXIT]` trace.
+- **The pre-map lives in `load_boot_server`, not `load_exec_image`.** The latter is
+  shared with `system::do_exec`, so putting it there would hand a device window to
+  every binary any process ever exec'd. Consequence worth knowing: a proc that
+  exec'd would *lose* its device window, which is why `do_exec` drops the
+  device-leaf count rather than tracing it.
+- **No TLB maintenance on the pre-map**, for two independent reasons: the address
+  space was built moments ago and has never been installed in TTBR0 (and a recycled
+  ASID is always clean — `teardown_addrspace` flushes before `free_asid`), and
+  `switch_ttbr0_with_asid`, which runs on TTY's first schedule, already issues
+  `isb; tlbi aside1; dsb ish; isb`. Same reasoning the `SERVER_STACK_VA` mapping
+  already relies on.
+- **`0x4000_0000` is a whole L1 slot, and VM's arena is now capped.** The device
+  window (`kernel-shared::uspace`, a new module — it is an *address* ABI, not a
+  message one) is 1 GiB-aligned and 16 MiB wide, clear of every occupied user VA.
+  A `const _` on the region *bases* is **not enough** on its own — it proves only
+  where each starts, and two of them grow on request: VM's mmap arena is a bump
+  cursor, and `set_brk` raises the heap's end to whatever the client asks for. So
+  **both** now carry a runtime `region::REGION_LIMIT` check returning `ENOMEM`
+  (review caught `set_brk` missing it after `mmap` got one — capping one and not the
+  other was plainly inconsistent). Nothing is exploitable today, but the window's
+  purpose is to be kernel-owned in *every* address space, so Phase 6 can pre-map a
+  device page into any driver without asking whether VM already promised that VA to
+  the process's heap. Adding the cap obsoleted one existing assertion:
+  `set_brk_overflow_is_einval_not_wrap`'s control case (largest break that still
+  aligns) flipped `Ok` → `ENOMEM`, which is a *stronger* no-wrap witness — a wrapped
+  `end` would have been small, sailed under the cap, and returned `Ok`, so the two
+  rejection reasons must stay distinguishable. These constants are deliberately not
+  emitted into the generated C headers — no Phase 5 C touches them.
+- **Extracting `is_usable_pa` out of `free_frame` introduced aliasing UB**, caught in
+  review. `free_frame` held `&mut *ALLOC.0.get()` across the call, and
+  `is_usable_pa` takes its own `&*ALLOC.0.get()` — two live references to one object
+  with one of them exclusive, which `noalias` on the `&mut` makes the kind a compiler
+  may act on. (The inline loop it replaced was a *reborrow* of the existing `&mut`,
+  which was fine.) Fix: hoist the check above the `&mut`, which is also better
+  ordering — validate before acquiring. **General rule for this codebase:** every
+  static table is an `UnsafeCell` newtype, so extracting a read-only loop into a
+  shared-borrow helper is never a pure refactor — check what `&mut` is live at each
+  call site. Same borrow-ending discipline as `sched::rts_set`/`rts_unset`.
+- **Helpers were lifted into `server-rt`** rather than copied into a sixth crate:
+  `payload.rs` (`rd_i32`/`wr_i32`/`rd_u64`/`wr_u64`/`buf_addr`, measured and
+  host-tested, replacing copies in PM/DS/VM/SCHED), `kcall.rs`
+  (`sys_safecopy`/`sys_copy`, out of PM, coverage-excluded), `diag_fmt` (PM's
+  private `diag_line`, promoted), and `sef_retrieve_from_ds`. The accessors use
+  `checked_add` for the offset: servers ship `--release` with
+  `overflow-checks = false`, where `off + 4` on a huge offset *wraps* and happens to
+  be safe by accident while panicking under `cargo test`.
+- **The DS lookup falls back on purpose.** DS publish-before-retrieve is *not*
+  deterministic by construction: it works because `build.rs` packs TTY before VFS,
+  so TTY's `DS_PUBLISH` reaches DS's FIFO first. Rather than let archive ordering
+  become load-bearing, VFS falls back to `boot_endpoint(TTY_PROC_NR)` and emits a
+  distinguishable `cdev.ds FAIL` line — so a boot where the ordering shifted still
+  produces the rest of the proof, while the required `cdev.ds ok` marker disappears
+  and CI goes red on that regression specifically.
+- **A driver replies to an unknown `m_type`; a server may drop it.** DS drops one
+  harmlessly because nothing SENDRECs it in anger, but a driver's clients all
+  SENDREC, and a dropped request blocks the caller forever. Every path out of TTY's
+  dispatch replies. A negative `SYS_SAFECOPY` result is relayed **verbatim** —
+  `EPERM` ("bad grant") and `EFAULT` ("unmapped buffer") are different client bugs.
+- **PL011 register offsets are deliberately duplicated** between
+  `kernel/src/arch/aarch64/uart.rs` and `drivers/tty/src/pl011.rs`. They cannot be
+  shared: the kernel crate is bare-metal-only and pinned by `forced-target`, so it
+  can never be a user-space dependency — and a register layout is a hardware fact,
+  not a shared ABI, so `kernel-shared` is the wrong home. Noted in both files.
+  `drivers/tty` also deliberately does *not* depend on `minixrs-driver-rt` (a 4-line
+  placeholder); Phase 6 makes that move, together with adding
+  `drivers/driver-rt/src` to `kernel/build.rs`'s shared watch list.
+
+**Honest gaps** (the 5.2 precedent for the unprobeable magic-`SYS_PROC` gate):
+
+- **Under TCG the Device *attribute* is not observably load-bearing.** QEMU's PL011
+  works fine through a Normal-WB mapping — which is why the kernel's own HHDM alias
+  has always been one. Substituting `ATTR_IDX_NORMAL` changes no marker. The
+  attribute is proved by construction and assertion (`prot_attrs`' hard assert, the
+  MAIR scan's encoding whitelist), not empirically. Same for the `FR.TXFF` poll
+  (TCG's FIFO never fills) and LF→CRLF (`grep -aF` markers cannot express `\r`).
+- **`copy_addrspace`'s and `pt_unmap`'s device arms are defense-in-depth.** Neither
+  is reachable today: nothing forks TTY, and VM has no reason (or `ipc_to` edge) to
+  unmap a driver's device window. `map_page_in`'s RAM/device assert is the
+  compensating total invariant, and the boot selftest covers the one arm that *is*
+  a live hazard.
+
+**Mutation tests run** (each applied, observed, reverted):
+
+| Mutation | Observed |
+|---|---|
+| Delete the `nr == TTY_PROC_NR` pre-map | 5 markers vanish (`[devmap] tty`, the banner, all three `cdev.*` results). **Not** a `!!!` banner as first predicted: the store faults at `far=0x40000018` (`TTY_UART_VA + FR_OFFSET` — the flag-register poll), which is a *handled* fault routed to VM, whose out-of-region arm raises `SYS_KILL(SIGSEGV)`; PM then terminates TTY, and VFS blocks forever in its `CDEV_WRITE` SENDREC. Checker FAILs on the missing markers |
+| Drop `teardown_addrspace`'s device guard | `!!! KERNEL PANIC: free_frame: PA 0x9000000 is outside all USABLE regions`, at boot, from the selftest |
+| Read the granter from a payload field | `cdev.write ok match=1` → `cdev.write FAIL rc=-1` (`EPERM`) |
+| Remove TTY's minor check | `cdev.deny ok n=2` → `cdev.deny FAIL bad-minor rc=35` (the write *succeeded* on minor 7) |
+| Halve the `CDEV_MAX_IO` clamp | `cdev.short ok n=256` → `cdev.short FAIL rc=128` |
+| Reply `OK` instead of the byte count | `cdev.write ok match=1` → `cdev.write FAIL rc=0` |
 
 ### Slice 5.4: VFS write path — fd 1/2 → CDEV(TTY)
 

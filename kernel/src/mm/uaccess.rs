@@ -17,9 +17,17 @@
 //!   address-space-independent, so the deferred `MF_DELIVERMSG` flush can write
 //!   a *receiver's* buffer without that receiver's TTBR0 being installed.
 //!
-//! A read-only destination is rejected explicitly ([`Prot::writable`]): the
-//! HHDM alias is a kernel mapping, so the MMU's EL0 permission bits do not
-//! police these writes the way they policed the old `write_volatile`.
+//! Copying through the HHDM alias is what makes both of those work, and it is
+//! also why every page of every range goes through [`resolve_copyable`] rather
+//! than a bare walk. The alias is a Normal-WB *kernel* mapping, so:
+//!
+//! - A read-only destination must be rejected explicitly — the MMU's EL0
+//!   permission bits do not police these writes the way they policed the old
+//!   `write_volatile`.
+//! - A **device** leaf must be rejected on either side (slice 5.3). MMIO reached
+//!   through a cacheable alias would be cached, gathered, and reordered; on the
+//!   source side that means reading side-effecting registers, on the destination
+//!   side losing writes.
 //!
 //! Slice 5.2's grant engine (`SYS_SAFECOPY` / `SYS_COPY`) is built directly on
 //! these primitives: [`copy_between_as`] is two walks and a `memcpy` per chunk,
@@ -48,7 +56,7 @@ const _: () = assert!(USER_PAGE_SIZE == FRAME_SIZE as u64);
 pub fn copy_from_user_as(ttbr0_pa: u64, va: u64, dst: &mut [u8]) -> Result<(), i32> {
     let mut done = 0usize;
     for chunk in page_chunks(va, dst.len()) {
-        let (pa, _prot) = walk_pt_in(ttbr0_pa, chunk.page_va).ok_or(EFAULT)?;
+        let pa = resolve_copyable(ttbr0_pa, chunk.page_va, false)?;
         // SAFETY: `pa` is a frame this address space's L3 maps, so it came from
         // `alloc_frame` and is HHDM-mapped; `chunk.offset + chunk.len` is
         // within one 4 KiB page by `page_chunks`' contract, so the source range
@@ -80,7 +88,7 @@ pub fn copy_to_user_as(ttbr0_pa: u64, va: u64, src: &[u8]) -> Result<(), i32> {
 
     let mut done = 0usize;
     for chunk in page_chunks(va, src.len()) {
-        let (pa, _prot) = walk_pt_in(ttbr0_pa, chunk.page_va).ok_or(EFAULT)?;
+        let pa = resolve_copyable(ttbr0_pa, chunk.page_va, true)?;
         // SAFETY: as `copy_from_user_as`, with the direction reversed — and the
         // destination additionally proven EL0-writable by the probe above, so
         // this cannot smuggle a write past a read-only mapping via the HHDM.
@@ -123,8 +131,8 @@ pub fn copy_between_as(
     probe_user_range(dst_ttbr0, dst_va, len, true)?;
 
     for chunk in dual_page_chunks(src_va, dst_va, len) {
-        let (src_pa, _prot) = walk_pt_in(src_ttbr0, chunk.src_page_va).ok_or(EFAULT)?;
-        let (dst_pa, _prot) = walk_pt_in(dst_ttbr0, chunk.dst_page_va).ok_or(EFAULT)?;
+        let src_pa = resolve_copyable(src_ttbr0, chunk.src_page_va, false)?;
+        let dst_pa = resolve_copyable(dst_ttbr0, chunk.dst_page_va, true)?;
         // SAFETY: both PAs came from an L3 leaf of their respective address
         // space, so both are `alloc_frame` frames and HHDM-mapped; each
         // `offset + len` stays inside one 4 KiB page by `dual_page_chunks`'
@@ -150,10 +158,30 @@ pub fn copy_between_as(
 /// without the copy.
 pub fn probe_user_range(ttbr0_pa: u64, va: u64, len: usize, write: bool) -> Result<(), i32> {
     for chunk in page_chunks(va, len) {
-        let (_pa, prot) = walk_pt_in(ttbr0_pa, chunk.page_va).ok_or(EFAULT)?;
-        if write && !prot.writable {
-            return Err(EFAULT);
-        }
+        resolve_copyable(ttbr0_pa, chunk.page_va, write)?;
     }
     Ok(())
+}
+
+/// Resolve one page of a copy range: walk it, reject a device leaf outright, and
+/// reject a non-writable one when the copy will write there.
+///
+/// The device rejection (slice 5.3) closes a hole the grant engine would
+/// otherwise open. Every copy here goes through the frame's **HHDM alias**, which
+/// is a Normal-WB kernel mapping — so a `memcpy` over a device leaf's PA would
+/// touch MMIO cached, gathered, and reordered, reading side-effecting registers
+/// on the source side and losing writes on the destination side. Nothing legitimate
+/// asks for it: a server that granted its own UART window, or a `SYS_COPY` naming
+/// TTY's device VA, is either confused or hostile. `EFAULT` is the right answer
+/// either way — it is what an unmapped page returns, so a caller learns nothing
+/// about whether the VA exists.
+fn resolve_copyable(ttbr0_pa: u64, page_va: u64, write: bool) -> Result<u64, i32> {
+    let (pa, prot) = walk_pt_in(ttbr0_pa, page_va).ok_or(EFAULT)?;
+    if prot.device {
+        return Err(EFAULT);
+    }
+    if write && !prot.writable {
+        return Err(EFAULT);
+    }
+    Ok(pa)
 }

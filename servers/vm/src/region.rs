@@ -28,6 +28,7 @@ use core::cell::UnsafeCell;
 
 use minixrs_kernel_shared::com::NR_SERVED_PROCS;
 use minixrs_kernel_shared::error::{EINVAL, ENOMEM};
+use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
 
 /// Fixed heap origin. Until PM supplies a real per-process memory layout
 /// (Phase 4), VM and stub D agree on this VA by convention: `brk` grows the
@@ -39,10 +40,33 @@ pub const HEAP_BASE: u64 = 0x0100_0000;
 /// (`0x0043_0000`), stack (`0x0083_0000`), or heap
 /// (`[0x0100_0000, 0x0100_8000)` today). `0x0200_0000` sits a clean 16 MiB above
 /// `HEAP_BASE`, leaving the heap room to grow before it could reach the arena.
-/// The arena itself is bump-only — munmap never returns addresses to it (reuse
-/// waits for Phase 4's real per-process VM layout), so an unbounded mmap loop
-/// would eventually walk off the end; acceptable while only the boot stubs run.
+///
+/// The arena is bump-only — munmap never returns addresses to it (reuse waits for
+/// a real per-process VM layout). Since slice 5.3 it is **capped** at
+/// [`REGION_LIMIT`] rather than growing without bound: the kernel now pre-maps a
+/// device window at [`USER_DEVICE_WINDOW_BASE`], and an unbounded mmap loop would
+/// eventually hand a client an address inside it. Past the cap, `mmap` returns
+/// `ENOMEM`.
 pub const MMAP_BASE: u64 = 0x0200_0000;
+
+/// Exclusive upper bound of **every** tracked region: the base of the kernel's
+/// user-space device window (slice 5.3). No heap and no mmap may extend past here.
+///
+/// A `const _` on the *bases* would not be enough — it proves only where each
+/// region starts, and both grow on request: the mmap arena's bump cursor advances,
+/// and `set_brk` raises the heap's `end` to whatever the client asks for. So both
+/// carry a runtime check against this bound, returning `ENOMEM`.
+///
+/// Why it matters even though nothing is exploitable today: the window's whole
+/// purpose is to be kernel-owned in *every* address space, so Phase 6 can pre-map a
+/// device page into any driver without first asking whether VM already promised
+/// that VA to the process's heap.
+pub const REGION_LIMIT: u64 = USER_DEVICE_WINDOW_BASE;
+
+// Both region origins must sit below the bound, or their first request would be
+// refused outright.
+const _: () = assert!(MMAP_BASE < USER_DEVICE_WINDOW_BASE);
+const _: () = assert!(HEAP_BASE < USER_DEVICE_WINDOW_BASE);
 
 /// aarch64 4 KiB page.
 const PAGE_SIZE: u64 = 4096;
@@ -113,8 +137,10 @@ impl ClientRegions {
 
     /// Set the program break to `new_break`, growing or creating the heap
     /// region as `[HEAP_BASE, page_align_up(new_break))`. Returns the resulting
-    /// break, or `EINVAL` if `new_break` is below `HEAP_BASE`, the page-aligned
-    /// break would overflow `u64`, or no region slot is free for a new heap.
+    /// break. Errors: `EINVAL` if `new_break` is below `HEAP_BASE`, the page-aligned
+    /// break would overflow `u64`, or no region slot is free for a new heap;
+    /// `ENOMEM` if the break would carry the heap past [`REGION_LIMIT`] into the
+    /// kernel's device window.
     fn set_brk(&mut self, new_break: u64) -> Result<u64, i32> {
         if new_break < HEAP_BASE {
             return Err(EINVAL);
@@ -125,6 +151,14 @@ impl ClientRegions {
             .checked_add(PAGE_SIZE - 1)
             .map(|v| v & !(PAGE_SIZE - 1))
             .ok_or(EINVAL)?;
+        // Same cap the mmap arena carries, and for the same reason: a heap grows to
+        // whatever the client asks for, so the `HEAP_BASE < REGION_LIMIT` const
+        // assert bounds only where it starts. Checked *after* the page-align, since
+        // rounding up can carry a break that was just under the bound over it, and
+        // *before* any region is mutated, so a refused brk changes nothing.
+        if end > REGION_LIMIT {
+            return Err(ENOMEM);
+        }
 
         // Grow the existing heap region if present.
         for r in self.regions.iter_mut() {
@@ -150,7 +184,9 @@ impl ClientRegions {
     /// Allocate an anonymous mmap region of `len` bytes. `len` is rounded up to
     /// a whole page; the base address is bump-allocated from `mmap_next`.
     /// Returns the chosen base. Errors: `EINVAL` if `len` is 0 or the round-up /
-    /// bump would overflow `u64`; `ENOMEM` if no region slot is free.
+    /// bump would overflow `u64`; `ENOMEM` if no region slot is free, or if the
+    /// bump would carry the arena past [`REGION_LIMIT`] into the kernel's device
+    /// window.
     fn mmap(&mut self, len: u64) -> Result<u64, i32> {
         if len == 0 {
             return Err(EINVAL);
@@ -162,6 +198,13 @@ impl ClientRegions {
             .ok_or(EINVAL)?;
         let start = self.mmap_next;
         let end = start.checked_add(size).ok_or(EINVAL)?;
+        // The arena is bump-only, so without this cap a long-running mmap loop
+        // would eventually hand out an address inside the kernel's device window
+        // (`USER_DEVICE_WINDOW_BASE`) and VM would try to resolve faults there.
+        // `ENOMEM` is the honest answer: address space, not frames, ran out.
+        if end > REGION_LIMIT {
+            return Err(ENOMEM);
+        }
 
         for r in self.regions.iter_mut() {
             if r.kind == Kind::Unused {
@@ -366,9 +409,17 @@ mod tests {
         // Without the checked_add guard, page_align_up wraps to a tiny `end`.
         assert_eq!(c.set_brk(u64::MAX), Err(EINVAL));
         assert_eq!(c.set_brk(u64::MAX - (PAGE_SIZE - 2)), Err(EINVAL));
-        // The largest break that still aligns without overflow succeeds.
+
+        // The largest break that still *aligns* without overflowing. Before slice
+        // 5.3 this returned `Ok(max_ok)`; it is now `ENOMEM`, refused by the
+        // `REGION_LIMIT` cap rather than by the overflow guard. That distinction is
+        // the point of keeping the case: `ENOMEM` witnesses that the align-up
+        // produced a genuinely huge `end`, because a wrapped `end` would have been
+        // *small*, sailed under the cap, and come back `Ok`. So the two rejection
+        // reasons must stay distinguishable — collapsing either to the other would
+        // hide a wrap.
         let max_ok = !(PAGE_SIZE - 1);
-        assert_eq!(c.set_brk(max_ok), Ok(max_ok));
+        assert_eq!(c.set_brk(max_ok), Err(ENOMEM));
     }
 
     #[test]
@@ -442,6 +493,79 @@ mod tests {
             c.mmap(0x1000).unwrap();
         }
         assert_eq!(c.mmap(0x1000), Err(ENOMEM));
+    }
+
+    /// A heap grows to whatever the client asks for, so — exactly like the mmap
+    /// arena — the `HEAP_BASE < REGION_LIMIT` const assert bounds only where it
+    /// starts. Check both sides of the boundary, and that a refused brk is inert.
+    #[test]
+    fn set_brk_stops_at_the_device_window() {
+        let mut c = ClientRegions::EMPTY;
+        // Right up to the bound is fine: the region is half-open, so a heap ending
+        // exactly at REGION_LIMIT does not include the window's first byte.
+        assert_eq!(c.set_brk(REGION_LIMIT), Ok(REGION_LIMIT));
+        assert!(!c.contains(REGION_LIMIT));
+        assert!(c.contains(REGION_LIMIT - 1));
+
+        // One byte past is ENOMEM, not a silently clipped heap.
+        assert_eq!(c.set_brk(REGION_LIMIT + 1), Err(ENOMEM));
+        // ...and the refusal left the previous break in place.
+        let heap = c.regions.iter().find(|r| r.kind == Kind::Heap).unwrap();
+        assert_eq!(heap.end, REGION_LIMIT, "a refused brk must change nothing");
+
+        // The page-align-up must not be able to carry a break over the bound.
+        let mut c = ClientRegions::EMPTY;
+        assert_eq!(c.set_brk(REGION_LIMIT - PAGE_SIZE + 1), Ok(REGION_LIMIT));
+        assert_eq!(
+            c.set_brk(REGION_LIMIT - PAGE_SIZE + 1 + PAGE_SIZE),
+            Err(ENOMEM)
+        );
+
+        // A fresh client's *first* brk is capped too — not just a grow.
+        let mut c = ClientRegions::EMPTY;
+        assert_eq!(c.set_brk(0x8000_0000), Err(ENOMEM));
+        assert!(c.regions.iter().all(|r| r.kind == Kind::Unused));
+    }
+
+    #[test]
+    fn both_region_origins_sit_below_the_bound() {
+        assert_eq!(REGION_LIMIT, USER_DEVICE_WINDOW_BASE);
+        // `min` rather than `<`: an all-constant `assert!` trips clippy's
+        // `assertions_on_constants`.
+        assert_eq!(HEAP_BASE.min(REGION_LIMIT), HEAP_BASE);
+        assert_eq!(MMAP_BASE.min(REGION_LIMIT), MMAP_BASE);
+    }
+
+    /// The arena is bump-only, so the only thing standing between a long-running
+    /// mmap loop and the kernel's device window is [`REGION_LIMIT`]. Drive the
+    /// cursor right up to it and check both sides of the boundary.
+    #[test]
+    fn mmap_stops_at_the_device_window() {
+        let mut c = ClientRegions::EMPTY;
+        // Park the cursor one page short of the limit: that page must succeed…
+        c.mmap_next = REGION_LIMIT - PAGE_SIZE;
+        let last = c.mmap(PAGE_SIZE).unwrap();
+        assert_eq!(last, REGION_LIMIT - PAGE_SIZE);
+        assert_eq!(c.mmap_next, REGION_LIMIT);
+        // …and the next one must not, even though region slots remain.
+        assert_eq!(c.mmap(PAGE_SIZE), Err(ENOMEM));
+        // A request that would *straddle* the limit is refused whole, not clipped.
+        c.mmap_next = REGION_LIMIT - PAGE_SIZE;
+        assert_eq!(c.mmap(2 * PAGE_SIZE), Err(ENOMEM));
+        assert_eq!(
+            c.mmap_next,
+            REGION_LIMIT - PAGE_SIZE,
+            "cursor moved on failure"
+        );
+    }
+
+    #[test]
+    fn the_arena_starts_below_the_device_window() {
+        assert_eq!(REGION_LIMIT, USER_DEVICE_WINDOW_BASE);
+        // `min` rather than `<`: an all-constant `assert!` trips clippy's
+        // `assertions_on_constants`. The module-level `const _` proves the same
+        // thing at compile time; this records it where a reader looks.
+        assert_eq!(MMAP_BASE.min(REGION_LIMIT), MMAP_BASE);
     }
 
     #[test]
