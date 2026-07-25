@@ -521,9 +521,9 @@ grant-sourced `SYS_EXEC` form; `error.rs` is renumbered to classic-MINIX
 `external/musl` built with clang `--target` + rust-lld. PFS/pipes moved out
 to Phase 7; TTY input/IRQs to Phase 6.
 
-- **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ◀ ready (branch `feature/slice-5.0-abi-prep`, pending merge)
-- **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL` ◀ next
-- **5.2** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY`
+- **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ✓ shipped (PR #40, merged 2026-07-25)
+- **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL` ◀ ready (branch `feature/slice-5.1-uaccess-diagctl`, pending merge)
+- **5.2** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY` ◀ next
 - **5.3** TTY server (TX-only, boot-premapped PL011) + CDEV band
 - **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS
 - **5.5** exec ABI: SysV initial stack + minimal auxv

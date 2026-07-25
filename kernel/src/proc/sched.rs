@@ -307,9 +307,13 @@ pub unsafe fn schedule_next() {
         // a richer per-proc message in debug builds; the authoritative
         // guard against a kernel task (asid=0) silently installing
         // TTBR0_EL1 = 0 lives in `switch_ttbr0_with_asid`, which asserts
-        // unconditionally (the kernel only builds --release). The TTBR0
-        // swap must happen *before* `flush_deliver_msg` — the flush writes
-        // via the active TTBR0, so the new proc's AS must already be live.
+        // unconditionally (the kernel only builds --release).
+        //
+        // The TTBR0 swap is still done before `flush_deliver_msg`, but the
+        // order is no longer load-bearing: as of slice 5.1 the flush walks
+        // `next.ttbr0_pa`'s page tables and copies through the HHDM, so it
+        // is address-space-independent. TTBR0 must be installed before
+        // `eret` regardless, which is why it stays here.
         debug_assert!(
             next.ttbr0_pa != 0 && next.asid != 0,
             "schedule_next: proc nr={} has no AS (ttbr0_pa={:#x}, asid={})",

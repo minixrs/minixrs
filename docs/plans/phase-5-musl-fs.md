@@ -24,7 +24,7 @@ Facts the design rests on (verified against source at session time):
   `SRV_T` priv by the existing `k_call_mask` fill, and routed to the
   caller-local dispatch arm — they are one-line `ENOSYS` macros in
   `kernel/src/system/stubs.rs`. **Phase 5 adds zero new kernel-call numbers**
-  (`NR_KERN_CALLS_PHASE4` stays 18); it fills in bodies.
+  (`NR_KERN_CALLS` stays 18); it fills in bodies.
 - `Priv.grant_table` / `grant_entries` exist since slice 2.2, unused.
 - Proc slots VFS 1, MEM 3, TTY 4, MFS 6, PFS 8 already have `BootEntry` rows,
   priv slots, and `SRV_T` `ipc_to`/`k_call_mask` wiring in
@@ -334,7 +334,7 @@ output); musl **before** the FS slices (the root image must contain
 `/bin/hello`, so musl must build before `mkfs-mfs` packs an image); FS
 next; exec-from-FS closes the milestone; stretch slices after.
 
-### Slice 5.0: errno renumber + `tools/gen-c-headers` ◀ ready (branch `feature/slice-5.0-abi-prep`, pending merge)
+### Slice 5.0: errno renumber + `tools/gen-c-headers` ✓ shipped (PR #40, merged 2026-07-25)
 
 **Goal:** D7 + D8 — the ABI is C-ready before any other Phase 5 work, so
 every later slice writes final errno values into its markers and code from
@@ -389,7 +389,7 @@ rediscover them):
   freeze — and the nine `sef.receive(&mut msg) != 0` sites that should read
   `!= OK`.
 
-### Slice 5.1: fault-safe user copy + real `SYS_DIAGCTL` ◀ next
+### Slice 5.1: fault-safe user copy + real `SYS_DIAGCTL` ◀ ready (branch `feature/slice-5.1-uaccess-diagctl`, pending merge)
 
 **Goal:** no user pointer can panic the kernel (D5), and servers can print
 (D2) — the observability + safety floor for everything after.
@@ -411,7 +411,83 @@ in `kernel/src/ipc/{message.rs,senda.rs,mod.rs}`, and `ipc_const.rs`'s wrong
 with no panic; a server's `diag_print` line appears in the boot log and
 joins `tests/qemu-boot.expected`.
 
-### Slice 5.2: grant table + `SYS_SETGRANT` / `SYS_SAFECOPY` / `SYS_COPY`
+**As built** (differences from the sketch above, recorded so later slices do
+not rediscover them):
+
+- The copy engine is a **general byte-level module**, `kernel/src/mm/uaccess.rs`
+  (`copy_from_user_as` / `copy_to_user_as` / `probe_user_range`, all over a raw
+  `ttbr0_pa`), not message-specific helpers. Slice 5.2's grant engine builds on
+  it directly — a cross-AS copy is two walks and a `memcpy`. `addrspace.rs`
+  gains the missing member of its `*_in` free-function family,
+  `walk_pt_in(ttbr0_pa, va) -> Option<(u64, Prot)>`; `AddrSpace::walk_pt`
+  delegates to it. The `Prot` half is load-bearing: the kernel copies through
+  the HHDM alias, which the MMU's EL0 permission bits do **not** police, so
+  `copy_to_user_as` must reject a read-only destination explicitly.
+- **Writes are all-or-nothing** (`probe_user_range` first). A 104-byte `Message`
+  is only 8-aligned and really can straddle two pages, so copy-as-you-go would
+  leave a half-written message in a user buffer before returning `EFAULT`.
+- The page-split arithmetic lives in `kernel-shared` as `page_chunks` /
+  `PageChunk` / `USER_PAGE_SIZE` beside `user_va_ok`, with 6 host tests — the
+  kernel crate has no `#[cfg(test)]`, and this is the one piece of the slice
+  with real off-by-one risk. `kernel-shared` goes 60 → 68 tests.
+- `ipc/message.rs` ends with **zero `unsafe`**: messages stage through a
+  `[u8; 104]` and are reassembled field-by-field, so every raw-pointer operation
+  in the user-copy path is in `mm::uaccess` alone.
+- `MF_MSGFAILED` already existed in `proc/flags.rs` (unused since Phase 2); the
+  flush now sets *and clears* it, so it records "the last delivery to this proc
+  failed" rather than being write-only. Nothing reads it yet — a later signals
+  slice can turn it into `SIGSEGV`, which is what MINIX's `delivermsg()` does.
+- Traces are **uncounted**, unlike the sampled `[ipc {n}]` form, so they are
+  stable boot markers: `[efault] proc=A nr=11 call=1 va=…` (emitted in `do_ipc`
+  keyed on `result == EFAULT`, which covers all three immediate copy sites at
+  once — nothing else in the kernel produces `EFAULT`) and
+  `[efault deliver] proc=A nr=11 va=…`.
+- **Four** probes on stub A's prologue, not one, covering every arm of the
+  engine: an unmapped page, a *page-straddling* buffer (8 bytes in A's stack
+  page, 96 in the unmapped page above), the deferred-flush path, and a
+  *mapped-but-read-only* destination (A's own code page) for the
+  `Prot::writable` check. That last one was added on review: without it a
+  regression dropping the writable check would still have passed every marker.
+  Mutation-tested — stubbing the check out makes exactly the
+  `va=0x400000` marker disappear. A new stub E was rejected: `NR_STUB_PROCS`
+  feeds `FORK_POOL_BASE`, so a fifth stub would shift init's forked children
+  15 → 16 and break three existing markers.
+- Granule and layout coupling is pinned by `const _` asserts rather than
+  convention: `USER_PAGE_SIZE == FRAME_SIZE` in `uaccess.rs` (the chunker and
+  the walker are in different crates), `FRAME_SIZE == PAGE_SIZE` and
+  `1 << PAGE_SHIFT == PAGE_SIZE` in `addrspace.rs`, and `offset_of!`-based
+  asserts in `ipc/message.rs` tying its `M_TYPE_OFF` / `PAYLOAD_OFF` to the real
+  `Message` layout. The last is the one that matters most: a field added ahead
+  of `payload` would otherwise be a *silent* miscopy (the slice length stays
+  right), not a panic.
+- `SYS_DIAGCTL` takes a **subcode** (`DIAGCTL_CODE_DIAG = 1`, MINIX 3's
+  numbering, with 2–4 reserved and `EINVAL`), so text budget is
+  `DIAG_TEXT_MAX = 88` after the subcode and length words. Text is sanitized to
+  printable ASCII, which is what guarantees one call = one line and keeps the
+  `grep -aF` marker contract intact.
+- `diag_print` is called from **`sef_startup`**, so all six SEF servers announce
+  themselves (`[diag vm] sef ready`, …) for one line of code. Two are asserted
+  as markers. It is placed before the `init_fresh` callback so the line proves
+  `SYS_DIAGCTL` independently of DS.
+- Done here rather than deferred: the `NR_KERN_CALLS_PHASE4` → `NR_KERN_CALLS`
+  rename (25 references; the C header already emitted the un-suffixed name, and
+  a `nr_kern_calls_is_not_phase_suffixed` test now forbids any phase-scoped name
+  in the ABI header). The `sef.receive(…) != 0` → `!= OK` sweep was **5** sites,
+  not the 9 slice 5.0 estimated — `drivers/`, `fs/` and `userland/` have no
+  receive loops yet. VFS's `let _ = sef.receive(…)` is left alone: it discards
+  every message, so the discard is the honest form.
+- `tests/qemu-boot.forbidden` gains `!!! kernel exception (vector index` — the
+  same-EL banner, which is precisely what a kernel dereference of a bad user
+  pointer produced before this slice. `!!! KERNEL PANIC:` already caught it
+  transitively, but this is the sharper canary.
+- **Verification note for future slices:** the highest risk was *surfacing* a
+  previously-silent failure — kernel-originated notifies (`deliver_alarm`,
+  `deliver_ksig`, `mini_pf_send`, `send_no_quantum`) set `MF_DELIVERMSG` on a
+  proc whose `deliver_msg_vir` came from its own last RECEIVE, and the old
+  `let _ =` swallowed a bad one. The guard is a **stub-free boot**
+  (`--no-default-features`) grepped for `[efault]`: it must be empty. It is.
+
+### Slice 5.2: grant table + `SYS_SETGRANT` / `SYS_SAFECOPY` / `SYS_COPY` ◀ next
 
 **Goal:** the D4 grant model, live end-to-end between two boot servers.
 

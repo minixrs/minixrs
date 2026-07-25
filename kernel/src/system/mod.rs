@@ -18,6 +18,7 @@
 //! [`ipc::dispatch`]: crate::ipc
 //! [`ipc::send::mini_send`]: crate::ipc
 
+mod do_diagctl;
 mod do_exec;
 mod do_exit;
 mod do_fork;
@@ -34,7 +35,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::{
-    KERNEL_CALL, NR_KERN_CALLS_PHASE4, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL, SYS_ENDKSIG, SYS_EXEC,
+    KERNEL_CALL, NR_KERN_CALLS, NR_SYS_CALLS, SYS_COPY, SYS_DIAGCTL, SYS_ENDKSIG, SYS_EXEC,
     SYS_EXIT, SYS_FORK, SYS_GETINFO, SYS_GETKSIG, SYS_IRQCTL, SYS_KILL, SYS_PRIVCTL, SYS_SAFECOPY,
     SYS_SCHEDCTL, SYS_SCHEDULE, SYS_SETALARM, SYS_SETGRANT, SYS_TIMES, SYS_VMCTL,
 };
@@ -119,7 +120,8 @@ pub fn kernel_call_sendrec(
         return ECALLDENIED;
     }
 
-    let mut msg = match copy_msg_from_user(user_msg_va) {
+    let caller_ttbr0 = proc_table[caller_idx].ttbr0_pa;
+    let mut msg = match copy_msg_from_user(caller_ttbr0, user_msg_va) {
         Ok(m) => m,
         Err(e) => return e,
     };
@@ -136,9 +138,23 @@ pub fn kernel_call_sendrec(
     let result = kernel_call_dispatch(proc_table, priv_table, caller_nr, &mut msg);
 
     // Build the reply.
+    //
+    // An EFAULT here means the kernel call *already ran* and its side effects
+    // are committed — the caller just cannot be told what happened, and sees
+    // EFAULT in x0 instead of the reply. Its buffer is left untouched
+    // (`copy_msg_to_user` is all-or-nothing), so it never observes a partial
+    // reply. This is the MINIX shape; before slice 5.1 the case was
+    // unreachable because a bad reply buffer panicked instead.
+    //
+    // The target address space is re-read rather than reused from the request
+    // copy: `SYS_EXEC` swaps its target's `(ttbr0_pa, asid)`, and a caller that
+    // exec'd *itself* would otherwise get its reply written into the address
+    // space that was just torn down. (`do_exec` rejects a self-target today,
+    // so this is defence in depth, not a live bug.)
     msg.m_source = system_endpoint();
     msg.m_type = result;
-    if let Err(e) = copy_msg_to_user(user_msg_va, &msg) {
+    let reply_ttbr0 = proc_table[caller_idx].ttbr0_pa;
+    if let Err(e) = copy_msg_to_user(reply_ttbr0, user_msg_va, &msg) {
         return e;
     }
 
@@ -218,7 +234,7 @@ fn kernel_call_dispatch(
 /// arm here is a compile error.
 fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Message) -> i32 {
     const _: () = assert!(
-        NR_KERN_CALLS_PHASE4 == 18,
+        NR_KERN_CALLS == 18,
         "expand kernel_call_dispatch when a new SYS_* lands",
     );
     match msg.m_type {
@@ -231,7 +247,7 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
         // in `kernel_call_dispatch` (they act on a target proc and need the table).
         SYS_SETALARM => do_setalarm::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
-        SYS_DIAGCTL => stubs::do_diagctl(caller, caller_priv, msg),
+        SYS_DIAGCTL => do_diagctl::do_diagctl(caller, caller_priv, msg),
         SYS_SETGRANT => stubs::do_setgrant(caller, caller_priv, msg),
         _ => EBADREQUEST,
     }
