@@ -21,12 +21,12 @@
 //! HHDM alias is a kernel mapping, so the MMU's EL0 permission bits do not
 //! police these writes the way they policed the old `write_volatile`.
 //!
-//! Slice 5.2's grant engine (`SYS_SAFECOPY` / `SYS_COPY`) builds directly on
-//! these primitives — a cross-address-space copy is two walks and a `memcpy`,
-//! which is exactly [`copy_from_user_as`] followed by [`copy_to_user_as`].
+//! Slice 5.2's grant engine (`SYS_SAFECOPY` / `SYS_COPY`) is built directly on
+//! these primitives: [`copy_between_as`] is two walks and a `memcpy` per chunk,
+//! with no new mechanism of its own.
 
 use minixrs_kernel_shared::error::EFAULT;
-use minixrs_kernel_shared::message::{USER_PAGE_SIZE, page_chunks};
+use minixrs_kernel_shared::message::{USER_PAGE_SIZE, dual_page_chunks, page_chunks};
 
 use crate::arch::aarch64::addrspace::walk_pt_in;
 use crate::mm::{FRAME_SIZE, phys_to_hhdm};
@@ -93,12 +93,61 @@ pub fn copy_to_user_as(ttbr0_pa: u64, va: u64, src: &[u8]) -> Result<(), i32> {
     Ok(())
 }
 
+/// Copy `len` bytes from `src_va` in address space `src_ttbr0` to `dst_va` in
+/// address space `dst_ttbr0`.
+///
+/// The grant engine's whole mechanism (slice 5.2): two page-table walks and a
+/// `memcpy` through the frames' HHDM aliases, per chunk. Neither address space
+/// need be the active one, and the two may be the same.
+///
+/// `Err(EFAULT)` if any page of either range is unmapped, or any destination
+/// page is not EL0-writable. **All-or-nothing on the destination**: both ranges
+/// are probed before the first byte moves, the same contract (and for the same
+/// reason) as [`copy_to_user_as`] — and the destination probe is load-bearing
+/// for the same reason too, since the HHDM alias is a kernel mapping that the
+/// MMU's EL0 permission bits do not police.
+///
+/// Overlapping ranges within one address space are copied chunk-by-chunk in
+/// ascending order with `memmove` semantics per chunk. That is well-defined for
+/// disjoint or forward-shifted ranges but is *not* a general overlap-safe copy;
+/// no caller asks for one (a grant names one process's buffer and the caller's
+/// own, and `SYS_COPY`'s two endpoints are distinct in every use).
+pub fn copy_between_as(
+    src_ttbr0: u64,
+    src_va: u64,
+    dst_ttbr0: u64,
+    dst_va: u64,
+    len: usize,
+) -> Result<(), i32> {
+    probe_user_range(src_ttbr0, src_va, len, false)?;
+    probe_user_range(dst_ttbr0, dst_va, len, true)?;
+
+    for chunk in dual_page_chunks(src_va, dst_va, len) {
+        let (src_pa, _prot) = walk_pt_in(src_ttbr0, chunk.src_page_va).ok_or(EFAULT)?;
+        let (dst_pa, _prot) = walk_pt_in(dst_ttbr0, chunk.dst_page_va).ok_or(EFAULT)?;
+        // SAFETY: both PAs came from an L3 leaf of their respective address
+        // space, so both are `alloc_frame` frames and HHDM-mapped; each
+        // `offset + len` stays inside one 4 KiB page by `dual_page_chunks`'
+        // contract, so both ranges lie inside their frame. Cache coherence and
+        // the single-threaded-EL1 no-concurrent-unmap argument are as in
+        // `copy_from_user_as`. `copy` (not `copy_nonoverlapping`) because the
+        // two aliases *can* name the same frame when a caller copies within one
+        // address space.
+        unsafe {
+            let src = phys_to_hhdm(src_pa).add(chunk.src_offset);
+            let dst = phys_to_hhdm(dst_pa).add(chunk.dst_offset);
+            core::ptr::copy(src, dst, chunk.len);
+        }
+    }
+    Ok(())
+}
+
 /// Verify every page of `[va, va + len)` is mapped in `ttbr0_pa` — and
 /// EL0-writable when `write`.
 ///
-/// The pre-pass behind [`copy_to_user_as`]'s all-or-nothing contract, exposed
-/// because slice 5.2's `verify_grant` wants exactly this check before it
-/// commits to a grant copy.
+/// The pre-pass behind [`copy_to_user_as`]'s and [`copy_between_as`]'s
+/// all-or-nothing contracts, exposed because a caller sometimes wants the check
+/// without the copy.
 pub fn probe_user_range(ttbr0_pa: u64, va: u64, len: usize, write: bool) -> Result<(), i32> {
     for chunk in page_chunks(va, len) {
         let (_pa, prot) = walk_pt_in(ttbr0_pa, chunk.page_va).ok_or(EFAULT)?;

@@ -61,3 +61,35 @@ minix.rs booting on aarch64
 # together they bracket the whole roster.
 [diag vm] sef ready
 [diag pm] sef ready
+
+# Slice 5.2: the grant engine, end to end. VFS direct-grants PM a 64-byte
+# read-only buffer and hands the id over in a PM_GRANT_TEST message; PM reads it
+# through the grant, then reads the *same* bytes again with the ungranted
+# SYS_COPY and compares. `match=1` is the whole point — it proves the grant path
+# moved the right bytes, not merely some bytes. Registration is per-granter, so
+# both VFS (proc=1) and PM (proc=0) appear; assert VFS's, which is the one the
+# demo's grant is served from.
+[ksys SYS_SETGRANT] proc=1 entries=
+[ksys SYS_SAFECOPY] granter=
+[ksys SYS_COPY] src=
+[diag pm] grant.test ok
+[diag pm] copy ok match=1
+
+# ...and the magic (third-party) arm: PM grants *itself* access to init's text
+# page and safecopies out of init's address space, a process that granted
+# nothing. Only the length is asserted — the bytes are init's instruction
+# encodings and change whenever init is rebuilt. Without this line the magic
+# path would be dead code until slice 5.5.
+[diag pm] magic ok
+
+# Slice 5.2: the copies that must be REFUSED. Seven safecopies, each valid in
+# every respect but one. Five are EPERM from `verify_grant` — wrong grantee,
+# wrong access, stale sequence, out-of-range index, past the end of the granted
+# range — and two are EFAULT from the copy engine itself: a granter claiming
+# CPF_WRITE over its own read-only .rodata (only `Prot::writable` stands between
+# that lie and a corrupted page, since the kernel copies through the HHDM alias)
+# and a well-formed grant over an unmapped page. Remove any one of those checks
+# and that copy succeeds, so this line turns into `grant.deny FAIL <which>` and
+# the marker disappears. (The `CPF_INDIRECT` and magic-`SYS_PROC` arms are not
+# probed; see `grant_denials` in servers/pm for why neither is reachable yet.)
+[diag pm] grant.deny ok

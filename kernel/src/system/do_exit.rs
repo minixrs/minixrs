@@ -16,7 +16,8 @@
 //! - wake every process blocked on the dead endpoint with `EDEADSRCDST`
 //!   (MINIX `clear_ipc_refs`): senders queued on the dead proc's `caller_q`
 //!   and receivers waiting on it specifically both resume with the error in
-//!   `x0`, and a dedicated-priv proc's pending-notification bits are purged;
+//!   `x0`, and a dedicated-priv proc's pending-notification bits and
+//!   grant-table registration are purged;
 //! - tear down the address space: free every leaf frame ([`walk_leaves`]),
 //!   invalidate the ASID's TLB entries, free the page-table tree
 //!   ([`AddrSpace::destroy`]), and recycle the ASID;
@@ -143,9 +144,10 @@ pub(super) fn do_exit(
 /// equals a real endpoint).
 ///
 /// When the dead proc *owns* a dedicated priv slot (`priv.proc_nr` names it),
-/// its pending-notification footprint is purged: its sender bit is cleared
-/// from every priv's `notify_pending`, its own map is zeroed, and the slot is
-/// detached. A shared priv slot (the `USER_PRIV_ID` case — every forked child
+/// its footprint there is purged: its sender bit is cleared from every priv's
+/// `notify_pending`, its own map is zeroed, its grant-table registration is
+/// dropped (slice 5.2), and the slot is detached.
+/// A shared priv slot (the `USER_PRIV_ID` case — every forked child
 /// aliases it) is deliberately left alone: its bitmap state belongs to all
 /// its live procs collectively, and `USR_T` (SENDREC-only) procs can never
 /// have set a notify bit anyway.
@@ -196,6 +198,13 @@ fn unblock_dependents(
                 clear_sys_bit(&mut pv.notify_pending, pid);
             }
             priv_table[pidx].notify_pending = [0; IPC_MAP_CHUNKS];
+            // Drop the grant-table registration (slice 5.2). The address named
+            // a table in the address space just torn down; leaving it would let
+            // a *recycled* slot's new occupant inherit a table address it never
+            // registered, and `verify_grant` would read grant entries out of
+            // whatever now lives there.
+            priv_table[pidx].grant_table = 0;
+            priv_table[pidx].grant_entries = 0;
             priv_table[pidx].proc_nr = None;
         }
     }

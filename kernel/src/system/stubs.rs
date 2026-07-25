@@ -22,8 +22,6 @@ macro_rules! enosys_stub {
     };
 }
 
-enosys_stub!(do_copy);
-enosys_stub!(do_safecopy);
 enosys_stub!(do_irqctl);
 // `do_exec` is a real handler as of slice 4.7 — see `system::do_exec`.
 // `do_vmctl` is a real handler as of slice 3.3 — see `system::do_vmctl`.
@@ -35,6 +33,7 @@ enosys_stub!(do_irqctl);
 // `do_fork` is a real handler as of slice 4.6 — see `system::do_fork`.
 enosys_stub!(do_times);
 // `do_diagctl` is a real handler as of slice 5.1 — see `system::do_diagctl`.
-enosys_stub!(do_setgrant);
+// `do_setgrant` / `do_safecopy` / `do_copy` are real handlers as of slice 5.2 —
+// see `system::do_setgrant` / `system::do_safecopy` / `system::do_copy`.
 // `do_kill` / `do_getksig` / `do_endksig` are real handlers as of slice 4.5 —
 // see `system::do_sig`.
