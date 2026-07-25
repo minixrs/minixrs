@@ -1,0 +1,20 @@
+[package]
+name = "minixrs-gen-c-headers"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+name = "minixrs_gen_c_headers"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minixrs-gen-c-headers"
+path = "src/main.rs"
+
+# Zero third-party dependencies on purpose: the argv handling is a dozen lines,
+# and a dep here would have to clear deny.toml's license allow-list, cargo-audit,
+# and the cargo-geiger sweep for no benefit.
+[dependencies]
+minixrs-kernel-shared = { path = "../../kernel-shared" }

@@ -170,6 +170,7 @@ server crates:
 
 ```sh
 cargo test -p minixrs-kernel-shared
+cargo test -p minixrs-gen-c-headers    # the C ABI header generator
 ```
 
 There is no `#[cfg(test)]` code under `kernel/src/` — the crate cannot be host-tested
@@ -181,7 +182,7 @@ CI smoke-boots it (below).
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Ten jobs run
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Eleven jobs run
 in parallel (`sonar` waits on `coverage`):
 
 | Job | Blocking? | What it checks |
@@ -189,6 +190,7 @@ in parallel (`sonar` waits on `coverage`):
 | `fmt` | yes | `cargo fmt --all --check` (covers the kernel too) |
 | `clippy` | yes | `cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings` (host target; kernel excluded for runner cost, see below) |
 | `clippy-kernel` | yes | `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings`, twice: default features and `--no-default-features` |
+| `c-headers` | yes | regenerates the C ABI headers from `kernel-shared` and compiles them with `clang -std=c11 -fsyntax-only` (host + both musl triples) |
 | `audit` | yes | `cargo-audit` advisory scan |
 | `deny` | yes | `cargo-deny` (licenses / bans, config in `deny.toml`) |
 | `geiger` | advisory | `unsafe` surface report (per package, kernel filtered out) |
@@ -210,6 +212,38 @@ runs `tools/check-boot-log.sh` against `tests/qemu-boot.expected` / `.forbidden`
 those expectations timing-robust (first occurrences, never counts), because CI's TCG is
 slower than a local run. `Cargo.lock` is committed so `audit` / `deny` are reproducible,
 and third-party actions are pinned to commit SHAs.
+
+## Generated C headers
+
+The musl fork's view of the minix.rs ABI is **generated, never committed**
+(phase-5 decision D8): `tools/gen-c-headers` depends on `kernel-shared` as an
+ordinary Rust crate and prints C from the live constants, so the Rust and C
+views cannot drift.
+
+```sh
+cargo gen-c-headers                 # -> target/gen-c-headers/
+cargo gen-c-headers /some/sysroot   # explicit output directory
+cargo gen-c-headers --stdout        # eyeball the output
+```
+
+It emits `include/minix/{ipc,com,callnr,errno}.h`, plus two artifacts that make
+the CI gate real: `abi-selftest.c` — a header is never a translation unit on its
+own, so without a `.c` file none of the generated `_Static_assert`s would ever
+fire — and `abi-check/errno.h`, a CI-only stand-in for the C library's
+`<errno.h>`.
+
+Two things the headers are careful about:
+
+- **`_PROC_NR` vs `_EP`.** Every process gets both. minix.rs sign-extends the
+  endpoint proc field instead of using MINIX 3's offset bias, so for the kernel
+  tasks the boot endpoint is *not* the process number (`SYSTEM_PROC_NR` is −2,
+  `SYSTEM_EP` is 32766). Naming a task by its `_PROC_NR` in an IPC call is a bug,
+  and the header asserts the C decode macro against the Rust-computed endpoints.
+- **The POSIX errno block is asserted, never defined.** minix.rs adopts musl's
+  numbering verbatim, so those values must come from the C library's own
+  `<errno.h>`; `minix/errno.h` defines only the MINIX 200-band and puts the
+  POSIX checks behind `MINIX_ABI_CHECK_POSIX_ERRNO`, which the musl build
+  defines. See [System Calls & ABI](reference/syscalls.md).
 
 ## Debugging: QEMU trace forensics
 

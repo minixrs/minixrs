@@ -23,3 +23,9 @@ rustflags = ["-C", "link-arg=-Tkernel/src/arch/x86_64/linker.ld"]
 # Aliases for common development commands
 [alias]
 kernel-aarch64 = "build -p minixrs-kernel --target aarch64-unknown-none --release"
+
+# Regenerate the C ABI headers from the live `kernel-shared` constants (phase-5
+# decision D8). The output is a build artifact under `target/` and is never
+# committed. The trailing `--` forwards an optional OUTDIR (or `--stdout`)
+# through to the binary.
+gen-c-headers = "run -q -p minixrs-gen-c-headers --"

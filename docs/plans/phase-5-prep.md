@@ -140,7 +140,7 @@ the known kernel-target clippy lints that CI never sees.
 **Proof:** all blocking gates green on the new nightly; kernel-target clippy
 clean or every remaining lint carries an explicit allow + rationale.
 
-## Chunk 6: Phase 5 design + slicing session (gates Phase 5) ◀ ready (branch feature/phase-5-plan, pending merge)
+## Chunk 6: Phase 5 design + slicing session (gates Phase 5) ✓ shipped (PR #39, merged 2026-07-24)
 
 **Goal:** Phase 5 in `docs/plan.md` is six bullets and a milestone. Phases 2–4
 succeeded because each slice was PR-sized, independently bootable, and left a
