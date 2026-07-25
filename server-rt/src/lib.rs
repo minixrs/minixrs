@@ -36,6 +36,7 @@
 mod classify;
 mod diag;
 mod ds;
+mod grant;
 mod init;
 mod sef;
 mod signal;
@@ -43,6 +44,7 @@ mod signal;
 pub use classify::{SefEvent, classify};
 pub use diag::diag_print;
 pub use ds::sef_publish_to_ds;
+pub use grant::GrantPool;
 pub use init::SefInitCb;
 pub use sef::{Sef, SefConfig, sef_startup};
 pub use signal::SefSignalCb;
