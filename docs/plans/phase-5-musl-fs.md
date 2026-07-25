@@ -334,7 +334,7 @@ output); musl **before** the FS slices (the root image must contain
 `/bin/hello`, so musl must build before `mkfs-mfs` packs an image); FS
 next; exec-from-FS closes the milestone; stretch slices after.
 
-### Slice 5.0: errno renumber + `tools/gen-c-headers` ◀ next
+### Slice 5.0: errno renumber + `tools/gen-c-headers` ◀ ready (branch `feature/slice-5.0-abi-prep`, pending merge)
 
 **Goal:** D7 + D8 — the ABI is C-ready before any other Phase 5 work, so
 every later slice writes final errno values into its markers and code from
@@ -351,11 +351,45 @@ host test snapshots the generated `message` struct layout against
 chunk-5 toolchain bump.
 
 **Proof:** QEMU boot markers green (values changed, behavior identical);
-`cargo run -p gen-c-headers` output compiles under
-`clang -std=c11 -fsyntax-only` (wired into CI as a host check in this
-slice).
+`cargo gen-c-headers` output compiles under `clang -std=c11 -fsyntax-only`
+(wired into CI as the blocking `c-headers` host check in this slice).
 
-### Slice 5.1: fault-safe user copy + real `SYS_DIAGCTL`
+**As built** (differences from the sketch above, recorded so 5.6 does not
+rediscover them):
+
+- The POSIX block is the **full contiguous `1..=40`** rather than D7's named
+  subset — classic MINIX and musl agree on all forty, so no later slice has to
+  come back and add one more errno. `error.rs` now defines its constants
+  through a small `errnos!` macro that also emits `pub const ALL:
+  &[(&str, i32)]`; that table is the single source of truth for the header
+  generator, the compile-time band guards, and the host tests. `EBADSRCDST`
+  takes 216 (modern MINIX spells that condition `EBADEPT`), the one name the
+  reference tree lacks.
+- The package is **`minixrs-gen-c-headers`** (workspace `minixrs-*`
+  convention), invoked through the new `cargo gen-c-headers` alias.
+- Four headers plus two check artifacts: `include/minix/{ipc,com,callnr,errno}.h`,
+  a CI-only `abi-check/errno.h`, and `abi-selftest.c` — a header is never a
+  translation unit, so without the selftest none of the `_Static_assert`s
+  would ever fire.
+- `minix/ipc.h` includes **nothing**: `offsetof` comes from
+  `__builtin_offsetof` under the private name `_MINIX_OFFSETOF`. Apple's clang
+  redirects `<stddef.h>` to the system header for any `*-musl` triple, which
+  breaks a hermetic sysroot-less check; and an ABI header should be includable
+  from freestanding C anyway.
+- **Errno verification is genuinely deferred to 5.6.** `minix/errno.h` defines
+  only the MINIX 200-band and puts the forty POSIX assertions behind
+  `#ifdef MINIX_ABI_CHECK_POSIX_ERRNO`, because CI has no musl sysroot and a
+  host `<errno.h>` has different values (Darwin `EDEADLK` is 11). CI compiles
+  that block against the generated stand-in, which proves the syntax and the
+  macro spellings but **not** the values; `tools/build-musl.sh` must define
+  `MINIX_ABI_CHECK_POSIX_ERRNO` in 5.6 to make the value check real.
+- Nominated for 5.1 (both deliberately out of scope here): renaming
+  `NR_KERN_CALLS_PHASE4` — the header already emits it as `NR_KERN_CALLS` with
+  a provenance comment, and the C name should not diverge past the 5.6
+  freeze — and the nine `sef.receive(&mut msg) != 0` sites that should read
+  `!= OK`.
+
+### Slice 5.1: fault-safe user copy + real `SYS_DIAGCTL` ◀ next
 
 **Goal:** no user pointer can panic the kernel (D5), and servers can print
 (D2) — the observability + safety floor for everything after.

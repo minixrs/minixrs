@@ -171,6 +171,27 @@ numbers (`SYS_SETGRANT`, `SYS_SAFECOPY`) exist as stubs today; a real grant tabl
 and validated copy are an opening Phase-5 slice — every interesting Phase-5 data
 path (VFS read/write, FS ↔ VFS) moves bytes across address spaces and needs them.
 
+## Generated C headers
+
+The ABI above is described to C by headers **generated from the live Rust
+constants** and never committed (phase-5 decision D8):
+
+| Header | Contents |
+|--------|----------|
+| `minix/ipc.h` | the `message` struct, endpoint packing macros, IPC primitives |
+| `minix/com.h` | process numbers and the boot endpoints derived from them |
+| `minix/callnr.h` | kernel-call numbers and the server request bands |
+| `minix/errno.h` | the MINIX 200-band errnos; an opt-in check on the C library's POSIX ones |
+
+```sh
+cargo gen-c-headers          # -> target/gen-c-headers/
+```
+
+Every value comes from `kernel-shared`, and the headers carry `_Static_assert`s
+pinning the `message` layout and the endpoint encode/decode against it — so an
+ABI change on the Rust side fails to compile on the C side rather than silently
+corrupting IPC. See [Build & CI](../build.md#generated-c-headers).
+
 ## MINIX 3 source references
 
 | File | Purpose |

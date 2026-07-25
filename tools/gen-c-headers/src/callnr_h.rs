@@ -1,0 +1,302 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
+//! `minix/callnr.h` — kernel-call numbers and the server request bands.
+
+use minixrs_kernel_shared::callnr;
+
+use crate::builder::CFile;
+
+/// Include guard for the generated header.
+pub const GUARD: &str = "_MINIX_CALLNR_H";
+
+/// The 18 kernel calls, in numeric order.
+fn kernel_calls() -> [(&'static str, i32); 18] {
+    [
+        ("SYS_GETINFO", callnr::SYS_GETINFO),
+        ("SYS_PRIVCTL", callnr::SYS_PRIVCTL),
+        ("SYS_FORK", callnr::SYS_FORK),
+        ("SYS_EXEC", callnr::SYS_EXEC),
+        ("SYS_EXIT", callnr::SYS_EXIT),
+        ("SYS_COPY", callnr::SYS_COPY),
+        ("SYS_SAFECOPY", callnr::SYS_SAFECOPY),
+        ("SYS_IRQCTL", callnr::SYS_IRQCTL),
+        ("SYS_VMCTL", callnr::SYS_VMCTL),
+        ("SYS_SCHEDULE", callnr::SYS_SCHEDULE),
+        ("SYS_SETALARM", callnr::SYS_SETALARM),
+        ("SYS_TIMES", callnr::SYS_TIMES),
+        ("SYS_DIAGCTL", callnr::SYS_DIAGCTL),
+        ("SYS_SETGRANT", callnr::SYS_SETGRANT),
+        ("SYS_SCHEDCTL", callnr::SYS_SCHEDCTL),
+        ("SYS_KILL", callnr::SYS_KILL),
+        ("SYS_GETKSIG", callnr::SYS_GETKSIG),
+        ("SYS_ENDKSIG", callnr::SYS_ENDKSIG),
+    ]
+}
+
+/// A server request band: base constant, its members, and the count constant
+/// that bounds it (`None` for VM, which has no `NR_*` on the Rust side).
+struct Band {
+    title: &'static str,
+    base_name: &'static str,
+    base: i32,
+    count: Option<(&'static str, usize)>,
+    members: Vec<(&'static str, i32)>,
+}
+
+fn bands() -> [Band; 5] {
+    [
+        Band {
+            title: "PM requests",
+            base_name: "PM_RQ_BASE",
+            base: callnr::PM_RQ_BASE,
+            count: Some(("NR_PM_MSGS", callnr::NR_PM_MSGS)),
+            members: vec![
+                ("PM_GETPID", callnr::PM_GETPID),
+                ("PM_FORK", callnr::PM_FORK),
+                ("PM_EXIT", callnr::PM_EXIT),
+                ("PM_WAIT", callnr::PM_WAIT),
+                ("PM_EXEC", callnr::PM_EXEC),
+            ],
+        },
+        Band {
+            title: "VM requests",
+            base_name: "VM_RQ_BASE",
+            base: callnr::VM_RQ_BASE,
+            count: None,
+            members: vec![
+                ("VM_PAGEFAULT", callnr::VM_PAGEFAULT),
+                ("VM_BRK", callnr::VM_BRK),
+                ("VM_MMAP", callnr::VM_MMAP),
+                ("VM_MUNMAP", callnr::VM_MUNMAP),
+                ("VM_FORK", callnr::VM_FORK),
+            ],
+        },
+        Band {
+            title: "SEF control messages",
+            base_name: "SEF_RQ_BASE",
+            base: callnr::SEF_RQ_BASE,
+            count: Some(("NR_SEF_MSGS", callnr::NR_SEF_MSGS)),
+            members: vec![
+                ("SEF_INIT", callnr::SEF_INIT),
+                ("SEF_SIGNAL", callnr::SEF_SIGNAL),
+            ],
+        },
+        Band {
+            title: "DS requests",
+            base_name: "DS_RQ_BASE",
+            base: callnr::DS_RQ_BASE,
+            count: Some(("NR_DS_REQUESTS", callnr::NR_DS_REQUESTS)),
+            members: vec![
+                ("DS_PUBLISH", callnr::DS_PUBLISH),
+                ("DS_RETRIEVE", callnr::DS_RETRIEVE),
+                ("DS_CHECK", callnr::DS_CHECK),
+            ],
+        },
+        Band {
+            title: "SCHED requests",
+            base_name: "SCHED_RQ_BASE",
+            base: callnr::SCHED_RQ_BASE,
+            count: Some(("NR_SCHED_MSGS", callnr::NR_SCHED_MSGS)),
+            members: vec![
+                ("SCHEDULING_NO_QUANTUM", callnr::SCHEDULING_NO_QUANTUM),
+                ("SCHEDULING_START", callnr::SCHEDULING_START),
+                ("SCHEDULING_STOP", callnr::SCHEDULING_STOP),
+                ("SCHEDULING_SET_NICE", callnr::SCHEDULING_SET_NICE),
+            ],
+        },
+    ]
+}
+
+/// Render `minix/callnr.h`.
+pub fn render() -> String {
+    let mut f = CFile::new(
+        "Kernel-call numbers, server request bands, and their payload constants.",
+        &["kernel-shared/src/callnr.rs"],
+    );
+    f.guard_open(GUARD);
+
+    f.blank();
+    f.include(
+        "minix/ipc.h",
+        "NOTIFY_MESSAGE, for the band ordering checks",
+    );
+
+    f.block_comment(&[
+        "Deviation from MINIX 3: its <minix/callnr.h> holds POSIX syscall numbers",
+        "and keeps server request numbers in <minix/com.h>. minix.rs has no POSIX",
+        "call-number layer -- a libc wrapper builds a server request directly --",
+        "so this header carries the kernel calls and the request bands together.",
+        "",
+        "Payload byte offsets are not emitted yet: on the Rust side they live in",
+        "doc comments rather than constants. The first musl wrapper (slice 5.6) is",
+        "the forcing function for promoting them to real constants.",
+    ]);
+
+    f.section("kernel calls");
+    f.define_hex("KERNEL_CALL", callnr::KERNEL_CALL.into());
+    f.blank();
+    for (name, value) in kernel_calls() {
+        f.define_hex(name, value.into());
+    }
+    f.blank();
+    f.define_raw(
+        "NR_KERN_CALLS",
+        &format!(
+            "{}   /* kernel-shared: NR_KERN_CALLS_PHASE4 */",
+            callnr::NR_KERN_CALLS_PHASE4
+        ),
+    );
+    f.define_dec("NR_SYS_CALLS", callnr::NR_SYS_CALLS as i64);
+
+    f.section("kernel-call payload constants");
+    f.define_dec("GET_WHOAMI", callnr::GET_WHOAMI.into());
+    f.define_dec("SYS_GETINFO_NAME_LEN", callnr::SYS_GETINFO_NAME_LEN as i64);
+    f.define_dec("EXEC_NAME_LEN", callnr::EXEC_NAME_LEN as i64);
+    f.define_dec("PRIVCTL_SET_USER", callnr::PRIVCTL_SET_USER.into());
+    f.define_dec("SCHEDCTL_FLAG_KERNEL", callnr::SCHEDCTL_FLAG_KERNEL.into());
+
+    f.section("SYS_VMCTL subcalls");
+    f.define_dec("VMCTL_PT_MAP", callnr::VMCTL_PT_MAP.into());
+    f.define_dec("VMCTL_PT_UNMAP", callnr::VMCTL_PT_UNMAP.into());
+    f.define_dec(
+        "VMCTL_CLEAR_PAGEFAULT",
+        callnr::VMCTL_CLEAR_PAGEFAULT.into(),
+    );
+    f.define_dec("VMCTL_GET_PAGEFAULT", callnr::VMCTL_GET_PAGEFAULT.into());
+    f.define_dec("VMCTL_VMINHIBIT_SET", callnr::VMCTL_VMINHIBIT_SET.into());
+    f.define_dec(
+        "VMCTL_VMINHIBIT_CLEAR",
+        callnr::VMCTL_VMINHIBIT_CLEAR.into(),
+    );
+    f.define_dec("NR_VMCTL_SUBCALLS", callnr::NR_VMCTL_SUBCALLS as i64);
+    f.blank();
+    f.define_dec("VMCTL_PROT_WRITE", callnr::VMCTL_PROT_WRITE.into());
+    f.define_dec("VMCTL_PROT_EXEC", callnr::VMCTL_PROT_EXEC.into());
+
+    for band in bands() {
+        f.section(band.title);
+        f.define_hex(band.base_name, band.base.into());
+        for (name, value) in &band.members {
+            f.define_hex(name, (*value).into());
+        }
+        if let Some((count_name, count)) = band.count {
+            f.define_dec(count_name, count as i64);
+        }
+    }
+
+    f.section("band ordering");
+    f.block_comment(&[
+        "Mirrors the `const _: () = assert!(..)` guards in callnr.rs: every band",
+        "sits above the previous one and entirely below NOTIFY_MESSAGE, so no",
+        "server request can ever be mistaken for a kernel NOTIFY.",
+    ]);
+    f.static_assert(
+        "NR_SYS_CALLS >= NR_KERN_CALLS",
+        "the privilege call mask is narrower than the kernel-call set",
+    );
+    f.static_assert(
+        "PM_RQ_BASE > KERNEL_CALL + NR_KERN_CALLS - 1",
+        "the PM band overlaps the kernel calls",
+    );
+    f.static_assert(
+        "PM_RQ_BASE + NR_PM_MSGS - 1 < VM_RQ_BASE",
+        "the PM band overlaps the VM band",
+    );
+    f.static_assert("SEF_RQ_BASE > VM_FORK", "the SEF band overlaps the VM band");
+    f.static_assert(
+        "DS_RQ_BASE > SEF_RQ_BASE + NR_SEF_MSGS - 1",
+        "the DS band overlaps the SEF band",
+    );
+    f.static_assert(
+        "SCHED_RQ_BASE > DS_RQ_BASE + NR_DS_REQUESTS - 1",
+        "the SCHED band overlaps the DS band",
+    );
+    f.static_assert(
+        "SCHED_RQ_BASE + NR_SCHED_MSGS - 1 < NOTIFY_MESSAGE",
+        "a server request number collides with NOTIFY_MESSAGE",
+    );
+
+    f.guard_close(GUARD);
+    f.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder;
+
+    #[test]
+    fn kernel_calls_render_from_live_constants() {
+        let text = render();
+        for (name, value) in kernel_calls() {
+            assert_eq!(
+                builder::define_value(&text, name).as_deref(),
+                Some(format!("0x{value:X}").as_str()),
+                "{name} did not render from its Rust constant"
+            );
+        }
+    }
+
+    #[test]
+    fn the_kernel_call_list_is_complete_and_contiguous() {
+        let calls = kernel_calls();
+        assert_eq!(calls.len(), callnr::NR_KERN_CALLS_PHASE4);
+        for (i, (name, value)) in calls.into_iter().enumerate() {
+            assert_eq!(
+                value,
+                callnr::KERNEL_CALL + i as i32,
+                "{name} is out of order"
+            );
+        }
+    }
+
+    #[test]
+    fn every_band_base_member_and_count_appears() {
+        let text = render();
+        for band in bands() {
+            assert_eq!(
+                builder::define_value(&text, band.base_name).as_deref(),
+                Some(format!("0x{:X}", band.base).as_str())
+            );
+            for (name, value) in &band.members {
+                assert_eq!(
+                    builder::define_value(&text, name).as_deref(),
+                    Some(format!("0x{value:X}").as_str()),
+                    "{name} missing from the {} band",
+                    band.title
+                );
+            }
+            if let Some((count_name, count)) = band.count {
+                assert_eq!(
+                    builder::define_value(&text, count_name).as_deref(),
+                    Some(count.to_string().as_str())
+                );
+            }
+        }
+    }
+
+    /// VM is the one band with no `NR_*` count on the Rust side, so its guard
+    /// names the last member instead. Pin that so a future `NR_VM_MSGS` is a
+    /// deliberate change here rather than a silent gap.
+    #[test]
+    fn the_vm_band_has_no_count_constant() {
+        let vm = bands()
+            .into_iter()
+            .find(|b| b.base_name == "VM_RQ_BASE")
+            .unwrap();
+        assert!(vm.count.is_none());
+        assert!(render().contains("SEF_RQ_BASE > VM_FORK"));
+    }
+
+    /// `NR_KERN_CALLS_PHASE4` is a phase-scoped Rust name; the C header, which
+    /// freezes at slice 5.6, spells it `NR_KERN_CALLS` and records the origin.
+    #[test]
+    fn nr_kern_calls_is_renamed_with_provenance() {
+        let text = render();
+        assert!(text.contains(&format!(
+            "#define NR_KERN_CALLS            {}   /* kernel-shared: NR_KERN_CALLS_PHASE4 */",
+            callnr::NR_KERN_CALLS_PHASE4
+        )));
+        assert!(builder::define_value(&text, "NR_KERN_CALLS_PHASE4").is_none());
+    }
+}

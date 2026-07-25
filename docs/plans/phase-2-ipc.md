@@ -16,7 +16,8 @@ buildable, boots, and produces observable output. The Phase 2 milestone
   (generation-aware, 15-bit signed proc field, sentinels derived from
   `ENDPOINT_SLOT_TOP`), IPC primitive numbers, kernel-call numbers,
   task and server endpoint constants (renumbered contiguously; no
-  static `LOG` slot), MINIX errno values. `NR_PROCS = 1024`. 21
+  static `LOG` slot), MINIX errno values (bespoke at the time; resequenced
+  to classic-MINIX/musl values in slice 5.0). `NR_PROCS = 1024`. 21
   host-side unit tests; no kernel changes.
 - **Slice 2.2** ✓ shipped (PR #4, merged 2026-05-22) — `Proc` and `Priv` structs with kernel-internal
   `RTS_*` / `MF_*` / priv-flag / trap-mask constants in
