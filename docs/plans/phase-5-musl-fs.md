@@ -389,7 +389,7 @@ rediscover them):
   freeze — and the nine `sef.receive(&mut msg) != 0` sites that should read
   `!= OK`.
 
-### Slice 5.1: fault-safe user copy + real `SYS_DIAGCTL` ◀ ready (branch `feature/slice-5.1-uaccess-diagctl`, pending merge)
+### Slice 5.1: fault-safe user copy + real `SYS_DIAGCTL` ✓ shipped (PR #41, merged 2026-07-25)
 
 **Goal:** no user pointer can panic the kernel (D5), and servers can print
 (D2) — the observability + safety floor for everything after.
@@ -487,7 +487,7 @@ not rediscover them):
   `let _ =` swallowed a bad one. The guard is a **stub-free boot**
   (`--no-default-features`) grepped for `[efault]`: it must be empty. It is.
 
-### Slice 5.2: grant table + `SYS_SETGRANT` / `SYS_SAFECOPY` / `SYS_COPY` ◀ next
+### Slice 5.2: grant table + `SYS_SETGRANT` / `SYS_SAFECOPY` / `SYS_COPY` ◀ ready (branch `feature/slice-5.2-grants`, pending merge)
 
 **Goal:** the D4 grant model, live end-to-end between two boot servers.
 
@@ -507,7 +507,101 @@ grant id through DS (`grant.test` key — DS is already a name→i32 registry);
 PM retrieves it, `SYS_SAFECOPY`s the buffer, and `diag_print`s the checksum.
 Marker line in `qemu-boot.expected`; `[ksys]` traces show the new calls.
 
-### Slice 5.3: TTY server (TX-only, premapped PL011) + CDEV band
+**As built** (differences from the sketch above, recorded so later slices do
+not rediscover them):
+
+- **The grant id travels in-band, not through DS.** `DS_PUBLISH` deliberately
+  registers the kernel-stamped `m_source` and ignores the payload — that is its
+  anti-spoof property — so it cannot carry an id at all, and an init-ordering
+  handoff through DS would race besides. VFS `ipc_send`s PM a `PM_GRANT_TEST`
+  message carrying `{gid, len, rw_gid, addr}` instead. SEND blocks until PM's
+  loop receives, so the demo is self-synchronizing; and this is the shape a grant
+  id really travels in (slice 5.3's `CDEV_WRITE {minor, granter, grant_id, len}`
+  is the same). Cost: one demo-only PM request number (`PM_GRANT_TEST`,
+  `NR_PM_MSGS` 5 → 6), to retire when a real consumer lands.
+- **The granter is `m_source`, never a payload field** — and the same rule binds
+  every later band that carries a grant id. Review caught the first draft
+  reading the granter out of the payload: PM holds `SYS_COPY` / `SYS_SAFECOPY`
+  and its clients (init, every forked child on the shared USER privilege) hold
+  neither, so a caller-supplied granter endpoint would let any of them aim a
+  privileged cross-address-space copy at a third party *through PM* and read a
+  checksum of the result back off the console — a confused deputy. Taking the
+  granter from the kernel stamp means a client can only ever name its own address
+  space. PM additionally serves the demo request only when `m_source` is VFS.
+  **CDEV/BDEV/FS must not reintroduce a payload granter field.**
+- **The magic arm gets a live QEMU proof**, not just host tests: PM magic-grants
+  init's text page (`0x0010_0000`, the load base every user binary shares) to
+  itself and safecopies 8 bytes out of init's address space — a genuine
+  third-party read from a process that granted nothing. Uses only init's
+  endpoint, which PM already holds. Without it the arm would be dead code until
+  5.5. The line reports only the length; init's `_start` bytes change on rebuild.
+- **`SYS_COPY` is proved in the same exchange**: PM re-reads the *same* bytes
+  from VFS's raw address with no grant and compares checksums (`copy ok
+  match=1`). That comparison is what proves the grant path moved the right bytes
+  rather than merely some bytes.
+- **`server-rt` keeps `#![forbid(unsafe_code)]`.** `GrantPool<const N>` is a
+  *value* the server owns (a `main`-frame local that outlives the receive loop),
+  not a static — so there is no `UnsafeCell` and no `unsafe impl Sync`. It also
+  makes registration self-healing: `ensure_registered` compares the pool's live
+  address against the one last registered and re-issues `SYS_SETGRANT` when they
+  differ, and both taking a raw pointer and casting it to an integer are safe
+  operations. `revoke` re-registers too (review catch): clearing a slot only
+  revokes anything if the kernel is reading *that* copy of the table, so a moved
+  pool would otherwise clear its entry while the kernel kept honouring the stale
+  address — a revocation that silently does nothing is the worst failure this
+  type has. The pool must be built in `main`, not `init_fresh` — that frame is
+  gone by the time a grantee safecopies.
+- **Magic is gated on `Priv::flags & SYS_PROC`**, minix.rs's variant of MINIX's
+  hardcoded "only VFS and MIB may issue magic grants" — the same trust boundary
+  with no proc-nr list to keep in sync.
+- **`SYS_SETGRANT` rejects a shared privilege slot** (`priv.proc_nr !=
+  Some(caller)` → `EPERM`). Unreachable today (the shared `USER_PRIV_ID` has an
+  empty `k_call_mask`), but one table address cannot describe several processes'
+  memory, and this is what stops a future grant-capable user class inheriting the
+  hole. **Both `do_exit` and `do_exec`** clear `grant_table` / `grant_entries` on
+  a dedicated slot: exit so a recycled server slot cannot inherit a stale table
+  address, and exec — caught in review — because exec preserves the privilege
+  slot while replacing the address space, so the registered VA would otherwise
+  describe the discarded image and aim `verify_grant` at whatever the new image
+  maps there. The exec arm is unreachable in this slice's boot (the only
+  exec'ing procs are forked children on the shared USER privilege, which the
+  `proc_nr` guard skips) and becomes live the first time a server execs.
+- `kernel-shared` gained **`user_range_ok(va, len)`** beside `user_va_ok`: a
+  granted range is a byte buffer and need not be 8-aligned, so the message-grade
+  predicate is the wrong gate for it. Bounding the range is also what stops
+  `page_chunks` being handed a 2^64 length. `user_va_ok` is still right for
+  `SYS_SETGRANT`, whose table *is* 8-aligned.
+- **Seven denial probes, not one demo line.** `[diag pm] grant.deny ok n=7`
+  covers wrong grantee, wrong access, stale sequence, out-of-range index, range
+  overrun, a granter *lying* about writability over `.rodata`, and a grant over
+  an unmapped page. Each is constructed so every check but its target passes.
+  Mutation-tested one at a time: removing the grantee / seq / access / range
+  check, or `copy_between_as`'s destination-writable probe, each flips the line
+  to `grant.deny FAIL <name>`. Two findings from that exercise:
+  - the **index range check is not independently observable** — an id past the
+    table makes the entry read fail first (unmapped page, or a slot without
+    `CPF_USED`), so it is defence in depth rather than the observed cause;
+  - the **`SYS_PROC` magic gate cannot be probed at all** in this slice, because
+    every process able to call `SYS_SETGRANT` is server-grade. Inverting the gate
+    was used instead to prove it is evaluated on the live path (`magic ok` →
+    `magic FAIL rc=-1`). A non-server granter arrives with the musl slices; the
+    real negative probe belongs there. `CPF_INDIRECT` is likewise unprobed —
+    `GrantPool` has no API to mint one.
+  The `.rodata` probe is the one that needed new plumbing (VFS issues a second,
+  deliberately-lying `CPF_READ | CPF_WRITE` grant over the same read-only
+  buffer) and is the grant-path analogue of slice 5.1's fourth bad-pointer probe:
+  the kernel copies through the HHDM alias, where EL0 permission bits do not
+  apply, so `Prot::writable` is the only thing between a lying granter and a
+  corrupted `.rodata` page.
+- `dual_page_chunks` lives in `kernel-shared::message` beside `page_chunks` for
+  the same reason (the kernel crate has no `#[cfg(test)]`), with 8 host tests
+  including the case both sides straddle at *different* offsets — a 128-byte copy
+  that takes three chunks. `kernel-shared` goes 68 → 91 tests, `server-rt` 12 →
+  25.
+- Traces are head-carved (6) like `do_vmctl`'s, not sampled: these are low-rate
+  callers the `[ksys N]` every-100th sampler would never catch.
+
+### Slice 5.3: TTY server (TX-only, premapped PL011) + CDEV band ◀ next
 
 **Goal:** D1 — first user-space driver; EL0-originated text on the serial
 console.
