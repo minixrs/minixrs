@@ -7,9 +7,11 @@
  * `userland_bootstrap` (mapped EL0 RX at USER_CODE_VA_{A,B}). The stubs
  * exercise all three sync IPC primitives:
  *
- *   Stub A — sender: SENDREC to endpoint B in a loop, incrementing a
- *   counter held in x19 (AAPCS callee-saved; the SVC entry/exit code in
- *   trap.S saves and restores all of x0..x30, so x19 survives the trap).
+ *   Stub A — sender: three one-shot slice-5.1 bad-pointer probes (see the
+ *   comments at _user_stub_a_start), then SENDREC to endpoint B in a loop,
+ *   incrementing a counter held in x19 (AAPCS callee-saved; the SVC
+ *   entry/exit code in trap.S saves and restores all of x0..x30, so x19
+ *   survives the trap).
  *
  *   Stub B — echo server: RECEIVE from ANY, then SEND back to whoever
  *   m_source identifies. Mirrors m_type unchanged.
@@ -58,6 +60,20 @@
     .equ VM_MUNMAP,    0xC03               // VM_RQ_BASE + 3
     .equ MSG_SIZE,     104                 // sizeof(Message); fits in `mov` imm12
 
+/*
+ * Slice-5.1 fault-safety probe addresses (stub A only).
+ *
+ * A's address space holds exactly two mapped pages: code RX at
+ * USER_CODE_VA_A (0x0040_0000) and stack RW at USER_STACK_VA_A
+ * (0x0080_0000), with SP_EL0 = 0x0080_1000. Everything else below
+ * USER_VA_TOP is in range but unmapped -- which is precisely the case that
+ * panicked the kernel before the PT-walk copy engine landed.
+ */
+    .equ BAD_VA_HI,    0x0090              // 0x0090_0000: in range, unmapped
+    .equ STACK_VA_HI,  0x0080              // 0x0080_0000: A's stack page
+    .equ STRADDLE_LO,  0x0FF8              // 0x0080_0FF8: 8 bytes in, 96 past the end
+    .equ CODE_VA_HI,   0x0040              // 0x0040_0000: A's code page, mapped RO
+
 /* ---- Stub A: sender ----------------------------------------------------- */
 
     .section .rodata.user_stub_a, "a", %progbits
@@ -65,6 +81,78 @@
     .global _user_stub_a_start
     .type _user_stub_a_start, %object
 _user_stub_a_start:
+    /* ---- slice 5.1: one-shot fault-safety probes ------------------------
+     * Four deliberate bad-pointer IPCs, run once before the ping-pong loop.
+     * Each must come back EFAULT (-14) in x0 with the kernel still standing;
+     * before slice 5.1 the first one took an EL1 data abort and panicked.
+     * The kernel traces each as an `[efault ...]` line -- the checked-in
+     * boot markers for this slice. Together they cover every arm of the copy
+     * engine: unmapped source, multi-page range, deferred write, and the
+     * write-permission check.
+     */
+
+    /* (1) immediate read path: SEND whose message pointer is unmapped.
+     *     `mini_send` copies the message before it inspects the destination,
+     *     so B is never involved and A is never queued. */
+    movz    x9, #BAD_VA_HI, lsl #16         // 0x0090_0000
+    mov     x0, #ENDPOINT_B
+    mov     x1, #SEND
+    mov     x2, x9
+    svc     #0                              // -> x0 == EFAULT
+
+    /* (2) page-straddling read: 8 bytes land in A's mapped stack page, the
+     *     other 96 in the unmapped page above it. A Message is only
+     *     8-aligned, so this really can happen; it proves the copy engine
+     *     walks *every* page of the range, not just the first. */
+    movz    x10, #STACK_VA_HI, lsl #16
+    movk    x10, #STRADDLE_LO               // 0x0080_0FF8
+    mov     x0, #ENDPOINT_B
+    mov     x1, #SEND
+    mov     x2, x10
+    svc     #0                              // -> x0 == EFAULT
+
+    /* (3) deferred write path: a good SEND, then a RECEIVE naming a bad
+     *     deliver buffer. `mini_receive` only records the buffer VA; B's
+     *     echo is deposited via MF_DELIVERMSG and the *flush* discovers the
+     *     bad page, patching EFAULT into A's parked x0. Works under either
+     *     scheduling order -- if B is already RECEIVE-blocked the echo
+     *     arrives while A is blocked; otherwise A's RECEIVE finds B queued
+     *     on its caller_q. Either way the flush is the code under test. */
+    sub     x11, sp, #MSG_SIZE
+    str     wzr, [x11, #0]                  // m_source -- kernel overwrites
+    str     wzr, [x11, #4]                  // m_type = 0
+    mov     x0, #ENDPOINT_B
+    mov     x1, #SEND
+    mov     x2, x11
+    svc     #0                              // good buffer: delivers or queues
+    mov     x0, #ENDPOINT_B
+    mov     x1, #RECEIVE
+    mov     x2, x9                          // bad deliver buffer
+    svc     #0                              // -> x0 == EFAULT, via the flush
+
+    /* (4) read-only destination: same shape as (3), but the deliver buffer
+     *     names A's own *code* page, which is mapped RO_CODE. The page is
+     *     present, so only the copy engine's Prot::writable check rejects
+     *     it -- the kernel writes through the HHDM alias, which the MMU's
+     *     EL0 permission bits do not police, so without that check this
+     *     would silently scribble over executable memory. Nothing else in
+     *     the boot exercises it. */
+    sub     x11, sp, #MSG_SIZE
+    str     wzr, [x11, #0]
+    str     wzr, [x11, #4]
+    mov     x0, #ENDPOINT_B
+    mov     x1, #SEND
+    mov     x2, x11
+    svc     #0                              // good buffer: delivers or queues
+    movz    x12, #CODE_VA_HI, lsl #16       // 0x0040_0000 (RO code page)
+    mov     x0, #ENDPOINT_B
+    mov     x1, #RECEIVE
+    mov     x2, x12
+    svc     #0                              // -> x0 == EFAULT, nothing written
+
+    /* A's next SENDREC re-records a good deliver_msg_vir, so the probes
+     * leave no lasting state and the loop below is unchanged. */
+
     mov     x19, #0                         // persistent message counter
 1:
     // Build Message at [SP_EL0 - 104, SP_EL0): m_source=0, m_type=counter.

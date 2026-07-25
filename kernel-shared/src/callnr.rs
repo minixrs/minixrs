@@ -30,6 +30,14 @@ pub const SYS_VMCTL: i32 = KERNEL_CALL + 8;
 pub const SYS_SCHEDULE: i32 = KERNEL_CALL + 9;
 pub const SYS_SETALARM: i32 = KERNEL_CALL + 10;
 pub const SYS_TIMES: i32 = KERNEL_CALL + 11;
+/// Server → kernel: the servers' debug channel (slice 5.1). Subcode in payload
+/// `0..4` (i32); for `DIAGCTL_CODE_DIAG`, the text length in `4..8` (i32) and
+/// the text itself inline in `DIAG_TEXT_OFF..DIAG_TEXT_OFF+len`. The kernel
+/// prints one console line per call, prefixed with the *caller's own* name as
+/// the kernel knows it. Caller-local. MINIX 3 (`kernel/system/do_diagctl.c`)
+/// passes a `(buf, len)` user pointer here; minix.rs carries the text inline
+/// so the debug channel needs no user-copy machinery and cannot fault — it has
+/// to work while the copy engine and grants are themselves under construction.
 pub const SYS_DIAGCTL: i32 = KERNEL_CALL + 12;
 pub const SYS_SETGRANT: i32 = KERNEL_CALL + 13;
 /// Scheduler claim/release. A user-space scheduler (SCHED) calls this to take a
@@ -65,18 +73,23 @@ pub const SCHEDCTL_FLAG_KERNEL: i32 = 1 << 0;
 /// (`< 20` bytes); a short name like `"worker"` fits with room to spare.
 pub const EXEC_NAME_LEN: usize = 16;
 
-/// Number of kernel calls defined through Phase 4. Slice 4.3 made
-/// `SYS_SCHEDULE` real and added `SYS_SCHEDCTL` (15); slice 4.5 adds the
-/// signal trio `SYS_KILL` / `SYS_GETKSIG` / `SYS_ENDKSIG`, bringing the
-/// count to 18.
-pub const NR_KERN_CALLS_PHASE4: usize = 18;
+/// Number of kernel calls defined. Reached 18 in Phase 4 (slice 4.3 made
+/// `SYS_SCHEDULE` real and added `SYS_SCHEDCTL`; slice 4.5 added the signal
+/// trio `SYS_KILL` / `SYS_GETKSIG` / `SYS_ENDKSIG`) and stays there through
+/// Phase 5, which adds no new call numbers — it fills in bodies for calls that
+/// were already numbered and `ENOSYS`-stubbed.
+///
+/// Named `NR_KERN_CALLS_PHASE4` until slice 5.1. The generated C header always
+/// emitted it as `NR_KERN_CALLS`, and the two must not diverge past the slice
+/// 5.6 ABI freeze.
+pub const NR_KERN_CALLS: usize = 18;
 
 /// Size of the privilege-table kernel-call mask, in bits. Sized as a single
 /// `u32` chunk (32 slots) to leave headroom past Phase 4's 15 calls while
 /// keeping the bitmap a single word per privilege slot.
 pub const NR_SYS_CALLS: usize = 32;
 
-const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS_PHASE4);
+const _: () = assert!(NR_SYS_CALLS >= NR_KERN_CALLS);
 const _: () = assert!(NR_SYS_CALLS.is_multiple_of(32));
 
 // ---------------------------------------------------------------------------
@@ -115,6 +128,37 @@ pub const SYS_GETINFO_NAME_LEN: usize = 16;
 /// an empty kernel-call mask — ordinary user processes make no kernel calls.
 /// The 4.6 fork path leans on this to hand forked children a privilege.
 pub const PRIVCTL_SET_USER: i32 = 1;
+
+// ---------------------------------------------------------------------------
+// `SYS_DIAGCTL` subcodes + inline-text payload geometry.
+//
+// The subcode lives in payload `0..4` (the `GET_WHOAMI` / `VMCTL_*`
+// convention), numbered from 1 so a zeroed payload is an obvious "invalid".
+// Numbering follows MINIX 3's `DIAGCTL_CODE_*` order; only `DIAG` is
+// implemented in Phase 5, the rest are reserved so their wire values cannot be
+// reused by a later minix.rs-specific code.
+// ---------------------------------------------------------------------------
+
+/// Print inline text to the kernel console. Length in payload `4..8`, text in
+/// `DIAG_TEXT_OFF..DIAG_TEXT_OFF+len`.
+pub const DIAGCTL_CODE_DIAG: i32 = 1;
+/// Reserved (MINIX 3 `DIAGCTL_CODE_STACKTRACE`) — `EINVAL` in Phase 5.
+pub const DIAGCTL_CODE_STACKTRACE: i32 = 2;
+/// Reserved (MINIX 3 `DIAGCTL_CODE_REGISTER`) — `EINVAL` in Phase 5.
+pub const DIAGCTL_CODE_REGISTER: i32 = 3;
+/// Reserved (MINIX 3 `DIAGCTL_CODE_UNREGISTER`) — `EINVAL` in Phase 5.
+pub const DIAGCTL_CODE_UNREGISTER: i32 = 4;
+
+/// Offset of the inline text within the `SYS_DIAGCTL` payload. Follows the
+/// subcode (`0..4`) and length (`4..8`) words, so the text starts 8-aligned.
+pub const DIAG_TEXT_OFF: usize = 8;
+
+/// Maximum inline text bytes carried by one `SYS_DIAGCTL(DIAGCTL_CODE_DIAG)`
+/// call — the rest of the 96-byte payload. `server-rt::diag_print` splits
+/// longer strings across successive calls, one console line each.
+pub const DIAG_TEXT_MAX: usize = 96 - DIAG_TEXT_OFF;
+
+const _: () = assert!(DIAG_TEXT_OFF + DIAG_TEXT_MAX == 96);
 
 // ---------------------------------------------------------------------------
 // `SYS_VMCTL` subcalls.
@@ -215,7 +259,7 @@ pub const NR_PM_MSGS: usize = 5;
 
 // The PM range sits strictly above the kernel-call range and strictly below
 // VM's (and therefore every other) server request range and the NOTIFY marker.
-const _: () = assert!(PM_RQ_BASE > KERNEL_CALL + (NR_KERN_CALLS_PHASE4 as i32 - 1));
+const _: () = assert!(PM_RQ_BASE > KERNEL_CALL + (NR_KERN_CALLS as i32 - 1));
 const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VM_RQ_BASE);
 const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
@@ -441,7 +485,7 @@ mod tests {
         for (i, call) in calls.iter().enumerate() {
             assert_eq!(*call, KERNEL_CALL + i as i32);
         }
-        assert_eq!(calls.len(), NR_KERN_CALLS_PHASE4);
+        assert_eq!(calls.len(), NR_KERN_CALLS);
     }
 
     #[test]
@@ -476,12 +520,45 @@ mod tests {
     }
 
     #[test]
+    fn diagctl_subcodes_are_contiguous_from_one() {
+        // Subcode 0 is reserved as "invalid" (a zeroed payload), matching the
+        // VMCTL/PRIVCTL convention. Only DIAG is implemented in Phase 5; the
+        // rest are reserved so a later minix.rs code cannot reuse their wire
+        // values and diverge from MINIX 3's numbering.
+        let codes = [
+            DIAGCTL_CODE_DIAG,
+            DIAGCTL_CODE_STACKTRACE,
+            DIAGCTL_CODE_REGISTER,
+            DIAGCTL_CODE_UNREGISTER,
+        ];
+        for (i, code) in codes.iter().enumerate() {
+            assert_eq!(*code, 1 + i as i32);
+        }
+    }
+
+    #[test]
+    fn diag_text_fills_the_rest_of_the_payload() {
+        let payload_len = crate::message::Message {
+            m_source: 0,
+            m_type: 0,
+            payload: [0; 96],
+        }
+        .payload
+        .len();
+        assert_eq!(DIAG_TEXT_OFF + DIAG_TEXT_MAX, payload_len);
+        // The text starts 8-aligned relative to the message base (payload is
+        // at offset 8), so a future typed accessor can overlay u64 fields.
+        assert_eq!((8 + DIAG_TEXT_OFF) % 8, 0);
+        assert_eq!(DIAG_TEXT_MAX, 88);
+    }
+
+    #[test]
     fn vm_pagefault_distinct_from_kernel_calls_and_notify() {
         // VM requests must not collide with the KERNEL_CALL range, the IPC
         // NOTIFY_MESSAGE marker, or any SYS_* number — a server dispatcher
         // keys on m_type and a collision would misroute.
         assert_eq!(VM_PAGEFAULT, VM_RQ_BASE);
-        assert!(VM_PAGEFAULT > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+        assert!(VM_PAGEFAULT > KERNEL_CALL + NR_KERN_CALLS as i32);
         assert_ne!(VM_PAGEFAULT, crate::ipc_const::NOTIFY_MESSAGE);
     }
 
@@ -492,7 +569,7 @@ mod tests {
         // range, and the NOTIFY marker so VM's m_type dispatcher can't misroute.
         assert_eq!(VM_BRK, VM_RQ_BASE + 1);
         assert_ne!(VM_BRK, VM_PAGEFAULT);
-        assert!(VM_BRK > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+        assert!(VM_BRK > KERNEL_CALL + NR_KERN_CALLS as i32);
         assert_ne!(VM_BRK, crate::ipc_const::NOTIFY_MESSAGE);
     }
 
@@ -502,7 +579,7 @@ mod tests {
         assert_eq!(VM_MMAP, VM_RQ_BASE + 2);
         assert_ne!(VM_MMAP, VM_PAGEFAULT);
         assert_ne!(VM_MMAP, VM_BRK);
-        assert!(VM_MMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+        assert!(VM_MMAP > KERNEL_CALL + NR_KERN_CALLS as i32);
         assert_ne!(VM_MMAP, crate::ipc_const::NOTIFY_MESSAGE);
     }
 
@@ -515,7 +592,7 @@ mod tests {
         assert_ne!(VM_MUNMAP, VM_MMAP);
         assert_ne!(VM_MUNMAP, VM_BRK);
         assert_ne!(VM_MUNMAP, VM_PAGEFAULT);
-        assert!(VM_MUNMAP > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+        assert!(VM_MUNMAP > KERNEL_CALL + NR_KERN_CALLS as i32);
         assert_ne!(VM_MUNMAP, crate::ipc_const::NOTIFY_MESSAGE);
     }
 
@@ -527,7 +604,7 @@ mod tests {
         assert_ne!(VM_FORK, VM_MMAP);
         assert_ne!(VM_FORK, VM_BRK);
         assert_ne!(VM_FORK, VM_PAGEFAULT);
-        assert!(VM_FORK > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+        assert!(VM_FORK > KERNEL_CALL + NR_KERN_CALLS as i32);
         // (The VM_FORK < SEF_RQ_BASE ordering is locked by a module-level
         // const-assert, so it needs no runtime assertion here.)
         assert_ne!(VM_FORK, crate::ipc_const::NOTIFY_MESSAGE);
@@ -556,7 +633,7 @@ mod tests {
             assert_ne!(r, SEF_INIT);
             assert_ne!(r, SEF_SIGNAL);
             assert!(r > SEF_RQ_BASE + (NR_SEF_MSGS as i32 - 1));
-            assert!(r > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+            assert!(r > KERNEL_CALL + NR_KERN_CALLS as i32);
             assert_ne!(r, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(r < crate::ipc_const::NOTIFY_MESSAGE);
         }
@@ -615,7 +692,7 @@ mod tests {
                 assert_ne!(m, other);
             }
             assert!(m > DS_RQ_BASE + (NR_DS_REQUESTS as i32 - 1));
-            assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
         }
@@ -628,7 +705,7 @@ mod tests {
         assert_eq!(SYS_KILL, KERNEL_CALL + 15);
         assert_eq!(SYS_GETKSIG, KERNEL_CALL + 16);
         assert_eq!(SYS_ENDKSIG, KERNEL_CALL + 17);
-        assert_eq!(NR_KERN_CALLS_PHASE4, 18);
+        assert_eq!(NR_KERN_CALLS, 18);
     }
 
     #[test]
@@ -676,7 +753,7 @@ mod tests {
             ] {
                 assert_ne!(m, other);
             }
-            assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32 - 1);
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
             assert!(m < VM_RQ_BASE);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
@@ -696,7 +773,7 @@ mod tests {
             assert_ne!(m, VM_MMAP);
             assert_ne!(m, VM_MUNMAP);
             assert_ne!(m, VM_FORK);
-            assert!(m > KERNEL_CALL + NR_KERN_CALLS_PHASE4 as i32);
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
         }

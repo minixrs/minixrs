@@ -144,13 +144,11 @@ pub fn render() -> String {
         f.define_hex(name, value.into());
     }
     f.blank();
-    f.define_raw(
-        "NR_KERN_CALLS",
-        &format!(
-            "{}   /* kernel-shared: NR_KERN_CALLS_PHASE4 */",
-            callnr::NR_KERN_CALLS_PHASE4
-        ),
-    );
+    // Name-matched with the Rust constant as of slice 5.1 (it was
+    // `NR_KERN_CALLS_PHASE4` there, and carried a provenance comment here to
+    // bridge the gap). Keep the two spellings identical past the 5.6 ABI
+    // freeze — `nr_kern_calls_is_not_phase_suffixed` guards it.
+    f.define_dec("NR_KERN_CALLS", callnr::NR_KERN_CALLS as i64);
     f.define_dec("NR_SYS_CALLS", callnr::NR_SYS_CALLS as i64);
 
     f.section("kernel-call payload constants");
@@ -159,6 +157,23 @@ pub fn render() -> String {
     f.define_dec("EXEC_NAME_LEN", callnr::EXEC_NAME_LEN as i64);
     f.define_dec("PRIVCTL_SET_USER", callnr::PRIVCTL_SET_USER.into());
     f.define_dec("SCHEDCTL_FLAG_KERNEL", callnr::SCHEDCTL_FLAG_KERNEL.into());
+
+    f.section("SYS_DIAGCTL subcodes + inline-text payload");
+    f.define_dec("DIAGCTL_CODE_DIAG", callnr::DIAGCTL_CODE_DIAG.into());
+    f.define_dec(
+        "DIAGCTL_CODE_STACKTRACE",
+        callnr::DIAGCTL_CODE_STACKTRACE.into(),
+    );
+    f.define_dec(
+        "DIAGCTL_CODE_REGISTER",
+        callnr::DIAGCTL_CODE_REGISTER.into(),
+    );
+    f.define_dec(
+        "DIAGCTL_CODE_UNREGISTER",
+        callnr::DIAGCTL_CODE_UNREGISTER.into(),
+    );
+    f.define_dec("DIAG_TEXT_OFF", callnr::DIAG_TEXT_OFF as i64);
+    f.define_dec("DIAG_TEXT_MAX", callnr::DIAG_TEXT_MAX as i64);
 
     f.section("SYS_VMCTL subcalls");
     f.define_dec("VMCTL_PT_MAP", callnr::VMCTL_PT_MAP.into());
@@ -245,7 +260,7 @@ mod tests {
     #[test]
     fn the_kernel_call_list_is_complete_and_contiguous() {
         let calls = kernel_calls();
-        assert_eq!(calls.len(), callnr::NR_KERN_CALLS_PHASE4);
+        assert_eq!(calls.len(), callnr::NR_KERN_CALLS);
         for (i, (name, value)) in calls.into_iter().enumerate() {
             assert_eq!(
                 value,
@@ -327,15 +342,21 @@ mod tests {
         assert!(render().contains("SEF_RQ_BASE > VM_FORK"));
     }
 
-    /// `NR_KERN_CALLS_PHASE4` is a phase-scoped Rust name; the C header, which
-    /// freezes at slice 5.6, spells it `NR_KERN_CALLS` and records the origin.
+    /// The C name and the Rust name must stay identical. The Rust constant was
+    /// `NR_KERN_CALLS_PHASE4` until slice 5.1, which renamed it to match this
+    /// header rather than let a phase-scoped name outlive Phase 4 and cross the
+    /// slice-5.6 ABI freeze. Nothing may reintroduce a phase suffix on either
+    /// side.
     #[test]
-    fn nr_kern_calls_is_renamed_with_provenance() {
+    fn nr_kern_calls_is_not_phase_suffixed() {
         let text = render();
-        assert!(text.contains(&format!(
-            "#define NR_KERN_CALLS            {}   /* kernel-shared: NR_KERN_CALLS_PHASE4 */",
-            callnr::NR_KERN_CALLS_PHASE4
-        )));
-        assert!(builder::define_value(&text, "NR_KERN_CALLS_PHASE4").is_none());
+        assert_eq!(
+            builder::define_value(&text, "NR_KERN_CALLS").as_deref(),
+            Some(callnr::NR_KERN_CALLS.to_string().as_str())
+        );
+        assert!(
+            !text.contains("PHASE"),
+            "the ABI header must carry no phase-scoped names"
+        );
     }
 }

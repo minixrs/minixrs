@@ -41,6 +41,7 @@ use minixrs_kernel_shared::com::{
     CLOCK, DS_PROC_NR, PM_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
 };
 use minixrs_kernel_shared::endpoint::Endpoint;
+use minixrs_kernel_shared::error::OK;
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minixrs_server_rt::{SefConfig, sef_publish_to_ds, sef_startup};
 
@@ -102,7 +103,7 @@ fn main() -> ! {
         payload: [0u8; 96],
     };
     loop {
-        if sef.receive(&mut msg) != 0 {
+        if sef.receive(&mut msg) != OK {
             continue;
         }
         // RS's traffic is all NOTIFY: the alarm from CLOCK, and heartbeat acks

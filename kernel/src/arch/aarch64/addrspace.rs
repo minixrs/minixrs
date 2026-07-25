@@ -26,11 +26,17 @@
 //! TTBR0_EL1; until then, AddrSpaces are passive data structures.
 
 use crate::arch::aarch64::mmu::{
-    ATTR_IDX_NORMAL, PAGE_SHIFT, PTE_AF, PTE_AP_RO_EL0, PTE_AP_RW_EL0, PTE_PXN, PTE_SH_INNER,
-    PTE_TABLE, PTE_UXN, PTE_VALID, PTES_PER_LEVEL, pte_attr_idx,
+    ATTR_IDX_NORMAL, PAGE_SHIFT, PAGE_SIZE, PTE_AF, PTE_AP_RO_EL0, PTE_AP_RW_EL0, PTE_PXN,
+    PTE_SH_INNER, PTE_TABLE, PTE_UXN, PTE_VALID, PTES_PER_LEVEL, pte_attr_idx,
 };
 use crate::mm::{FRAME_SIZE, Frame, alloc_frame, free_frame, phys_to_hhdm};
 use minixrs_kernel_shared::message::USER_VA_TOP;
+
+// `check_va` aligns on `FRAME_SIZE` while `pte_index` shifts by `PAGE_SHIFT`,
+// so an allocator frame and an L3 leaf must describe the same granule. The two
+// constants are declared independently (`mm::frame` and `mmu`), so pin them.
+const _: () = assert!(FRAME_SIZE == PAGE_SIZE);
+const _: () = assert!(1usize << PAGE_SHIFT == PAGE_SIZE);
 
 /// User-page permission. Maps onto the aarch64 stage-1 descriptor's AP +
 /// PXN + UXN bits; kernel callers describe intent here and `prot_attrs()`
@@ -127,17 +133,7 @@ impl AddrSpace {
     /// Walk the page table to find the PA backing `va`, or `None` if `va`
     /// is unmapped.
     pub fn walk_pt(&self, va: u64) -> Option<u64> {
-        check_va(va).ok()?;
-        let l0 = self.ttbr0_pa;
-        let l1 = next_table(l0, pte_index(va, 0))?;
-        let l2 = next_table(l1, pte_index(va, 1))?;
-        let l3 = next_table(l2, pte_index(va, 2))?;
-        let pte = table_ref(l3)[pte_index(va, 3)];
-        if pte & PTE_VALID == 0 {
-            None
-        } else {
-            Some(pte & PA_MASK)
-        }
+        walk_pt_in(self.ttbr0_pa, va).map(|(pa, _)| pa)
     }
 
     /// Free every intermediate L1/L2/L3 table and the L0 root.
@@ -211,6 +207,40 @@ pub fn unmap_page_in(ttbr0_pa: u64, va: u64) -> Option<u64> {
     }
     l3_table[idx] = 0;
     Some(pte & PA_MASK)
+}
+
+/// Translate the page-aligned `va` in the tree rooted at `ttbr0_pa` to its
+/// backing frame PA and the EL0 permissions its leaf descriptor carries.
+/// Returns `None` for a walk miss, a misaligned or out-of-range `va`, or a
+/// `ttbr0_pa` that names no tree.
+///
+/// This is the body of [`AddrSpace::walk_pt`], exposed as a free function for
+/// the same reason as [`map_page_in`] / [`unmap_page_in`]: the kernel resolves
+/// a user VA in a proc's *live* address space given only the `ttbr0_pa` stored
+/// on its [`Proc`](crate::proc::Proc) slot. Slice 5.1's fault-safe user copy
+/// (`mm::uaccess`) is the first consumer; slice 5.2's grant engine is the next.
+/// The [`Prot`] half is what lets a write reject a read-only destination — the
+/// kernel copies through the HHDM alias, which the MMU's EL0 permission bits do
+/// not police.
+///
+/// All table access is via HHDM; the target AS need not be the active one.
+pub fn walk_pt_in(ttbr0_pa: u64, va: u64) -> Option<(u64, Prot)> {
+    // A kernel task has no user AS (`ttbr0_pa == 0`). The old copy helpers
+    // walked the live TTBR0 and could not hit this; a `ttbr0_pa`-taking walk
+    // can, and `table_ref(0)` would read whatever the HHDM maps at PA 0.
+    if ttbr0_pa == 0 || ttbr0_pa & (FRAME_SIZE as u64 - 1) != 0 {
+        return None;
+    }
+    check_va(va).ok()?;
+    let l1 = next_table(ttbr0_pa, pte_index(va, 0))?;
+    let l2 = next_table(l1, pte_index(va, 1))?;
+    let l3 = next_table(l2, pte_index(va, 2))?;
+    let pte = table_ref(l3)[pte_index(va, 3)];
+    if pte & PTE_VALID == 0 {
+        None
+    } else {
+        Some((pte & PA_MASK, pte_prot(pte)))
+    }
 }
 
 /// Visit every valid L3 leaf mapping in the tree rooted at `ttbr0_pa`,

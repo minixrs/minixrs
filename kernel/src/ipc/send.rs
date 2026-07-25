@@ -53,6 +53,7 @@ pub fn mini_send(
     };
 
     let caller_endpoint = proc_table[caller_idx].endpoint;
+    let caller_ttbr0 = proc_table[caller_idx].ttbr0_pa;
     let Some(caller_priv_id) = proc_table[caller_idx].priv_id else {
         return ECALLDENIED;
     };
@@ -72,7 +73,7 @@ pub fn mini_send(
     // Note: copy precedes deadlock_check deliberately — a userspace bug
     // (bad VA) surfaces as EFAULT rather than masquerading as a
     // kernel-detected ELOCKED. Keep this ordering.
-    let mut msg = match copy_msg_from_user(user_msg_va) {
+    let mut msg = match copy_msg_from_user(caller_ttbr0, user_msg_va) {
         Ok(m) => m,
         Err(e) => return e,
     };
