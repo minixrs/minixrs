@@ -1,0 +1,7 @@
+Grok finds the following from review Top issues
+
+1. [bug] servers/pm/src/main.rs:376 — PM_GRANT_TEST ignores m_source; any PM client can drive privileged SYS_COPY / SYS_SAFECOPY with attacker-chosen endpoint/VA (confused deputy).
+2. [bug] kernel/src/system/do_exec.rs:157 — SYS_EXEC tears down the old AS but does not clear grant_table / grant_entries (unlike do_exit).
+3. [suggestion] server-rt/src/grant.rs:135 — ensure_registered only runs on new grants; a moved pool leaves a stale kernel registration.
+4. [nit] tests/qemu-boot.expected:85 — comment still says “five” denials; battery is seven.
+5. [nit] kernel-shared/src/callnr.rs:205 — PM_GRANT_TEST docs omit rw_gid at 12..16.

@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "55b280c42c34",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.2-grants",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/plan.md",
+    "docs/plans/phase-5-musl-fs.md",
+    "kernel-shared/src/callnr.rs",
+    "kernel-shared/src/grant.rs",
+    "kernel-shared/src/lib.rs",
+    "kernel-shared/src/message.rs",
+    "kernel/src/mm/uaccess.rs",
+    "kernel/src/system/do_copy.rs",
+    "kernel/src/system/do_exec.rs",
+    "kernel/src/system/do_exit.rs",
+    "kernel/src/system/do_safecopy.rs",
+    "kernel/src/system/do_setgrant.rs",
+    "kernel/src/system/mod.rs",
+    "kernel/src/system/stubs.rs",
+    "server-rt/src/grant.rs",
+    "server-rt/src/lib.rs",
+    "servers/pm/src/main.rs",
+    "servers/vfs/src/main.rs",
+    "sonar-project.properties",
+    "tests/qemu-boot.expected",
+    "tools/gen-c-headers/src/callnr_h.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/55/b280c42c34/0/metadata.json",
+      "transcript": "/55/b280c42c34/0/full.jsonl",
+      "compact_transcript": "/55/b280c42c34/0/transcript.jsonl",
+      "content_hash": "/55/b280c42c34/0/content_hash.txt",
+      "prompt": "/55/b280c42c34/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 332,
+    "cache_creation_tokens": 397418,
+    "cache_read_tokens": 50392932,
+    "output_tokens": 157007,
+    "api_call_count": 176
+  }
+}
