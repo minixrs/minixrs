@@ -225,6 +225,32 @@ pub fn alloc_frame() -> Option<Frame> {
     None
 }
 
+/// True when `pa` lies inside one of the `MEMMAP_USABLE` regions the allocator
+/// tracks — i.e. when `pa` names RAM this allocator owns, as opposed to MMIO, a
+/// firmware reservation, the kernel image, or a gap between two regions.
+///
+/// `base_pa` is captured at init time and never advances, so `[base_pa, end_pa)`
+/// is each region's *original* extent — exactly the set of legal frame PAs, not
+/// just the not-yet-bumped remainder.
+///
+/// Extracted from [`free_frame`]'s bounds check in slice 5.3 to make the
+/// RAM/device split a *total* invariant. `addrspace::map_page_in` now asserts
+/// `prot.device != is_usable_pa(pa)` on every leaf, so every mapped leaf is
+/// provably either `(RAM ∧ ¬device)` or `(device ∧ ¬RAM)`. That is the lemma
+/// which makes `if !prot.device { free_frame(…) }` sound in each of the five leaf
+/// sweeps (enumerated on [`crate::arch::aarch64::addrspace::map_page_in`]), rather
+/// than merely plausible.
+pub fn is_usable_pa(pa: u64) -> bool {
+    // SAFETY: single-threaded boot invariant; read-only.
+    let a = unsafe { &*ALLOC.0.get() };
+    for r in &a.regions[..a.region_count] {
+        if r.base_pa <= pa && pa < r.end_pa {
+            return true;
+        }
+    }
+    false
+}
+
 /// Return one 4 KiB frame to the allocator. The frame is pushed onto the
 /// free list; future `alloc_frame` calls will hand it back out (zeroed —
 /// we re-zero on the alloc side, not the free side, so callers can free
@@ -245,23 +271,26 @@ pub fn alloc_frame() -> Option<Frame> {
 pub fn free_frame(frame: Frame) {
     let pa = frame.addr();
 
-    // SAFETY: single-threaded boot invariant.
-    let a = unsafe { &mut *ALLOC.0.get() };
-
-    // Bounds-check against tracked regions. `base_pa` is captured at init
-    // time and never advances, so `[base_pa, end_pa)` is the region's
-    // original extent — exactly the set of legal frame PAs.
-    let mut in_range = false;
-    for r in &a.regions[..a.region_count] {
-        if r.base_pa <= pa && pa < r.end_pa {
-            in_range = true;
-            break;
-        }
-    }
+    // Bounds-check against tracked regions. Deliberately still a loud assert
+    // rather than a silent early return: a catch-all that quietly skipped
+    // non-RAM frames would demote a genuine forged-PA or double-free bug into
+    // an untraceable leak. Callers that legitimately hold a non-RAM PA (a
+    // device leaf, since slice 5.3) must test [`is_usable_pa`] themselves.
+    //
+    // This runs **before** the `&mut` borrow below, and must stay there:
+    // `is_usable_pa` takes its own shared borrow of the same `UnsafeCell`, so
+    // calling it while a `&mut Allocator` is live would put two references to one
+    // object in scope with one of them exclusive — aliasing UB, and `noalias` on
+    // the `&mut` makes it the kind a compiler may act on. Same borrow-ending
+    // discipline as `sched::rts_set`/`rts_unset`.
     assert!(
-        in_range,
+        is_usable_pa(pa),
         "free_frame: PA {pa:#x} is outside all USABLE regions"
     );
+
+    // SAFETY: single-threaded boot invariant. Sole live reference to the
+    // allocator from here to the end of the function.
+    let a = unsafe { &mut *ALLOC.0.get() };
 
     // Push onto the free list via HHDM.
     let vaddr = crate::mm::phys_to_hhdm(pa) as *mut FreeNode;

@@ -125,13 +125,18 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // the right proc slot. `worker` is packed with proc_nr -1
     // (`com::EXEC_ONLY_PROC_NR`): it is not a boot server — the loader skips any
     // negative proc_nr — but it is resolvable by name for `SYS_EXEC` (slice 4.7).
-    let servers: [(&str, std::path::PathBuf, i32); 8] = [
+    let servers: [(&str, std::path::PathBuf, i32); 9] = [
         ("minixrs-vm", workspace.join("servers/vm"), 7), // VM_PROC_NR
         ("minixrs-ds", workspace.join("servers/ds"), 5), // DS_PROC_NR
+        // TTY sits between DS and VFS on purpose. DS must come first so every
+        // later server's `DS_PUBLISH` lands; the console driver should reach its
+        // receive loop before its first client, which is VFS today (slice 5.3's
+        // demo) and stays VFS for 5.4's fd 1/2 and 5.6's musl `printf`.
+        ("minixrs-tty", workspace.join("drivers/tty"), 4), // TTY_PROC_NR
         ("minixrs-vfs", workspace.join("servers/vfs"), 1), // VFS_PROC_NR
         ("minixrs-sched", workspace.join("servers/sched"), 9), // SCHED_PROC_NR
-        ("minixrs-rs", workspace.join("servers/rs"), 2), // RS_PROC_NR
-        ("minixrs-pm", workspace.join("servers/pm"), 0), // PM_PROC_NR
+        ("minixrs-rs", workspace.join("servers/rs"), 2),   // RS_PROC_NR
+        ("minixrs-pm", workspace.join("servers/pm"), 0),   // PM_PROC_NR
         ("minixrs-init", workspace.join("userland/init"), 10), // INIT_PROC_NR — PID 1
         ("minixrs-worker", workspace.join("userland/worker"), -1), // EXEC_ONLY_PROC_NR
     ];

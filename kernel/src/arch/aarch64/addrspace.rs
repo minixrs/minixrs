@@ -26,10 +26,10 @@
 //! TTBR0_EL1; until then, AddrSpaces are passive data structures.
 
 use crate::arch::aarch64::mmu::{
-    ATTR_IDX_NORMAL, PAGE_SHIFT, PAGE_SIZE, PTE_AF, PTE_AP_RO_EL0, PTE_AP_RW_EL0, PTE_PXN,
-    PTE_SH_INNER, PTE_TABLE, PTE_UXN, PTE_VALID, PTES_PER_LEVEL, pte_attr_idx,
+    self, ATTR_IDX_NORMAL, PAGE_SHIFT, PAGE_SIZE, PTE_AF, PTE_AP_RO_EL0, PTE_AP_RW_EL0, PTE_PXN,
+    PTE_SH_INNER, PTE_TABLE, PTE_UXN, PTE_VALID, PTES_PER_LEVEL, pte_attr_idx, pte_attr_idx_of,
 };
-use crate::mm::{FRAME_SIZE, Frame, alloc_frame, free_frame, phys_to_hhdm};
+use crate::mm::{FRAME_SIZE, Frame, alloc_frame, free_frame, is_usable_pa, phys_to_hhdm};
 use minixrs_kernel_shared::message::USER_VA_TOP;
 
 // `check_va` aligns on `FRAME_SIZE` while `pte_index` shifts by `PAGE_SHIFT`,
@@ -38,31 +38,51 @@ use minixrs_kernel_shared::message::USER_VA_TOP;
 const _: () = assert!(FRAME_SIZE == PAGE_SIZE);
 const _: () = assert!(1usize << PAGE_SHIFT == PAGE_SIZE);
 
-/// User-page permission. Maps onto the aarch64 stage-1 descriptor's AP +
-/// PXN + UXN bits; kernel callers describe intent here and `prot_attrs()`
-/// converts to the bit pattern.
+/// User-page permission and memory type. Maps onto the aarch64 stage-1
+/// descriptor's AP + PXN + UXN bits and its AttrIndx field; kernel callers
+/// describe intent here and `prot_attrs()` converts to the bit pattern.
 #[derive(Copy, Clone, Debug)]
 pub struct Prot {
     /// EL0 may write.
     pub writable: bool,
     /// EL0 may fetch from this page (code).
     pub executable: bool,
+    /// This leaf maps MMIO, not RAM: Device memory rather than Normal-WB, and
+    /// **not** a frame the allocator owns. Slice 5.3's TTY UART page is the only
+    /// one today. Every teardown path must skip `free_frame` for such a leaf —
+    /// see [`map_page_in`]'s total invariant.
+    pub device: bool,
 }
 
 impl Prot {
     pub const RO_CODE: Self = Self {
         writable: false,
         executable: true,
+        device: false,
     };
     pub const RW_DATA: Self = Self {
         writable: true,
         executable: false,
+        device: false,
     };
     pub const RO_DATA: Self = Self {
         writable: false,
         executable: false,
+        device: false,
+    };
+    /// MMIO, EL0 read+write, never executable. The kernel installs this only for
+    /// a PA outside every USABLE region (see [`map_page_in`]).
+    pub const DEVICE_RW: Self = Self {
+        writable: true,
+        executable: false,
+        device: true,
     };
 }
+
+// `pte_prot` recognizes a device leaf as "AttrIndx is not the Normal one", and
+// `Prot::device == false` must round-trip through index 0. Both depend on
+// `ATTR_IDX_NORMAL` staying 0 — the index `assert_mair_normal_wb` pins.
+const _: () = assert!(ATTR_IDX_NORMAL == 0);
 
 fn prot_attrs(prot: Prot) -> u64 {
     let ap = if prot.writable {
@@ -71,7 +91,23 @@ fn prot_attrs(prot: Prot) -> u64 {
         PTE_AP_RO_EL0
     };
     let uxn = if prot.executable { 0 } else { PTE_UXN };
-    PTE_AF | PTE_SH_INNER | ap | PTE_PXN | uxn | pte_attr_idx(ATTR_IDX_NORMAL)
+    let attr_idx = if prot.device {
+        let idx = mmu::device_attr_idx();
+        // Hard assert (the kernel ships --release, so `debug_assert!` is gone):
+        // `device_attr_idx` returns `ATTR_IDX_NORMAL` until
+        // `mmu::init_device_attr_idx` has run, and emitting Normal-WB for MMIO
+        // is exactly the silent-corruption case this whole mechanism exists to
+        // prevent — the CPU would be free to cache, gather, and reorder UART
+        // register accesses.
+        assert!(
+            idx != ATTR_IDX_NORMAL,
+            "device mapping before mmu::init_device_attr_idx()",
+        );
+        idx
+    } else {
+        ATTR_IDX_NORMAL
+    };
+    PTE_AF | PTE_SH_INNER | ap | PTE_PXN | uxn | pte_attr_idx(attr_idx)
 }
 
 /// Errors from [`AddrSpace`] operations.
@@ -166,10 +202,50 @@ impl AddrSpace {
 /// page-fault handler and slice-3.3's `VMCTL_PT_MAP` both go through here.
 ///
 /// All table access is via HHDM; the target AS need not be the active one.
+///
+/// # The RAM/device invariant
+///
+/// Every leaf this function installs is *provably* either `(RAM ∧ ¬device)` or
+/// `(device ∧ ¬RAM)` — the two asserts below make that total, with no third case.
+/// That is the lemma the **five** leaf sweeps rely on when they gate `free_frame`
+/// on `!prot.device`:
+///
+/// 1. `do_exit::teardown_addrspace` — the live one; counts device leaves instead
+///    of freeing them.
+/// 2. `do_fork::copy_addrspace`'s copy loop — re-maps a device leaf rather than
+///    copying it (MMIO is shared, and a `memcpy` through the cacheable HHDM alias
+///    would read side-effecting registers into RAM).
+/// 3. `do_fork::copy_addrspace`'s **out-of-memory unwind** sweep — distinct from
+///    (2), and easy to miss: it frees the leaves the copy loop had already
+///    installed, including any device leaf (2) re-mapped.
+/// 4. `do_vmctl`'s `pt_unmap`.
+/// 5. `userland::destroy_addrspace_with_leaves`.
+///
+/// Without the invariant, `prot.device == false` would only mean "the
+/// mapper did not *say* device", and one mis-tagged MMIO leaf would push a
+/// non-RAM PA onto the frame allocator's free list — which `free_frame` catches
+/// as a panic today, and would silently hand back out if that assert were ever
+/// relaxed.
 pub fn map_page_in(ttbr0_pa: u64, va: u64, pa: u64, prot: Prot) -> Result<(), MapError> {
     check_va(va)?;
     if pa & (FRAME_SIZE as u64 - 1) != 0 {
         return Err(MapError::Misaligned);
+    }
+    // Hard asserts, not `debug_assert!`: the kernel ships `--release`, and both
+    // directions are silent corruption rather than a clean failure. Mapping RAM
+    // as Device would make an ordinary page uncached and unable to be freed by
+    // the teardown paths; mapping MMIO as Normal would let the teardown paths
+    // free a device PA into the frame allocator.
+    if prot.device {
+        assert!(
+            !is_usable_pa(pa),
+            "device mapping of RAM PA {pa:#x} at va {va:#x}",
+        );
+    } else {
+        assert!(
+            is_usable_pa(pa),
+            "normal mapping of non-RAM PA {pa:#x} at va {va:#x}",
+        );
     }
 
     let l1 = ensure_next_table(ttbr0_pa, pte_index(va, 0))?;
@@ -296,12 +372,22 @@ const PTE_AP_READONLY_BIT: u64 = PTE_AP_RO_EL0 & !PTE_AP_RW_EL0;
 
 /// Recover the mapping intent from a leaf page descriptor — the inverse of
 /// [`prot_attrs`]. Writable ⇔ the AP read-only bit is clear; executable ⇔
-/// UXN is clear. Fork uses this to re-install a copied page with the same
-/// permissions the parent had.
+/// UXN is clear; device ⇔ the AttrIndx field is not [`ATTR_IDX_NORMAL`]. Fork
+/// uses this to re-install a copied page with the same permissions the parent
+/// had, and the teardown paths use `device` to decide whether the leaf's PA is a
+/// frame they may free.
+///
+/// The device decode is **stateless** — it reads the descriptor, not
+/// `mmu::device_attr_idx()`. That is sound because the kernel emits exactly two
+/// AttrIndx values (`ATTR_IDX_NORMAL` and whichever index
+/// `mmu::init_device_attr_idx` chose), and byte 0 of MAIR is pinned to Normal-WB,
+/// so `ATTR_IDX_NORMAL` can never be the device index. Being stateless also means
+/// a leaf decodes the same way regardless of when it was installed.
 fn pte_prot(pte: u64) -> Prot {
     Prot {
         writable: pte & PTE_AP_READONLY_BIT == 0,
         executable: pte & PTE_UXN == 0,
+        device: pte_attr_idx_of(pte) != ATTR_IDX_NORMAL,
     }
 }
 
