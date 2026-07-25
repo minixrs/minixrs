@@ -1,0 +1,10 @@
+add all 4
+
+---
+
+grok reviewer comes back with Top issues
+
+1. [bug] kernel/src/mm/frame.rs:274 — free_frame holds &mut ALLOC while is_usable_pa takes &ALLOC (aliasing UB introduced by this refactor)
+2. [suggestion] servers/vm/src/region.rs:133 — set_brk has no device-window cap (unlike mmap)
+3. [nit] kernel/src/mm/frame.rs:297 — docs say “four” teardown paths; should be five
+4. [nit] book/src/drivers/overview.md:72 — book hardcodes attr_idx=1 (firmware-dependent)
