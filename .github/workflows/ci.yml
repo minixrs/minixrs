@@ -69,6 +69,60 @@ jobs:
           cargo clippy -p minixrs-kernel --target aarch64-unknown-none \
             --no-default-features -- -D warnings
 
+  c-headers:
+    name: generated C headers
+    runs-on: ubuntu-latest
+    # Blocking (phase-5 decision D8): the generated headers are the musl fork's
+    # only view of the minix.rs ABI, and they are never committed — so a Rust
+    # change that produces uncompilable C has to fail in the slice that made it,
+    # not in slice 5.6 when the first C file appears.
+    #
+    # No clang install step: kernel/build.rs already shells out to bare `clang`
+    # to assemble the kernel's .S files, so it is an existing hard build
+    # requirement that the runner images satisfy.
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Generate headers
+        run: cargo gen-c-headers
+      # -nostdlibinc (clang-only; do not "portably" swap in cc) plus
+      # -ffreestanding keeps the check hermetic: the selftest sees ONLY the
+      # generated headers and clang's own resource-dir headers, so it cannot
+      # accidentally validate against the host libc — whose errno values differ
+      # from musl's (Darwin EDEADLK is 11, not 35). Three triples: the host
+      # proves portability, the two musl triples are what actually ships.
+      # -fsyntax-only needs no backend, no linker, and no sysroot.
+      - name: Syntax-check the generated headers
+        run: |
+          for target in "" "--target=aarch64-unknown-linux-musl" \
+                           "--target=x86_64-unknown-linux-musl"; do
+            clang -std=c11 -pedantic-errors -Wall -Wextra -Werror \
+              -fsyntax-only -ffreestanding -nostdlibinc $target \
+              -Itarget/gen-c-headers/include \
+              target/gen-c-headers/abi-selftest.c
+          done
+      # Compiles <minix/errno.h>'s opt-in POSIX block against the generated
+      # stand-in. A syntax and macro-spelling check only — the stand-in is
+      # generated from the same Rust table the assertions check. The real value
+      # check runs against the musl fork's bits/errno.h from slice 5.6 on.
+      - name: Syntax-check the opt-in errno assertions
+        run: |
+          clang -std=c11 -pedantic-errors -Wall -Wextra -Werror \
+            -fsyntax-only -ffreestanding -nostdlibinc \
+            --target=aarch64-unknown-linux-musl \
+            -DMINIX_ABI_CHECK_POSIX_ERRNO \
+            -Itarget/gen-c-headers/abi-check \
+            -Itarget/gen-c-headers/include \
+            target/gen-c-headers/abi-selftest.c
+      # D8: the headers are build artifacts under target/ and are never
+      # committed. Makes that rule mechanical rather than a convention.
+      - name: Assert nothing was written into the tree
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest

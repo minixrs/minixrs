@@ -56,6 +56,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "minixrs-gen-c-headers"
+version = "0.1.0"
+dependencies = [
+ "minixrs-kernel-shared",
+]
+
+[[package]]
 name = "minixrs-init"
 version = "0.1.0"
 dependencies = [

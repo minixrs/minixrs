@@ -50,6 +50,18 @@ in the tree today are listed as real; everything else is grouped under
 | error codes | `kernel-shared/src/error.rs` |
 | signal numbers | `kernel-shared/src/signal.rs` |
 
+The arrow runs both ways for the first four rows: `tools/gen-c-headers` generates
+`minix/{ipc,com,callnr,errno}.h` back out of those Rust modules for the musl fork
+to include, so C never gets a hand-maintained copy of the ABI.
+
+Errno numbering is minix.rs's own policy rather than a port of either reference
+tree (phase-5 decision D7): the POSIX block `1..=40` uses classic book-era MINIX
+values — identical to Linux/musl, which is what lets musl's stock
+`bits/errno.h` work unmodified — while the MINIX-specific IPC errnos take modern
+MINIX 3's 200-band values, clear of Linux's entire range. Both are stored negated
+in Rust. `EBADSRCDST` is the one name modern MINIX lacks; it takes the value of
+that tree's `EBADEPT` (216).
+
 ## Runtime and libraries
 
 | MINIX 3 | minix.rs |

@@ -489,7 +489,7 @@ Aggregate scope (Phase 4 as a whole):
 - **Milestone:** Full server boot sequence completes; init process starts —
   **reached; Phase 4 complete (slice 4.8, 2026-07-18).**
 
-### Pre-Phase-5 cleanup (complete pending chunk-6 merge)
+### Pre-Phase-5 cleanup (complete)
 
 Phase 4's close-out review identified PR-sized cleanup/prep chunks to land
 before Phase 5 starts, tracked with the usual markers in
@@ -500,8 +500,8 @@ into `NR_SERVED_PROCS`; toolchain bump + kernel clippy debt) are `✓ shipped`
 (PRs #33–#37, merged 2026-07-24); chunk 7 (de-hosting the kernel crate, which
 also flipped `clippy-kernel` and `qemu-smoke` to blocking) is `✓ shipped`
 (PR #38, merged 2026-07-24); chunk 6 — the Phase 5 design + slicing session
-that gates Phase 5 and produced the slice plan below — is `◀ ready` (branch
-`feature/phase-5-plan`, pending merge).
+that gates Phase 5 and produced the slice plan below — is `✓ shipped`
+(PR #39, merged 2026-07-24).
 
 ### Phase 5: musl Fork + File Systems
 
@@ -521,8 +521,8 @@ grant-sourced `SYS_EXEC` form; `error.rs` is renumbered to classic-MINIX
 `external/musl` built with clang `--target` + rust-lld. PFS/pipes moved out
 to Phase 7; TTY input/IRQs to Phase 6.
 
-- **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ◀ next
-- **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL`
+- **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ◀ ready (branch `feature/slice-5.0-abi-prep`, pending merge)
+- **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL` ◀ next
 - **5.2** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY`
 - **5.3** TTY server (TX-only, boot-premapped PL011) + CDEV band
 - **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS
