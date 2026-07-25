@@ -1,33 +1,32 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! Slice-3.1b userland bootstrap: per-process address spaces with 8-bit
-//! ARMv8 ASIDs.
+//! Userland bootstrap: per-process address spaces with 8-bit ARMv8 ASIDs.
 //!
-//! Each of the three EL0 stubs (A, B, C — the slice 2.5 / 2.6 regression
-//! coverage) gets its own [`AddrSpace`] built from the slice-3.1a frame
-//! allocator. Code and stack pages are allocated as fresh frames, the
-//! stub blob is copied in via HHDM (`mm::phys_to_hhdm`), and the
+//! Everything the kernel starts at EL0 is built here. Two shapes:
+//!
+//!   - **Boot servers and init**, loaded from the MXBI archive by
+//!     [`load_boot_server`] — an ELF load plus one stack page. Slice 4.7
+//!     factored the address-space half out as [`load_exec_image`], which
+//!     `system::do_exec` reuses to re-image a live proc.
+//!   - **Demo stubs A–D** (`boot-stubs` feature, default on), built by
+//!     [`build_stub`] from raw blobs in `user_stub.S` — one code page, one
+//!     stack page. They are the standing regression battery for the IPC
+//!     primitives, SCHED delegation, VM page faults, and (as of slice 5.1)
+//!     the fault-safe user copy; init and worker exercise none of that.
+//!
+//! Either way the proc gets its own [`AddrSpace`], frames come from
+//! [`crate::mm`], contents are written through the HHDM
+//! (`mm::phys_to_hhdm`) rather than the not-yet-active TTBR0, and the
 //! resulting `(ttbr0_pa, asid)` is stored on the proc slot. The scheduler
 //! ([`crate::proc::sched::schedule_next`]) installs that TTBR0 on every
 //! EL1 → EL0 transition.
 //!
-//! What slice 3.1a's smoke test exercised in isolation — `AddrSpace::new`,
-//! `map_page`, `walk_pt`, the free-list reuse on `destroy` — now drives
-//! the three real EL0 stubs.
+//! The tree is owned by the proc slot from then on, not by an `AddrSpace`
+//! value — hence the `mem::forget` at the end of each builder. Teardown goes
+//! through `system::do_exit`, which frees leaf frames before the tables.
 //!
-//! What this slice does *not* do:
-//!   - Recover from page faults. EC=0x20 / EC=0x24 still panic via
-//!     [`super::exception::el0_sync_unexpected`]; slice 3.1b extends that
-//!     handler's ISS decoder so the dump is informative, but the policy
-//!     is still "halt" — real `do_page_fault` + `RTS_PAGEFAULT` land in
-//!     slice 3.2.
-//!   - Cross-AS IPC delivery. The SVC handler runs in the caller's TTBR0,
-//!     so single-AS reads in `ipc::message` still walk correctly; slice
-//!     3.4's HHDM-walk redesign of `flush_deliver_msg` swaps that out
-//!     once VM exists.
-//!   - Install a kernel-shared global mapping for the EL0 stubs. The
-//!     code page is mapped RO + EL0-executable into each per-proc AS
-//!     individually (zero shared frames).
+//! No page is ever shared between stubs: each maps its own frame at its own
+//! VA, so there is no kernel-global user mapping to reason about.
 
 use core::sync::atomic::Ordering;
 

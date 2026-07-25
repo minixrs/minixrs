@@ -38,3 +38,26 @@ minix.rs booting on aarch64
 # RS's periodic kernel alarm: assert only the FIRST fire (always inside the
 # head carve-out) -- timing-robust under slow CI TCG, unlike a fire count
 [alarm 1] owner=r nr=2 at=
+
+# Slice 5.1: stub A's one-shot bad-pointer probes. Each returns EFAULT instead
+# of taking an EL1 data abort (which the forbidden list catches as a panic).
+# Between them they cover every arm of the copy engine: probe 1 is a fully
+# unmapped page, probe 2 straddles A's stack page into the unmapped one above
+# it, probe 3 fails in the deferred MF_DELIVERMSG flush and lands EFAULT in A's
+# parked x0, and probe 4 names A's *mapped but read-only* code page -- the only
+# check on that path is the copy engine's own Prot::writable test, since the
+# kernel writes through the HHDM alias where EL0 permission bits do not apply.
+# call=1 is SEND; nr=11 is stub A. These lines are unsampled, so unlike
+# `[ipc N]` they cannot drift with IPC ordering.
+[efault] proc=A nr=11 call=1 va=0x900000
+[efault] proc=A nr=11 call=1 va=0x800ff8
+[efault deliver] proc=A nr=11 va=0x900000
+[efault deliver] proc=A nr=11 va=0x400000
+
+# Slice 5.1: SYS_DIAGCTL is real -- every SEF server announces itself from EL0
+# through the kernel debug channel. The name prefix comes from the kernel's own
+# proc slot, not the payload, so these lines cannot be spoofed. Assert two of
+# the six: vm is the first server packed in the MXBI archive, pm the last, so
+# together they bracket the whole roster.
+[diag vm] sef ready
+[diag pm] sef ready

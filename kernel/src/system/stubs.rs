@@ -34,7 +34,7 @@ enosys_stub!(do_irqctl);
 // `system::do_privctl` / `system::do_exit`.
 // `do_fork` is a real handler as of slice 4.6 — see `system::do_fork`.
 enosys_stub!(do_times);
-enosys_stub!(do_diagctl);
+// `do_diagctl` is a real handler as of slice 5.1 — see `system::do_diagctl`.
 enosys_stub!(do_setgrant);
 // `do_kill` / `do_getksig` / `do_endksig` are real handlers as of slice 4.5 —
 // see `system::do_sig`.

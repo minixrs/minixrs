@@ -11,7 +11,7 @@
 
 use core::cell::UnsafeCell;
 
-use minixrs_kernel_shared::callnr::NR_KERN_CALLS_PHASE4;
+use minixrs_kernel_shared::callnr::NR_KERN_CALLS;
 use minixrs_kernel_shared::com::{
     ASYNCM, CLOCK, DS_PROC_NR, HARDWARE, IDLE, INIT_PROC_NR, MEM_PROC_NR, MFS_PROC_NR,
     NR_BOOT_PROCS, NR_PROCS, NR_SYS_PROCS, NR_TASKS, PFS_PROC_NR, PM_PROC_NR, RS_PROC_NR,
@@ -482,7 +482,7 @@ fn populate_priv(id: PrivId, entry: &BootEntry, n_active: u16) {
         // SRV_T privs can issue every kernel call defined so far. This bound
         // tracks the highest `SYS_*` number; slice 4.3 widened it to admit
         // `SYS_SCHEDULE` / `SYS_SCHEDCTL` so SCHED may issue them.
-        fill_bits(&mut pr.k_call_mask, NR_KERN_CALLS_PHASE4);
+        fill_bits(&mut pr.k_call_mask, NR_KERN_CALLS);
     }
     // Kernel-task slots leave ipc_to and k_call_mask zeroed.
 

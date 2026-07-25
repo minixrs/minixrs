@@ -2,6 +2,7 @@
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! SEF startup handshake and control-aware receive loop.
 
+use crate::diag::diag_print;
 use minixrs_ipc::{ipc_notify, ipc_receive, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{GET_WHOAMI, SYS_GETINFO, SYS_GETINFO_NAME_LEN};
@@ -69,6 +70,14 @@ pub fn sef_startup(cfg: SefConfig) -> Result<Sef, i32> {
         name,
         signal_handler: cfg.signal_handler,
     };
+
+    // First words from EL0: announce on the kernel debug channel (slice 5.1).
+    // Placed after GET_WHOAMI but *before* `init_fresh` (which publishes to DS)
+    // so the line proves `SYS_DIAGCTL` on its own, independent of DS being up.
+    // The kernel supplies the `[diag <name>]` prefix from its own proc slot, so
+    // one constant string identifies every server distinctly. Best-effort: a
+    // failed debug print must not abort a server's startup.
+    let _ = diag_print("sef ready");
 
     if let Some(init) = cfg.init_fresh {
         let rc = init(endpoint, &name);
