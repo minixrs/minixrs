@@ -15,7 +15,13 @@ pub const GUARD: &str = "_MINIX_COM_H";
 /// because the kernel tasks are `com::SYSTEM` (no suffix) on the Rust side but
 /// must be `SYSTEM_PROC_NR` / `SYSTEM_EP` in C, where a bare `SYSTEM` would be
 /// an unpleasant macro to inflict on a C translation unit.
-fn processes() -> [(&'static str, ProcNr); 16] {
+///
+/// The array length is the live `NR_TASKS + NR_BOOT_PROCS`, not a literal: a new
+/// boot server in `com.rs` bumps `NR_BOOT_PROCS` and this array then fails to
+/// compile until its row is added, so the C view of the process table cannot
+/// silently lag the Rust one. `the_process_list_covers_every_task_and_boot_slot`
+/// locks the slot values that fill it.
+fn processes() -> [(&'static str, ProcNr); com::NR_TASKS + com::NR_BOOT_PROCS] {
     [
         ("ASYNCM", com::ASYNCM),
         ("IDLE", com::IDLE),
@@ -129,6 +135,31 @@ pub fn render() -> String {
 mod tests {
     use super::*;
     use crate::{builder, ipc_h};
+
+    /// Completeness, not just correctness: the array's *length* is locked by its
+    /// return type, and this pins what has to be in it — the `NR_TASKS` negative
+    /// task slots followed by boot slots `0..NR_BOOT_PROCS`, contiguously. A new
+    /// boot server that gets a Rust endpoint and an MXBI entry but no row here
+    /// fails one of the two rather than quietly missing its C macros.
+    #[test]
+    fn the_process_list_covers_every_task_and_boot_slot() {
+        let procs = processes();
+        assert_eq!(procs.len(), com::NR_TASKS + com::NR_BOOT_PROCS);
+        for (i, (name, nr)) in procs.into_iter().enumerate() {
+            assert_eq!(
+                nr.get(),
+                i as i32 - com::NR_TASKS as i32,
+                "{name} is out of slot order"
+            );
+        }
+        // Restated at the ends so the intent survives a refactor of the loop:
+        // the list spans exactly [-NR_TASKS, NR_BOOT_PROCS).
+        assert_eq!(procs[0].1.get(), -(com::NR_TASKS as i32));
+        assert_eq!(
+            procs[procs.len() - 1].1.get(),
+            com::NR_BOOT_PROCS as i32 - 1
+        );
+    }
 
     #[test]
     fn every_process_has_both_a_proc_nr_and_an_ep() {

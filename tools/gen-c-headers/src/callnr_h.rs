@@ -35,6 +35,11 @@ fn kernel_calls() -> [(&'static str, i32); 18] {
 
 /// A server request band: base constant, its members, and the count constant
 /// that bounds it (`None` for VM, which has no `NR_*` on the Rust side).
+///
+/// `members` is checked against `count` by
+/// `every_band_member_list_matches_its_count`: a new request that bumps the Rust
+/// `NR_*` without gaining a row here would otherwise render a larger count and
+/// no macro for the request itself.
 struct Band {
     title: &'static str,
     base_name: &'static str,
@@ -275,9 +280,38 @@ mod tests {
         }
     }
 
+    /// The completeness half of the band lock: `every_band_base_member_and_count_appears`
+    /// only proves that whatever is listed renders, so on its own a new request
+    /// that bumped `NR_PM_MSGS` would grow the C count and the ordering asserts
+    /// while silently omitting its own macro. Each band's members must therefore
+    /// be exactly `count` entries, contiguous from `base`.
+    #[test]
+    fn every_band_member_list_matches_its_count() {
+        for band in bands() {
+            if let Some((count_name, count)) = band.count {
+                assert_eq!(
+                    band.members.len(),
+                    count,
+                    "the {} band lists {} members but {count_name} is {count}",
+                    band.title,
+                    band.members.len()
+                );
+            }
+            for (i, (name, value)) in band.members.iter().enumerate() {
+                assert_eq!(
+                    *value,
+                    band.base + i as i32,
+                    "{name} is out of order in the {} band",
+                    band.title
+                );
+            }
+        }
+    }
+
     /// VM is the one band with no `NR_*` count on the Rust side, so its guard
-    /// names the last member instead. Pin that so a future `NR_VM_MSGS` is a
-    /// deliberate change here rather than a silent gap.
+    /// names the last member instead. Pin both the guard text and the member the
+    /// guard names, so a future `NR_VM_MSGS` — or a `VM_RQ_BASE + 5` request —
+    /// is a deliberate change here rather than a silent gap.
     #[test]
     fn the_vm_band_has_no_count_constant() {
         let vm = bands()
@@ -285,6 +319,11 @@ mod tests {
             .find(|b| b.base_name == "VM_RQ_BASE")
             .unwrap();
         assert!(vm.count.is_none());
+        assert_eq!(
+            vm.members.last().map(|(name, value)| (*name, *value)),
+            Some(("VM_FORK", callnr::VM_FORK)),
+            "the SEF ordering assert names the VM band's last member"
+        );
         assert!(render().contains("SEF_RQ_BASE > VM_FORK"));
     }
 

@@ -117,17 +117,23 @@ pub fn render() -> String {
 
     f.section("message");
     f.block_comment(&[
-        "The IPC message. Laid out to match kernel-shared's #[repr(C, align(8))]",
+        &format!(
+            "The IPC message. Laid out to match kernel-shared's #[repr(C, align({}))]",
+            l.align
+        ),
         "Message exactly; the assertions below are generated from the live Rust",
         "type, so a layout change on either side fails to compile rather than",
         "silently corrupting every IPC call.",
         "",
         "C11 forbids an alignment specifier on a struct type declaration, so the",
         "_Alignas rides the first member -- a struct's alignment is the maximum of",
-        "its members', which yields the required 8.",
+        &format!("its members', which yields the required {}.", l.align),
     ]);
     f.line("struct message {");
-    f.line("    _Alignas(8) endpoint_t m_source;   /* set by the kernel on delivery */");
+    f.line(&format!(
+        "    _Alignas({}) endpoint_t m_source;   /* set by the kernel on delivery */",
+        l.align
+    ));
     f.line("    int                    m_type;     /* call number out, result back  */");
     f.line(&format!(
         "    unsigned char          payload[{}];",
@@ -230,8 +236,27 @@ mod tests {
     fn alignas_rides_the_first_member() {
         // C11 rejects an alignment specifier on the struct type declaration.
         let text = render();
-        assert!(text.contains("_Alignas(8) endpoint_t m_source;"));
-        assert!(!text.contains("_Alignas(8) struct"));
+        let align = align_of::<Message>();
+        assert!(text.contains(&format!("_Alignas({align}) endpoint_t m_source;")));
+        assert!(!text.contains(&format!("_Alignas({align}) struct")));
+    }
+
+    /// Every layout number in the emitted text is measurement-driven, including
+    /// the `_Alignas` on the declaration itself: the `_Alignof` assert would
+    /// catch a hardcode, but only after the declaration had already disagreed
+    /// with the measured layout.
+    #[test]
+    fn the_declared_alignment_comes_from_the_measurement() {
+        let text = render();
+        let l = MessageLayout::measure();
+        assert_eq!(
+            text.matches("_Alignas(").count(),
+            1,
+            "exactly one alignment specifier, on the first member"
+        );
+        assert!(text.contains(&format!("_Alignas({})", l.align)));
+        assert!(text.contains(&format!("_Alignof(message) == {}", l.align)));
+        assert!(text.contains(&format!("#[repr(C, align({}))]", l.align)));
     }
 
     #[test]
