@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "5df4ae9b7675",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.0-abi-prep",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".cargo/config.toml",
+    ".github/workflows/ci.yml",
+    "CLAUDE.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "book/src/build.md",
+    "book/src/reference/minix3-mapping.md",
+    "book/src/reference/syscalls.md",
+    "docs/plan.md",
+    "docs/plans/phase-2-ipc.md",
+    "docs/plans/phase-5-musl-fs.md",
+    "docs/plans/phase-5-prep.md",
+    "kernel-shared/src/error.rs",
+    "sonar-project.properties",
+    "tools/gen-c-headers/Cargo.toml",
+    "tools/gen-c-headers/src/builder.rs",
+    "tools/gen-c-headers/src/callnr_h.rs",
+    "tools/gen-c-headers/src/com_h.rs",
+    "tools/gen-c-headers/src/errno_h.rs",
+    "tools/gen-c-headers/src/ipc_h.rs",
+    "tools/gen-c-headers/src/lib.rs",
+    "tools/gen-c-headers/src/main.rs",
+    "tools/gen-c-headers/src/selftest.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5d/f4ae9b7675/0/metadata.json",
+      "transcript": "/5d/f4ae9b7675/0/full.jsonl",
+      "content_hash": "/5d/f4ae9b7675/0/content_hash.txt",
+      "prompt": "/5d/f4ae9b7675/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 16781,
+    "cache_creation_tokens": 601607,
+    "cache_read_tokens": 28193429,
+    "output_tokens": 119495,
+    "api_call_count": 112
+  }
+}

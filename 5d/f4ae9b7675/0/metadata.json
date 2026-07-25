@@ -1,0 +1,126 @@
+{
+  "cli_version": "0.7.7",
+  "checkpoint_id": "5df4ae9b7675",
+  "session_id": "578e1187-a252-4c16-9c59-9b5a67e0ef50",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-25T04:00:35.659428Z",
+  "branch": "feature/slice-5.0-abi-prep",
+  "checkpoints_count": 2,
+  "save_step_count": 2,
+  "files_touched": [
+    ".cargo/config.toml",
+    ".github/workflows/ci.yml",
+    "CLAUDE.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "book/src/build.md",
+    "book/src/reference/minix3-mapping.md",
+    "book/src/reference/syscalls.md",
+    "docs/plan.md",
+    "docs/plans/phase-2-ipc.md",
+    "docs/plans/phase-5-musl-fs.md",
+    "docs/plans/phase-5-prep.md",
+    "kernel-shared/src/error.rs",
+    "sonar-project.properties",
+    "tools/gen-c-headers/Cargo.toml",
+    "tools/gen-c-headers/src/builder.rs",
+    "tools/gen-c-headers/src/callnr_h.rs",
+    "tools/gen-c-headers/src/com_h.rs",
+    "tools/gen-c-headers/src/errno_h.rs",
+    "tools/gen-c-headers/src/ipc_h.rs",
+    "tools/gen-c-headers/src/lib.rs",
+    "tools/gen-c-headers/src/main.rs",
+    "tools/gen-c-headers/src/selftest.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5",
+  "turn_id": "6a73a47446be",
+  "token_usage": {
+    "input_tokens": 16781,
+    "cache_creation_tokens": 601607,
+    "cache_read_tokens": 28193429,
+    "output_tokens": 119495,
+    "api_call_count": 112
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01QKpH4Lh2a4qvmZbzCfBdWS",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "6a73a47446be",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 564,
+        "end": 565,
+        "entry_ids": [
+          "265a05ed-141e-44e5-85c1-204c822f18c3"
+        ],
+        "tool_use_id": "toolu_01QKpH4Lh2a4qvmZbzCfBdWS"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01QKpH4Lh2a4qvmZbzCfBdWS"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-25T04:00:35.631794Z",
+    "agent_lines": 2305,
+    "agent_removed": 86,
+    "human_added": 4,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2309,
+    "total_lines_changed": 2395,
+    "agent_percentage": 99.8329853862213,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 2305,
+      "agent_lines_removed": 86,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 2305,
+      "agent_lines_removed": 86,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    }
+  ]
+}
