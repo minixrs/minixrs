@@ -23,6 +23,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub const PL011_PHYS_BASE: usize = 0x0900_0000;
 
+// These three offsets are deliberately duplicated in `drivers/tty/src/pl011.rs`,
+// the user-space console driver (slice 5.3). They cannot be shared: this crate is
+// bare-metal-only and pinned to `aarch64-unknown-none` by `forced-target`, so it
+// can never be a dependency of a user-space crate — and a PL011 register layout is
+// a hardware fact, not a shared ABI, so `kernel-shared` is the wrong home for it.
+// Keep the two in step by hand if the register block is ever extended.
 const DR_OFFSET: usize = 0x00;
 const FR_OFFSET: usize = 0x18;
 const FR_TXFF: u32 = 1 << 5;

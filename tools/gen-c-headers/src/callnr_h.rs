@@ -69,7 +69,10 @@ struct Band {
     members: Vec<(&'static str, i32)>,
 }
 
-fn bands() -> [Band; 5] {
+/// The bands, in ascending numeric order — `bands_are_in_ascending_numeric_order`
+/// enforces that, so inserting a new band in the wrong place fails a test rather
+/// than rendering a header whose sections disagree with its ordering asserts.
+fn bands() -> [Band; 6] {
     [
         Band {
             title: "PM requests",
@@ -84,6 +87,13 @@ fn bands() -> [Band; 5] {
                 ("PM_EXEC", callnr::PM_EXEC),
                 ("PM_GRANT_TEST", callnr::PM_GRANT_TEST),
             ],
+        },
+        Band {
+            title: "character-device requests",
+            base_name: "CDEV_RQ_BASE",
+            base: callnr::CDEV_RQ_BASE,
+            count: Some(("NR_CDEV_MSGS", callnr::NR_CDEV_MSGS)),
+            members: vec![("CDEV_WRITE", callnr::CDEV_WRITE)],
         },
         Band {
             title: "VM requests",
@@ -290,8 +300,12 @@ pub fn render() -> String {
         "the PM band overlaps the kernel calls",
     );
     f.static_assert(
-        "PM_RQ_BASE + NR_PM_MSGS - 1 < VM_RQ_BASE",
-        "the PM band overlaps the VM band",
+        "PM_RQ_BASE + NR_PM_MSGS - 1 < CDEV_RQ_BASE",
+        "the PM band overlaps the CDEV band",
+    );
+    f.static_assert(
+        "CDEV_RQ_BASE + NR_CDEV_MSGS - 1 < VM_RQ_BASE",
+        "the CDEV band overlaps the VM band",
     );
     f.static_assert("SEF_RQ_BASE > VM_FORK", "the SEF band overlaps the VM band");
     f.static_assert(
@@ -391,6 +405,54 @@ mod tests {
                     band.title
                 );
             }
+        }
+    }
+
+    /// The header renders one section per band in `bands()` order, and the
+    /// ordering `_Static_assert`s below them chain each band to the previous one.
+    /// A band inserted in the wrong slot would therefore render sections that
+    /// disagree with the asserts — so pin the order here rather than in review.
+    /// Slices 5.4 (VFS, `0x800`), 5.7 (BDEV, `0x900`), and 5.8 (MFS, `0xA00`)
+    /// each insert a band *below* CDEV; this test is what tells them where.
+    #[test]
+    fn bands_are_in_ascending_numeric_order() {
+        let bands = bands();
+        for pair in bands.windows(2) {
+            let (lo, hi) = (&pair[0], &pair[1]);
+            let lo_last = lo.members.last().map(|(_, v)| *v).unwrap_or(lo.base);
+            assert!(
+                lo_last < hi.base,
+                "the {} band (ends {lo_last:#x}) is not below the {} band ({:#x})",
+                lo.title,
+                hi.title,
+                hi.base,
+            );
+        }
+    }
+
+    /// The CDEV band's payload offsets and `CDEV_MAX_IO` are deliberately not
+    /// emitted: this header's own comment defers every payload offset to the first
+    /// musl wrapper (slice 5.6), and musl's `write()` goes to VFS, not straight to
+    /// a character driver — so no C in Phase 5 needs them.
+    #[test]
+    fn no_cdev_payload_constants_are_emitted_yet() {
+        let text = render();
+        assert_eq!(
+            builder::define_value(&text, "CDEV_WRITE").as_deref(),
+            Some(format!("0x{:X}", callnr::CDEV_WRITE).as_str())
+        );
+        for name in [
+            "CDEV_MINOR_OFF",
+            "CDEV_GRANT_OFF",
+            "CDEV_LEN_OFF",
+            "CDEV_OFFSET_OFF",
+            "CDEV_MAX_IO",
+            "CDEV_MINOR_CONSOLE",
+        ] {
+            assert!(
+                builder::define_value(&text, name).is_none(),
+                "{name} must wait for the musl slice"
+            );
         }
     }
 

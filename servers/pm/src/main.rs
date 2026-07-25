@@ -41,14 +41,12 @@
 
 mod mproc;
 
-use core::fmt::Write;
-
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     EXEC_NAME_LEN, PM_EXEC, PM_EXIT, PM_FORK, PM_GETPID, PM_GRANT_TEST, PM_WAIT, PRIVCTL_SET_USER,
-    SAFECOPY_FROM, SAFECOPY_TO, SCHEDULING_START, SCHEDULING_STOP, SYS_COPY, SYS_ENDKSIG, SYS_EXEC,
-    SYS_EXIT, SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, SYS_SAFECOPY, VM_FORK,
+    SAFECOPY_FROM, SAFECOPY_TO, SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT,
+    SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
 };
 use minixrs_kernel_shared::com::{
     INIT_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
@@ -57,7 +55,10 @@ use minixrs_kernel_shared::endpoint::{Endpoint, NONE, SELF, endpoint_proc};
 use minixrs_kernel_shared::error::{EAGAIN, ECHILD, EFAULT, EINVAL, EPERM, ESRCH, OK};
 use minixrs_kernel_shared::grant::{CPF_READ, grant_id};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
-use minixrs_server_rt::{GrantPool, SefConfig, diag_print, sef_publish_to_ds, sef_startup};
+use minixrs_server_rt::{
+    GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, rd_u64, sef_publish_to_ds, sef_startup,
+    sys_copy, sys_safecopy, wr_i32,
+};
 
 /// Priority band and quantum PM assigns a forked child via `SCHEDULING_START`.
 /// These match SCHED's own `USER_Q` / `QUANTUM` (`servers/sched/src/policy.rs`)
@@ -157,7 +158,7 @@ fn main() -> ! {
             PM_EXIT => handle_exit(system, sched, &mut msg),
             PM_WAIT => handle_wait(&mut msg),
             PM_EXEC => handle_exec(system, &mut msg),
-            PM_GRANT_TEST => handle_grant_test(system, own_e, &mut grants, &msg),
+            PM_GRANT_TEST => handle_grant_test(own_e, &mut grants, &msg),
             // Unknown request: drop it.
             _ => {}
         }
@@ -387,12 +388,7 @@ fn handle_exec(system: Endpoint, msg: &mut Message) {
 /// only when that source is VFS, since nothing else has business driving a
 /// demo-only request number.
 #[cfg_attr(test, allow(dead_code))]
-fn handle_grant_test(
-    system: Endpoint,
-    own_e: Endpoint,
-    grants: &mut GrantPool<GRANT_SLOTS>,
-    msg: &Message,
-) {
+fn handle_grant_test(own_e: Endpoint, grants: &mut GrantPool<GRANT_SLOTS>, msg: &Message) {
     // The granter is whoever the kernel says sent this, never a payload field.
     let granter = msg.m_source;
     if granter != boot_endpoint(VFS_PROC_NR) {
@@ -410,7 +406,6 @@ fn handle_grant_test(
     // 1. Through the grant.
     let mut buf = [0u8; GRANT_TEST_MAX];
     let rc = sys_safecopy(
-        system,
         SAFECOPY_FROM,
         granter,
         gid,
@@ -420,27 +415,20 @@ fn handle_grant_test(
     );
     let grant_sum = checksum(&buf[..len]);
     if rc == OK {
-        diag_line(format_args!("grant.test ok sum={grant_sum} len={len}"));
+        diag_fmt(format_args!("grant.test ok sum={grant_sum} len={len}"));
     } else {
-        diag_line(format_args!("grant.test FAIL rc={rc}"));
+        diag_fmt(format_args!("grant.test FAIL rc={rc}"));
         return;
     }
 
     // 2. The same bytes with no grant, straight out of VFS's address space.
     let mut raw = [0u8; GRANT_TEST_MAX];
-    let rc = sys_copy(
-        system,
-        granter,
-        raw_addr,
-        SELF,
-        buf_addr(&mut raw),
-        len as u64,
-    );
+    let rc = sys_copy(granter, raw_addr, SELF, buf_addr(&mut raw), len as u64);
     if rc == OK {
         let same = u8::from(checksum(&raw[..len]) == grant_sum);
-        diag_line(format_args!("copy ok match={same}"));
+        diag_fmt(format_args!("copy ok match={same}"));
     } else {
-        diag_line(format_args!("copy FAIL rc={rc}"));
+        diag_fmt(format_args!("copy FAIL rc={rc}"));
     }
 
     // 3. Magic: PM grants itself access to init's memory, then reads it.
@@ -454,7 +442,6 @@ fn handle_grant_test(
     ) {
         Ok(mgid) => {
             let rc = sys_safecopy(
-                system,
                 SAFECOPY_FROM,
                 own_e,
                 mgid,
@@ -463,17 +450,17 @@ fn handle_grant_test(
                 MAGIC_PROBE_LEN as u64,
             );
             if rc == OK {
-                diag_line(format_args!("magic ok len={MAGIC_PROBE_LEN}"));
+                diag_fmt(format_args!("magic ok len={MAGIC_PROBE_LEN}"));
             } else {
-                diag_line(format_args!("magic FAIL rc={rc}"));
+                diag_fmt(format_args!("magic FAIL rc={rc}"));
             }
             let _ = grants.revoke(mgid);
         }
-        Err(e) => diag_line(format_args!("magic FAIL grant={e}")),
+        Err(e) => diag_fmt(format_args!("magic FAIL grant={e}")),
     }
 
     // 4. The copies that must be refused.
-    grant_denials(system, own_e, grants, granter, gid, rw_gid, len as u64);
+    grant_denials(own_e, grants, granter, gid, rw_gid, len as u64);
 }
 
 /// Probe the checks that no *successful* copy exercises.
@@ -506,7 +493,6 @@ fn handle_grant_test(
 // through from the PM_GRANT_TEST payload
 #[cfg_attr(test, allow(dead_code))]
 fn grant_denials(
-    system: Endpoint,
     own_e: Endpoint,
     grants: &mut GrantPool<GRANT_SLOTS>,
     vfs_e: Endpoint,
@@ -529,15 +515,15 @@ fn grant_denials(
         grants.grant_direct(own_e, addr, n, CPF_READ),
         grants.grant_direct(own_e, addr, n, CPF_READ),
     ) else {
-        return diag_line(format_args!("grant.deny FAIL setup"));
+        return diag_fmt(format_args!("grant.deny FAIL setup"));
     };
     if grants.revoke(stale).is_err() || grants.grant_direct(own_e, addr, n, CPF_READ).is_err() {
-        return diag_line(format_args!("grant.deny FAIL reissue"));
+        return diag_fmt(format_args!("grant.deny FAIL reissue"));
     }
     // A grant over an address PM has nothing mapped at. Perfectly well-formed —
     // only the page-table walk can catch it, which is the point.
     let Ok(unmapped) = grants.grant_direct(own_e, UNMAPPED_PROBE_VA, n, CPF_READ) else {
-        return diag_line(format_args!("grant.deny FAIL setup"));
+        return diag_fmt(format_args!("grant.deny FAIL setup"));
     };
 
     let probes: [(&str, i32, Endpoint, i32, u64, i32); 7] = [
@@ -559,24 +545,16 @@ fn grant_denials(
 
     let mut denied = 0usize;
     for (name, dir, granter, gid, offset, want) in probes {
-        let rc = sys_safecopy(system, dir, granter, gid, offset, addr, n);
+        let rc = sys_safecopy(dir, granter, gid, offset, addr, n);
         if rc == want {
             denied += 1;
         } else {
-            diag_line(format_args!("grant.deny FAIL {name} rc={rc}"));
+            diag_fmt(format_args!("grant.deny FAIL {name} rc={rc}"));
         }
     }
     if denied == probes.len() {
-        diag_line(format_args!("grant.deny ok n={denied}"));
+        diag_fmt(format_args!("grant.deny ok n={denied}"));
     }
-}
-
-/// Address of a local staging buffer, as the kernel wants it. The kernel writes
-/// through its own mapping of this frame, and the SENDREC's inline asm is a full
-/// memory clobber, so the compiler cannot cache the buffer across the call.
-#[cfg_attr(test, allow(dead_code))]
-fn buf_addr(b: &mut [u8]) -> u64 {
-    b.as_mut_ptr() as usize as u64
 }
 
 /// Wrapping byte sum. Not a strong checksum — it only has to change when the
@@ -586,60 +564,6 @@ fn buf_addr(b: &mut [u8]) -> u64 {
 fn checksum(b: &[u8]) -> u32 {
     b.iter()
         .fold(0u32, |acc, &x| acc.wrapping_mul(31).wrapping_add(x as u32))
-}
-
-/// Render `args` into a stack buffer and print it on the kernel debug channel.
-///
-/// `diag_print` takes a `&str` and PM has no allocator, so formatted output goes
-/// through a fixed buffer. Truncation is silent — a debug line is not worth an
-/// error path.
-#[cfg_attr(test, allow(dead_code))]
-fn diag_line(args: core::fmt::Arguments<'_>) {
-    let mut buf = DiagBuf {
-        buf: [0u8; DIAG_LINE_MAX],
-        len: 0,
-    };
-    let _ = buf.write_fmt(args);
-    let _ = diag_print(buf.as_str());
-}
-
-/// Longest formatted diag line PM builds. One `SYS_DIAGCTL` call carries
-/// `DIAG_TEXT_MAX` (88) bytes; staying under that keeps one line per call.
-const DIAG_LINE_MAX: usize = 88;
-
-/// A `core::fmt::Write` sink over a fixed stack buffer.
-#[cfg_attr(test, allow(dead_code))]
-struct DiagBuf {
-    buf: [u8; DIAG_LINE_MAX],
-    len: usize,
-}
-
-impl DiagBuf {
-    #[cfg_attr(test, allow(dead_code))]
-    fn as_str(&self) -> &str {
-        // Only ASCII is ever written here, so the conversion cannot fail; an
-        // empty string is a harmless fallback if it somehow did.
-        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
-    }
-}
-
-impl core::fmt::Write for DiagBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let room = self.buf.len() - self.len;
-        let n = if bytes.len() < room {
-            bytes.len()
-        } else {
-            room
-        };
-        self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
-        self.len += n;
-        if n < bytes.len() {
-            Err(core::fmt::Error)
-        } else {
-            Ok(())
-        }
-    }
 }
 
 /// MINIX `W_EXITCODE` for a normal exit: the low byte of `status` in bits 8..16,
@@ -849,67 +773,6 @@ fn sched_stop(sched: Endpoint, target_e: Endpoint) -> i32 {
     m.m_type
 }
 
-/// `SYS_SAFECOPY` — copy between the range `gid` grants and PM's own buffer at
-/// `addr` (SENDREC to SYSTEM). `direction` is `SAFECOPY_FROM` / `SAFECOPY_TO`;
-/// `offset` is measured within the granted range. Returns the kernel-call
-/// result.
-#[cfg_attr(test, allow(dead_code))]
-fn sys_safecopy(
-    system: Endpoint,
-    direction: i32,
-    granter: Endpoint,
-    gid: i32,
-    offset: u64,
-    addr: u64,
-    bytes: u64,
-) -> i32 {
-    let mut m = Message {
-        m_source: 0,
-        m_type: SYS_SAFECOPY,
-        payload: [0u8; 96],
-    };
-    wr_i32(&mut m, 0, direction);
-    wr_i32(&mut m, 4, granter);
-    wr_i32(&mut m, 8, gid);
-    wr_u64(&mut m, 16, offset);
-    wr_u64(&mut m, 24, addr);
-    wr_u64(&mut m, 32, bytes);
-    let rc = ipc_sendrec(system, &mut m);
-    if rc != OK {
-        return rc;
-    }
-    m.m_type
-}
-
-/// `SYS_COPY` — raw privileged copy from `(src_e, src_addr)` to
-/// `(dst_e, dst_addr)` with no grant involved (SENDREC to SYSTEM). `SELF` names
-/// PM itself. Returns the kernel-call result.
-#[cfg_attr(test, allow(dead_code))]
-fn sys_copy(
-    system: Endpoint,
-    src_e: Endpoint,
-    src_addr: u64,
-    dst_e: Endpoint,
-    dst_addr: u64,
-    bytes: u64,
-) -> i32 {
-    let mut m = Message {
-        m_source: 0,
-        m_type: SYS_COPY,
-        payload: [0u8; 96],
-    };
-    wr_i32(&mut m, 0, src_e);
-    wr_i32(&mut m, 4, dst_e);
-    wr_u64(&mut m, 16, src_addr);
-    wr_u64(&mut m, 24, dst_addr);
-    wr_u64(&mut m, 32, bytes);
-    let rc = ipc_sendrec(system, &mut m);
-    if rc != OK {
-        return rc;
-    }
-    m.m_type
-}
-
 /// Reply to a SENDREC caller: stamp `m_type`, zero `m_source` (the kernel
 /// overwrites it on delivery), and SEND the message back. Any payload the
 /// caller wants returned must be written before this call.
@@ -918,30 +781,6 @@ fn reply(target_e: Endpoint, msg: &mut Message, m_type: i32) {
     msg.m_type = m_type;
     msg.m_source = 0;
     let _ = ipc_send(target_e, msg);
-}
-
-/// Read a native-endian i32 from payload `off..off+4`.
-#[cfg_attr(test, allow(dead_code))]
-fn rd_i32(m: &Message, off: usize) -> i32 {
-    i32::from_ne_bytes(m.payload[off..off + 4].try_into().unwrap_or([0; 4]))
-}
-
-/// Write a native-endian i32 into payload `off..off+4`.
-#[cfg_attr(test, allow(dead_code))]
-fn wr_i32(m: &mut Message, off: usize, v: i32) {
-    m.payload[off..off + 4].copy_from_slice(&v.to_ne_bytes());
-}
-
-/// Read a native-endian u64 from payload `off..off+8`.
-#[cfg_attr(test, allow(dead_code))]
-fn rd_u64(m: &Message, off: usize) -> u64 {
-    u64::from_ne_bytes(m.payload[off..off + 8].try_into().unwrap_or([0; 8]))
-}
-
-/// Write a native-endian u64 into payload `off..off+8`.
-#[cfg_attr(test, allow(dead_code))]
-fn wr_u64(m: &mut Message, off: usize, v: u64) {
-    m.payload[off..off + 8].copy_from_slice(&v.to_ne_bytes());
 }
 
 // The freestanding panic handler; under `cargo test` std supplies its own.

@@ -21,7 +21,10 @@
 mod do_copy;
 mod do_diagctl;
 mod do_exec;
-mod do_exit;
+// `pub(crate)` so `arch::aarch64::userland`'s boot-time device-teardown selftest
+// can reach `do_exit::teardown_addrspace`. Every other `do_*` module stays
+// private — dispatch is the only way in.
+pub(crate) mod do_exit;
 mod do_fork;
 mod do_getinfo;
 mod do_privctl;

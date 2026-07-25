@@ -157,6 +157,15 @@ name = "minixrs-sh"
 version = "0.1.0"
 
 [[package]]
+name = "minixrs-tty"
+version = "0.1.0"
+dependencies = [
+ "minixrs-ipc",
+ "minixrs-kernel-shared",
+ "minixrs-server-rt",
+]
+
+[[package]]
 name = "minixrs-vfs"
 version = "0.1.0"
 dependencies = [

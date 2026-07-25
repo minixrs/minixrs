@@ -7,6 +7,7 @@
 - [IPC](ipc/overview.md)
 - [Memory Management](memory/overview.md)
 - [Servers](servers/overview.md)
+- [Drivers](drivers/overview.md)
 - [Build & Toolchain](build.md)
 - [Roadmap](roadmap.md)
 

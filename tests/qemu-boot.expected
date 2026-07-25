@@ -8,16 +8,19 @@
 # Kernel banner (kernel/src/main.rs)
 minix.rs booting on aarch64
 
-# Address-space bring-up: 7 servers + init (arch/aarch64/userland.rs)
+# Address-space bring-up: 8 servers + init (arch/aarch64/userland.rs). The tty
+# line is new in slice 5.3 -- the first user-space *driver*, packed between ds and
+# vfs so the console is in its receive loop before its first client.
 [as] vm nr=7 ttbr0_pa=
 [as] ds nr=5 ttbr0_pa=
+[as] tty nr=4 ttbr0_pa=
 [as] vfs nr=1 ttbr0_pa=
 [as] sched nr=9 ttbr0_pa=
 [as] rs nr=2 ttbr0_pa=
 [as] pm nr=0 ttbr0_pa=
 [as] init nr=10 ttbr0_pa=
 
-# ...plus the 4 boot stubs (11 [as] lines total)
+# ...plus the 4 boot stubs (12 [as] lines total)
 [as] stub A nr=11 ttbr0_pa=
 [as] stub B nr=12 ttbr0_pa=
 [as] stub C nr=13 ttbr0_pa=
@@ -93,3 +96,63 @@ minix.rs booting on aarch64
 # the marker disappears. (The `CPF_INDIRECT` and magic-`SYS_PROC` arms are not
 # probed; see `grant_denials` in servers/pm for why neither is reachable yet.)
 [diag pm] grant.deny ok
+
+# ---------------------------------------------------------------------------
+# Slice 5.3: the TTY console driver and the CDEV band.
+# ---------------------------------------------------------------------------
+
+# The driver announces itself on the kernel debug channel, exactly like the six SEF
+# servers. Distinct from the console banner below: this one proves TTY reached
+# `sef_startup`, before it has touched any hardware.
+[diag tty] sef ready
+
+# The kernel pre-maps the PL011's MMIO page into TTY's address space with Device
+# attributes (there is no VMCTL_MAP_PHYS -- D1 deferred VM-mediated device mapping
+# to Phase 6, so this is a bring-up step like the stack page). va/pa are fixed
+# constants (uspace::TTY_UART_VA, uart::PL011_PHYS_BASE) so both are asserted; the
+# attr_idx is NOT, because which MAIR index already encodes a Device type depends on
+# what the bootloader programmed. Delete this pre-map, or weaken it to a
+# non-writable Prot, and TTY's first register store takes an EL0 data abort -- which
+# the forbidden list catches.
+[devmap] tty va=0x40000000 pa=0x9000000 attr_idx=
+
+# TTY never exits, so `teardown_addrspace`'s device arm would be untested code on a
+# live landmine: a missing `prot.device` guard makes `free_frame` panic on the
+# UART's PA. `userland::device_teardown_selftest` therefore builds one throwaway
+# address space holding exactly one device leaf and tears it down at boot. Both
+# counts are asserted -- freed=0 proves the leaf was NOT freed, devs=1 proves it was
+# actually seen (a guard that skipped every leaf would give freed=0 devs=0).
+# Unconditional, so the --no-default-features boot covers it too.
+[devmap] selftest ok freed=0 devs=1
+
+# The milestone. Every other line in this log carries a kernel trace prefix
+# ([as] / [ipc] / [ksys] / [diag] / [pf] / [devmap]); this one was composed at EL0
+# and reached the wire through a user-space store to a device register.
+minix.rs console: tty online (EL0)
+
+# Slice 5.3: VFS drives the console over CDEV_WRITE. It resolves TTY through DS
+# rather than hard-coding boot_endpoint(TTY_PROC_NR) -- what a real client does. The
+# lookup is not deterministic by construction (it works because build.rs packs tty
+# before vfs), so a failed lookup falls back to the boot endpoint and emits
+# `cdev.ds FAIL` instead: the demo still runs, and *this* marker disappears, so an
+# ordering regression turns CI red specifically rather than silently passing.
+[diag vfs] cdev.ds ok ep=
+
+# A real write: a read-only direct grant over VFS's banner, and a reply compared
+# against the granted length. `match=1` rather than the length itself -- self-
+# checking, and independent of the banner text. A driver replying OK instead of the
+# byte count gives match=0.
+[diag vfs] cdev.write ok match=1
+
+# The short-write contract: VFS asks for CDEV_MAX_IO + 8 bytes and must get exactly
+# CDEV_MAX_IO back. That is what lets a driver stage through a fixed buffer with no
+# allocator, and it is the difference between "write returns a count" and "write
+# returns success". Change the clamp and this number changes with it.
+[diag vfs] cdev.short ok n=256
+
+# ...and the two requests that must be REFUSED, each valid in every respect but
+# one: minor 7 with a perfectly good grant (ENXIO, from TTY's own minor check), and
+# a grant issued to PM rather than TTY (EPERM, from the kernel's `who_to` check --
+# the property that makes a grant id safe to pass around at all). Remove either
+# check and that request succeeds, so this line becomes `cdev.deny FAIL <name>`.
+[diag vfs] cdev.deny ok n=2
