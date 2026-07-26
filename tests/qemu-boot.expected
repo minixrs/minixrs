@@ -156,3 +156,53 @@ minix.rs console: tty online (EL0)
 # the property that makes a grant id safe to pass around at all). Remove either
 # check and that request succeeds, so this line becomes `cdev.deny FAIL <name>`.
 [diag vfs] cdev.deny ok n=2
+
+# ---------------------------------------------------------------------------
+# Slice 5.4: the POSIX write path -- init -> VFS -> TTY, with one copy.
+# ---------------------------------------------------------------------------
+#
+# These three lines are written BY init, THROUGH the path they test. init holds no
+# kernel calls and no grant table (the shared USER priv), so it has no debug
+# channel: `write()` is its only way to speak, and a regression takes the evidence
+# with it rather than reporting on itself.
+#
+# Asserted substrings are kept short on purpose. The log interleaves raw kernel
+# tick bytes, and TTY's EL0 stores can be preempted mid-line, so a whole-line match
+# is not reliable -- the same rule the [as]/[ksys] markers follow.
+
+# The milestone: a user process put bytes on the console under its own POSIX call.
+# VFS resolved fd 1, issued a MAGIC grant naming init's buffer with TTY as grantee,
+# and TTY safecopied straight out of init's address space -- VFS never touched the
+# bytes. The grant's owner comes from the kernel-stamped m_source; read it from a
+# payload field instead and every line in this block vanishes (EPERM: the grant
+# would name the wrong owner).
+minix.rs init: hello via VFS write
+
+# A line longer than one CDEV_WRITE can carry. CDEV_MAX_IO is a driver staging
+# detail and must not leak into write()'s return, so VFS re-sends with `offset`
+# advanced until the buffer is out. This tail marker sits past the clamp: drop
+# VFS's loop and the console gets the first 256 bytes while this substring -- and
+# only this substring -- disappears.
+vfs-loop-end
+
+# ...and the count that write returned, checked by init against what it asked for.
+# The other half of the same contract, and neither half subsumes the other: a
+# write() that moved every byte but replied OK would still print the tail above
+# while lying to a caller looping on the result. `match=1` rather than the number
+# itself is the 5.3 convention -- self-checking, and init has no way to format an
+# integer anyway (no server-rt, so no diag_fmt).
+minix.rs init: vfs.long ok match=1
+
+# Four refusals, then the summary on fd 2 (so that descriptor is proven too).
+# Each probe is well-formed but for one field: descriptor 3 (in range of the fd
+# row, not open -> EBADF), a request number one past VFS_WRITE (-> ENOSYS, and the
+# reply itself is the assertion -- a dropped unknown request would block init
+# forever and hang the boot), an unmapped buffer (-> EFAULT from the kernel's
+# page-table walk, relayed back through TTY and VFS unflattened; it costs init no
+# page fault, since the copy engine walks rather than dereferences), and a negative
+# length (-> EINVAL, which unchecked would widen into a ~16 EiB u64 on the grant).
+# A missing check makes its probe succeed and turns this into
+# `vfs.deny FAIL <name>`. A zero-length write is deliberately not probed here --
+# it is a legal no-op, not a denial, and `write::validate` covers it (and the
+# check order that keeps it from issuing a grant) in host tests.
+minix.rs init: vfs.deny ok n=4

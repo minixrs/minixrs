@@ -40,13 +40,14 @@ the serial line, and slice 5.4 puts a process's fd 1 and 2 on top of it.
 Every server's request numbers occupy a distinct band below `NOTIFY_MESSAGE`, so
 a message type unambiguously identifies both its server and its meaning
 (`kernel-shared/src/callnr.rs`, const-asserted disjoint). The bands are listed —
-and rendered into the generated C header — in ascending numeric order, so
-`0x800` / `0x900` / `0xA00` are reserved for the three bands Phase 5 still owes:
-VFS, BDEV, and MFS.
+and rendered into the generated C header — in ascending numeric order. VFS took
+`0x800` in slice 5.4; `0x900` and `0xA00` stay reserved for the two bands Phase 5
+still owes, BDEV and MFS.
 
 | Base | Value | Server / purpose |
 |------|-------|------------------|
 | `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC` |
+| `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` |
 | `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK` |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init) |
@@ -125,8 +126,8 @@ are seeded at init; forked children are allocated from a pool
 proc number.
 
 User processes drive their whole lifecycle through PM — the POSIX shape, *user →
-PM, never user → kernel* (the shared user privilege only opens an `ipc_to` edge to
-PM):
+server, never user → kernel* (the shared user privilege opens `ipc_to` edges to PM
+and VFS, and nothing else):
 
 - **`PM_GETPID`** replies with the caller's pid (`m_type` *is* the pid, MINIX
   result-is-pid), parent pid in the payload.
@@ -161,21 +162,63 @@ disposes of each — `SYS_ENDKSIG` to acknowledge a survivor, or `SYS_EXIT` to
 terminate. Handlers (catching, `sigaction`) are Phase 5; Phase 4's default action
 for a user process is termination.
 
-## VFS: skeletal
+## VFS: the write path
 
-**VFS** (`servers/vfs/`) boots through SEF and publishes to DS, but does **no**
-file operations yet: its receive loop drops any application message it gets. File
-descriptors, the PM↔VFS work protocol, and real filesystem I/O require the
-Phase-5 musl fork and file-system servers.
+**VFS** (`servers/vfs/`) turns a small integer into something you can write to.
+That is the whole of its job in Phase 5 so far, and since slice 5.4 it does it for
+real: an ordinary user process can `write(1, buf, len)` and see bytes on the
+console. Mount points, `open`, and reads arrive with the MFS server in slice 5.8.
 
-It is, however, already the system's first *grant* client and its first *console*
-client. At startup it direct-grants a read-only buffer to PM (proving the
-cross-address-space copy engine, slice 5.2), then looks TTY up in DS and drives
-`CDEV_WRITE` — a real write, a deliberately over-long write that must come back
-short, and two requests that must be refused (slice 5.3). Both are demo wiring in
-the sense that no client asks for them yet, but neither is throwaway: slice 5.4
-puts VFS's fd 1 and 2 on the same `CDEV_WRITE` path, using a magic grant over the
-*caller's* buffer so the data still moves in a single copy.
+### One request, one copy
+
+```text
+user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off}──► TTY
+                                 │                                      │
+                                 └── magic grant: caller's buf ──────────┘
+                                         (kernel copies, once)
+```
+
+VFS resolves the descriptor, issues a **magic** (third-party) grant naming the
+*caller's* buffer with the driver as grantee, and forwards the grant id. TTY then
+safecopies straight out of the caller's address space. The bytes never pass
+through VFS: there is exactly one copy, from the process that wrote them to the
+driver that transmits them. This is the first consumer of the magic grant form on
+a real data path, and the rail slice 5.6's musl `write()` lands on.
+
+Three properties hold that path together:
+
+- **The grant's owner is the kernel-stamped `m_source`.** VFS holds `SYS_PROC`,
+  which is what makes a magic grant legal for it at all — so a caller-supplied
+  owner field would let any VFS client aim a privileged cross-address-space copy
+  at a third party's memory. `VFS_WRITE` has no such field, and must never gain
+  one. It is the same anti-confused-deputy rule that keeps a granter out of the
+  `CDEV_WRITE` payload, applied to the granting side.
+- **VFS absorbs short writes.** A character driver may move fewer bytes than asked
+  (`CDEV_MAX_IO`, its staging limit); POSIX `write()` is not allowed to expose
+  that, so VFS re-sends with `offset` advanced until the buffer is out and reports
+  the total. One grant covers the whole buffer — only the offset moves. An error
+  after partial progress reports the *progress*, since those bytes really did go
+  out.
+- **Every request gets a reply**, including an unknown one (`ENOSYS`). VFS's
+  clients are all inside a SENDREC, so a dropped message blocks the caller forever.
+
+### The descriptor table
+
+`servers/vfs/src/fd.rs` holds one row of descriptors per process, indexed by
+kernel proc number and sized from the shared `NR_SERVED_PROCS` ceiling that PM's
+`mproc` and VM's `ClientRegions` also derive from. Nothing opens or closes yet, so
+every row is identical — fds 0, 1, and 2 name the console, everything else is
+`EBADF` — which is POSIX's inheritance convention and is what lets init write
+before any filesystem exists. Because nothing mutates, the storage is an ordinary
+immutable `static` and VFS carries no `unsafe`; slice 5.8's `open` flips it to the
+`UnsafeCell` newtype that VM's region table already uses.
+
+VFS also remains the system's first *grant* client and first *console* client:
+its startup still direct-grants a read-only buffer to PM (slice 5.2) and drives
+`CDEV_WRITE` by hand (slice 5.3). Those are kept deliberately, as the regression
+battery for three contracts the real write path never reaches — the direct-grant
+form, a *visible* short write, and the two `CDEV_WRITE` refusals a well-formed
+`write()` cannot provoke.
 
 ## init: PID 1
 
@@ -184,10 +227,24 @@ for everything above. Unlike the demo stubs it replaced, it is a genuine boot
 module: `build.rs` packs it into the MXBI archive with its true proc number
 (`INIT_PROC_NR = 10`), and the ordinary boot loop loads it and makes it runnable —
 PM does not hand-release it. It runs at user grade, sharing the `USER_PRIV_ID`
-privilege (SENDREC to PM only, no kernel calls) with every forked child.
+privilege (SENDREC to PM and VFS, no kernel calls) with every forked child.
 
-init is a plain `minix-ipc` program — no SEF, because it is not a server. Its
-whole body is a respawn loop: `PM_FORK`; the child (`m_type == 0`) issues
+Since slice 5.4 it also speaks. Before the respawn loop it writes to fd 1 and fd 2
+through VFS, which is the whole POSIX write path exercised from the one place that
+proves it matters: a process with no kernel calls, no grant table, and no debug
+channel of any kind. That last part is deliberate — `write()` is init's *only* way
+to say anything, so it reports on the path under test through the path under test,
+and a regression takes the evidence with it. It prints a banner, a line longer than
+one `CDEV_WRITE` can carry (whose tail marker only appears if VFS looped, and whose
+returned count init checks against what it asked for), and four probes that must
+each be refused: a closed descriptor (`EBADF`), an unknown request number
+(`ENOSYS` — and the *reply* is the assertion, since a dropped request would hang
+init and the boot with it), an unmapped buffer (`EFAULT`, from the kernel's
+page-table walk, which costs init no page fault because the copy engine walks
+rather than dereferences), and a negative length (`EINVAL`).
+
+init is a plain `minix-ipc` program — no SEF, because it is not a server. The rest
+of its body is a respawn loop: `PM_FORK`; the child (`m_type == 0`) issues
 `PM_EXEC` to become the `worker` binary, which runs a few `PM_GETPID` round-trips
 and exits; the parent (`m_type > 0`) issues `PM_WAIT` to reap the zombie, then
 loops. Each cycle recycles a fork-pool slot with a fresh endpoint generation —

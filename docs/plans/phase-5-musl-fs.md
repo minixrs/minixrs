@@ -769,7 +769,7 @@ not rediscover them):
 | Halve the `CDEV_MAX_IO` clamp | `cdev.short ok n=256` → `cdev.short FAIL rc=128` |
 | Reply `OK` instead of the byte count | `cdev.write ok match=1` → `cdev.write FAIL rc=0` |
 
-### Slice 5.4: VFS write path — fd 1/2 → CDEV(TTY)
+### Slice 5.4: VFS write path — fd 1/2 → CDEV(TTY) ◀ ready (branch `feature/slice-5.4-vfs-write`, pending merge)
 
 **Goal:** the POSIX write shape: user proc → VFS → TTY, single copy.
 
@@ -785,7 +785,125 @@ loop (raw `minix-ipc` message — init stays a plain Rust user program).
 **Proof:** init's banner reaches serial through VFS→TTY; `[ipc]` head
 traces show init→VFS SENDREC + VFS→TTY CDEV round-trip.
 
-### Slice 5.5: exec ABI — SysV initial stack + minimal auxv
+**As built** (differences from the sketch above, recorded so later slices do
+not rediscover them):
+
+- **init reports through the path it tests, and that forced a fourth marker.**
+  init holds the shared USER privilege — no kernel calls, so no `SYS_DIAGCTL` and
+  no debug channel of any kind. `write()` is the only thing it can say anything
+  with, which is a nice property (a regression takes the evidence with it) but
+  means every assertion has to be phrased as console text. The banner and the
+  `vfs.deny ok n=4` summary were in the plan; the **`vfs.long ok match=1`** line
+  was not, and it turned out to be load-bearing. Without it *nothing* checked a
+  successful write's return value — init ignores it — so "reply `OK` instead of
+  the byte count", which the plan listed as a mutation expected to produce a
+  `FAIL`, moved no marker at all. The tail marker `vfs-loop-end` does not cover
+  it either: a `write()` that moves every byte and then reports `OK` prints the
+  tail and is still broken, in exactly the way a caller looping on the result
+  would hit forever. Two markers, two independent halves of one contract.
+- **The short-write loop clamps rather than trusts the driver.** `off +=
+  n` would walk past the buffer if a driver ever reported more than it was asked
+  for, and over-report the write; `off.saturating_add(n).min(len)` cannot. TTY is
+  trusted today, but the loop is the shape every future block/FS driver client
+  copies. A driver reporting `0` breaks the loop rather than re-sending forever —
+  a server that spins is worse than a short write.
+- **An error after partial progress reports the progress**, not the error (POSIX).
+  The bytes really did go out, and telling the caller otherwise makes it send them
+  twice. The error resurfaces on the next write, where it is still true.
+- **`user_range_ok` is defence in depth, and the mutation table says so.** Removing
+  it changes no marker: the kernel's copy engine walks the caller's page tables and
+  answers `EFAULT` regardless (D5), which is the load-bearing gate. It stays because
+  rejecting a malformed buffer before issuing a grant is cheaper and more legible
+  than discovering it two hops away — but nothing should mistake it for the check
+  that makes the path safe.
+- **The pure logic is a sibling module, `write.rs`** (the `drivers/tty/src/cdev.rs`
+  split), holding `parse` / `validate` / `advance` with the SENDREC left in
+  `main.rs`. Two of the short-write loop's four rules are **unreachable through a
+  working TTY** — a driver reporting `0`, and one reporting more than it was asked
+  for — so in the loop they could not be exercised without breaking the driver; as
+  a step function they are three lines of test each. It also gets the `len < 0`
+  (`EINVAL`) and `len == 0` (`Ok(0)`, checked *before* the buffer so an empty write
+  never issues a grant) arms under host tests, and keeps them measured — `main.rs`
+  is Sonar-coverage-excluded, a sibling module is not.
+- **The fd table is an immutable `static`, so VFS still carries zero `unsafe`.**
+  Nothing opens or closes in 5.4, so the table is fully determined at compile time
+  and needs no interior mutability. Slice 5.8's `open` flips storage to the
+  `UnsafeCell<[FdRow; N]>` + `unsafe impl Sync` newtype `vm/region.rs` and
+  `ds/registry.rs` already use; `resolve_in` takes the rows as a borrowed slice
+  precisely so it survives that switch untouched. Sized from `NR_SERVED_PROCS`,
+  the shared ceiling, with the same `const _` guard PM/VM/SCHED carry.
+- **`NR_FDS = 4`, not 3.** The fourth slot exists so "past the end of the row" and
+  "in range but not open" are distinguishable cases in a test — and the `bad-fd`
+  boot probe uses descriptor 3 for exactly that reason, since a descriptor that is
+  merely out of bounds would be rejected by arithmetic rather than by the table.
+- **`resolve` returns `Fd`, not a minor**, and `do_write` matches on it. The
+  `Ok(Fd::Unused)` arm is unreachable today (`resolve` maps a closed descriptor to
+  `EBADF` itself) and is kept so 5.8's regular-file variant lands as a compile
+  error to be routed rather than a silent fallthrough.
+- **VFS resolves TTY once, in `main`.** `tty_endpoint` moved out of `tty_demo`; a
+  DS round-trip per `write()` would be a lookup per write for an endpoint that
+  cannot change. The 5.3 demos are kept in full — they are the regression battery
+  for the three contracts the real path does not reach (the *direct* grant form,
+  the *visible* short write, and the two `CDEV_WRITE` refusals a well-formed
+  `write()` never provokes).
+- **The C header emits `VFS_WRITE` but not its payload offsets.** Same deferral
+  the CDEV band uses, for a nearer reason: slice 5.6's `write()` wrapper is
+  precisely the C that will need `VFS_FD_OFF`/`VFS_LEN_OFF`/`VFS_BUF_OFF`, so the
+  test asserting their absence is what makes emitting them a deliberate act in that
+  slice rather than something that drifted in early and froze un-reviewed at the
+  ABI freeze.
+- **The USER `ipc_to` widening is a list, not a second lookup.** `populate_user_priv`
+  now loops over `USER_IPC_TO = [PM, VFS]`, resolving every server's priv slot in one
+  read-only pass before taking any `&mut Priv` — the borrow discipline the existing
+  `// SAFETY:` comments already justified, now with two servers instead of one.
+  Every entry costs a *pair* of bits: `init_boot_image` fills a boot server's bitmap
+  only over `[0, n_active)`, and `USER_PRIV_ID` is 20, so each reverse reply edge
+  must be opened explicitly. The mutation table below shows the two directions
+  failing in visibly different ways, which is worth knowing when adding a third
+  server (5.8's MFS will not need one — a user process talks to VFS, not to MFS).
+
+- **Four denial probes, not three.** A negative length (`EINVAL`) joined the boot
+  battery on review: unchecked it widens into a ~16 EiB `u64` on the grant VFS is
+  about to issue over the caller's buffer, which is worth an end-to-end marker and
+  not only a unit test. A **zero**-length write is deliberately not in that battery
+  — it is a legal no-op rather than a denial, and folding it in would have meant a
+  positive assertion wearing a `deny` label; `write::validate` covers it, and the
+  check order that stops it issuing a grant, in host tests.
+- **`UNMAPPED_VA` carries compile-time guards**, not just prose. The `EFAULT` probe
+  only proves what it claims if the address is well-formed enough to *reach* the
+  page-table walk: one that VFS's own `user_range_ok` rejected would answer
+  `EFAULT` a hop earlier and silently test the wrong thing. So `const _` asserts
+  non-NULL, below `USER_VA_TOP`, and clear of `USER_DEVICE_WINDOW_BASE`. The two
+  layout facts it also rests on — init's link base and its stack VA — stay prose,
+  because neither is a constant a user program can see (`SERVER_STACK_VA` is
+  kernel-internal, the link base lives in `user.ld`).
+
+**Honest gaps:**
+
+- **The confused-deputy rule is proved by construction, not by probe.** There is no
+  `who_from` field in `VFS_WRITE`, so no boot marker can demonstrate a client
+  failing to spoof one — the same shape as 5.2's unprobeable magic-`SYS_PROC` gate
+  and 5.3's absent granter field. The mutation below (add such a field) is the only
+  evidence, and it is evidence about a build that does not exist.
+- **Only one process ever writes.** init is the sole `VFS_WRITE` client, so the fd
+  table's per-process rows are exercised at exactly one index at runtime; the host
+  tests sweep the whole `NR_SERVED_PROCS` range instead. Nothing yet writes from a
+  forked child, which is what would prove the inherited-descriptor story end to end.
+
+**Mutation tests run** (each applied, observed, reverted):
+
+| Mutation | Observed |
+|---|---|
+| Read the grant's owner from a payload field instead of `m_source` | all four init markers vanish — the grant names the wrong owner, so TTY's safecopy is refused and every write fails. TTY itself stays online, so the failure is localized to the new path |
+| Drop VFS's short-write loop (single `CDEV_WRITE`) | `vfs-loop-end` **and** `vfs.long ok match=1` vanish (`vfs.long FAIL` printed); banner and `vfs.deny ok n=4` survive — the two markers really are independent halves |
+| Make `resolve_in` accept any descriptor | `vfs.deny ok n=4` → `vfs.deny FAIL bad-fd` (the write to descriptor 3 succeeded) |
+| Drop the `ipc_to += VFS` bit in `populate_user_priv` | all four init markers vanish — init's SENDREC is refused before VFS ever sees it |
+| Drop the reverse VFS → USER `ipc_to` bit | the banner **still prints** (the request was delivered and served; only the *reply* is refused), then init hangs in that SENDREC forever — so the other three init markers and all three `SYS_FORK`/`SYS_EXEC`/`SYS_EXIT` cycle markers vanish. 6 missing |
+| Reply `OK` instead of the byte count from `do_write` | `vfs.long FAIL`, and `vfs.deny FAIL bad-buf` — the `EFAULT` probe reads as success. `bad-fd`/`no-such` still pass, since both return before the mutated line |
+| Drop the `user_range_ok` pre-check | **nothing moves** — all 51 markers still pass. Confirms it is defence in depth and the kernel's page-table walk is the load-bearing `EFAULT` gate |
+| Drop `write::validate`'s negative-length check | `vfs.deny ok n=4` → `vfs.deny FAIL bad-len` (the write with `len = -1` was accepted) |
+
+### Slice 5.5: exec ABI — SysV initial stack + minimal auxv ◀ next
 
 **Goal:** D13's stack contract — musl's crt runs unpatched.
 

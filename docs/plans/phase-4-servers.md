@@ -175,7 +175,8 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
   free / generation bump stay with 4.6. `SYS_PRIVCTL` becomes real
   (`do_privctl.rs`): sole subcode `PRIVCTL_SET_USER` points a
   `RTS_NO_PRIV`-frozen target at the new shared USER priv slot
-  (`table::USER_PRIV_ID` = 20: `USR_T`, `ipc_to` = {PM}, empty `k_call_mask`,
+  (`table::USER_PRIV_ID` = 20: `USR_T`, `ipc_to` = {PM} — slice 5.4 widened it
+  to {PM, VFS}, empty `k_call_mask`,
   `sig_mgr` = PM; `populate_user_priv` also opens the reverse PM → 20 edge,
   `install_stub_d_priv` pattern) and releases it (`EPERM` on a live target —
   the freeze gate doubles as authorization). PM (`servers/pm`, MXBI row 6,
