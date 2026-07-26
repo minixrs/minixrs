@@ -1,0 +1,8 @@
+grok review found Top issues
+
+1. [suggestion] userland/init/src/main.rs:319 — SIGSEGV/kill path leaves exit_status 0 → false exec stack ok (same class of vacuous marker as stub D, different failure mode)
+2. [suggestion] kernel/src/system/do_exec.rs:167 — copy_to_user_as errors always folded to ENOMEM
+3. [suggestion] kernel-shared/src/execstack.rs:56 — AT_RANDOM deferred; track for 5.6 musl SSP
+4. [nit] docs/plans/phase-5-musl-fs.md:916 — Scope still says worker “reads nothing”
+5. [nit] userland/init/src/main.rs:342 — FAIL line on STDOUT vs other FAILs on STDERR
+6. [nit] userland/worker/src/main.rs:179 — SAFETY comment says 8-aligned; check is 16-aligned

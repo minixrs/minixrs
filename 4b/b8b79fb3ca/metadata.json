@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "4bb8b79fb3ca",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.5-exec-abi",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "CLAUDE.md",
+    "book/src/reference/syscalls.md",
+    "docs/plan.md",
+    "docs/plans/phase-5-musl-fs.md",
+    "kernel-shared/src/execstack.rs",
+    "kernel-shared/src/lib.rs",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/boot_image/elf.rs",
+    "kernel/src/system/do_exec.rs",
+    "tests/qemu-boot.expected",
+    "tests/qemu-boot.forbidden",
+    "userland/init/src/main.rs",
+    "userland/worker/src/main.rs",
+    "userland/worker/user.ld"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4b/b8b79fb3ca/0/metadata.json",
+      "transcript": "/4b/b8b79fb3ca/0/full.jsonl",
+      "compact_transcript": "/4b/b8b79fb3ca/0/transcript.jsonl",
+      "content_hash": "/4b/b8b79fb3ca/0/content_hash.txt",
+      "prompt": "/4b/b8b79fb3ca/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 250,
+    "cache_creation_tokens": 251173,
+    "cache_read_tokens": 25479222,
+    "output_tokens": 103772,
+    "api_call_count": 133
+  }
+}
