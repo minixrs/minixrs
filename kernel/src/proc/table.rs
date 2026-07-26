@@ -277,7 +277,7 @@ static IMAGE: [BootEntry; N_IMAGE] = [
     },
     // init (PID 1) is an ordinary user process, not a system server (slice 4.8):
     // `USR_T` traps (SENDREC only), and `init_boot_image` points its proc slot at
-    // the shared `USER_PRIV_ID` (ipc_to = {PM}, empty kernel-call mask) rather than
+    // the shared `USER_PRIV_ID` (ipc_to = {PM, VFS}, empty kernel-call mask) rather
     // populating a dedicated server-grade priv slot. `priv_flags` here is *inert*
     // for init: `init_boot_image` skips `populate_priv` for this entry, so `SYS_PROC`
     // is never consumed — it's kept only so the `IMAGE` array stays structurally
@@ -379,25 +379,48 @@ pub(crate) const USER_PRIV_ID: PrivId = PrivId::new(20);
 
 const _: () = assert!((USER_PRIV_ID.get() as usize) < NR_SYS_PROCS);
 
+/// The servers an ordinary user process may SENDREC.
+///
+/// PM has been here since slice 4.5 — the whole process lifecycle flows through
+/// it in the POSIX shape (user → PM, never user → kernel). VFS joins in slice
+/// 5.4, which puts `write(1)` / `write(2)` on the VFS → TTY path and gives a user
+/// process its first way to put a byte on the console.
+///
+/// Every entry costs a **pair** of `ipc_to` bits, and the reverse one is not
+/// free: `init_boot_image` fills a boot server's bitmap only over the active boot
+/// priv slots `[0, n_active)`, and [`USER_PRIV_ID`] is well past that, so each
+/// server's *reply* edge has to be opened here explicitly. Without it a user
+/// proc's SENDREC blocks forever with the server unable to answer.
+const USER_IPC_TO: [ProcNr; 2] = [PM_PROC_NR, VFS_PROC_NR];
+
 /// Populate the shared USER priv slot (slice 4.5).
 ///
-/// `USR_T` traps (SENDREC only), `ipc_to` open to PM alone, and an *empty*
-/// kernel-call mask — ordinary user processes make no kernel calls (MINIX 3
-/// `table.c` gives the user template a `{0}` call mask). `sig_mgr` is PM:
-/// MINIX makes PM the signal manager for user processes, while the boot
+/// `USR_T` traps (SENDREC only), `ipc_to` open to [`USER_IPC_TO`] alone, and an
+/// *empty* kernel-call mask — ordinary user processes make no kernel calls
+/// (MINIX 3 `table.c` gives the user template a `{0}` call mask). `sig_mgr` is
+/// PM: MINIX makes PM the signal manager for user processes, while the boot
 /// slots keep RS (the system-process manager) from `populate_priv`.
 ///
-/// Also opens the reverse PM → USER `ipc_to` bit so PM can reply to a user
-/// proc's SENDREC — `init_boot_image` fills SRV_T bitmaps only for the active
-/// boot slots `[0, n_active)`, the same gap `install_stub_d_priv` closes for
-/// VM → D (as a second, sequential borrow).
+/// Also opens each reverse server → USER `ipc_to` bit so the server can reply to
+/// a user proc's SENDREC — the same gap `install_stub_d_priv` closes for VM → D,
+/// and closed the same way: as borrows sequential to the USER slot's.
 fn populate_user_priv() {
-    let pm_priv_id = {
+    // Resolve every server's priv slot up front, in one read-only pass. The two
+    // mutation blocks below each hold a `&mut Priv`, and a lookup running while
+    // one of those is live would be a second reference into the same table.
+    let mut server_privs = [None; USER_IPC_TO.len()];
+    {
         // SAFETY: read-only snapshot; no live `&mut Proc` here.
         let table = unsafe { proc_table_ref() };
-        let idx = proc_index(PM_PROC_NR).expect("PM in proc table");
-        table[idx].priv_id.expect("PM priv populated by proc::init")
-    };
+        for (dst, nr) in server_privs.iter_mut().zip(USER_IPC_TO) {
+            let idx = proc_index(nr).expect("USER-reachable server in proc table");
+            *dst = Some(
+                table[idx]
+                    .priv_id
+                    .expect("server priv populated by proc::init"),
+            );
+        }
+    }
 
     {
         // SAFETY: priv index < NR_SYS_PROCS (const-asserted); single-threaded
@@ -409,19 +432,21 @@ fn populate_user_priv() {
         pr.flags = PREEMPTIBLE | BILLABLE;
         pr.trap_mask = USR_T;
         pr.ipc_to.fill(0);
-        set_sys_bit(&mut pr.ipc_to, pm_priv_id);
+        for id in server_privs.iter().flatten() {
+            set_sys_bit(&mut pr.ipc_to, *id);
+        }
         pr.k_call_mask.fill(0);
         pr.notify_pending.fill(0);
         pr.asyn_pending.fill(0);
         pr.sig_mgr = boot_endpoint(PM_PROC_NR);
     }
 
-    // Open PM → USER. Separate borrow: the USER slot's `&mut Priv` above has
-    // been dropped.
-    {
+    // Open each server → USER. Separate borrows: the USER slot's `&mut Priv`
+    // above has been dropped, and each iteration's ends before the next begins.
+    for id in server_privs.iter().flatten() {
         // SAFETY: priv index in-range; no overlapping reference held.
-        let pm_pr = unsafe { priv_slot_mut(pm_priv_id) }.expect("PM priv slot in range");
-        set_sys_bit(&mut pm_pr.ipc_to, USER_PRIV_ID);
+        let server_pr = unsafe { priv_slot_mut(*id) }.expect("server priv slot in range");
+        set_sys_bit(&mut server_pr.ipc_to, USER_PRIV_ID);
     }
 }
 
@@ -453,7 +478,7 @@ fn init_boot_image() {
     for (slot, entry) in IMAGE.iter().enumerate() {
         if entry.nr == INIT_PROC_NR {
             // init is PID 1 — an ordinary user process. Point its proc slot at the
-            // shared USER priv (`USER_PRIV_ID`: `USR_T`, ipc_to = {PM}, empty
+            // shared USER priv (`USER_PRIV_ID`: `USR_T`, ipc_to = {PM, VFS}, empty
             // k_call_mask, sig_mgr = PM), the same slot every forked child uses.
             // `populate_user_priv()` (called right after this loop) fills that slot
             // and opens the PM → USER reverse edge, so no dedicated server-grade

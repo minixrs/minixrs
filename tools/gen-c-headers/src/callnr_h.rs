@@ -72,7 +72,7 @@ struct Band {
 /// The bands, in ascending numeric order — `bands_are_in_ascending_numeric_order`
 /// enforces that, so inserting a new band in the wrong place fails a test rather
 /// than rendering a header whose sections disagree with its ordering asserts.
-fn bands() -> [Band; 6] {
+fn bands() -> [Band; 7] {
     [
         Band {
             title: "PM requests",
@@ -87,6 +87,13 @@ fn bands() -> [Band; 6] {
                 ("PM_EXEC", callnr::PM_EXEC),
                 ("PM_GRANT_TEST", callnr::PM_GRANT_TEST),
             ],
+        },
+        Band {
+            title: "VFS requests",
+            base_name: "VFS_RQ_BASE",
+            base: callnr::VFS_RQ_BASE,
+            count: Some(("NR_VFS_MSGS", callnr::NR_VFS_MSGS)),
+            members: vec![("VFS_WRITE", callnr::VFS_WRITE)],
         },
         Band {
             title: "character-device requests",
@@ -300,8 +307,12 @@ pub fn render() -> String {
         "the PM band overlaps the kernel calls",
     );
     f.static_assert(
-        "PM_RQ_BASE + NR_PM_MSGS - 1 < CDEV_RQ_BASE",
-        "the PM band overlaps the CDEV band",
+        "PM_RQ_BASE + NR_PM_MSGS - 1 < VFS_RQ_BASE",
+        "the PM band overlaps the VFS band",
+    );
+    f.static_assert(
+        "VFS_RQ_BASE + NR_VFS_MSGS - 1 < CDEV_RQ_BASE",
+        "the VFS band overlaps the CDEV band",
     );
     f.static_assert(
         "CDEV_RQ_BASE + NR_CDEV_MSGS - 1 < VM_RQ_BASE",
@@ -412,8 +423,9 @@ mod tests {
     /// ordering `_Static_assert`s below them chain each band to the previous one.
     /// A band inserted in the wrong slot would therefore render sections that
     /// disagree with the asserts — so pin the order here rather than in review.
-    /// Slices 5.4 (VFS, `0x800`), 5.7 (BDEV, `0x900`), and 5.8 (MFS, `0xA00`)
-    /// each insert a band *below* CDEV; this test is what tells them where.
+    /// Slice 5.4 inserted VFS (`0x800`) between PM and CDEV on exactly this
+    /// instruction; slices 5.7 (BDEV, `0x900`) and 5.8 (MFS, `0xA00`) each
+    /// insert a band *below* CDEV too, and this test is what tells them where.
     #[test]
     fn bands_are_in_ascending_numeric_order() {
         let bands = bands();
@@ -430,17 +442,25 @@ mod tests {
         }
     }
 
-    /// The CDEV band's payload offsets and `CDEV_MAX_IO` are deliberately not
-    /// emitted: this header's own comment defers every payload offset to the first
-    /// musl wrapper (slice 5.6), and musl's `write()` goes to VFS, not straight to
-    /// a character driver — so no C in Phase 5 needs them.
+    /// Neither band's payload offsets are emitted: this header's own comment
+    /// defers *every* payload offset to the first musl wrapper (slice 5.6).
+    ///
+    /// The two bands defer for the same reason at different distances. No C in
+    /// Phase 5 talks to a character driver at all — musl's `write()` goes to VFS,
+    /// not straight to TTY — so `CDEV_*` may well never be emitted. `VFS_*` is the
+    /// opposite case: slice 5.6's `write()` wrapper is precisely the C that needs
+    /// `VFS_FD_OFF` / `VFS_LEN_OFF` / `VFS_BUF_OFF`, so this assertion is what
+    /// makes emitting them a deliberate act in that slice rather than something
+    /// that drifted in early and froze un-reviewed at the 5.6 ABI freeze.
     #[test]
-    fn no_cdev_payload_constants_are_emitted_yet() {
+    fn no_cdev_or_vfs_payload_constants_are_emitted_yet() {
         let text = render();
-        assert_eq!(
-            builder::define_value(&text, "CDEV_WRITE").as_deref(),
-            Some(format!("0x{:X}", callnr::CDEV_WRITE).as_str())
-        );
+        for request in ["CDEV_WRITE", "VFS_WRITE"] {
+            assert!(
+                builder::define_value(&text, request).is_some(),
+                "{request} itself must be emitted"
+            );
+        }
         for name in [
             "CDEV_MINOR_OFF",
             "CDEV_GRANT_OFF",
@@ -448,6 +468,9 @@ mod tests {
             "CDEV_OFFSET_OFF",
             "CDEV_MAX_IO",
             "CDEV_MINOR_CONSOLE",
+            "VFS_FD_OFF",
+            "VFS_LEN_OFF",
+            "VFS_BUF_OFF",
         ] {
             assert!(
                 builder::define_value(&text, name).is_none(),
