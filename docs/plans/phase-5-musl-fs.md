@@ -604,7 +604,7 @@ not rediscover them):
 - Traces are head-carved (6) like `do_vmctl`'s, not sampled: these are low-rate
   callers the `[ksys N]` every-100th sampler would never catch.
 
-### Slice 5.3: TTY driver (TX-only, premapped PL011) + CDEV band ◀ ready (branch `feature/slice-5.3-tty-cdev`, pending merge)
+### Slice 5.3: TTY driver (TX-only, premapped PL011) + CDEV band ✓ shipped (PR #43, merged 2026-07-25)
 
 **Goal:** D1 — first user-space driver; EL0-originated text on the serial
 console.
