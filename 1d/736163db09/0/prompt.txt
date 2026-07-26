@@ -1,0 +1,7 @@
+minixrs side of grok's review Top issues
+
+1. [bug] external/README.md:8 — musl submodule is documented/CI-required but missing (no .gitmodules, no external/musl); qemu-smoke cannot resolve/build the sysroot
+2. [suggestion] tools/build-musl.sh:62 — shasum may be absent on Ubuntu; prefer portable hash
+3. [suggestion] book/src/build.md:233 — still documents include/minix/ / MINIX_ABI_CHECK_POSIX_ERRNO after rename
+4. [suggestion] book/src/servers/overview.md:247 — init still described as always exec’ing worker
+5. [suggestion] tests/qemu-boot.expected:258 — comment overclaims flush-path proof for the first Hello line
