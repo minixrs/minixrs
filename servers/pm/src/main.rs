@@ -39,6 +39,8 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 
+minixrs_abi_note::brand!();
+
 mod mproc;
 
 use minixrs_ipc::{ipc_send, ipc_sendrec};
@@ -100,11 +102,11 @@ const UNMAPPED_PROBE_VA: u64 = 0x4000_0000;
 /// ELF entry point. The kernel primes `SP_EL0` before `eret`, so `_start`
 /// dives straight into Rust. Gated to `not(test)` (under `cargo test` the
 /// crate links as a host binary with the C runtime's `_start`);
-/// `.text._start` is gated to the bare-metal target so a Mach-O host
+/// `.text._start` is gated to the minixrs target so a Mach-O host
 /// `cargo check` still type-checks.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-#[cfg_attr(target_os = "none", unsafe(link_section = ".text._start"))]
+#[cfg_attr(target_os = "minixrs", unsafe(link_section = ".text._start"))]
 pub extern "C" fn _start() -> ! {
     main()
 }

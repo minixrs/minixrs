@@ -42,6 +42,8 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 
+minixrs_abi_note::brand!();
+
 mod cdev;
 mod pl011;
 
@@ -66,11 +68,11 @@ const BANNER: &str = "minix.rs console: tty online (EL0)\n";
 /// straight into Rust without setting up a stack itself.
 // Gate the whole shim to `not(test)`: under `cargo test` the crate links as a
 // normal host executable, and an exported `_start` would collide with the C
-// runtime's. `.text._start` is an ELF section name, gated to the bare-metal target
+// runtime's. `.text._start` is an ELF section name, gated to the minixrs target
 // so `cargo check --workspace` on a Mach-O host still type-checks.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-#[cfg_attr(target_os = "none", unsafe(link_section = ".text._start"))]
+#[cfg_attr(target_os = "minixrs", unsafe(link_section = ".text._start"))]
 pub extern "C" fn _start() -> ! {
     main()
 }

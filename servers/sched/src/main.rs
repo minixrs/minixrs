@@ -30,6 +30,8 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 
+minixrs_abi_note::brand!();
+
 mod policy;
 
 use minixrs_ipc::{ipc_send, ipc_sendrec};
@@ -48,11 +50,11 @@ use minixrs_server_rt::{SefConfig, sef_publish_to_ds, sef_startup};
 // Gate the whole shim to `not(test)`: under `cargo test` the crate links as a
 // normal host executable, and an exported `_start` would collide with the C
 // runtime's `_start`. `.text._start` is an ELF section name, gated to the
-// bare-metal target so `cargo check --workspace` on a Mach-O host still
+// minixrs target so `cargo check --workspace` on a Mach-O host still
 // type-checks (the host rejects the specifier).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-#[cfg_attr(target_os = "none", unsafe(link_section = ".text._start"))]
+#[cfg_attr(target_os = "minixrs", unsafe(link_section = ".text._start"))]
 pub extern "C" fn _start() -> ! {
     main()
 }

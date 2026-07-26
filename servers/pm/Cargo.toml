@@ -22,3 +22,7 @@ boot-stubs = []
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minix-ipc" }
 minixrs-server-rt = { path = "../../server-rt" }
+minixrs-abi-note = { path = "../../minixrs-abi-note" }
+
+[lints]
+workspace = true
