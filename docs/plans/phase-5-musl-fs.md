@@ -44,7 +44,7 @@ Facts the design rests on (verified against source at session time):
 - IPC message copies are raw `read_volatile`/`write_volatile` through the
   active TTBR0; an in-range-but-unmapped user pointer is a **kernel panic**
   (the EL1 same-EL vector slots dump registers and panic; there is no fixup).
-- The musl fork (`musl-minix`, sibling repo) is pristine: v1.2.5 + 102
+- The musl fork (`musl-minixrs`, sibling repo) is pristine: v1.2.5 + 102
   upstream commits, MIT-clean, zero MINIX changes yet. A static musl
   hello-world needs only `writev`, `exit`/`exit_group`, `set_tid_address`,
   and a benign `ioctl(TIOCGWINSZ)` at runtime — **no malloc, no brk/mmap** —
@@ -238,7 +238,7 @@ hand-written headers + drift test (manual upkeep as the ABI grows).
 
 ### D9. musl vendoring: git submodule at `external/musl`
 
-The fork enters the build as a **submodule pinned to `musl-minix`'s `main`**.
+The fork enters the build as a **submodule pinned to `musl-minixrs`'s `main`**.
 Rationale: keeps 1537 C files out of this repo's history; `external/**` is
 already Sonar-excluded; cargo-audit/deny/geiger only walk the cargo graph so
 a C tree is invisible to them either way; MINIX changes land as reviewable
