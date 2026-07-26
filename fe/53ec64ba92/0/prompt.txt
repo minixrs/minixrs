@@ -1,0 +1,15 @@
+pretty good results.  Grok only had a few things in the review Top issues
+
+┌────────────┬───────────────────────────────┬────────────────────────────────────────────────────────────┐
+│ Severity   │ Location                      │ Summary                                                    │
+├────────────┼───────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ nit        │ userland/init/src/main.rs:9   │ Crate doc still says "SENDREC to PM only"                  │
+├────────────┼───────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ nit        │ CLAUDE.md:169                 │ Older 4.5/4.6/4.8 bullets still claim ipc_to = {PM} only   │
+├────────────┼───────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ suggestion │ servers/vfs/src/main.rs:296   │ write_all has no pure host unit tests (QEMU/mutation only) │
+├────────────┼───────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ suggestion │ userland/init/src/main.rs:110 │ UNMAPPED_VA bare constant; no compile-time layout guard    │
+├────────────┼───────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ nit        │ servers/vfs/src/main.rs:236   │ len < 0 / len == 0 arms not covered by boot markers        │
+└────────────┴───────────────────────────────┴────────────────────────────────────────────────────────────┘
