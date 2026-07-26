@@ -1,22 +1,49 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! minix.rs VFS (virtual file system) server — skeletal boot (slice 4.2), plus the
-//! slice-5.2 grant demo and the slice-5.3 console demo.
+//! minix.rs VFS (virtual file system) server — the POSIX write path (slice 5.4),
+//! plus the grant and console demos slices 5.2 and 5.3 left behind as regression
+//! probes.
 //!
 //! Slice 4.2 stood VFS up as a real boot server: it boots through the SEF
-//! framework and publishes its endpoint to DS, proving the multi-server boot
-//! path and the DS registry end to end. It does *no* file operations yet — the
-//! PM↔VFS fork/exec work protocol needs file descriptors and is Phase 5 — so the
-//! receive loop simply drops any application traffic that arrives.
+//! framework and publishes its endpoint to DS. Slice 5.2 gave it the granting half
+//! of the first cross-address-space copy ([`grant_test`]), and 5.3 made it the
+//! first client of the TTY console driver ([`tty_demo`]).
 //!
-//! Slice 5.2 gives VFS the granting half of the first real cross-address-space
-//! copy: it direct-grants a checksummed read-only buffer to PM and hands PM the
-//! grant id in a `PM_GRANT_TEST` message. See [`grant_test`].
+//! Slice 5.4 makes it a *file system* server, in the one sense that matters at
+//! this stage: an ordinary user process can now write to a descriptor. See
+//! [`do_write`].
 //!
-//! Slice 5.3 makes VFS the first client of the TTY console driver: it looks TTY up
-//! in DS and drives `CDEV_WRITE` — a real write, a short write, and two refusals.
-//! See [`tty_demo`]. That is not throwaway wiring: slice 5.4 puts VFS's fd 1 and 2
-//! on this exact path.
+//! ## The write path, and its one copy
+//!
+//! ```text
+//! user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off}──► TTY
+//!                                  │                                      │
+//!                                  └── magic grant: caller's buf ──────────┘
+//!                                          (kernel copies, once)
+//! ```
+//!
+//! VFS resolves the descriptor, issues a **magic** (third-party) grant naming the
+//! *caller's* buffer with the driver as grantee, and forwards the id. TTY then
+//! safecopies straight out of the caller's address space into its staging buffer.
+//! The bytes never pass through VFS — there is exactly one copy, from the process
+//! that wrote them to the driver that transmits them, which is the whole point of
+//! the D4 grant design.
+//!
+//! Three properties hold that path together, each of which has its own probe in
+//! the boot log:
+//!
+//! **The grant's owner is the kernel-stamped `m_source`.** VFS holds `SYS_PROC`,
+//! which is what makes a magic grant legal for it at all; a caller-supplied owner
+//! field would therefore let *any* VFS client aim a privileged cross-address-space
+//! copy at a third party's memory. `VFS_WRITE` has no such field. This is slice
+//! 5.2/5.3's confused-deputy rule applied to the granting side.
+//!
+//! **VFS absorbs short writes.** `CDEV_MAX_IO` is a driver staging detail; a
+//! `write()` return value is not allowed to expose it. So [`write_all`] re-sends
+//! with `offset` advanced until the buffer is out and reports the total.
+//!
+//! **Every request gets a reply.** VFS's clients are all inside a SENDREC, so a
+//! dropped message blocks the caller forever — TTY's rule, and now VFS's.
 //!
 //! Built as a freestanding aarch64 ELF (see `servers/vfs/user.ld`), packed into
 //! the kernel's boot-image archive by `kernel/build.rs`, and loaded into its own
@@ -30,20 +57,25 @@
 
 minixrs_abi_note::brand!();
 
+mod fd;
+mod write;
+
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     CDEV_GRANT_OFF, CDEV_LEN_OFF, CDEV_MAX_IO, CDEV_MINOR_CONSOLE, CDEV_MINOR_OFF, CDEV_OFFSET_OFF,
-    CDEV_WRITE, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN,
+    CDEV_WRITE, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{PM_PROC_NR, TTY_PROC_NR, boot_endpoint};
-use minixrs_kernel_shared::endpoint::Endpoint;
-use minixrs_kernel_shared::error::{ENXIO, EPERM, OK};
+use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
+use minixrs_kernel_shared::error::{EBADF, ENOSYS, ENXIO, EPERM, OK};
 use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE};
 use minixrs_server_rt::{
     GrantPool, SefConfig, diag_fmt, sef_publish_to_ds, sef_retrieve_from_ds, sef_startup, wr_i32,
     wr_u64,
 };
+
+use fd::Fd;
 
 /// Bytes VFS grants PM in the slice-5.2 demo.
 const GRANT_TEST_LEN: usize = 64;
@@ -137,8 +169,14 @@ fn main() -> ! {
     // grantee safecopies. (`server-rt` keeps the table as a value rather than a
     // static precisely so it can be owned like this.)
     let mut grants: GrantPool<GRANT_SLOTS> = GrantPool::new();
+
+    // Resolve the console driver once, before serving anyone: the demos below and
+    // every `VFS_WRITE` that follows all target it, and a DS lookup per write
+    // would be a round-trip per write for an endpoint that cannot change.
+    let tty = tty_endpoint();
+
     grant_test(&mut grants);
-    tty_demo(&mut grants);
+    tty_demo(&mut grants, tty);
 
     let mut msg = Message {
         m_source: 0,
@@ -146,12 +184,124 @@ fn main() -> ! {
         payload: [0u8; 96],
     };
     loop {
-        // No file ops yet (Phase 5): receive and drop application traffic. The
-        // SEF framework still services control traffic (pings/signals/re-init)
-        // inside `receive`; only the application messages it hands back are
-        // discarded here.
-        let _ = sef.receive(&mut msg);
+        if sef.receive(&mut msg) != OK {
+            continue;
+        }
+        // Capture the caller *first*: it is the reply target, the owner named by
+        // the write's magic grant, and the process whose fd table is consulted —
+        // and the dispatch below overwrites `msg.m_source` on the way out.
+        let caller_e = msg.m_source;
+        match msg.m_type {
+            VFS_WRITE => {
+                let rc = do_write(caller_e, &msg, &mut grants, tty);
+                reply(caller_e, &mut msg, rc);
+            }
+            // Reply rather than drop (TTY's rule): VFS's clients are all inside a
+            // SENDREC, and a dropped request blocks the caller forever. DS can
+            // afford to drop one only because nothing SENDRECs it in anger.
+            _ => reply(caller_e, &mut msg, ENOSYS),
+        }
     }
+}
+
+/// Serve one `VFS_WRITE`. Returns the reply `m_type`: bytes written (`>= 0`), or
+/// a negative errno.
+///
+/// The checks, in order — each is the first thing that can be wrong given the
+/// ones before it:
+///
+/// 1. The descriptor resolves, through the caller's own row of the fd table. The
+///    caller is named by the kernel-stamped `m_source`, so a client cannot ask
+///    about another process's descriptors.
+/// 2. `len < 0` → `EINVAL`. Left unchecked it would widen into a ~16 EiB `u64`
+///    byte count for the grant.
+/// 3. `len == 0` → `0`, a legal empty write. Deliberately *before* the grant, so
+///    a client polling with `len = 0` gets no grant issued at all and cannot use
+///    it to probe the granting path. TTY applies the same rule one layer down.
+/// 4. The buffer lies in the user address range. This is `user_range_ok`, the
+///    no-alignment variant grants use — a `write()` buffer is a byte buffer.
+///    Defence in depth rather than the load-bearing gate: the kernel's copy
+///    engine walks the caller's page tables and answers `EFAULT` for anything
+///    unmapped regardless (D5), which is what makes a bad pointer an errno here
+///    instead of a fault in the caller.
+///
+/// Then the grant. `caller_e` is the **kernel-stamped `m_source`** — the one fact
+/// in this whole request a client cannot forge. VFS holds `SYS_PROC`, which is
+/// what makes a magic grant legal for it; taking the owner from the payload
+/// instead would let any VFS client aim TTY's privileged `SYS_SAFECOPY` at a
+/// third party's address space through VFS. There is no payload field for it, and
+/// there must never be one.
+#[cfg_attr(test, allow(dead_code))]
+fn do_write(
+    caller_e: Endpoint,
+    msg: &Message,
+    grants: &mut GrantPool<GRANT_SLOTS>,
+    tty: Endpoint,
+) -> i32 {
+    let req = write::parse(msg);
+
+    let minor = match fd::resolve(endpoint_proc(caller_e).get(), req.fd) {
+        Ok(Fd::CharDev { minor }) => minor,
+        // `resolve` maps a closed descriptor to `EBADF` itself, so this arm is
+        // unreachable today. It exists so slice 5.8's regular-file variant shows
+        // up as a compile error to be routed, not a silent fallthrough.
+        Ok(Fd::Unused) => return EBADF,
+        Err(e) => return e,
+    };
+
+    let len = match write::validate(req.len, req.buf) {
+        Ok(len) => len,
+        Err(e) => return e,
+    };
+    if len == 0 {
+        // A legal empty write. No grant is issued, so a client polling with
+        // `len = 0` cannot use it to probe the granting path.
+        return 0;
+    }
+
+    // The single-copy hop: the grant names the *caller's* memory, so the kernel
+    // moves the bytes from the caller straight into the driver.
+    let gid = match grants.grant_magic(tty, caller_e, req.buf, len as u64, CPF_READ) {
+        Ok(gid) => gid,
+        // Verbatim: `ENOMEM` (VFS is out of grant slots) and a `SYS_SETGRANT`
+        // failure are different problems, and neither is the client's fault.
+        Err(e) => return e,
+    };
+    let written = write_all(tty, minor, gid, len);
+    let _ = grants.revoke(gid);
+    written
+}
+
+/// Drive `CDEV_WRITE` until `len` bytes are out, and report the total.
+///
+/// This is the IPC half only: every decision about when to stop and what to
+/// report lives in [`write::advance`], which is where its rules are documented and
+/// unit-tested. Two of those rules — a driver reporting `0`, and a driver
+/// reporting more than it was asked for — are unreachable through a working TTY,
+/// so keeping them out of this loop is what makes them testable at all.
+///
+/// `len > 0` on entry (`do_write` returns early on an empty write), so at least
+/// one request always goes out and `len - off` is never zero.
+#[cfg_attr(test, allow(dead_code))]
+fn write_all(tty: Endpoint, minor: i32, gid: i32, len: usize) -> i32 {
+    let mut off = 0usize;
+    loop {
+        let n = cdev_write(tty, minor, gid, (len - off) as i32, off as u64);
+        match write::advance(off, len, n) {
+            write::Step::More(next) => off = next,
+            write::Step::Done(rc) => return rc,
+        }
+    }
+}
+
+/// Reply to a SENDREC caller: stamp `m_type`, zero `m_source` (the kernel
+/// overwrites it on delivery), and SEND the message back. A copy of TTY's, for
+/// the reason TTY's exists.
+#[cfg_attr(test, allow(dead_code))]
+fn reply(target_e: Endpoint, msg: &mut Message, m_type: i32) {
+    msg.m_type = m_type;
+    msg.m_source = 0;
+    let _ = ipc_send(target_e, msg);
 }
 
 /// Slice 5.2 demo: direct-grant [`GRANT_TEST_BUF`] to PM and tell PM about it.
@@ -206,17 +356,19 @@ fn grant_test(grants: &mut GrantPool<GRANT_SLOTS>) {
     let _ = ipc_send(pm, &mut msg);
 }
 
-/// Slice 5.3 demo: drive the TTY console driver over `CDEV_WRITE`.
+/// Slice 5.3 demo: drive the TTY console driver over `CDEV_WRITE` directly.
 ///
-/// VFS is the natural client — it is already the granter in the 5.2 demo, it
-/// already owns a [`GrantPool`], and slice 5.4 puts its fd 1/2 on exactly this
-/// path, so the wiring is not throwaway.
+/// Kept as a regression battery now that [`do_write`] is the real path, because
+/// it proves three contracts the real path does not reach: the direct-grant form
+/// (`do_write` issues magic grants), the *visible* short write (`do_write`
+/// deliberately hides it behind [`write_all`]), and the two `CDEV_WRITE` refusals
+/// a well-formed `write()` never provokes.
 ///
 /// Four things get proven, in order:
 ///
-/// 1. **DS lookup.** VFS asks DS for TTY's endpoint rather than hard-coding
-///    `boot_endpoint(TTY_PROC_NR)`, which is what a real client does. On failure it
-///    *does* fall back to the boot endpoint and says so — see [`tty_endpoint`].
+/// 1. **DS lookup.** `tty` was resolved through DS by [`tty_endpoint`] rather than
+///    hard-coded to `boot_endpoint(TTY_PROC_NR)`, which is what a real client
+///    does. On failure that helper falls back to the boot endpoint and says so.
 /// 2. **A real write.** Grant the banner read-only to TTY, send `CDEV_WRITE`, and
 ///    check the reply equals the granted length. `match=1` rather than the length
 ///    itself: self-checking, and it does not have to be re-derived if the banner
@@ -231,9 +383,7 @@ fn grant_test(grants: &mut GrantPool<GRANT_SLOTS>) {
 ///
 /// Best-effort throughout: a failure here must not stop VFS from serving.
 #[cfg_attr(test, allow(dead_code))]
-fn tty_demo(grants: &mut GrantPool<GRANT_SLOTS>) {
-    let tty = tty_endpoint();
-
+fn tty_demo(grants: &mut GrantPool<GRANT_SLOTS>, tty: Endpoint) {
     // 2. The banner, through a read-only direct grant.
     let banner_addr = (&raw const TTY_BANNER) as usize as u64;
     let banner_len = TTY_BANNER.len() as u64;
