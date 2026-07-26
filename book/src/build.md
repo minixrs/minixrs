@@ -80,11 +80,14 @@ The kernel's `build.rs` does two build-time jobs:
   is always a mistake (see [The kernel is not host-buildable](#the-kernel-is-not-host-buildable)).
   The demo-stub blob `user_stub.S` is assembled only when the `boot-stubs` feature is
   on (see [Boot stubs](#boot-stubs-boot-stubs-feature)).
-- **Boot-image packing** — it builds each boot server for the EL0 user target in
-  its own isolated `CARGO_TARGET_DIR`, packs the ELFs into the MXBI archive
-  (`pack_mxbi`), and emits `BOOT_IMAGE_PATH` for the kernel to `include_bytes!`.
-  There is no separate `mkbootimage` tool. See [Boot](boot/overview.md) for the
-  archive format and module set.
+- **Boot-image packing** — it builds each boot server for the custom EL0 user
+  target `tools/targets/aarch64-unknown-minixrs.json` (via `-Zbuild-std`) into one
+  shared nested `CARGO_TARGET_DIR` (`target/minixrs-user`, so `core`/`alloc` are
+  compiled once rather than per crate), checks each ELF carries the minixrs
+  identity note, packs them into the MXBI archive (`pack_mxbi`), and emits
+  `BOOT_IMAGE_PATH` for the kernel to `include_bytes!`. There is no separate
+  `mkbootimage` tool. See [Boot](boot/overview.md) for the archive format and
+  module set.
 
 ### Boot stubs (`boot-stubs` feature)
 
@@ -159,9 +162,10 @@ Three things to know:
 
 No `cfg(target_os = ...)` gates remain under `kernel/src/`.
 
-The `cfg_attr(target_os = "none", …)` attributes in `servers/*` and `userland/*` are a
+The `cfg_attr(target_os = "minixrs", …)` attributes in `servers/*` and `userland/*` are a
 different thing: those crates *are* host-built and host-tested, and the attribute only
-hides an ELF section specifier from a Mach-O host.
+hides an ELF section specifier from a Mach-O host. (They keyed on `target_os = "none"`
+until M1 moved the user-space binaries onto the `aarch64-unknown-minixrs` target.)
 
 ## Host tests
 

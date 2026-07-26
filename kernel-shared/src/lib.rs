@@ -12,6 +12,7 @@
 
 #![no_std]
 
+pub mod brand;
 pub mod callnr;
 pub mod com;
 pub mod endpoint;

@@ -41,6 +41,8 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 
+minixrs_abi_note::brand!();
+
 mod region;
 
 use minixrs_ipc::{ipc_send, ipc_sendrec};
@@ -65,11 +67,11 @@ const PAGE_SIZE: u64 = 4096;
 // runtime's `_start` (a hard "duplicate symbol" error on the GNU/Linux linker).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-// `.text._start` is an ELF section name; gate it to the bare-metal target so
+// `.text._start` is an ELF section name; gate it to the minixrs target so
 // `cargo check --workspace` on a Mach-O host (which rejects the specifier)
 // still type-checks this crate. `ENTRY(_start)` in user.ld roots the symbol
 // either way, so ordering it first in `.text` is a nicety, not a requirement.
-#[cfg_attr(target_os = "none", unsafe(link_section = ".text._start"))]
+#[cfg_attr(target_os = "minixrs", unsafe(link_section = ".text._start"))]
 pub extern "C" fn _start() -> ! {
     main()
 }

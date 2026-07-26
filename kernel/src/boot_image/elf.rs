@@ -19,6 +19,7 @@
 use crate::arch::aarch64::addrspace::{AddrSpace, MapError, Prot};
 use crate::arch::aarch64::mmu::{PAGE_SIZE, flush_icache_range};
 use crate::mm::{alloc_frame, phys_to_hhdm};
+use minixrs_kernel_shared::brand;
 
 /// Errors the loader can surface. All are fatal at boot (the embedded VM ELF
 /// is produced by our own build, so any of these means a build/loader bug).
@@ -45,6 +46,10 @@ pub enum ElfError {
     WriteExec,
     /// The address-space mapping failed (out of memory, already mapped, …).
     Map(MapError),
+    /// No PT_NOTE note with owner "minixrs\0", type NT_MINIXRS_IDENT (M1).
+    MissingBrand,
+    /// Brand present but built for an ABI this kernel does not speak.
+    UnsupportedAbi(u32),
 }
 
 impl From<MapError> for ElfError {
@@ -113,6 +118,16 @@ pub fn load_into(elf: &[u8], aspace: &mut AddrSpace) -> Result<u64, ElfError> {
     let e_phnum = rd_u16(elf, 56)? as usize;
     if e_phentsize != PHDR_SIZE {
         return Err(ElfError::BadPhentsize);
+    }
+
+    // M1: refuse an image without the minixrs identity note
+    // (tooling/docs/abi-note.md). This is the single choke point under
+    // `load_exec_image`, covering boot, exec, and future exec-from-FS.
+    match brand::scan_brand(elf) {
+        Ok(_) => {}
+        Err(brand::BrandError::UnsupportedAbi(v)) => return Err(ElfError::UnsupportedAbi(v)),
+        Err(brand::BrandError::MissingBrand) => return Err(ElfError::MissingBrand),
+        Err(brand::BrandError::Malformed) => return Err(ElfError::Truncated),
     }
 
     for i in 0..e_phnum {
