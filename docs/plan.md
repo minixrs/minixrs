@@ -23,7 +23,7 @@ Build minix.rs as a learning OS that preserves MINIX 3's microkernel architectur
 ```
 +------------------------------------------------------------------+
 |                        User Programs                             |
-|  (linked against musl-minix, POSIX-compatible)                   |
+|  (linked against musl-minixrs, POSIX-compatible)                 |
 +------------------------------------------------------------------+
          |  _syscall(endpoint, callnr, &msg)  via SYSCALL/SVC
          v
