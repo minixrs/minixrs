@@ -90,9 +90,33 @@ fn rd_u64(b: &[u8], off: usize) -> Result<u64, ElfError> {
         .ok_or(ElfError::Truncated)
 }
 
-/// Load every `PT_LOAD` segment of `elf` into `aspace` and return the entry
-/// point virtual address (`e_entry`).
-pub fn load_into(elf: &[u8], aspace: &mut AddrSpace) -> Result<u64, ElfError> {
+/// What [`load_into`] learned about the image it just mapped.
+///
+/// `entry` is all the boot path needs; the program-header fields exist for the
+/// `exec` initial stack (slice 5.5), which reports them to the new program as
+/// `AT_PHDR` / `AT_PHNUM` / `AT_PHENT` so musl's `__init_tls` can walk the
+/// headers without re-opening the file.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LoadedElf {
+    /// Program entry point VA (`e_entry`).
+    pub entry: u64,
+    /// VA the program header table is readable at, when some `PT_LOAD` maps it.
+    ///
+    /// `None` is the ordinary case for an image whose first `PT_LOAD` starts
+    /// past the header — nothing is broken, there is simply no `AT_PHDR` to
+    /// report. `userland/worker/user.ld` uses the `FILEHDR PHDRS` idiom
+    /// specifically so this is `Some`.
+    pub phdr_va: Option<u64>,
+    /// `e_phnum` — number of program header entries.
+    pub phnum: u16,
+    /// `e_phentsize` — bytes per entry (always 56 here; the header is rejected
+    /// otherwise).
+    pub phentsize: u16,
+}
+
+/// Load every `PT_LOAD` segment of `elf` into `aspace` and report the entry
+/// point plus where the program headers landed (see [`LoadedElf`]).
+pub fn load_into(elf: &[u8], aspace: &mut AddrSpace) -> Result<LoadedElf, ElfError> {
     if elf.len() < EHDR_SIZE {
         return Err(ElfError::Truncated);
     }
@@ -130,6 +154,7 @@ pub fn load_into(elf: &[u8], aspace: &mut AddrSpace) -> Result<u64, ElfError> {
         Err(brand::BrandError::Malformed) => return Err(ElfError::Truncated),
     }
 
+    let mut phdr_va = None;
     for i in 0..e_phnum {
         let ph = e_phoff + i * e_phentsize;
         if rd_u32(elf, ph)? != PT_LOAD {
@@ -141,10 +166,51 @@ pub fn load_into(elf: &[u8], aspace: &mut AddrSpace) -> Result<u64, ElfError> {
         let p_filesz = rd_u64(elf, ph + 32)? as usize;
         let p_memsz = rd_u64(elf, ph + 40)? as usize;
 
+        // Does this segment's *file* range cover the program header table? If
+        // so the headers are mapped, and the VA they are readable at follows
+        // from the segment's offset→vaddr relation. First match wins; `None`
+        // when no segment covers them is ordinary (see `LoadedElf::phdr_va`).
+        if phdr_va.is_none()
+            && segment_covers_phdrs(p_offset, p_filesz, e_phoff, e_phnum, e_phentsize)
+        {
+            // `e_phoff >= p_offset` is part of what `segment_covers_phdrs` just
+            // proved, so this subtraction cannot wrap.
+            phdr_va = p_vaddr.checked_add((e_phoff - p_offset) as u64);
+        }
+
         load_segment(elf, aspace, p_flags, p_offset, p_vaddr, p_filesz, p_memsz)?;
     }
 
-    Ok(e_entry)
+    Ok(LoadedElf {
+        entry: e_entry,
+        phdr_va,
+        phnum: e_phnum as u16,
+        phentsize: e_phentsize as u16,
+    })
+}
+
+/// Is the whole program header table inside this segment's file range?
+///
+/// All-checked arithmetic: `e_phoff`/`e_phnum`/`e_phentsize` come straight out
+/// of the image's header, so an overflow here must read as "not covered" rather
+/// than wrap into a bogus containment.
+fn segment_covers_phdrs(
+    p_offset: usize,
+    p_filesz: usize,
+    e_phoff: usize,
+    e_phnum: usize,
+    e_phentsize: usize,
+) -> bool {
+    let Some(ph_bytes) = e_phnum.checked_mul(e_phentsize) else {
+        return false;
+    };
+    let (Some(ph_end), Some(seg_end)) = (
+        e_phoff.checked_add(ph_bytes),
+        p_offset.checked_add(p_filesz),
+    ) else {
+        return false;
+    };
+    e_phoff >= p_offset && ph_end <= seg_end
 }
 
 #[allow(clippy::too_many_arguments)]

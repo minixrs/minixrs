@@ -60,6 +60,64 @@ control in the driver era). The dispatch table is `kernel/src/system/mod.rs`.
 | `0x610` | `SYS_GETKSIG` | live | PM: fetch the next process with pending signals. |
 | `0x611` | `SYS_ENDKSIG` | live | PM: acknowledge signal processing for a target. |
 
+### The `SYS_EXEC` initial stack
+
+`SYS_EXEC` does not merely set `sp` to the top of the new image's stack page — it
+builds the **SysV/Linux initial process stack** there first and points `SP_EL0`
+at it. That is what lets a C runtime start unpatched: musl's `crt1` →
+`__libc_start_main` → `__init_libc` reads `argc`/`argv`/`envp` and the auxiliary
+vector straight off the stack, takes `libc.page_size` from `AT_PAGESZ`, and lets
+`__init_tls` walk the program headers from `AT_PHDR`. Keeping the musl fork's
+diff confined to `arch/aarch64/syscall_arch.h` + `src/minix/` depends on the
+kernel supplying this frame rather than crt being taught a new shape.
+
+The layout, upward from `sp` (16-byte aligned, as the AAPCS64 requires at entry —
+`SCTLR_EL1.SA0` turns a violation into an EL0 alignment abort):
+
+| Offset | Contents |
+|-------:|----------|
+| `+0`   | `argc` (`u64`) |
+| `+8`   | `argv[0]` — a VA pointing at the name string below |
+| `+16`  | `argv` NULL terminator |
+| `+24`  | `envp` NULL terminator (the environment is empty) |
+| `+32`  | auxiliary vector: `(a_type, a_val)` pairs, 16 bytes each |
+| …      | `(AT_NULL, 0)` — auxv terminator |
+| …      | the NUL-terminated name string |
+| …      | zero padding up to the stack-page top |
+
+There is exactly one argument (`argc == 1`, `argv[0]` the exec name) and no
+environment: `SYS_EXEC` names a boot-embedded binary, and user-supplied
+`argv`/`envp` arrive with exec-from-FS. The auxiliary vector is emitted in a
+fixed order rather than Linux's incidental one, so traces and tests are
+deterministic:
+
+| Entry | Value | Emitted |
+|-------|-------|---------|
+| `AT_PHDR` (3) | VA the program headers are readable at | only when a `PT_LOAD` maps them |
+| `AT_PHNUM` (5) | `e_phnum` | with `AT_PHDR` |
+| `AT_PHENT` (4) | `e_phentsize` (56) | with `AT_PHDR` |
+| `AT_PAGESZ` (6) | 4096 | always |
+| `AT_NULL` (0) | 0 | always, last |
+
+`AT_PHDR` is conditional because it must not be invented: a linker script that
+does not pull the ELF header into the first `PT_LOAD` leaves `e_phoff` in an
+unmapped file prefix, and reporting a VA there would fault `__init_tls`.
+`userland/worker/user.ld` uses the `FILEHDR PHDRS` idiom (plus
+`. = <base> + SIZEOF_HEADERS`) so its first `PT_LOAD` starts at file offset 0 and
+does cover the headers. Boot servers are loaded by a different path
+(`load_boot_server`), get no frame at all, and start with `sp` at the page top —
+their `_start` reads nothing.
+
+The byte layout lives in `kernel-shared/src/execstack.rs`
+(`build_initial_stack`), which is pure and host-tested; `do_exec` stages the
+frame in a kernel-stack buffer and installs it with `mm::uaccess::copy_to_user_as`
+against the new address space's `ttbr0_pa` — that primitive is
+address-space-independent, so the frame lands before the AS is ever installed. A
+frame that cannot be built (`E2BIG`) or copied (`ENOMEM`) tears the fresh image
+back down and leaves the target on its old one. The `AT_*` values are the
+Linux/SysV ones and are deliberately **not** emitted by `gen-c-headers`: musl
+defines them itself.
+
 ### `SYS_VMCTL` subcalls
 
 `SYS_VMCTL` is VM's single privileged lever over the kernel's paging mechanism.

@@ -26,6 +26,12 @@
 //! none), so it reports *through the path under test*: if the path regresses the
 //! lines change or vanish, and the boot markers go with them. See [`announce`].
 //!
+//! Slice 5.5 gives it one more thing to say. `SYS_EXEC` now hands a new image a
+//! SysV initial stack, and `worker` checks that frame against its own `sp` and
+//! encodes the verdict as its exit status — so init, which reaps it anyway,
+//! prints the **first** such status and nothing thereafter. See
+//! [`report_exec_stack`].
+//!
 //! Built as a freestanding aarch64 ELF (`userland/init/user.ld`). It uses
 //! `minix-ipc` directly — no `server-rt`/SEF, because it is a plain user program,
 //! not a server. The `_start` shim and panic handler are gated to `not(test)`.
@@ -43,6 +49,7 @@ use minixrs_kernel_shared::callnr::{
 use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{EBADF, EFAULT, EINVAL, ENOSYS, OK};
+use minixrs_kernel_shared::execstack::EXEC_STACK_PROBE_PASS;
 use minixrs_kernel_shared::message::USER_VA_TOP;
 use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
 
@@ -144,6 +151,17 @@ fn main() -> ! {
 
     announce(vfs);
 
+    // One-shot: the exec-ABI verdict of the first child init forks (slice 5.5).
+    //
+    // Keyed on that child's **pid**, not on "the first reap", because the two are
+    // not the same reap. PM seeds the demo stubs as init's children, and stub D
+    // is SIGSEGV'd on purpose early in boot — so init's first `wait()` returns
+    // that zombie, whose status has nothing to do with exec and happens to be 0.
+    // Reporting it would print `exec stack ok` no matter what the frame looked
+    // like. `alloc_pid` never hands out 0, so it doubles as the "not yet" value.
+    let mut probe_pid = 0;
+    let mut reported = false;
+
     loop {
         // fork(): PM replies to both halves of this SENDREC — the child sees
         // `m_type == 0`, the parent sees the child pid (`> 0`); a negative value
@@ -164,10 +182,22 @@ fn main() -> ! {
                 }
             }
             n if n > 0 => {
-                // Parent: reap the child (blocks until it exits), then loop to
-                // fork the next one.
+                // Parent: `n` is the new child's pid. Remember the first one —
+                // that is the process whose exec-ABI verdict gets reported.
+                if probe_pid == 0 {
+                    probe_pid = n;
+                }
+                // Reap a child (blocks until one exits), then loop to fork the
+                // next. `wait()` replies the reaped child's pid, so the verdict
+                // is reported only when the child that ran `worker` comes back —
+                // and only once, since the loop runs forever and a line per
+                // cycle would bury the console.
                 let mut w = pm_msg(PM_WAIT);
-                let _ = ipc_sendrec(pm, &mut w);
+                let rc = ipc_sendrec(pm, &mut w);
+                if !reported && rc == OK && w.m_type == probe_pid {
+                    reported = true;
+                    report_exec_stack(vfs, rd_i32(&w, 0));
+                }
             }
             _ => {
                 // Transient fork failure (table full): back off briefly, retry.
@@ -269,18 +299,86 @@ fn deny_probes(vfs: Endpoint) {
 /// copy, so the frame outlives every use of it.
 #[cfg_attr(test, allow(dead_code))]
 fn report_fail(vfs: Endpoint, name: &str) {
-    const PREFIX: &str = "minix.rs init: vfs.deny FAIL ";
     let mut line = [0u8; 64];
-    let mut n = 0;
-    for src in [PREFIX.as_bytes(), name.as_bytes(), b"\n"] {
-        for b in src {
-            if n < line.len() {
-                line[n] = *b;
-                n += 1;
+    let mut n = append(&mut line, 0, b"minix.rs init: vfs.deny FAIL ");
+    n = append(&mut line, n, name.as_bytes());
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
+}
+
+/// Report the exec-ABI verdict the first reaped child carried out (slice 5.5).
+///
+/// `worker` reads its own `sp` and checks the SysV initial stack `SYS_EXEC` built
+/// — `argc`/`argv`/`envp`/auxv — then exits with `0` or the number of the first
+/// failing check. That verdict has to leave the process somehow, and a console
+/// line per fork cycle would flood the log, so it rides out as the exit status
+/// and init prints it once. The kernel's own `[exec]` trace says only that the
+/// kernel *thinks* it wrote a frame; this line is the EL0 half of the proof.
+///
+/// `status` is the `W_EXITCODE` PM encodes: the exit code sits in bits 8..16.
+///
+/// Success is a **positive sentinel**, not 0, because 0 is what a child that
+/// never got as far as reporting leaves behind: PM's kill path marks a signalled
+/// process a zombie without setting `exit_status`, so a worker that faulted on a
+/// malformed frame — which VM turns into a SIGSEGV, not the unhandled EL0 abort
+/// the forbidden list watches for — would otherwise be reaped as a pass. That
+/// case gets its own `no-verdict` spelling so the log names it.
+#[cfg_attr(test, allow(dead_code))]
+fn report_exec_stack(vfs: Endpoint, status: i32) {
+    let code = (status >> 8) & 0xff;
+    if code == EXEC_STACK_PROBE_PASS {
+        let _ = vfs_write(vfs, STDOUT, b"minix.rs init: exec stack ok\n");
+        return;
+    }
+
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: exec stack FAIL ");
+    if code == 0 {
+        n = append(&mut line, n, b"no-verdict\n");
+    } else {
+        n = append(&mut line, n, b"code=");
+        let mut digits = [0u8; 3];
+        let mut d = 0;
+        let mut v = code as u32;
+        loop {
+            digits[d] = b'0' + (v % 10) as u8;
+            v /= 10;
+            d += 1;
+            if v == 0 || d == digits.len() {
+                break;
             }
         }
+        digits[..d].reverse();
+        n = append(&mut line, n, &digits[..d]);
+        n = append(&mut line, n, b"\n");
     }
+    // fd 2, like init's other failure report and worker's own — failures go to
+    // stderr, and it keeps that descriptor exercised on the path that matters.
     let _ = vfs_write(vfs, STDERR, &line[..n]);
+}
+
+/// Append `src` to `line[..n]`, dropping any overflow, and return the new length.
+///
+/// The whole of init's string formatting: no allocator, no `core::fmt`, and a
+/// truncating append rather than a fallible one, because a report that does not
+/// quite fit is still worth printing.
+#[cfg_attr(test, allow(dead_code))]
+fn append(line: &mut [u8], mut n: usize, src: &[u8]) -> usize {
+    for &b in src {
+        if n < line.len() {
+            line[n] = b;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Read a native-endian `i32` out of a reply payload.
+#[cfg_attr(test, allow(dead_code))]
+fn rd_i32(m: &Message, off: usize) -> i32 {
+    let mut b = [0u8; 4];
+    b.copy_from_slice(&m.payload[off..off + 4]);
+    i32::from_ne_bytes(b)
 }
 
 /// `write(fd, buf, buf.len())` through VFS. Returns the byte count written, or a

@@ -10,8 +10,11 @@
 //!   ([`BootImage::module_by_name`]);
 //! - build a brand-new address space and load the ELF into it
 //!   ([`userland::load_exec_image`] — the same helper that boots the servers);
-//! - reset the target's register frame to the new entry point with a fresh
-//!   stack (exec starts clean — no register carries over);
+//! - write the SysV/Linux initial stack frame into it
+//!   ([`execstack::build_initial_stack`]) so a C runtime finds `argc`/`argv`/
+//!   `envp`/auxv where it expects them;
+//! - reset the target's register frame to the new entry point with `sp` pointing
+//!   at that frame (exec starts clean — no register carries over);
 //! - swap in the new `(ttbr0_pa, asid)` and tear down the *old* address space
 //!   (reusing [`do_exit`]'s teardown sequence);
 //! - unblock the target so the scheduler resumes it at `_start`.
@@ -47,8 +50,9 @@ use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::EXEC_NAME_LEN;
 use minixrs_kernel_shared::com::NR_SYS_PROCS;
 use minixrs_kernel_shared::endpoint::{NONE, SELF};
-use minixrs_kernel_shared::error::{EINVAL, ENOENT, ENOMEM, OK};
-use minixrs_kernel_shared::message::Message;
+use minixrs_kernel_shared::error::{E2BIG, EINVAL, ENOENT, ENOMEM, OK};
+use minixrs_kernel_shared::execstack;
+use minixrs_kernel_shared::message::{Message, USER_PAGE_SIZE};
 
 use crate::arch::aarch64::context::ArchRegisterFrame;
 use crate::arch::aarch64::userland;
@@ -130,6 +134,50 @@ pub(super) fn do_exec(
         None => return ENOMEM,
     };
 
+    // Hand the new image a real SysV/Linux initial stack (slice 5.5, D13):
+    // `[argc][argv…][NULL][envp…][NULL][auxv][AT_NULL]` with the name string
+    // above it, so musl's crt runs unpatched. Still before the point of no
+    // return — either failure below tears the *fresh* image down and leaves the
+    // target on its old one, exactly like the `load_exec_image` failure above.
+    let mut auxv = [(0u64, 0u64); execstack::MAX_AUXV];
+    let mut n_auxv = 0;
+    // `AT_PHDR` only when a PT_LOAD actually maps the header table — an image
+    // linked without the `FILEHDR PHDRS` idiom leaves the ELF header in an
+    // unmapped file prefix, and a VA pointing there would fault `__init_tls`.
+    if let Some(phdr_va) = img.phdr_va {
+        auxv[n_auxv] = (execstack::AT_PHDR, phdr_va);
+        auxv[n_auxv + 1] = (execstack::AT_PHNUM, img.phnum as u64);
+        auxv[n_auxv + 2] = (execstack::AT_PHENT, img.phentsize as u64);
+        n_auxv += 3;
+    }
+    auxv[n_auxv] = (execstack::AT_PAGESZ, USER_PAGE_SIZE);
+    n_auxv += 1;
+
+    let mut frame_buf = [0u8; execstack::INITIAL_STACK_MAX];
+    let Some(frame) =
+        execstack::build_initial_stack(&mut frame_buf, img.sp_top, name, &auxv[..n_auxv])
+    else {
+        super::do_exit::teardown_addrspace(img.ttbr0_pa, img.asid);
+        return E2BIG;
+    };
+    // `copy_to_user_as` is address-space-independent by design (slice 5.1): it
+    // walks `ttbr0_pa` and copies through each frame's HHDM alias, so it works
+    // on an address space that is not installed — no new copy machinery, and the
+    // stack page's `Prot::writable` is checked like any other user write.
+    //
+    // Its errno is relayed **verbatim** rather than folded into `ENOMEM`, the
+    // rule TTY already follows for `SYS_SAFECOPY`: every failure here is a
+    // kernel bug (the destination is the stack page this call just mapped), and
+    // `EFAULT` — the walk found nothing, or found something read-only — points
+    // at a different bug from a genuine allocation failure. Flattening them
+    // costs the one distinction worth having.
+    if let Err(e) =
+        crate::mm::uaccess::copy_to_user_as(img.ttbr0_pa, frame.sp, &frame_buf[..frame.len])
+    {
+        super::do_exit::teardown_addrspace(img.ttbr0_pa, img.asid);
+        return e;
+    }
+
     // Point of no return. Drop any grant-table registration the *old* image
     // made (slice 5.2): `grant_table` is a VA in the address space about to be
     // discarded, and exec preserves the privilege slot, so leaving it would aim
@@ -152,7 +200,7 @@ pub(super) fn do_exec(
         let old = (t.ttbr0_pa, t.asid);
         t.regs = ArchRegisterFrame::EMPTY;
         t.regs.elr_el1 = img.entry;
-        t.regs.sp_el0 = img.sp_top;
+        t.regs.sp_el0 = frame.sp;
         t.regs.spsr_el1 = userland::STUB_SPSR_EL0;
         t.ttbr0_pa = img.ttbr0_pa;
         t.asid = img.asid;
@@ -196,6 +244,16 @@ pub(super) fn do_exec(
             "[ksys SYS_EXEC] target={target_nr} name={name} entry={:#x} old_asid={old_asid} new_asid={} freed={freed}",
             img.entry,
             img.asid,
+        );
+        // The initial stack the new image will read. `auxv` counts real pairs,
+        // excluding the `AT_NULL` terminator — which is what makes the
+        // conditional `AT_PHDR` arm observable rather than quietly dead. `sp`
+        // goes last: it is derived from the name length and auxv count, so the
+        // asserted marker substring stops before it.
+        let _ = writeln!(
+            Uart::new(),
+            "[exec] argc=1 envc=0 auxv={n_auxv} sp={:#x}",
+            frame.sp,
         );
     }
     OK

@@ -413,7 +413,16 @@ pub(crate) struct ExecImage {
     pub ttbr0_pa: u64,
     pub asid: u8,
     pub entry: u64,
+    /// Top of the image's single stack page. `exec` builds the SysV initial
+    /// stack frame downward from here and points `sp_el0` at the frame's base;
+    /// a boot server has no frame and starts with `sp_el0` here.
     pub sp_top: u64,
+    /// VA the program headers are readable at, when a `PT_LOAD` maps them —
+    /// `exec`'s `AT_PHDR`. See [`crate::boot_image::elf::LoadedElf::phdr_va`].
+    pub phdr_va: Option<u64>,
+    /// `e_phnum` / `e_phentsize` — `exec`'s `AT_PHNUM` / `AT_PHENT`.
+    pub phnum: u16,
+    pub phentsize: u16,
 }
 
 /// Build a fresh address space from an ELF image: allocate the L0 root, load
@@ -432,8 +441,8 @@ pub(crate) struct ExecImage {
 pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
     let mut aspace = AddrSpace::new().ok()?;
 
-    let entry = match crate::boot_image::elf::load_into(elf, &mut aspace) {
-        Ok(e) => e,
+    let loaded = match crate::boot_image::elf::load_into(elf, &mut aspace) {
+        Ok(l) => l,
         Err(e) => {
             // A brand rejection (M1, `elf::load_into`'s scan) is surfaced
             // before the load unwinds — the boot path panics right after
@@ -490,8 +499,11 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
     Some(ExecImage {
         ttbr0_pa,
         asid,
-        entry,
+        entry: loaded.entry,
         sp_top: SERVER_STACK_VA + PAGE_SIZE as u64,
+        phdr_va: loaded.phdr_va,
+        phnum: loaded.phnum,
+        phentsize: loaded.phentsize,
     })
 }
 
