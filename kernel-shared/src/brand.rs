@@ -42,10 +42,11 @@ fn u64le(b: &[u8], off: usize) -> Option<u64> {
 
 pub fn scan_brand(elf: &[u8]) -> Result<BrandInfo, BrandError> {
     use BrandError::Malformed;
+    // `e_ident` gate: magic, then EI_CLASS == ELFCLASS64 (2) and
+    // EI_DATA == ELFDATA2LSB (1).
     if elf.get(..4) != Some(b"\x7fELF".as_slice())
-        || elf.get(4) != Some(&2)  // ELFCLASS64
+        || elf.get(4) != Some(&2)
         || elf.get(5) != Some(&1)
-    // ELFDATA2LSB
     {
         return Err(Malformed);
     }

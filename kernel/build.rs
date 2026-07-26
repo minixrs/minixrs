@@ -196,14 +196,18 @@ fn build_server(
     let target_dir = workspace.join("target/minixrs-user");
     let target_json = workspace.join("tools/targets/aarch64-unknown-minixrs.json");
 
-    // Rebuild + re-embed whenever this server's sources, linker script, or
-    // manifest change. `src` is watched as a directory so submodules (e.g.
-    // `servers/ds/src/registry.rs`) are covered — watching only `main.rs` would
-    // silently embed a stale ELF after a submodule edit.
+    // Rebuild + re-embed whenever this server's sources, linker script, manifest,
+    // or own build script change. `src` is watched as a directory so submodules
+    // (e.g. `servers/ds/src/registry.rs`) are covered — watching only `main.rs`
+    // would silently embed a stale ELF after a submodule edit. `build.rs` is
+    // watched because it emits the crate's `-T<user.ld>` link arg (M1): cargo
+    // reruns the *nested* build for it, but only this line makes the *outer*
+    // kernel build notice and re-pack.
     for path in [
         crate_dir.join("src"),
         crate_dir.join("user.ld"),
         crate_dir.join("Cargo.toml"),
+        crate_dir.join("build.rs"),
     ] {
         println!("cargo:rerun-if-changed={}", path.display());
     }

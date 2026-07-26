@@ -16,9 +16,11 @@ fork/exec/wait lifecycle through PM.
 ## Where servers live
 
 Servers are freestanding `#![no_std]` / `#![no_main]` ELF binaries linked with
-their own `user.ld` (page-aligned segments based at `0x0010_0000`). The kernel's
-`build.rs` compiles each into an isolated target directory and concatenates them
-into a single **MXBI archive** embedded in the kernel image; the boot loader
+their own `user.ld` (page-aligned segments based at `0x0010_0000`) and branded
+with the minixrs ELF identity note, which the kernel requires of every image it
+loads. The kernel's `build.rs` compiles each for the `aarch64-unknown-minixrs`
+target and concatenates them into a single **MXBI archive** embedded in the
+kernel image; the boot loader
 (`kernel/src/arch/aarch64/userland.rs`) walks the archive and loads each module
 into the proc slot named by its record. Each server gets its own per-process
 TTBR0, so they all share the same low load base with no collision.
