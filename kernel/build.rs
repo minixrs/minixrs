@@ -116,6 +116,8 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
         workspace.join("minix-ipc/src"),
         workspace.join("server-rt/src"),
         workspace.join("kernel-shared/src"),
+        workspace.join("minixrs-abi-note/src"),
+        workspace.join("tools/targets/aarch64-unknown-minixrs.json"),
     ] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
@@ -152,9 +154,15 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
         } else {
             &[]
         };
-        let elf = build_server(crate_name, crate_dir, workspace, out_dir, extra);
+        let elf = build_server(crate_name, crate_dir, workspace, extra);
         let bytes = std::fs::read(&elf)
             .unwrap_or_else(|e| panic!("reading {crate_name} ELF {}: {e}", elf.display()));
+        // Pack-time gate: refuse to embed an unbranded/foreign ELF. Runtime
+        // enforcement in load_exec_image stays authoritative — exec-from-FS
+        // (slice 5.9) bypasses this assertion entirely.
+        if let Err(e) = minixrs_kernel_shared::brand::scan_brand(&bytes) {
+            panic!("{}: missing/bad minixrs brand: {e:?}", elf.display());
+        }
         let name = crate_name.strip_prefix("minixrs-").unwrap_or(crate_name);
         modules.push((*proc_nr, name.to_string(), bytes));
     }
@@ -165,25 +173,28 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     println!("cargo:rustc-env=BOOT_IMAGE_PATH={}", archive_path.display());
 }
 
-/// Build one server crate for the aarch64 EL0 user target and return the path to
-/// the produced ELF.
+/// Build one user-space crate for the custom `aarch64-unknown-minixrs` target
+/// (`tools/targets/aarch64-unknown-minixrs.json`, via `-Zbuild-std`) and return
+/// the path to the produced ELF.
 ///
-/// We reuse the builtin `aarch64-unknown-none` triple but must NOT inherit the
-/// kernel's linker script: the workspace `.cargo/config.toml` forces
-/// `-Tkernel/.../linker.ld` on that triple via `rustflags`. We override it with
-/// `CARGO_ENCODED_RUSTFLAGS` (highest-precedence; replaces config rustflags
-/// entirely) pointing at the server's `user.ld`, and isolate each build in its
-/// own `CARGO_TARGET_DIR` so nesting cargo inside this build script does not
-/// deadlock on the outer kernel build's target-dir lock.
+/// The `-T<user.ld>` link arg comes from each crate's own build.rs, cfg-gated
+/// on `target_os = "minixrs"` — nothing is injected here. Inherited rustflags
+/// are scrubbed instead, so the kernel's `-Tlinker.ld` (keyed on
+/// `aarch64-unknown-none` in `.cargo/config.toml`, which the JSON target name
+/// doesn't match anyway) or a developer's env can't leak in.
 fn build_server(
     crate_name: &str,
     crate_dir: &std::path::Path,
     workspace: &std::path::Path,
-    out_dir: &std::path::Path,
     extra_args: &[&str],
 ) -> PathBuf {
-    let user_ld = crate_dir.join("user.ld");
-    let target_dir = out_dir.join(format!("{crate_name}-target"));
+    // One shared nested target dir (not per-crate): -Zbuild-std would otherwise
+    // rebuild core+alloc 9x per kernel build. Nested invocations run
+    // sequentially from this script; cargo's own locking covers any overlap
+    // with developer commands. Still separate from the outer `target/` root,
+    // so nesting cargo here cannot deadlock on the kernel build's lock.
+    let target_dir = workspace.join("target/minixrs-user");
+    let target_json = workspace.join("tools/targets/aarch64-unknown-minixrs.json");
 
     // Rebuild + re-embed whenever this server's sources, linker script, or
     // manifest change. `src` is watched as a directory so submodules (e.g.
@@ -191,37 +202,38 @@ fn build_server(
     // silently embed a stale ELF after a submodule edit.
     for path in [
         crate_dir.join("src"),
-        user_ld.clone(),
+        crate_dir.join("user.ld"),
         crate_dir.join("Cargo.toml"),
     ] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    // `-C link-arg=-T<user.ld>`, encoded with the \x1f separator cargo expects.
-    let encoded_rustflags = format!("-Clink-arg=-T{}", user_ld.display());
-
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let status = Command::new(cargo)
         .current_dir(workspace)
+        .args(["build", "-p", crate_name, "--target"])
+        .arg(&target_json)
         .args([
-            "build",
-            "-p",
-            crate_name,
-            "--target",
-            "aarch64-unknown-none",
             "--release",
+            // Custom target ⇒ no prebuilt core/alloc; `compiler-builtins-mem`
+            // provides memcpy/memset (harmless if a future nightly defaults it).
+            "-Zbuild-std=core,alloc",
+            "-Zbuild-std-features=compiler-builtins-mem",
         ])
         .args(extra_args)
         .env("CARGO_TARGET_DIR", &target_dir)
+        // The servers' -T<user.ld> now comes from each crate's own build.rs
+        // (cfg-gated on target_os = "minixrs"); scrub any inherited rustflags
+        // so the kernel's -Tlinker.ld (or a user's env) can't leak in.
         .env_remove("RUSTFLAGS")
-        .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn cargo for {crate_name}: {e}"));
     if !status.success() {
         panic!("building {crate_name} (server ELF) failed");
     }
 
-    let elf = target_dir.join(format!("aarch64-unknown-none/release/{crate_name}"));
+    let elf = target_dir.join(format!("aarch64-unknown-minixrs/release/{crate_name}"));
     assert!(
         elf.exists(),
         "{crate_name} ELF missing at {}",
