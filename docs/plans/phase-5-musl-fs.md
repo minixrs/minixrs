@@ -769,7 +769,7 @@ not rediscover them):
 | Halve the `CDEV_MAX_IO` clamp | `cdev.short ok n=256` → `cdev.short FAIL rc=128` |
 | Reply `OK` instead of the byte count | `cdev.write ok match=1` → `cdev.write FAIL rc=0` |
 
-### Slice 5.4: VFS write path — fd 1/2 → CDEV(TTY) ◀ ready (branch `feature/slice-5.4-vfs-write`, pending merge)
+### Slice 5.4: VFS write path — fd 1/2 → CDEV(TTY) ✓ shipped (PR #45, merged 2026-07-26)
 
 **Goal:** the POSIX write shape: user proc → VFS → TTY, single copy.
 
@@ -903,7 +903,7 @@ not rediscover them):
 | Drop the `user_range_ok` pre-check | **nothing moves** — all 51 markers still pass. Confirms it is defence in depth and the kernel's page-table walk is the load-bearing `EFAULT` gate |
 | Drop `write::validate`'s negative-length check | `vfs.deny ok n=4` → `vfs.deny FAIL bad-len` (the write with `len = -1` was accepted) |
 
-### Slice 5.5: exec ABI — SysV initial stack + minimal auxv ◀ next
+### Slice 5.5: exec ABI — SysV initial stack + minimal auxv ◀ ready (branch `feature/slice-5.5-exec-abi`, pending merge)
 
 **Goal:** D13's stack contract — musl's crt runs unpatched.
 
@@ -919,7 +919,101 @@ nothing) but proves the frame doesn't break a raw `_start`.
 `[exec]` trace line reports `sp`/argc/auxv count and joins the expected
 file.
 
-### Slice 5.6: musl submodule + `src/minix` port + boot-embedded hello — **milestone A**
+**As built** (differences from the sketch above, recorded so later slices do
+not rediscover them — note the Scope paragraph's "worker … reads nothing" is
+superseded: worker validates the frame, which is where most of this slice's
+proof lives):
+
+- **`AT_PHDR` ships live, not as a dead conditional.** "When the first PT_LOAD
+  covers the ELF header" was, as written, *never*: lld's default aarch64
+  `max-page-size` (64 KiB) puts the first `PT_LOAD` at file offset `0x10000`,
+  while `e_phoff = 64` sits in the unmapped `[0, 0x10000)` prefix of every binary
+  this repo builds. So `userland/worker/user.ld` took the `FILEHDR PHDRS` idiom
+  (`text PT_LOAD FILEHDR PHDRS FLAGS(5)` plus
+  `. = 0x00100000 + SIZEOF_HEADERS`), which lld accepts and which yields
+  `PT_LOAD` #0 at offset `0x0` / vaddr `0x100000` — both still page-aligned, so
+  the loader's strict `p_offset`/`p_vaddr` checks are untouched. The entry moves
+  to `0x101000`. Server `user.ld`s were **not** changed: boot-loaded images keep
+  the bare-`sp` path and never see an auxv.
+- **The frame is proved at EL0, not by the kernel trace.** `[exec]` only says the
+  kernel *thinks* it wrote a frame, so `worker` reads its own `sp` and checks it
+  byte for byte. That is what its `_start` is `#[unsafe(naked)]` for — `mov x0,
+  sp` is the first instruction the process executes, where an ordinary prologue
+  could perturb `sp` first and taking the value in `x0` from the kernel would
+  prove nothing about `SP_EL0`. The `#[cfg(all(not(test), target_arch =
+  "aarch64"))]` split with a plain fallback is copied from `minix-ipc`'s SVC asm,
+  so CI's x86_64 clippy job still checks the crate.
+- **The verdict rides out as the exit status.** `worker` runs once per init fork
+  cycle, so an unconditional success line would flood the console; it exits with
+  `0` or the number of the first failing check, and init — which reaps it anyway
+  — prints that one status. A failure additionally writes
+  `minix.rs worker: stack FAIL` to fd 2 directly, belt and braces for the case
+  where the status path is itself what regressed. Both spellings are on the
+  forbidden list.
+- **"The first reap" is not the worker's reap, and mutation testing is the only
+  reason that was caught.** init's report keyed on its first `PM_WAIT` reply, and
+  the marker passed — but PM's `mproc::seed` parents the demo stubs to init, and
+  stub D is SIGSEGV'd on purpose early in boot, so init's first `wait()` reaps
+  *that* zombie, whose status is 0. The marker was printing `exec stack ok`
+  regardless of the frame: the argc mutation produced 81 `worker: stack FAIL`
+  lines and a cheerful `exec stack ok` beside them. The fix is to key on the
+  **pid** of the first child init forks (`alloc_pid` never returns 0, so 0 is the
+  "not yet" sentinel) and report when `wait()` replies that pid. Ordering in the
+  log now confirms it: `exec stack ok` follows the first
+  `[ksys SYS_EXIT] target=w`, where before it preceded it. Note this was invisible
+  under `--no-default-features`, where there are no stubs and the first reap
+  really is the worker's — a marker can be right in one build configuration and
+  vacuous in the other.
+- **Silence must not read as success — the second vacuous-marker hole.** The
+  verdict was first encoded as "exit 0 = pass", which is wrong for the same
+  reason the first-reap keying was: PM's `mproc::handle_kill_in` marks a
+  signalled process a zombie **without touching `exit_status`**, so a worker that
+  died before reporting is reaped with status 0. That is not hypothetical —
+  `validate` dereferences pointers taken out of the frame, so a sufficiently
+  malformed frame faults it, and VM's out-of-region arm raises SIGSEGV rather
+  than the `!!! EL0 data abort` banner the forbidden list watches for. A pass is
+  therefore the positive sentinel `execstack::EXEC_STACK_PROBE_PASS` (`0x5A`),
+  and status 0 prints `exec stack FAIL no-verdict`, naming the case. General
+  rule for probes reporting through an exit status: **encode the pass, not the
+  absence of a failure.**
+- **What is deliberately missing from the auxv is now documented against the
+  fork.** `execstack.rs` records why `AT_RANDOM`, the uid/gid/`AT_SECURE` block,
+  `AT_HWCAP`/`AT_SYSINFO`/`AT_EXECFN` are safe to omit today — musl decodes into
+  `size_t aux[AUX_CNT] = { 0 }`, so an absent entry reads 0, `__init_ssp(NULL)`
+  falls back to an address-derived canary, and an all-zero uid/gid/secure block
+  takes `__init_libc`'s early return. Slice 5.6 should confirm the SSP path
+  actually runs and decide whether an address-derived canary is acceptable;
+  `AT_PAGESZ` is the one entry that is **not** optional (`libc.page_size =
+  aux[AT_PAGESZ]` is unconditional), which is why it is always emitted.
+- **Frame failures tear down the fresh image.** `build_initial_stack` returning
+  `None` (→ `E2BIG`) or `copy_to_user_as` failing (→ `ENOMEM`) both run
+  `do_exit::teardown_addrspace` on the image just built and return before the
+  point of no return, so the target stays cleanly on its old image — extending
+  the existing `load_exec_image`-failure invariant rather than weakening it. The
+  copy's errno is relayed verbatim rather than flattened into `ENOMEM` (TTY's
+  `SYS_SAFECOPY` rule): both are kernel bugs here, but `EFAULT` and `ENOMEM`
+  point at different ones.
+- **`load_into` now returns a `LoadedElf`** (`entry`, `phdr_va: Option<u64>`,
+  `phnum`, `phentsize`) instead of a bare entry VA, with `phdr_va` computed in the
+  existing segment loop from the first `PT_LOAD` whose *file* range covers the
+  header table. `ExecImage` carries the three new fields; `load_boot_server` is
+  otherwise untouched.
+- **No `gen-c-headers` entry.** The `AT_*` values are the Linux/SysV ones and musl
+  defines them itself — emitting them would be the opposite of D13's
+  keep-the-diff-minimal principle.
+
+**Mutation tests run** (each applied, observed, reverted):
+
+| Mutation | Observed |
+|---|---|
+| Write `argc = 0` | `exec stack ok` → `exec stack FAIL code=2` (worker's argc check), plus `worker: stack FAIL`. **On the first attempt this printed `ok` beside 81 `worker: stack FAIL` lines** — the stale-zombie defect above, found here and fixed |
+| Drop the `AT_PAGESZ` pair | `[exec] … auxv=3` (so that marker vanishes) and `exec stack FAIL code=6` |
+| Off-by-one on the `argv[0]` string VA | `exec stack FAIL code=3` — the argv[0] check dereferences the stored pointer, so a pointer one byte off reads `"orker\0"` |
+| Subtract 8 from `sp` (break 16-alignment) | `exec stack FAIL code=1`. No EL0 alignment abort — worker's own check fires first, which is the point of putting alignment first |
+| Skip the `copy_to_user_as` | `exec stack FAIL code=2`: worker reads the zeroed stack page, so `argc` is 0. Confirms the frame really arrives via the copy and is not somehow present already |
+| Revert `user.ld`'s `FILEHDR PHDRS` | `[exec] … auxv=1` (the `auxv=4` marker vanishes) and `exec stack FAIL code=7` — the phdr check. Confirms the `AT_PHDR` arm is live rather than dead |
+
+### Slice 5.6: musl submodule + `src/minix` port + boot-embedded hello — **milestone A** ◀ next
 
 **Goal:** a C program built against the musl fork runs on minix.rs (exec'd
 from the boot archive; the FS comes later).
