@@ -206,3 +206,32 @@ minix.rs init: vfs.long ok match=1
 # it is a legal no-op, not a denial, and `write::validate` covers it (and the
 # check order that keeps it from issuing a grant) in host tests.
 minix.rs init: vfs.deny ok n=4
+
+# ---------------------------------------------------------------------------
+# Slice 5.5: the exec ABI -- a SysV initial stack, so musl's crt runs unpatched.
+# ---------------------------------------------------------------------------
+
+# The kernel's half: SYS_EXEC now builds [argc][argv][NULL][envp NULL][auxv]
+# [AT_NULL] on the new image's stack page and points sp_el0 at it. auxv=4 is the
+# full set -- AT_PHDR/AT_PHNUM/AT_PHENT/AT_PAGESZ -- and the first three appear
+# only because userland/worker/user.ld uses the `FILEHDR PHDRS` idiom, so the
+# first PT_LOAD covers the ELF header. Revert that link change and this becomes
+# auxv=1: the count is what makes the conditional arm observable rather than
+# quietly dead. sp is last because it is the run-variable field.
+[exec] argc=1 envc=0 auxv=4 sp=0x
+
+# ...and the EL0 half, which is the one that actually proves anything: the trace
+# above only says the kernel *thinks* it wrote a frame. `worker`'s _start is
+# naked (`mov x0, sp` is the first instruction it runs, so no prologue can
+# perturb the value) and it checks the frame byte for byte -- alignment, argc,
+# the argv[0] string, both NULL terminators, AT_PAGESZ, and a phdr readable at
+# AT_PHDR. The verdict leaves as its exit status rather than a console line,
+# because worker runs once per init fork cycle; init reaps that child -- matched
+# by pid, since PM parents the demo stubs to init and stub D's early SIGSEGV
+# would otherwise be the first thing reaped -- and prints its status once. A
+# failing check turns this into `exec stack FAIL code=N` (forbidden), naming
+# which property broke. Success is the positive sentinel EXEC_STACK_PROBE_PASS,
+# not 0: PM's kill path zombifies a signalled process without setting
+# exit_status, so a worker that faulted before reporting is reaped with 0 --
+# which prints `exec stack FAIL no-verdict` rather than passing silently.
+minix.rs init: exec stack ok
