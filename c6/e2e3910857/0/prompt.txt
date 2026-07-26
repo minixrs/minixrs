@@ -1,0 +1,9 @@
+grok's review shows Top issues
+
+1. [suggestion] CLAUDE.md:186 — Still teaches cfg_attr(target_os = "none", …); should be "minixrs"
+2. [suggestion] CLAUDE.md:192 — Still claims per-crate CARGO_TARGET_DIR; now shared target/minixrs-user
+3. [suggestion] kernel/build.rs:203 — Per-server rerun-if-changed misses each crate’s build.rs (stale MXBI ELF if only that file changes)
+4. [suggestion] CLAUDE.md:185 — Shared dep watch list omits minixrs-abi-note
+5. [nit] kernel-shared/src/brand.rs:45 — Awkward ELFDATA2LSB comment placement
+6. [nit] book/src/build.md:162 — Public docs still say target_os = "none"
+7. [nit] Nine identical build.rs copies — fine for M1; propagation risk later
