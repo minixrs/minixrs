@@ -13,3 +13,11 @@
 !!! EL0 instruction abort
 !!! EL0 data abort
 do_irq: unexpected INTID
+# Slice 5.5: the exec initial stack failed its EL0 check. Both spellings are
+# listed because they fail independently: worker writes its own line straight to
+# fd 2 (belt and braces, in case the exit-status path is what broke), and init
+# prints the reaped verdict with the number of the first failing check. Either
+# one appearing means a process is being handed a frame musl's crt could not
+# read -- and neither can appear in a healthy boot.
+minix.rs worker: stack FAIL
+minix.rs init: exec stack FAIL
