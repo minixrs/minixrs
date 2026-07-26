@@ -164,7 +164,7 @@ pub const SYS_GETINFO_NAME_LEN: usize = 16;
 // ---------------------------------------------------------------------------
 
 /// Point a frozen (`RTS_NO_PRIV`) target at the shared USER privilege slot
-/// and release it. The USER slot carries `USR_T` traps, `ipc_to` = {PM}, and
+/// and release it. The USER slot carries `USR_T` traps, `ipc_to` = {PM, VFS}, and
 /// an empty kernel-call mask — ordinary user processes make no kernel calls.
 /// The 4.6 fork path leans on this to hand forked children a privilege.
 pub const PRIVCTL_SET_USER: i32 = 1;
@@ -322,19 +322,94 @@ pub const PM_GRANT_TEST: i32 = PM_RQ_BASE + 5;
 pub const NR_PM_MSGS: usize = 6;
 
 // The PM range sits strictly above the kernel-call range and strictly below
-// CDEV's (and therefore every other) server request range and the NOTIFY marker.
+// VFS's (and therefore every other) server request range and the NOTIFY marker.
 const _: () = assert!(PM_RQ_BASE > KERNEL_CALL + (NR_KERN_CALLS as i32 - 1));
-const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < CDEV_RQ_BASE);
+const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VFS_RQ_BASE);
 const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
+// ---------------------------------------------------------------------------
+// VFS (virtual file system) request numbers — `m_type` values for messages
+// addressed to VFS, the POSIX file-descriptor layer (slice 5.4).
+//
+// Like the PM/CDEV/VM/DS/SEF/SCHED ranges these are *server IPC requests*, not
+// kernel calls. `0x800` was reserved for VFS when the CDEV band claimed `0xB00`,
+// keeping the bands in numeric order between PM (`0x700`) and CDEV; `0x900` and
+// `0xA00` stay free for the two bands Phase 5 still owes, BDEV (5.7) and MFS
+// (5.8). Numbering is minix.rs-specific — MINIX 3 carries VFS's call numbers in
+// `include/minix/callnr.h` as POSIX syscall numbers, a layer minix.rs does not
+// have (a libc wrapper builds the server request directly).
+//
+// Unlike the CDEV band, the payload carries a **raw buffer address**, not a
+// grant id: VFS's client is an ordinary user process with no grant table and no
+// server-grade privilege. VFS is the one that grants — it issues a `CPF_MAGIC`
+// grant naming the *caller's* buffer with the driver as grantee, so the bytes
+// move in a single copy from the caller straight into the driver and VFS never
+// touches them. The **granter of that magic grant is the kernel-stamped
+// `m_source`, never a payload field**: VFS holds `SYS_PROC`, so a caller-supplied
+// owner would let any VFS client aim a privileged cross-address-space copy at a
+// third party (the confused-deputy rule the CDEV band's comment states, applied
+// to the granting side).
+// ---------------------------------------------------------------------------
+
+/// Base for VFS server request `m_type` values.
+pub const VFS_RQ_BASE: i32 = 0x800;
+
+/// User → VFS: `write(fd, buf, len)`.
+///
+/// Payload: the file descriptor in [`VFS_FD_OFF`]`..+4` (i32), the byte count in
+/// [`VFS_LEN_OFF`]`..+4` (i32), and the buffer's address *in the caller's own
+/// address space* in [`VFS_BUF_OFF`]`..+8` (u64).
+///
+/// Reply `m_type` is the **number of bytes written** (`>= 0`; `0` is legal), or a
+/// negative errno — identical to [`CDEV_WRITE`]'s contract, and exactly what
+/// musl's `write()` returns. `EBADF` for a descriptor that is not open,
+/// `EINVAL` for a negative length, `EFAULT` for a buffer outside the caller's
+/// user-address range.
+///
+/// A short write from the underlying driver is **not** visible here: [`CDEV_MAX_IO`]
+/// is a driver staging detail, so VFS re-sends `CDEV_WRITE` with `offset` advanced
+/// until the buffer is out and reports the total. A partial transfer that then
+/// fails still reports the bytes already written — POSIX's rule that a partial
+/// success beats an error.
+pub const VFS_WRITE: i32 = VFS_RQ_BASE;
+
+/// Number of VFS server requests defined so far. Locks VFS's dispatch coverage
+/// the way `NR_DS_REQUESTS` locks the DS server.
+pub const NR_VFS_MSGS: usize = 1;
+
+/// Offset of the file descriptor in a `VFS_WRITE` payload (i32).
+pub const VFS_FD_OFF: usize = 0;
+/// Offset of the requested byte count in a `VFS_WRITE` payload (i32).
+pub const VFS_LEN_OFF: usize = 4;
+/// Offset of the caller's buffer address in a `VFS_WRITE` payload (u64, so
+/// 8-aligned relative to the message base — the payload itself starts at message
+/// offset 8, and 8 + 8 is a multiple of 8; the same reasoning
+/// [`CDEV_OFFSET_OFF`] documents).
+pub const VFS_BUF_OFF: usize = 8;
+
+// The VFS range sits strictly above the PM range and strictly below CDEV's (and
+// therefore every other server request range) and the NOTIFY marker.
+const _: () = assert!(VFS_RQ_BASE > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
+const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < CDEV_RQ_BASE);
+const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
+// The `VFS_WRITE` payload fields are ordered, non-overlapping, and fit the
+// 96-byte payload. `VFS_BUF_OFF` is 8 wide (u64); the rest are 4 (i32).
+const _: () = assert!(VFS_FD_OFF + 4 <= VFS_LEN_OFF);
+const _: () = assert!(VFS_LEN_OFF + 4 <= VFS_BUF_OFF);
+const _: () = assert!(VFS_BUF_OFF + 8 <= 96);
+// The u64 buffer address must be 8-aligned within the message, whose payload
+// starts at byte 8.
+const _: () = assert!((8 + VFS_BUF_OFF).is_multiple_of(8));
 
 // ---------------------------------------------------------------------------
 // CDEV (character device) request numbers — `m_type` values for messages
 // addressed to a character-device driver, TTY being the first (slice 5.3).
 //
-// Like the PM/VM/DS/SEF/SCHED ranges these are *server IPC requests*, not kernel
-// calls. `0xB00` keeps the bands in numeric order between PM (`0x700`) and VM
-// (`0xC00`) while leaving `0x800` / `0x900` / `0xA00` free for the three bands
-// Phase 5 still owes: VFS (slice 5.4), MFS (5.8), and BDEV (5.7). Numbering is
+// Like the PM/VFS/VM/DS/SEF/SCHED ranges these are *server IPC requests*, not
+// kernel calls. `0xB00` keeps the bands in numeric order between VFS (`0x800`,
+// claimed in slice 5.4) and VM (`0xC00`) while leaving `0x900` / `0xA00` free for
+// the two bands Phase 5 still owes: BDEV (5.7) and MFS (5.8). Numbering is
 // minix.rs-specific — MINIX 3 carries `CDEV_*` in `include/minix/com.h` with its
 // own values, which minix.rs does not inherit because its device protocol is
 // narrower (no `CDEV_REPLY` message class; a driver replies to the SENDREC).
@@ -396,9 +471,9 @@ pub const CDEV_MINOR_CONSOLE: i32 = 0;
 /// driver's `main` frame on a one-page stack.
 pub const CDEV_MAX_IO: usize = 256;
 
-// The CDEV range sits strictly above the PM range and strictly below VM's (and
+// The CDEV range sits strictly above the VFS range and strictly below VM's (and
 // therefore every other server request range) and the NOTIFY marker.
-const _: () = assert!(CDEV_RQ_BASE > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
+const _: () = assert!(CDEV_RQ_BASE > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
 const _: () = assert!(CDEV_RQ_BASE + (NR_CDEV_MSGS as i32 - 1) < VM_RQ_BASE);
 const _: () = assert!(CDEV_RQ_BASE + (NR_CDEV_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
@@ -778,6 +853,7 @@ mod tests {
             for vm in [VM_PAGEFAULT, VM_BRK, VM_MMAP, VM_MUNMAP, VM_FORK] {
                 assert_ne!(r, vm);
             }
+            assert_ne!(r, VFS_WRITE);
             assert_ne!(r, CDEV_WRITE);
             assert_ne!(r, SEF_INIT);
             assert_ne!(r, SEF_SIGNAL);
@@ -827,6 +903,7 @@ mod tests {
             SCHEDULING_SET_NICE,
         ] {
             for other in [
+                VFS_WRITE,
                 CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
@@ -884,9 +961,9 @@ mod tests {
             assert_eq!(*m, PM_RQ_BASE + i as i32);
         }
         assert_eq!(msgs.len(), NR_PM_MSGS);
-        // The whole PM range stays below CDEV's (and therefore every other
+        // The whole PM range stays below VFS's (and therefore every other
         // server request range and the NOTIFY marker).
-        assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < CDEV_RQ_BASE);
+        assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VFS_RQ_BASE);
     }
 
     #[test]
@@ -896,6 +973,7 @@ mod tests {
         // server's m_type dispatcher and the SEF classifier never collide.
         for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC, PM_GRANT_TEST] {
             for other in [
+                VFS_WRITE,
                 CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
@@ -915,10 +993,102 @@ mod tests {
                 assert_ne!(m, other);
             }
             assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
+            assert!(m < VFS_RQ_BASE);
+            assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
+            assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn vfs_msgs_contiguous_from_base() {
+        // VFS requests are contiguous from VFS_RQ_BASE; NR_VFS_MSGS locks the
+        // VFS server's dispatch coverage.
+        let msgs = [VFS_WRITE];
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(*m, VFS_RQ_BASE + i as i32);
+        }
+        assert_eq!(msgs.len(), NR_VFS_MSGS);
+        assert_eq!(VFS_RQ_BASE, 0x800);
+    }
+
+    #[test]
+    fn vfs_msgs_distinct_from_other_ranges() {
+        // Each VFS request must stay distinct from every other band and the
+        // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a server's m_type
+        // dispatcher and the SEF classifier never collide. VFS sits between PM
+        // and CDEV, which is what its two bounds assert.
+        for m in [VFS_WRITE] {
+            for other in [
+                PM_GETPID,
+                PM_FORK,
+                PM_EXIT,
+                PM_WAIT,
+                PM_EXEC,
+                PM_GRANT_TEST,
+                CDEV_WRITE,
+                VM_PAGEFAULT,
+                VM_BRK,
+                VM_MMAP,
+                VM_MUNMAP,
+                VM_FORK,
+                DS_PUBLISH,
+                DS_RETRIEVE,
+                DS_CHECK,
+                SEF_INIT,
+                SEF_SIGNAL,
+                SCHEDULING_NO_QUANTUM,
+                SCHEDULING_START,
+                SCHEDULING_STOP,
+                SCHEDULING_SET_NICE,
+            ] {
+                assert_ne!(m, other);
+            }
+            assert!(m > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
             assert!(m < CDEV_RQ_BASE);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
         }
+    }
+
+    #[test]
+    fn vfs_write_payload_offsets_are_ordered_and_disjoint() {
+        // Every field the request defines, in declaration order, with its width:
+        // the i32 fields are 4 bytes, the u64 buffer address is 8.
+        //
+        // Unlike `CDEV_WRITE` this payload carries a raw buffer address rather
+        // than a grant id — VFS's client is an ordinary user process with no
+        // grant table. VFS makes the grant itself, naming the caller's buffer,
+        // and takes the owner from the kernel-stamped `m_source`. There is
+        // deliberately no owner/granter field here for the same reason there is
+        // none in `CDEV_WRITE`: VFS holds `SYS_PROC`, so a caller-supplied owner
+        // would aim a privileged cross-address-space copy at a third party.
+        let fields = [
+            ("fd", VFS_FD_OFF, 4),
+            ("len", VFS_LEN_OFF, 4),
+            ("buf", VFS_BUF_OFF, 8),
+        ];
+        assert_eq!(fields.len(), 3, "a VFS_WRITE payload field was added");
+        assert_eq!(VFS_FD_OFF, 0, "the first field must start the payload");
+
+        for pair in fields.windows(2) {
+            let (name, off, width) = pair[0];
+            let (next_name, next_off, _) = pair[1];
+            assert!(
+                off + width <= next_off,
+                "{name} ({off}..{}) overlaps {next_name} at {next_off}",
+                off + width,
+            );
+        }
+        let (last_name, last_off, last_width) = fields[fields.len() - 1];
+        assert!(
+            last_off + last_width <= 96,
+            "{last_name} runs past the 96-byte payload",
+        );
+
+        // The u64 field must be 8-aligned *within the message*, whose payload
+        // starts at byte 8 — so an even multiple of 8 here.
+        assert_eq!((8 + VFS_BUF_OFF) % 8, 0);
     }
 
     #[test]
@@ -945,6 +1115,7 @@ mod tests {
                 PM_WAIT,
                 PM_EXEC,
                 PM_GRANT_TEST,
+                VFS_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -962,7 +1133,7 @@ mod tests {
             ] {
                 assert_ne!(m, other);
             }
-            assert!(m > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
+            assert!(m > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
             assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
             assert!(m < VM_RQ_BASE);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
@@ -971,16 +1142,17 @@ mod tests {
     }
 
     #[test]
-    fn cdev_band_sits_at_0xb00_leaving_three_bands_free() {
-        // The band base is load-bearing for numeric ordering: PM (0x700) below,
-        // VM (0xC00) above, with 0x800 / 0x900 / 0xA00 reserved for the three
-        // bands Phase 5 still owes (VFS 5.4, MFS 5.8, BDEV 5.7). Nothing may
-        // claim one of those without also moving whichever band would then be
-        // out of numeric order.
+    fn cdev_band_sits_at_0xb00_leaving_two_bands_free() {
+        // The band base is load-bearing for numeric ordering: VFS (0x800, taken
+        // in slice 5.4) below, VM (0xC00) above, with 0x900 / 0xA00 still
+        // reserved for the two bands Phase 5 owes (BDEV 5.7, MFS 5.8). Nothing
+        // may claim one of those without also moving whichever band would then
+        // be out of numeric order.
         assert_eq!(CDEV_RQ_BASE, 0xB00);
-        for reserved in [0x800, 0x900, 0xA00] {
+        for reserved in [0x900, 0xA00] {
             for taken in [
                 PM_RQ_BASE,
+                VFS_RQ_BASE,
                 CDEV_RQ_BASE,
                 VM_RQ_BASE,
                 SEF_RQ_BASE,
@@ -1050,6 +1222,7 @@ mod tests {
         // classifier can never collide. (The base-vs-VM-range ordering is
         // additionally locked by a module-level const-assert.)
         for m in [SEF_INIT, SEF_SIGNAL] {
+            assert_ne!(m, VFS_WRITE);
             assert_ne!(m, CDEV_WRITE);
             assert_ne!(m, VM_PAGEFAULT);
             assert_ne!(m, VM_BRK);
