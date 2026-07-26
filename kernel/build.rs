@@ -111,9 +111,9 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // Libraries every server links against. Watched once (not per-server) so a
     // change re-runs build.rs and re-embeds. Each is watched as a directory so
     // cargo covers every submodule recursively — otherwise an edit to e.g. a new
-    // `minix-ipc` module or DS request number would embed stale ELFs.
+    // `minixrs-ipc` module or DS request number would embed stale ELFs.
     for path in [
-        workspace.join("minix-ipc/src"),
+        workspace.join("minixrs-ipc/src"),
         workspace.join("server-rt/src"),
         workspace.join("kernel-shared/src"),
         workspace.join("minixrs-abi-note/src"),
@@ -167,10 +167,169 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
         modules.push((*proc_nr, name.to_string(), bytes));
     }
 
+    // `hello` — the first C program (slice 5.6), built from userland/hello
+    // against the musl fork rather than by cargo. Packed under proc_nr -1 like
+    // `worker`: resolvable by name for SYS_EXEC, never boot-loaded.
+    //
+    // When the musl sysroot is absent or stale, fall back to packing the
+    // `worker` ELF *under the name* `hello`. Presence-checking the SYSROOT
+    // rather than the submodule is deliberate: a fresh clone that ran
+    // `git submodule update` but not `tools/build-musl.sh` would otherwise
+    // trigger a multi-minute musl build from inside a cargo build script. The
+    // fallback keeps every boot green with no feature flag — only the
+    // hello-specific markers go missing.
+    let hello_bytes = match build_hello(workspace) {
+        Some(bytes) => bytes,
+        None => {
+            println!(
+                "cargo::warning=musl sysroot missing or stale; packing `worker` as `hello`. \
+                 Run tools/build-musl.sh to build the real C program (slice 5.6)."
+            );
+            modules
+                .iter()
+                .find(|(_, name, _)| name == "worker")
+                .map(|(_, _, bytes)| bytes.clone())
+                .expect("worker must be packed before the hello fallback")
+        }
+    };
+    // Same pack-time brand gate the servers get. For the real C build this is
+    // what turns a regressed crt1.c brand block into a *build* failure rather
+    // than a boot failure.
+    if let Err(e) = minixrs_kernel_shared::brand::scan_brand(&hello_bytes) {
+        panic!("hello: missing/bad minixrs brand: {e:?}");
+    }
+    modules.push((-1, "hello".to_string(), hello_bytes)); // EXEC_ONLY_PROC_NR
+
     let archive = pack_mxbi(&modules);
     let archive_path = out_dir.join("boot_image.mxbi");
     std::fs::write(&archive_path, &archive).expect("writing boot-image archive");
     println!("cargo:rustc-env=BOOT_IMAGE_PATH={}", archive_path.display());
+}
+
+/// Build `userland/hello` — the slice-5.6 C milestone — against the musl fork's
+/// sysroot, returning the linked ELF's bytes.
+///
+/// Returns `None` when the sysroot is missing or stale, so the caller can fall
+/// back to packing `worker` under the name `hello`. It deliberately does **not**
+/// build the sysroot itself: that is `tools/build-musl.sh`'s job, and kicking off
+/// a multi-minute musl build from inside a cargo build script would turn a fresh
+/// clone's first `cargo kernel-aarch64` into a mystery.
+///
+/// This is not a cargo crate — it is a `.c` and a `.ld` compiled and linked here
+/// directly, because cargo has no notion of a C program linked against a
+/// foreign libc. clang is already a hard build requirement (the kernel's `.S`
+/// files go through it) and `rust-lld` ships with the pinned toolchain, so no
+/// platform linker and no Homebrew LLVM are involved.
+fn build_hello(workspace: &std::path::Path) -> Option<Vec<u8>> {
+    let src = workspace.join("userland/hello/hello.c");
+    let script = workspace.join("userland/hello/hello.ld");
+    let sysroot = workspace.join("target/musl-sysroot");
+    let stamp = sysroot.join(".stamp");
+
+    for path in [&src, &script, &stamp] {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+
+    if !stamp.is_file() || !sysroot.join("lib/libc.a").is_file() {
+        return None;
+    }
+
+    let sysroot_inc = sysroot.join("include");
+    let lib = sysroot.join("lib");
+    let out = workspace.join("target/hello");
+    std::fs::create_dir_all(&out).expect("creating target/hello");
+    let obj = out.join("hello.o");
+    let elf = out.join("hello");
+
+    // -nostdinc + -isystem <sysroot>/include: the fork's headers and nothing
+    // else. The host libc must not creep in — its errno values differ.
+    let cc = std::process::Command::new("clang")
+        .args(["--target=aarch64-unknown-linux-musl", "-nostdinc"])
+        .arg("-isystem")
+        .arg(&sysroot_inc)
+        .args(["-ffreestanding", "-O2", "-Wall", "-Wextra", "-Werror", "-c"])
+        .arg("-o")
+        .arg(&obj)
+        .arg(&src)
+        .status()
+        .expect("running clang for userland/hello");
+    assert!(
+        cc.success(),
+        "clang failed to compile userland/hello/hello.c"
+    );
+
+    // musl's vfprintf pulls in soft-float binary128 helpers (__multf3,
+    // __floatsitf, …): aarch64's `long double` is IEEE quad with no hardware
+    // support, and musl's configure finds no runtime library on this host. The
+    // pinned toolchain's own `compiler_builtins`, built for the custom target by
+    // the server builds above, exports exactly those C-ABI names — so the
+    // dependency is satisfied from the toolchain rather than by adding an
+    // LLVM/compiler-rt build to the tree. (The *prebuilt* aarch64-unknown-none
+    // rlib in the rustup sysroot does NOT export them; only the build-std one
+    // does, which is why this globs the nested target dir.)
+    let builtins = find_compiler_builtins(workspace)
+        .expect("compiler_builtins rlib not found under target/minixrs-user");
+
+    let lld = rustlib_bin("rust-lld").expect("rust-lld not found in the Rust sysroot");
+    let link = std::process::Command::new(&lld)
+        .args(["-flavor", "gnu", "-T"])
+        .arg(&script)
+        .arg("-o")
+        .arg(&elf)
+        .arg(lib.join("crt1.o"))
+        .arg(lib.join("crti.o"))
+        .arg(&obj)
+        .arg(lib.join("libc.a"))
+        .arg(&builtins)
+        .arg(lib.join("crtn.o"))
+        // D13: 4 KiB pages, and no two PT_LOADs sharing a page — the kernel's
+        // loader maps segment-by-segment with per-segment permissions.
+        .args([
+            "-z",
+            "max-page-size=4096",
+            "-z",
+            "separate-loadable-segments",
+        ])
+        .status()
+        .expect("running rust-lld for userland/hello");
+    assert!(link.success(), "rust-lld failed to link userland/hello");
+
+    Some(std::fs::read(&elf).expect("reading the linked hello ELF"))
+}
+
+/// Locate the `compiler_builtins` rlib the nested `-Zbuild-std` builds produced.
+fn find_compiler_builtins(workspace: &std::path::Path) -> Option<PathBuf> {
+    let deps = workspace.join("target/minixrs-user/aarch64-unknown-minixrs/release/deps");
+    let mut hits: Vec<PathBuf> = std::fs::read_dir(&deps)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("libcompiler_builtins-") && n.ends_with(".rlib"))
+        })
+        .collect();
+    // Deterministic pick if a stale hash lingers beside a fresh one.
+    hits.sort();
+    hits.pop()
+}
+
+/// Path to a tool shipped in the Rust sysroot's `lib/rustlib/*/bin`.
+fn rustlib_bin(name: &str) -> Option<PathBuf> {
+    let sysroot = std::process::Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()?;
+    let sysroot = PathBuf::from(String::from_utf8(sysroot.stdout).ok()?.trim());
+    let rustlib = sysroot.join("lib/rustlib");
+    for entry in std::fs::read_dir(&rustlib).ok()?.flatten() {
+        let candidate = entry.path().join("bin").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Build one user-space crate for the custom `aarch64-unknown-minixrs` target

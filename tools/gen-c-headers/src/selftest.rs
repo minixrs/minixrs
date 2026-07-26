@@ -11,10 +11,10 @@ use crate::builder::CFile;
 
 /// The generated headers, in dependency order.
 pub const HEADERS: [&str; 4] = [
-    "minix/ipc.h",
-    "minix/com.h",
-    "minix/callnr.h",
-    "minix/errno.h",
+    "minixrs/ipc.h",
+    "minixrs/com.h",
+    "minixrs/callnr.h",
+    "minixrs/errno.h",
 ];
 
 /// Render `abi-selftest.c`.

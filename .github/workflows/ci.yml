@@ -103,16 +103,17 @@ jobs:
               -Itarget/gen-c-headers/include \
               target/gen-c-headers/abi-selftest.c
           done
-      # Compiles <minix/errno.h>'s opt-in POSIX block against the generated
+      # Compiles <minixrs/errno.h>'s opt-in POSIX block against the generated
       # stand-in. A syntax and macro-spelling check only — the stand-in is
       # generated from the same Rust table the assertions check. The real value
-      # check runs against the musl fork's bits/errno.h from slice 5.6 on.
+      # check runs against the musl fork's bits/errno.h in tools/build-musl.sh,
+      # on the qemu-smoke job (slice 5.6).
       - name: Syntax-check the opt-in errno assertions
         run: |
           clang -std=c11 -pedantic-errors -Wall -Wextra -Werror \
             -fsyntax-only -ffreestanding -nostdlibinc \
             --target=aarch64-unknown-linux-musl \
-            -DMINIX_ABI_CHECK_POSIX_ERRNO \
+            -DMINIXRS_ABI_CHECK_POSIX_ERRNO \
             -Itarget/gen-c-headers/abi-check \
             -Itarget/gen-c-headers/include \
             target/gen-c-headers/abi-selftest.c
@@ -175,7 +176,7 @@ jobs:
     name: miri (advisory)
     runs-on: ubuntu-latest
     # Advisory: miri may be unavailable for the very latest nightly, and only the
-    # pure crates below are testable under it (minix-ipc uses inline asm).
+    # pure crates below are testable under it (minixrs-ipc uses inline asm).
     continue-on-error: true
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -197,9 +198,15 @@ jobs:
     # satisfying chunk 1's "stable across a few PRs" bar. Keep the expectations
     # in tests/qemu-boot.expected timing-robust (first occurrences, never
     # counts) — shared-runner TCG timing is the flake risk.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
+      # submodules: external/musl is the musl fork (slice 5.6). Without it
+      # kernel/build.rs falls back to packing `worker` as `hello` and the C
+      # markers go missing — so the checkout must be recursive or this job
+      # silently stops testing the thing it exists to test.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          submodules: recursive
       - name: Install pinned toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -212,6 +219,28 @@ jobs:
           qemu-system-aarch64 --version
       - name: Fetch Limine bootloader (pinned commit)
         run: make -C external/limine
+      # The musl sysroot is expensive (a full libc build) and changes only when
+      # the submodule or the toolchain does — exactly what the key covers.
+      # tools/build-musl.sh writes the same identity into target/musl-sysroot/
+      # .stamp and re-uses the tree when it matches, so a cache hit makes the
+      # build step below a no-op.
+      #
+      # Keyed on the submodule's resolved COMMIT, not on a tracked file: the
+      # port branch is force-pushed on rebase, so external/musl/VERSION would
+      # stay identical across a port change and serve a stale sysroot.
+      - name: Resolve musl submodule commit
+        id: musl
+        run: echo "sha=$(git -C external/musl rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Cache musl sysroot
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target/musl-sysroot
+          key: musl-sysroot-${{ runner.os }}-${{ runner.arch }}-${{ steps.musl.outputs.sha }}-${{ hashFiles('rust-toolchain.toml', 'tools/build-musl.sh') }}
+      # No new tooling to install: clang is already a hard build requirement
+      # (build.rs assembles the kernel's .S files with it) and llvm-ar ships
+      # with the pinned Rust toolchain.
+      - name: Build the musl sysroot
+        run: tools/build-musl.sh
       - name: Build kernel
         run: cargo kernel-aarch64
       - name: Boot in QEMU (45 s wall clock)

@@ -126,7 +126,7 @@ MINIX has two kinds of calls, and minix.rs keeps both.
 message to the responsible server (`fork` → PM, file ops → VFS, `mmap` → VM). The
 program never traps into the kernel for these; it uses `SENDREC` to send a request
 and block for the reply. Today the user side of this path is exercised directly
-through the `minix-ipc` crate (by `init` and `worker`); the musl wrappers that
+through the `minixrs-ipc` crate (by `init` and `worker`); the musl wrappers that
 will make it transparent to C programs arrive in Phase 5.
 
 **Kernel calls (`SYS_*`)** — servers ask the kernel for privileged operations
@@ -171,7 +171,7 @@ The project is a single Cargo workspace:
 ```text
 kernel/          microkernel (no_std, no_main)
 kernel-shared/   message types, endpoints, call numbers (shared by all crates)
-minix-ipc/       user-space IPC library (the SVC trap stubs)
+minixrs-ipc/       user-space IPC library (the SVC trap stubs)
 server-rt/       server runtime / SEF framework
 servers/         pm, vfs, vm, rs, ds, sched
 drivers/         virtio-blk/net/console, memory, driver-rt   (stubs — planned)

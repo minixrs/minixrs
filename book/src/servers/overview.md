@@ -243,13 +243,29 @@ init and the boot with it), an unmapped buffer (`EFAULT`, from the kernel's
 page-table walk, which costs init no page fault because the copy engine walks
 rather than dereferences), and a negative length (`EINVAL`).
 
-init is a plain `minix-ipc` program — no SEF, because it is not a server. The rest
+init is a plain `minixrs-ipc` program — no SEF, because it is not a server. The rest
 of its body is a respawn loop: `PM_FORK`; the child (`m_type == 0`) issues
-`PM_EXEC` to become the `worker` binary, which runs a few `PM_GETPID` round-trips
-and exits; the parent (`m_type > 0`) issues `PM_WAIT` to reap the zombie, then
-loops. Each cycle recycles a fork-pool slot with a fresh endpoint generation —
-observable in the boot trace as repeating `SYS_FORK` → `SYS_EXEC name=worker` →
-`SYS_EXIT` triples, the proof that fork, exec, teardown, and reap all compose.
+`PM_EXEC` naming the binary it wants to become; the parent (`m_type > 0`) issues
+`PM_WAIT` to reap the zombie, then loops. Each cycle recycles a fork-pool slot
+with a fresh endpoint generation — observable in the boot trace as repeating
+`SYS_FORK` → `SYS_EXEC` → `SYS_EXIT` triples, the proof that fork, exec,
+teardown, and reap all compose.
+
+Since slice 5.6 the exec target is the *caller's* choice — `PM_EXEC` carries a
+name, rather than PM hardcoding one — and init **alternates** between two
+binaries, so the trace shows `name=worker` and `name=hello` on successive
+cycles:
+
+- **`worker`** is slice 5.5's exec-ABI probe. It validates the SysV initial
+  stack against its own `sp` and reports the verdict as its exit status, which
+  init prints once (keyed on the child's *pid*, because PM parents the demo
+  stubs to init and stub D's deliberate SIGSEGV would otherwise be the first
+  thing reaped).
+- **`hello`** is slice 5.6's C milestone, linked against the musl fork.
+
+Alternating rather than switching is deliberate: retiring `worker` to make room
+for `hello` would have taken the exec-ABI proof down with it. See
+[C Library & musl Port](../libc/overview.md).
 
 The demo stubs A–D remain installed alongside init as a live regression battery:
 A↔B exercise the raw SEND/RECEIVE/SENDREC primitives, C exercises the

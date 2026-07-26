@@ -27,7 +27,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
 
 - **Slice 4.1** ✓ shipped (PR #23, merged 2026-06-14) —
   `server-rt` SEF framework + migrate VM onto it + finish
-  `minix-ipc`. Add `ipc_notify` / `ipc_sendnb` (new SVC `primitive` values).
+  `minixrs-ipc`. Add `ipc_notify` / `ipc_sendnb` (new SVC `primitive` values).
   Build `server-rt`: `sef_startup()` (learn own endpoint/name via
   `SYS_GETINFO(GET_WHOAMI)`, run `init_fresh` callback) and `sef_receive()`
   (wrap `ipc_receive(ANY, …)`, intercept SEF control messages — ping/signal/init
@@ -294,7 +294,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
 - **Slice 4.8** ✓ shipped (PR #31, merged 2026-07-18) — init
   (PID 1) + Phase 4 wrap-up + docs. **Phase 4 complete.** `init` becomes a real
   boot process: a freestanding `userland/init` ELF (fork/exec/wait respawn loop,
-  `minix-ipc` only — no SEF; `_start` + panic handler `not(test)`-gated; `user.ld`
+  `minixrs-ipc` only — no SEF; `_start` + panic handler `not(test)`-gated; `user.ld`
   copied from `worker`) packed into the MXBI archive by adding
   `("minixrs-init", …/init, 10)` to `build.rs`'s `servers` array. The existing
   boot loader loads it into `INIT_PROC_NR=10`, clears `RTS_NO_PRIV`, and enqueues
@@ -329,7 +329,7 @@ ELF + the generalized `load_boot_server` path — no new boot priv wiring.
 
 Aggregate scope (Phase 4 as a whole):
 
-- `minix-ipc`: NOTIFY + SENDNB primitives
+- `minixrs-ipc`: NOTIFY + SENDNB primitives
 - `server-rt`: SEF startup + receive loop + init/signal callbacks (minimal subset)
 - Multi-module boot-image archive (MXBI) + generalized server loader
 - Kernel calls made real: `SYS_FORK`, `SYS_EXEC`, `SYS_EXIT`, `SYS_PRIVCTL`,

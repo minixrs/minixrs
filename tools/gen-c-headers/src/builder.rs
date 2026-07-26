@@ -203,11 +203,11 @@ mod tests {
     #[test]
     fn guards_open_and_close_the_same_name() {
         let mut f = CFile::new("t", &[]);
-        f.guard_open("_MINIX_IPC_H");
-        f.guard_close("_MINIX_IPC_H");
+        f.guard_open("_MINIXRS_IPC_H");
+        f.guard_close("_MINIXRS_IPC_H");
         let text = f.finish();
-        assert!(text.contains("#ifndef _MINIX_IPC_H\n#define _MINIX_IPC_H\n"));
-        assert!(text.contains("#endif /* _MINIX_IPC_H */"));
+        assert!(text.contains("#ifndef _MINIXRS_IPC_H\n#define _MINIXRS_IPC_H\n"));
+        assert!(text.contains("#endif /* _MINIXRS_IPC_H */"));
     }
 
     #[test]

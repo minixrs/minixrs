@@ -7,16 +7,16 @@
 //! sysroot at build time, and **never committed**. Drift between the Rust and C
 //! views of the ABI is therefore impossible by construction rather than caught
 //! by a test. cbindgen was rejected because it cannot const-eval the
-//! `ProcNr::new()` endpoint constants that `minix/com.h` is mostly made of.
+//! `ProcNr::new()` endpoint constants that `minixrs/com.h` is mostly made of.
 //!
 //! Four headers plus two check artifacts:
 //!
 //! | Artifact | Contents |
 //! |---|---|
-//! | `include/minix/ipc.h` | `message`, endpoint packing, IPC primitives |
-//! | `include/minix/com.h` | proc numbers and the endpoints derived from them |
-//! | `include/minix/callnr.h` | kernel calls and the server request bands |
-//! | `include/minix/errno.h` | the MINIX errno band; opt-in POSIX check |
+//! | `include/minixrs/ipc.h` | `message`, endpoint packing, IPC primitives |
+//! | `include/minixrs/com.h` | proc numbers and the endpoints derived from them |
+//! | `include/minixrs/callnr.h` | kernel calls and the server request bands |
+//! | `include/minixrs/errno.h` | the MINIX errno band; opt-in POSIX check |
 //! | `abi-check/errno.h` | CI-only stand-in for the C library's `<errno.h>` |
 //! | `abi-selftest.c` | the translation unit that fires every assertion |
 //!
@@ -48,19 +48,19 @@ pub struct Artifact {
 pub fn artifacts() -> Vec<Artifact> {
     vec![
         Artifact {
-            path: "include/minix/ipc.h",
+            path: "include/minixrs/ipc.h",
             text: ipc_h::render(),
         },
         Artifact {
-            path: "include/minix/com.h",
+            path: "include/minixrs/com.h",
             text: com_h::render(),
         },
         Artifact {
-            path: "include/minix/callnr.h",
+            path: "include/minixrs/callnr.h",
             text: callnr_h::render(),
         },
         Artifact {
-            path: "include/minix/errno.h",
+            path: "include/minixrs/errno.h",
             text: errno_h::render(),
         },
         Artifact {
@@ -154,7 +154,7 @@ mod tests {
             com_h::GUARD,
             callnr_h::GUARD,
             errno_h::GUARD,
-            "_MINIX_ABI_CHECK_ERRNO_H",
+            "_MINIXRS_ABI_CHECK_ERRNO_H",
         ];
         for (i, g) in guards.iter().enumerate() {
             assert!(!guards[i + 1..].contains(g), "duplicate include guard {g}");
