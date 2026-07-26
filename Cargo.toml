@@ -4,6 +4,7 @@ members = [
     "kernel",
     "kernel-shared",
     "minix-ipc",
+    "minixrs-abi-note",
     "server-rt",
     "servers/pm",
     "servers/vfs",
@@ -43,6 +44,12 @@ license = "BSD-3-Clause"
 repository = "https://github.com/minixrs/minixrs"
 homepage = "https://github.com/minixrs/minixrs"
 authors = ["Kevin Barnard and minix.rs Contributors"]
+
+# M1 shim (delete at M5 when the real rustc target exists): builtin host
+# targets don't know target_os = "minixrs", so without this, host clippy's
+# -D warnings trips unexpected_cfgs on every brand!()/cfg site.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("minixrs"))'] }
 
 [profile.release]
 opt-level = 's'

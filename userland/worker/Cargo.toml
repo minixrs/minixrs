@@ -12,3 +12,7 @@ path = "src/main.rs"
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minix-ipc" }
+minixrs-abi-note = { path = "../../minixrs-abi-note" }
+
+[lints]
+workspace = true

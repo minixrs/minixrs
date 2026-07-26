@@ -434,7 +434,27 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
 
     let entry = match crate::boot_image::elf::load_into(elf, &mut aspace) {
         Ok(e) => e,
-        Err(_) => {
+        Err(e) => {
+            // A brand rejection (M1, `elf::load_into`'s scan) is surfaced
+            // before the load unwinds — the boot path panics right after
+            // (`load_boot_server`'s "server image load failed"), and the exec
+            // path folds every failure into `ENOMEM`. `[brand]` is uncounted —
+            // a stable marker, like `[efault]`. Other ElfErrors stay silent
+            // as before.
+            {
+                use crate::arch::aarch64::uart::Pl011;
+                use crate::boot_image::elf::ElfError;
+                use core::fmt::Write;
+                match e {
+                    ElfError::MissingBrand => {
+                        let _ = writeln!(Pl011::new(), "[brand] reject: missing");
+                    }
+                    ElfError::UnsupportedAbi(v) => {
+                        let _ = writeln!(Pl011::new(), "[brand] reject: abi={v}");
+                    }
+                    _ => {}
+                }
+            }
             destroy_addrspace_with_leaves(aspace);
             return None;
         }

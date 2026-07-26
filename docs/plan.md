@@ -23,7 +23,7 @@ Build minix.rs as a learning OS that preserves MINIX 3's microkernel architectur
 ```
 +------------------------------------------------------------------+
 |                        User Programs                             |
-|  (linked against musl-minix, POSIX-compatible)                   |
+|  (linked against musl-minixrs, POSIX-compatible)                 |
 +------------------------------------------------------------------+
          |  _syscall(endpoint, callnr, &msg)  via SYSCALL/SVC
          v
@@ -524,7 +524,8 @@ to Phase 7; TTY input/IRQs to Phase 6.
 - **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ✓ shipped (PR #40, merged 2026-07-25)
 - **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL` ✓ shipped (PR #41, merged 2026-07-25)
 - **5.2** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY` ✓ shipped (PR #42, merged 2026-07-25)
-- **5.3** TTY driver (TX-only, boot-premapped PL011) + CDEV band ◀ ready (branch `feature/slice-5.3-tty-cdev`, pending merge)
+- **5.3** TTY driver (TX-only, boot-premapped PL011) + CDEV band ✓ shipped (PR #43, merged 2026-07-25)
+- **M1** (toolchain program P1, out-of-band): `aarch64-unknown-minixrs` target JSON + ELF identity brand ◀ ready (branch `feature/m1-minixrs-target-brand`, pending merge)
 - **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS ◀ next
 - **5.5** exec ABI: SysV initial stack + minimal auxv
 - **5.6** musl submodule + `src/minix` port + boot-embedded hello — **milestone A**

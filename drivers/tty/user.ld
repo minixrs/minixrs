@@ -23,6 +23,7 @@ PHDRS {
     text   PT_LOAD FLAGS(5); /* R+X */
     rodata PT_LOAD FLAGS(4); /* R   */
     data   PT_LOAD FLAGS(6); /* RW  */
+    note   PT_NOTE FLAGS(4); /* minixrs identity note */
 }
 
 SECTIONS {
@@ -34,7 +35,18 @@ SECTIONS {
     } :text
 
     . = ALIGN(4K);
-    .rodata : ALIGN(4K) {
+    /*
+     * minixrs identity note (tooling/docs/abi-note.md): first thing in the
+     * RO segment, dual-assigned so it lands in the rodata PT_LOAD *and* its
+     * own PT_NOTE phdr. KEEP() is mandatory — nothing references the
+     * section — and this rule must stay ahead of the /DISCARD/ *(.note.*)
+     * rule below (first match wins).
+     */
+    .note.minixrs.ident : {
+        KEEP(*(.note.minixrs.ident))
+    } :rodata :note
+
+    .rodata : {
         *(.rodata .rodata.*)
     } :rodata
 

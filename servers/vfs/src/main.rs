@@ -28,6 +28,8 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 
+minixrs_abi_note::brand!();
+
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
@@ -109,7 +111,7 @@ const fn tty_rule_pattern() -> [u8; TTY_RULE_LEN] {
 /// dive straight into Rust without setting up a stack itself.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-#[cfg_attr(target_os = "none", unsafe(link_section = ".text._start"))]
+#[cfg_attr(target_os = "minixrs", unsafe(link_section = ".text._start"))]
 pub extern "C" fn _start() -> ! {
     main()
 }
