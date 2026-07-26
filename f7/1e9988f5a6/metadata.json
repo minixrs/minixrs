@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "f71e9988f5a6",
+  "strategy": "manual-commit",
+  "branch": "feature/m1-minixrs-target-brand",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "kernel/build.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f7/1e9988f5a6/0/metadata.json",
+      "transcript": "/f7/1e9988f5a6/0/full.jsonl",
+      "compact_transcript": "/f7/1e9988f5a6/0/transcript.jsonl",
+      "content_hash": "/f7/1e9988f5a6/0/content_hash.txt",
+      "prompt": "/f7/1e9988f5a6/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 30,
+    "cache_creation_tokens": 23855,
+    "cache_read_tokens": 2218152,
+    "output_tokens": 11804,
+    "api_call_count": 16
+  }
+}
