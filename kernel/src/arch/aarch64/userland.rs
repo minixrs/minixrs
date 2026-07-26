@@ -430,6 +430,26 @@ pub(crate) struct ExecImage {
 /// SAFETY: single-threaded EL1; the sole caller of the frame allocator + ASID
 /// pool for its duration. Must run after `mm::init_from_limine_memmap`.
 pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
+    // M1 staged rollout, stage 1: log-only. Stage 2 (next commit) moves
+    // enforcement into elf::load_into as a hard reject.
+    if let Err(e) = minixrs_kernel_shared::brand::scan_brand(elf) {
+        use crate::arch::aarch64::uart::Pl011;
+        use core::fmt::Write;
+        use minixrs_kernel_shared::brand::BrandError;
+        // `[brand]` is uncounted — a stable marker, like `[efault]`.
+        let _ = match e {
+            BrandError::MissingBrand => {
+                writeln!(Pl011::new(), "[brand] WARN unbranded image: missing")
+            }
+            BrandError::UnsupportedAbi(v) => {
+                writeln!(Pl011::new(), "[brand] WARN unbranded image: abi={v}")
+            }
+            BrandError::Malformed => {
+                writeln!(Pl011::new(), "[brand] WARN unbranded image: malformed")
+            }
+        };
+    }
+
     let mut aspace = AddrSpace::new().ok()?;
 
     let entry = match crate::boot_image::elf::load_into(elf, &mut aspace) {
