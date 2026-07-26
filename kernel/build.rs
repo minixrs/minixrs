@@ -219,6 +219,12 @@ fn build_server(
         .arg(&target_json)
         .args([
             "--release",
+            // The pinned nightly gates `.json` target specs behind this flag.
+            // It must be passed explicitly here: a developer's *global*
+            // `~/.cargo/config.toml` may carry `[unstable] json-target-spec`
+            // (RustRover needs it), which masks its absence locally while CI —
+            // which has no such config — fails the nested build.
+            "-Zjson-target-spec",
             // Custom target ⇒ no prebuilt core/alloc; `compiler-builtins-mem`
             // provides memcpy/memset (harmless if a future nightly defaults it).
             "-Zbuild-std=core,alloc",
