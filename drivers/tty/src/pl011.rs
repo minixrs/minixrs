@@ -26,7 +26,7 @@
 //! ## Why this is the crate's only `unsafe`
 //!
 //! Everything else in the driver is message parsing (`cdev.rs`) or IPC through
-//! `minix-ipc`. The two volatile accesses here are what `#![forbid(unsafe_code)]`
+//! `minixrs-ipc`. The two volatile accesses here are what `#![forbid(unsafe_code)]`
 //! on `server-rt` exists to keep out of shared code.
 
 // Only `main.rs`'s `not(test)`-gated paths reach these, so under `cargo test`

@@ -21,3 +21,11 @@ do_irq: unexpected INTID
 # read -- and neither can appear in a healthy boot.
 minix.rs worker: stack FAIL
 minix.rs init: exec stack FAIL
+# Slice 5.6: hello's runtime errno check ran but disagreed. Distinct from the
+# marker simply going missing (which means hello never ran at all): this spelling
+# means the C program executed and got the wrong errno or return value, i.e. the
+# D7 identity broke somewhere along VFS -> driver -> syscall_ret.
+minix.rs hello: errno FAIL
+# Slice 5.6: the two-iovec fwrite returned a short count. Distinct from the
+# marker vanishing (hello never ran): this means it ran and writev mis-counted.
+minix.rs hello: iov FAIL

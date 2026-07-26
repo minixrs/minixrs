@@ -67,6 +67,27 @@ pub fn wr_u64(m: &mut Message, off: usize, v: u64) {
     }
 }
 
+/// Read a NUL-padded, fixed-width name from payload `off..off+width`.
+///
+/// Returns `None` when the field does not fit the payload, is empty before its
+/// first NUL, or is not valid UTF-8. Those are the three cases every caller has
+/// to reject anyway, so collapsing them into one `None` keeps the call site to a
+/// single errno arm — and it matches the kernel's own `SYS_EXEC` name reader
+/// (`kernel/src/system/do_exec.rs`), which answers `EINVAL` to exactly this set.
+///
+/// A name that fills all `width` bytes with no NUL at all is well-formed; the
+/// field is padded, not terminated. That is what lets `EXEC_NAME_LEN` carry a
+/// name of exactly `EXEC_NAME_LEN` characters.
+pub fn rd_name(m: &Message, off: usize, width: usize) -> Option<&str> {
+    let field = span(off, width).and_then(|r| m.payload.get(r))?;
+    let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    let name = &field[..end];
+    if name.is_empty() {
+        return None;
+    }
+    core::str::from_utf8(name).ok()
+}
+
 /// The address of a local staging buffer, in the form the kernel's copy calls
 /// want it (`SYS_COPY` / `SYS_SAFECOPY` take a plain `u64` VA).
 ///
@@ -150,6 +171,60 @@ mod tests {
         assert_eq!(rd_u64(&m, 89), 0);
         assert_eq!(rd_i32(&m, usize::MAX), 0);
         assert_eq!(rd_u64(&m, usize::MAX), 0);
+    }
+
+    /// Writes a name into `off..off+width` the way a client marshals one: the
+    /// bytes, then NUL padding out to the field width.
+    fn put_name(m: &mut Message, off: usize, width: usize, name: &str) {
+        m.payload[off..off + width].fill(0);
+        m.payload[off..off + name.len()].copy_from_slice(name.as_bytes());
+    }
+
+    #[test]
+    fn name_round_trips_nul_padded() {
+        let mut m = msg();
+        put_name(&mut m, 0, 16, "worker");
+        assert_eq!(rd_name(&m, 0, 16), Some("worker"));
+
+        put_name(&mut m, 0, 16, "hello");
+        assert_eq!(rd_name(&m, 0, 16), Some("hello"));
+    }
+
+    /// The field is padded, not terminated: a name filling all `width` bytes is
+    /// well-formed. This is the case a `position(NUL).unwrap()` would panic on.
+    #[test]
+    fn a_name_filling_the_whole_field_is_well_formed() {
+        let mut m = msg();
+        let full = "0123456789abcdef";
+        assert_eq!(full.len(), 16);
+        put_name(&mut m, 0, 16, full);
+        assert_eq!(rd_name(&m, 0, 16), Some(full));
+    }
+
+    /// The three rejected shapes, which the caller collapses into one `EINVAL`.
+    #[test]
+    fn empty_out_of_range_and_non_utf8_names_are_rejected() {
+        let m = msg();
+        assert_eq!(rd_name(&m, 0, 16), None, "an all-NUL field is empty");
+
+        let mut m = msg();
+        put_name(&mut m, 0, 16, "worker");
+        assert_eq!(rd_name(&m, 88, 16), None, "88..104 overruns the payload");
+        assert_eq!(rd_name(&m, usize::MAX, 16), None, "offset overflow");
+
+        let mut m = msg();
+        m.payload[0] = 0xFF;
+        assert_eq!(rd_name(&m, 0, 16), None, "0xFF is not valid UTF-8");
+    }
+
+    /// Reading stops at the first NUL, so a stale longer name left in the field
+    /// by a previous message cannot leak into a shorter one.
+    #[test]
+    fn reading_stops_at_the_first_nul() {
+        let mut m = msg();
+        put_name(&mut m, 0, 16, "worker");
+        m.payload[0..5].copy_from_slice(b"init\0");
+        assert_eq!(rd_name(&m, 0, 16), Some("init"));
     }
 
     #[test]

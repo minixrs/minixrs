@@ -780,7 +780,7 @@ grant** naming the caller's buffer and forwards it over `CDEV_WRITE` to TTY
 (the D4 single-copy data path, first magic-grant consumer); other fds
 `EBADF`, other ops `ENOSYS` for now. `populate_user_priv` opens
 `ipc_to = {PM, VFS}`. init sends one `VFS_WRITE` banner before its fork
-loop (raw `minix-ipc` message — init stays a plain Rust user program).
+loop (raw `minixrs-ipc` message — init stays a plain Rust user program).
 
 **Proof:** init's banner reaches serial through VFS→TTY; `[ipc]` head
 traces show init→VFS SENDREC + VFS→TTY CDEV round-trip.
@@ -903,7 +903,7 @@ not rediscover them):
 | Drop the `user_range_ok` pre-check | **nothing moves** — all 51 markers still pass. Confirms it is defence in depth and the kernel's page-table walk is the load-bearing `EFAULT` gate |
 | Drop `write::validate`'s negative-length check | `vfs.deny ok n=4` → `vfs.deny FAIL bad-len` (the write with `len = -1` was accepted) |
 
-### Slice 5.5: exec ABI — SysV initial stack + minimal auxv ◀ ready (branch `feature/slice-5.5-exec-abi`, pending merge)
+### Slice 5.5: exec ABI — SysV initial stack + minimal auxv ✓ shipped (PR #46, merged 2026-07-26)
 
 **Goal:** D13's stack contract — musl's crt runs unpatched.
 
@@ -941,7 +941,7 @@ proof lives):
   sp` is the first instruction the process executes, where an ordinary prologue
   could perturb `sp` first and taking the value in `x0` from the kernel would
   prove nothing about `SP_EL0`. The `#[cfg(all(not(test), target_arch =
-  "aarch64"))]` split with a plain fallback is copied from `minix-ipc`'s SVC asm,
+  "aarch64"))]` split with a plain fallback is copied from `minixrs-ipc`'s SVC asm,
   so CI's x86_64 clippy job still checks the crate.
 - **The verdict rides out as the exit status.** `worker` runs once per init fork
   cycle, so an unconditional success line would flood the console; it exits with
@@ -1013,7 +1013,7 @@ proof lives):
 | Skip the `copy_to_user_as` | `exec stack FAIL code=2`: worker reads the zeroed stack page, so `argc` is 0. Confirms the frame really arrives via the copy and is not somehow present already |
 | Revert `user.ld`'s `FILEHDR PHDRS` | `[exec] … auxv=1` (the `auxv=4` marker vanishes) and `exec stack FAIL code=7` — the phdr check. Confirms the `AT_PHDR` arm is live rather than dead |
 
-### Slice 5.6: musl submodule + `src/minix` port + boot-embedded hello — **milestone A** ◀ next
+### Slice 5.6: musl fork + `src/minixrs` port + boot-embedded hello — **milestone A; ABI freeze** ◀ ready (branch `feature/slice-5.6-musl-port`, pending merge)
 
 **Goal:** a C program built against the musl fork runs on minix.rs (exec'd
 from the boot archive; the FS comes later).
@@ -1022,7 +1022,7 @@ from the boot archive; the FS comes later).
 the existing `linux-inventory.md`; gut `arch/aarch64/syscall_arch.h`
 (replace `svc 0` Linux ABI with calls into the MINIX layer; drop `VDSO_*`);
 add `src/minix/`: the IPC trap asm (x0=endpoint, x1=primitive, x2=&msg —
-matching `minix-ipc`), `_syscall.c`, and a dispatcher mapping the milestone
+matching `minixrs-ipc`), `_syscall.c`, and a dispatcher mapping the milestone
 syscall set per D13 (`writev`/`write`, `exit`/`exit_group`,
 `set_tid_address`, `ioctl`→`-ENOTTY`, stubs). **Scope (this repo):**
 submodule at `external/musl`; `tools/build-musl.sh` (D10: configure
@@ -1040,7 +1040,78 @@ musl (MIT) added to the repo's licensing docs.
 reaches serial through VFS→TTY from a musl-linked binary exec'd out of the
 MXBI archive; marker in `qemu-boot.expected`.
 
-### Slice 5.7: BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob
+**As built** — deltas from the scope above:
+
+- **The fork was recreated, not reused.** The old `KevinBarnard/musl-minix`
+  (v1.2.5 + 103 commits, a stray `CLAUDE.md` on its working branch) is
+  **archived**; the port lives in a fresh `minixrs/musl-minixrs` pushed from a
+  clean clone of `git.musl-libc.org`, with `main` = pristine upstream mirror and
+  `minixrs` (the default branch) = the port, based on tag **`v1.2.6`**
+  (2026-03-20). The v1.2.5 `linux-inventory.md` was **not** carried over — it was
+  re-derived against v1.2.6 into the fork's `MINIXRS.md`, which also carries the
+  branch and delta contracts.
+- **Split 5.6a (fork) / 5.6b (this repo)**, the 4.6a/4.6b precedent, per the
+  cross-repo rule.
+- **`minix` → `minixrs` throughout**, since 5.6 is the ABI freeze and this was
+  the last cheap moment: `src/minixrs/` and `__minixrs_syscall` in the fork, and
+  on this side the generated C surface too — `include/minixrs/*.h`,
+  `_MINIXRS_OFFSETOF`, `MINIXRS_ABI_CHECK_POSIX_ERRNO`. Prose citing *MINIX 3's*
+  own headers (`callnr_h.rs`'s deviation note, `com_h.rs`'s `<minix/const.h>`)
+  was deliberately left alone. The `minix-ipc/` **directory** was renamed
+  `minixrs-ipc/` to match its long-standing package name.
+- **`PM_EXEC` gained a 16-byte name payload** (`PM_EXEC_NAME_OFF`), replacing
+  PM's hardcoded `EXEC_TARGET`, and **init alternates `worker` / `hello`**
+  (`EXEC_TARGETS`) rather than flipping outright — the written scope's "flips
+  `worker` → `hello`" predates 5.5 making `worker` the exec-stack probe, and
+  flipping would have retired `[exec] … auxv=4` and `init: exec stack ok`.
+  Groundwork 5.9's path form needs anyway. Reading the name uses a new
+  host-tested `server-rt::payload::rd_name`.
+- **The fallback presence-checks the SYSROOT, not the submodule**
+  (`target/musl-sysroot/.stamp`). Checking the submodule would let a fresh clone
+  that ran `git submodule update` but not `tools/build-musl.sh` trigger a
+  multi-minute libc build from inside a cargo build script.
+- **`RANLIB` is `llvm-ar s`, not `llvm-ranlib`** — the pinned toolchain ships
+  `llvm-ar` but not `llvm-ranlib`.
+- **Quad-float builtins had to be sourced.** musl's `vfprintf` references
+  `__multf3` / `__floatsitf` / … (aarch64 `long double` is IEEE quad, no
+  hardware support) and musl's configure finds no runtime library on this host.
+  They come from the toolchain's own `compiler_builtins` **as built by
+  `-Zbuild-std` for `aarch64-unknown-minixrs`**; the prebuilt
+  `aarch64-unknown-none` rlib in the rustup sysroot does *not* export the C-ABI
+  names. No compiler-rt/LLVM build was added.
+- **`hello.ld` places what a musl link brings and a Rust one does not** —
+  `.init`/`.fini`, `.init_array`/`.fini_array` with bracketing symbols, `.got`,
+  `.data.rel.ro` — since an orphan past the last `PT_LOAD` is a silent load
+  failure. No `PT_TLS`: musl keeps `errno` in the pthread struct via
+  `tpidr_el0`, so `libc.a` carries no `.tdata`/`.tbss`.
+- **The 4 KiB exec stack was sufficient** — §7's contingency (grow to 4 pages)
+  was *not* needed. Measured worst chain is ~2 KB
+  (`printf`→`vfprintf`→`printf_core`→`pad`→`__stdio_write`→`__minixrs_syscall`).
+  Note for later: v1.2.6's `fmt_fp` allocates a **VLA**, ~512 B for `%f` but
+  ~7.4 KB for `%Lf` — a future C program printing a `long double` *will* need a
+  bigger stack, and a static frame scan will not predict it.
+- **The real D7 errno check now runs**, as 5.0 promised it would here:
+  `build-musl.sh` compiles the opt-in POSIX block against the fork's own
+  `bits/errno.h`. Mutation-verified — swapping `EDEADLK`/`ENAMETOOLONG` fails
+  the build with `libc EDEADLK disagrees with kernel-shared error.rs`. **It was
+  vacuous when first written**: macOS `sed` has no `\b`, so `CHECK_MACRO` kept
+  its old spelling while CI and the script defined the new one, and the guarded
+  block compiled zero assertions.
+- **The `SYS_EXEC` marker drops the slot number.** The written scope's
+  `target=15 name=hello` holds only `--no-default-features`; with stubs, init's
+  fork pool gives `hello` slot **16**. Keying on `name=hello entry=` keeps it
+  true in both configs — the 5.5 "right in one feature config, vacuous in the
+  other" lesson, applied before it bit.
+- **The fallback made a *forbidden* marker fire, and only exercising it found
+  that.** `worker` validates `argv[0]` against the exact bytes the kernel wrote,
+  and it hardcoded `b"worker"` — so packing that same ELF under the name `hello`
+  meant a missing sysroot printed `worker: stack FAIL`, i.e. an absent optional
+  dependency was indistinguishable from a broken exec ABI. Now `ARGV0_NAMES` is
+  the set `{worker, hello}`, which keeps the exact-byte check. General lesson:
+  **a fallback path needs its own boot, not just a code review** — the
+  name-level substitution was reviewed twice and read correctly both times.
+
+### Slice 5.7: BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ◀ next
 
 **Goal:** D3 — a block-device story with a real MFS image behind it.
 

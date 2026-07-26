@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `minix/callnr.h` — kernel-call numbers and the server request bands.
+//! `minixrs/callnr.h` — kernel-call numbers and the server request bands.
 
 use minixrs_kernel_shared::{callnr, grant};
 
 use crate::builder::CFile;
 
 /// Include guard for the generated header.
-pub const GUARD: &str = "_MINIX_CALLNR_H";
+pub const GUARD: &str = "_MINIXRS_CALLNR_H";
 
 /// The 18 kernel calls, in numeric order.
 fn kernel_calls() -> [(&'static str, i32); 18] {
@@ -151,7 +151,7 @@ fn bands() -> [Band; 7] {
     ]
 }
 
-/// Render `minix/callnr.h`.
+/// Render `minixrs/callnr.h`.
 pub fn render() -> String {
     let mut f = CFile::new(
         "Kernel-call numbers, server request bands, and their payload constants.",
@@ -161,7 +161,7 @@ pub fn render() -> String {
 
     f.blank();
     f.include(
-        "minix/ipc.h",
+        "minixrs/ipc.h",
         "NOTIFY_MESSAGE, for the band ordering checks",
     );
 
@@ -171,9 +171,9 @@ pub fn render() -> String {
         "call-number layer -- a libc wrapper builds a server request directly --",
         "so this header carries the kernel calls and the request bands together.",
         "",
-        "Payload byte offsets are not emitted yet: on the Rust side they live in",
-        "doc comments rather than constants. The first musl wrapper (slice 5.6) is",
-        "the forcing function for promoting them to real constants.",
+        "Payload byte offsets ARE emitted, at the end of this header: slice 5.6's",
+        "musl wrappers build VFS and PM requests by hand and need them. The grant",
+        "ENTRY layout still is not -- see the grants section.",
     ]);
 
     f.section("kernel calls");
@@ -218,7 +218,7 @@ pub fn render() -> String {
     f.block_comment(&[
         "The grant ABI (slice 5.2). The grant-entry layout itself is deliberately",
         "not emitted yet: no C consumes it before the musl slice, and a dedicated",
-        "<minix/safecopies.h> would need its own builder and CI syntax check. The",
+        "<minixrs/safecopies.h> would need its own builder and CI syntax check. The",
         "flag values and the id packing are here because a C caller needs them to",
         "read a grant id out of a message payload.",
     ]);
@@ -291,6 +291,35 @@ pub fn render() -> String {
             f.define_dec(count_name, count as i64);
         }
     }
+
+    f.section("server-request payload offsets");
+    f.block_comment(&[
+        "Byte offsets within a message payload, which starts at message offset 8.",
+        "Emitted since slice 5.6: src/minixrs/_syscall.c in the musl fork builds",
+        "these requests by hand, so it needs the offsets as real constants rather",
+        "than as Rust doc comments.",
+        "",
+        "VFS_WRITE carries a RAW BUFFER ADDRESS in the caller's own address space,",
+        "not a grant id -- VFS's client is an ordinary user process with no grant",
+        "table. VFS is what turns it into a magic grant, naming the owner from the",
+        "kernel-stamped m_source and never from the payload.",
+        "",
+        "CDEV_WRITE, by contrast, carries a grant id and NO granter field, for the",
+        "same anti-spoof reason. Its offsets are emitted for completeness of the",
+        "band, not because C talks to a driver: musl's write() goes to VFS.",
+    ]);
+    f.define_dec("VFS_FD_OFF", callnr::VFS_FD_OFF as i64);
+    f.define_dec("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64);
+    f.define_dec("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64);
+    f.blank();
+    f.define_dec("PM_EXEC_NAME_OFF", callnr::PM_EXEC_NAME_OFF as i64);
+    f.blank();
+    f.define_dec("CDEV_MINOR_OFF", callnr::CDEV_MINOR_OFF as i64);
+    f.define_dec("CDEV_GRANT_OFF", callnr::CDEV_GRANT_OFF as i64);
+    f.define_dec("CDEV_LEN_OFF", callnr::CDEV_LEN_OFF as i64);
+    f.define_dec("CDEV_OFFSET_OFF", callnr::CDEV_OFFSET_OFF as i64);
+    f.define_dec("CDEV_MAX_IO", callnr::CDEV_MAX_IO as i64);
+    f.define_dec("CDEV_MINOR_CONSOLE", callnr::CDEV_MINOR_CONSOLE.into());
 
     f.section("band ordering");
     f.block_comment(&[
@@ -442,18 +471,15 @@ mod tests {
         }
     }
 
-    /// Neither band's payload offsets are emitted: this header's own comment
-    /// defers *every* payload offset to the first musl wrapper (slice 5.6).
+    /// The payload offsets, emitted as of slice 5.6 — the deliberate act the
+    /// preceding slices' negative assertion was holding the door on.
     ///
-    /// The two bands defer for the same reason at different distances. No C in
-    /// Phase 5 talks to a character driver at all — musl's `write()` goes to VFS,
-    /// not straight to TTY — so `CDEV_*` may well never be emitted. `VFS_*` is the
-    /// opposite case: slice 5.6's `write()` wrapper is precisely the C that needs
-    /// `VFS_FD_OFF` / `VFS_LEN_OFF` / `VFS_BUF_OFF`, so this assertion is what
-    /// makes emitting them a deliberate act in that slice rather than something
-    /// that drifted in early and froze un-reviewed at the 5.6 ABI freeze.
+    /// `src/minixrs/_syscall.c` in the musl fork marshals `VFS_WRITE` by hand, so
+    /// `VFS_FD_OFF` / `VFS_LEN_OFF` / `VFS_BUF_OFF` are load-bearing C now. Each
+    /// value is checked against the live Rust constant rather than a literal, so
+    /// this stays a wiring check and never becomes a second source of truth.
     #[test]
-    fn no_cdev_or_vfs_payload_constants_are_emitted_yet() {
+    fn payload_offsets_match_the_rust_constants() {
         let text = render();
         for request in ["CDEV_WRITE", "VFS_WRITE"] {
             assert!(
@@ -461,20 +487,23 @@ mod tests {
                 "{request} itself must be emitted"
             );
         }
-        for name in [
-            "CDEV_MINOR_OFF",
-            "CDEV_GRANT_OFF",
-            "CDEV_LEN_OFF",
-            "CDEV_OFFSET_OFF",
-            "CDEV_MAX_IO",
-            "CDEV_MINOR_CONSOLE",
-            "VFS_FD_OFF",
-            "VFS_LEN_OFF",
-            "VFS_BUF_OFF",
-        ] {
-            assert!(
-                builder::define_value(&text, name).is_none(),
-                "{name} must wait for the musl slice"
+        let offsets: [(&str, i64); 10] = [
+            ("VFS_FD_OFF", callnr::VFS_FD_OFF as i64),
+            ("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64),
+            ("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64),
+            ("PM_EXEC_NAME_OFF", callnr::PM_EXEC_NAME_OFF as i64),
+            ("CDEV_MINOR_OFF", callnr::CDEV_MINOR_OFF as i64),
+            ("CDEV_GRANT_OFF", callnr::CDEV_GRANT_OFF as i64),
+            ("CDEV_LEN_OFF", callnr::CDEV_LEN_OFF as i64),
+            ("CDEV_OFFSET_OFF", callnr::CDEV_OFFSET_OFF as i64),
+            ("CDEV_MAX_IO", callnr::CDEV_MAX_IO as i64),
+            ("CDEV_MINOR_CONSOLE", callnr::CDEV_MINOR_CONSOLE as i64),
+        ];
+        for (name, want) in offsets {
+            assert_eq!(
+                builder::define_value(&text, name).as_deref(),
+                Some(want.to_string().as_str()),
+                "{name} disagrees with the Rust constant"
             );
         }
     }
@@ -559,7 +588,7 @@ mod tests {
 
     /// `GrantEntry` is deliberately not emitted as a C struct until a C caller
     /// needs it (slice 5.6). Nothing may quietly add one here — that belongs in
-    /// its own `<minix/safecopies.h>` with its own CI syntax check.
+    /// its own `<minixrs/safecopies.h>` with its own CI syntax check.
     #[test]
     fn no_grant_struct_is_emitted_yet() {
         let text = render();

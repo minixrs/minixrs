@@ -71,7 +71,7 @@ that tree's `EBADEPT` (216).
 | `lib/libsys/sef_signal.c` | `server-rt/src/signal.rs` |
 | SEF message classifier | `server-rt/src/classify.rs` |
 | DS publish glue | `server-rt/src/ds.rs` |
-| `lib/libsys/kernel_call.c` | `minix-ipc/src/lib.rs` |
+| `lib/libsys/kernel_call.c` | `minixrs-ipc/src/lib.rs` |
 
 ## Servers
 

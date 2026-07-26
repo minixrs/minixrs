@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! IPC primitive numbers — the value the IPC trap takes in `x1` on aarch64
-//! (`minix-ipc`'s `svc #0` stub: `x0` = endpoint, `x1` = primitive,
+//! (`minixrs-ipc`'s `svc #0` stub: `x0` = endpoint, `x1` = primitive,
 //! `x2` = `*mut Message`).
 //!
 //! Matches MINIX 3 `include/minix/ipcconst.h`. The numbering is shared

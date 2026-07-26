@@ -1,0 +1,4 @@
+[submodule "external/musl"]
+	path = external/musl
+	url = https://github.com/minixrs/musl-minixrs.git
+	branch = minixrs

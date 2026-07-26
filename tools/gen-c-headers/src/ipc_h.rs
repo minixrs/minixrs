@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `minix/ipc.h` — the message struct, endpoint packing, and IPC primitives.
+//! `minixrs/ipc.h` — the message struct, endpoint packing, and IPC primitives.
 
 use minixrs_kernel_shared::{Message, endpoint, ipc_const};
 
 use crate::builder::CFile;
 
 /// Include guard for the generated header.
-pub const GUARD: &str = "_MINIX_IPC_H";
+pub const GUARD: &str = "_MINIXRS_IPC_H";
 
 /// Layout of [`Message`], measured rather than assumed.
 ///
@@ -41,7 +41,7 @@ impl MessageLayout {
     }
 }
 
-/// Render `minix/ipc.h`.
+/// Render `minixrs/ipc.h`.
 pub fn render() -> String {
     let l = MessageLayout::measure();
     let mut f = CFile::new(
@@ -66,10 +66,10 @@ pub fn render() -> String {
         "supported toolchain is clang (phase-5 decision D10).",
     ]);
     f.line("#if defined(__GNUC__) || defined(__clang__)");
-    f.define_raw("_MINIX_OFFSETOF(t, m)", "__builtin_offsetof(t, m)");
+    f.define_raw("_MINIXRS_OFFSETOF(t, m)", "__builtin_offsetof(t, m)");
     f.line("#else");
     f.include("stddef.h", "offsetof");
-    f.define_raw("_MINIX_OFFSETOF(t, m)", "offsetof(t, m)");
+    f.define_raw("_MINIXRS_OFFSETOF(t, m)", "offsetof(t, m)");
     f.line("#endif");
 
     f.section("endpoints");
@@ -106,7 +106,7 @@ pub fn render() -> String {
         "mirror endpoint.rs::{make_endpoint, endpoint_proc, endpoint_gen}.",
         "",
         "The consequence is that _ENDPOINT(0, p) != p for negative p, which is why",
-        "minix/com.h gives every process both a _PROC_NR and an _EP macro.",
+        "minixrs/com.h gives every process both a _PROC_NR and an _EP macro.",
     ]);
     f.line("#define _ENDPOINT(g, p)  (((g) << ENDPOINT_GEN_SHIFT) | ((p) & ENDPOINT_PROC_MASK))");
     f.line("#define _ENDPOINT_G(e)   ((e) >> ENDPOINT_GEN_SHIFT)");
@@ -152,15 +152,15 @@ pub fn render() -> String {
         "message alignment drifted from kernel-shared Message",
     );
     f.static_assert(
-        &format!("_MINIX_OFFSETOF(message, m_source) == {}", l.m_source_off),
+        &format!("_MINIXRS_OFFSETOF(message, m_source) == {}", l.m_source_off),
         "m_source offset drifted from kernel-shared Message",
     );
     f.static_assert(
-        &format!("_MINIX_OFFSETOF(message, m_type) == {}", l.m_type_off),
+        &format!("_MINIXRS_OFFSETOF(message, m_type) == {}", l.m_type_off),
         "m_type offset drifted from kernel-shared Message",
     );
     f.static_assert(
-        &format!("_MINIX_OFFSETOF(message, payload) == {}", l.payload_off),
+        &format!("_MINIXRS_OFFSETOF(message, payload) == {}", l.payload_off),
         "payload offset drifted from kernel-shared Message",
     );
 
@@ -168,7 +168,7 @@ pub fn render() -> String {
     f.block_comment(&[
         "Primitive numbers for the IPC trap. The register that carries them is",
         "part of the per-architecture trap ABI -- see kernel-shared/src/ipc_const.rs",
-        "and the minix-ipc crate, which are authoritative.",
+        "and the minixrs-ipc crate, which are authoritative.",
     ]);
     f.define_dec("SEND", ipc_const::SEND.into());
     f.define_dec("RECEIVE", ipc_const::RECEIVE.into());
@@ -198,7 +198,7 @@ mod tests {
         assert!(text.contains(&format!("sizeof(message) == {}", size_of::<Message>())));
         assert!(text.contains(&format!("_Alignof(message) == {}", align_of::<Message>())));
         assert!(text.contains(&format!(
-            "_MINIX_OFFSETOF(message, payload) == {}",
+            "_MINIXRS_OFFSETOF(message, payload) == {}",
             l.payload_off
         )));
         assert!(text.contains(&format!(
@@ -229,7 +229,7 @@ mod tests {
             .expect("the offsetof fallback block");
         assert!(!gnu_arm.contains("#include"));
         assert!(gnu_arm.contains("__builtin_offsetof"));
-        assert!(text.contains("_MINIX_OFFSETOF(message, payload)"));
+        assert!(text.contains("_MINIXRS_OFFSETOF(message, payload)"));
     }
 
     #[test]

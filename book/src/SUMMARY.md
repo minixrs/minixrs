@@ -8,6 +8,7 @@
 - [Memory Management](memory/overview.md)
 - [Servers](servers/overview.md)
 - [Drivers](drivers/overview.md)
+- [C Library & musl Port](libc/overview.md)
 - [Build & Toolchain](build.md)
 - [Roadmap](roadmap.md)
 

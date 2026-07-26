@@ -172,7 +172,7 @@ to per-proc TTBR0 in 3.1b and kept as regression coverage.
 - **Slice 3.4** ✓ shipped (two PRs; 3.4a PR #13, merged 2026-06-04; 3.4b
   PR #14, merged 2026-06-04)
   — Real VM server + kernel-originated `VM_PAGEFAULT` send. **3.4a** stood up
-  the user-space build toolchain and ELF loader: `minix-ipc` SVC stubs, a
+  the user-space build toolchain and ELF loader: `minixrs-ipc` SVC stubs, a
   freestanding `servers/vm` ELF (`user.ld`, base `0x10_0000`) built by
   `kernel/build.rs` (separate `CARGO_TARGET_DIR`, `CARGO_ENCODED_RUSTFLAGS`
   linker-script override) and embedded via `include_bytes!`, a minimal
