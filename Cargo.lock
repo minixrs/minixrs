@@ -54,6 +54,7 @@ dependencies = [
 name = "minixrs-ds"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
  "minixrs-server-rt",
@@ -70,6 +71,7 @@ dependencies = [
 name = "minixrs-init"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
 ]
@@ -125,6 +127,7 @@ dependencies = [
 name = "minixrs-pm"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
  "minixrs-server-rt",
@@ -134,6 +137,7 @@ dependencies = [
 name = "minixrs-rs"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
  "minixrs-server-rt",
@@ -143,6 +147,7 @@ dependencies = [
 name = "minixrs-sched"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
  "minixrs-server-rt",
@@ -164,6 +169,7 @@ version = "0.1.0"
 name = "minixrs-tty"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
  "minixrs-server-rt",
@@ -173,6 +179,7 @@ dependencies = [
 name = "minixrs-vfs"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
  "minixrs-server-rt",
@@ -209,6 +216,7 @@ dependencies = [
 name = "minixrs-vm"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
  "minixrs-server-rt",
@@ -218,6 +226,7 @@ dependencies = [
 name = "minixrs-worker"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
 ]
