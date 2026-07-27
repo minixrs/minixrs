@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `minix/com.h` — process numbers and the endpoints derived from them.
+//! `minixrs/com.h` — process numbers and the endpoints derived from them.
 
 use minixrs_kernel_shared::{ProcNr, com, error};
 
 use crate::builder::CFile;
 
 /// Include guard for the generated header.
-pub const GUARD: &str = "_MINIX_COM_H";
+pub const GUARD: &str = "_MINIXRS_COM_H";
 
 /// Every process that gets a `_PROC_NR` / `_EP` macro pair, in slot order.
 ///
@@ -42,7 +42,7 @@ fn processes() -> [(&'static str, ProcNr); com::NR_TASKS + com::NR_BOOT_PROCS] {
     ]
 }
 
-/// Render `minix/com.h`.
+/// Render `minixrs/com.h`.
 pub fn render() -> String {
     let mut f = CFile::new(
         "Process numbers, boot endpoints, and process-table capacities.",
@@ -52,7 +52,7 @@ pub fn render() -> String {
 
     f.blank();
     f.include(
-        "minix/ipc.h",
+        "minixrs/ipc.h",
         "endpoint_t and the _ENDPOINT* packing macros",
     );
 
@@ -66,7 +66,7 @@ pub fn render() -> String {
     f.block_comment(&[
         "MINIX 3 keeps OK in <minix/const.h>; minix.rs defines it alongside the",
         "errnos in kernel-shared/src/error.rs. It lives here so a C file that",
-        "checks an IPC result does not have to include <minix/errno.h> as well.",
+        "checks an IPC result does not have to include <minixrs/errno.h> as well.",
     ]);
     f.define_dec("OK", error::OK.into());
 
@@ -79,7 +79,7 @@ pub fn render() -> String {
         "",
         "They differ for the kernel tasks because minix.rs sign-extends the",
         "endpoint proc field instead of using MINIX 3's offset bias (see",
-        "minix/ipc.h). Naming a task by its _PROC_NR in an IPC call is a bug.",
+        "minixrs/ipc.h). Naming a task by its _PROC_NR in an IPC call is a bug.",
         "",
         "The _EP values are computed by calling com::boot_endpoint() in the",
         "generator: no equivalent Rust constant exists, and deriving them here is",
@@ -108,7 +108,7 @@ pub fn render() -> String {
 
     f.section("endpoint packing self-check");
     f.block_comment(&[
-        "The C decode macros in minix/ipc.h are hand-written; the _EP values are",
+        "The C decode macros in minixrs/ipc.h are hand-written; the _EP values are",
         "Rust-computed. These assertions check one against the other at compile",
         "time, in every translation unit, with no libc and no sysroot.",
     ]);
@@ -226,9 +226,9 @@ mod tests {
 
     #[test]
     fn includes_ipc_h_for_the_packing_macros() {
-        assert!(render().contains("#include <minix/ipc.h>"));
+        assert!(render().contains("#include <minixrs/ipc.h>"));
         // The guard name the include resolves to, kept in sync by construction.
-        assert_eq!(ipc_h::GUARD, "_MINIX_IPC_H");
+        assert_eq!(ipc_h::GUARD, "_MINIXRS_IPC_H");
     }
 
     #[test]

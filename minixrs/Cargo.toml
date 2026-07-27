@@ -13,6 +13,6 @@ readme = "README.md"
 
 [dependencies]
 minixrs-kernel-shared = { path = "../kernel-shared", version = "0.1.0" }
-minixrs-ipc = { path = "../minix-ipc", version = "0.1.0" }
+minixrs-ipc = { path = "../minixrs-ipc", version = "0.1.0" }
 minixrs-server-rt = { path = "../server-rt", version = "0.1.0" }
 minixrs-driver-rt = { path = "../drivers/driver-rt", version = "0.1.0" }

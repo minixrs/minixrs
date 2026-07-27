@@ -49,7 +49,7 @@ HHDM offset: 0xffff000000000000
 ## Cargo workspace
 
 The root `Cargo.toml` declares every crate as a workspace member: `kernel`,
-`kernel-shared`, `minix-ipc`, `server-rt`, the six `servers/*`, the (stub)
+`kernel-shared`, `minixrs-ipc`, `server-rt`, the six `servers/*`, the (stub)
 `drivers/*` and `fs/*`, and `userland/{init,worker,sh,coreutils}`.
 
 The kernel builds against the **builtin `aarch64-unknown-none` target** — not a
@@ -104,7 +104,7 @@ The feature lives on two crates — the **kernel** (gates the stub code in
 feature resolution, it reads `CARGO_FEATURE_BOOT_STUBS` and, when the kernel is
 stub-free, passes `--no-default-features` to the nested PM build too — keeping the
 two in lockstep. The feature is intentionally **not** placed on `kernel-shared`: a
-shared-crate default feature is force-enabled by other dependents (`minix-ipc`,
+shared-crate default feature is force-enabled by other dependents (`minixrs-ipc`,
 `server-rt`) through cargo *feature unification* and could not be turned off. So
 `NR_STUB_PROCS` (= 4) and `FORK_POOL_BASE` (= 15) are constant regardless of the
 feature — disabling stubs merely leaves proc slots 11–14 unoccupied; it does not
@@ -230,7 +230,7 @@ cargo gen-c-headers /some/sysroot   # explicit output directory
 cargo gen-c-headers --stdout        # eyeball the output
 ```
 
-It emits `include/minix/{ipc,com,callnr,errno}.h`, plus two artifacts that make
+It emits `include/minixrs/{ipc,com,callnr,errno}.h`, plus two artifacts that make
 the CI gate real: `abi-selftest.c` — a header is never a translation unit on its
 own, so without a `.c` file none of the generated `_Static_assert`s would ever
 fire — and `abi-check/errno.h`, a CI-only stand-in for the C library's
@@ -245,8 +245,8 @@ Two things the headers are careful about:
   and the header asserts the C decode macro against the Rust-computed endpoints.
 - **The POSIX errno block is asserted, never defined.** minix.rs adopts musl's
   numbering verbatim, so those values must come from the C library's own
-  `<errno.h>`; `minix/errno.h` defines only the MINIX 200-band and puts the
-  POSIX checks behind `MINIX_ABI_CHECK_POSIX_ERRNO`, which the musl build
+  `<errno.h>`; `minixrs/errno.h` defines only the MINIX 200-band and puts the
+  POSIX checks behind `MINIXRS_ABI_CHECK_POSIX_ERRNO`, which the musl build
   defines. See [System Calls & ABI](reference/syscalls.md).
 
 ## Debugging: QEMU trace forensics

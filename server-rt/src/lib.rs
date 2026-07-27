@@ -26,7 +26,7 @@
 //! Unlike MINIX's global `sef_setcb_*` registration, callbacks are passed in a
 //! [`SefConfig`] and carried in the returned [`Sef`] handle — no static mutable
 //! state, so the whole crate is `#![forbid(unsafe_code)]` (all `unsafe` lives in
-//! `minix-ipc`). Live-update / state-transfer SEF features are deferred.
+//! `minixrs-ipc`). Live-update / state-transfer SEF features are deferred.
 
 // `no_std` for the real (freestanding) build, but a normal host crate under
 // `cargo test` so the pure [`classify`] logic gets host-runnable unit tests.
@@ -49,6 +49,6 @@ pub use ds::{sef_publish_to_ds, sef_retrieve_from_ds};
 pub use grant::GrantPool;
 pub use init::SefInitCb;
 pub use kcall::{sys_copy, sys_safecopy};
-pub use payload::{buf_addr, rd_i32, rd_u64, wr_i32, wr_u64};
+pub use payload::{buf_addr, rd_i32, rd_name, rd_u64, wr_i32, wr_u64};
 pub use sef::{Sef, SefConfig, sef_startup};
 pub use signal::SefSignalCb;

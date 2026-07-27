@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "kernel",
     "kernel-shared",
-    "minix-ipc",
+    "minixrs-ipc",
     "minixrs-abi-note",
     "server-rt",
     "servers/pm",

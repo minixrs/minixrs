@@ -46,9 +46,9 @@ mod mproc;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    EXEC_NAME_LEN, PM_EXEC, PM_EXIT, PM_FORK, PM_GETPID, PM_GRANT_TEST, PM_WAIT, PRIVCTL_SET_USER,
-    SAFECOPY_FROM, SAFECOPY_TO, SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT,
-    SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
+    EXEC_NAME_LEN, PM_EXEC, PM_EXEC_NAME_OFF, PM_EXIT, PM_FORK, PM_GETPID, PM_GRANT_TEST, PM_WAIT,
+    PRIVCTL_SET_USER, SAFECOPY_FROM, SAFECOPY_TO, SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG,
+    SYS_EXEC, SYS_EXIT, SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
 };
 use minixrs_kernel_shared::com::{
     INIT_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
@@ -58,8 +58,8 @@ use minixrs_kernel_shared::error::{EAGAIN, ECHILD, EFAULT, EINVAL, EPERM, ESRCH,
 use minixrs_kernel_shared::grant::{CPF_READ, grant_id};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minixrs_server_rt::{
-    GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, rd_u64, sef_publish_to_ds, sef_startup,
-    sys_copy, sys_safecopy, wr_i32,
+    GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, rd_name, rd_u64, sef_publish_to_ds,
+    sef_startup, sys_copy, sys_safecopy, wr_i32,
 };
 
 /// Priority band and quantum PM assigns a forked child via `SCHEDULING_START`.
@@ -68,13 +68,6 @@ use minixrs_server_rt::{
 /// kernel-scheduled stubs.
 const CHILD_PRIORITY: i32 = 8;
 const CHILD_QUANTUM: i32 = 5;
-
-/// The boot-embedded binary PM's `execve` selects (slice 4.7). Until the
-/// filesystem/musl wrappers thread a user-supplied path (Phase 5), PM always
-/// execs the `worker` demo binary — the kernel resolves it by name in the MXBI
-/// archive. Must be `<= EXEC_NAME_LEN` bytes to fit the `SYS_EXEC` payload.
-const EXEC_TARGET: &str = "worker";
-const _: () = assert!(EXEC_TARGET.len() <= EXEC_NAME_LEN);
 
 /// Staging buffer for the slice-5.2 grant demo. Bounds every copy PM makes, so
 /// a `PM_GRANT_TEST` naming an over-large length is clamped rather than
@@ -340,15 +333,26 @@ fn handle_wait(msg: &mut Message) {
 }
 
 /// Handle `PM_EXEC`: replace the caller's program image with the boot-embedded
-/// [`EXEC_TARGET`]. PM issues `SYS_EXEC` naming the caller (kernel-stamped
-/// `m_source`); the kernel builds the new address space and resumes the caller
-/// at the new entry point. On success PM sends **no** reply — the caller does
-/// not return from this call, it restarts at the new image's `_start`. On
-/// failure the caller is untouched on its old image, so PM replies the errno.
+/// module it names. The target comes from the payload
+/// ([`PM_EXEC_NAME_OFF`]`..+`[`EXEC_NAME_LEN`], NUL-padded) as of slice 5.6 —
+/// before that PM hardcoded `"worker"`. PM issues `SYS_EXEC` naming the caller
+/// (kernel-stamped `m_source`); the kernel resolves the name against the boot
+/// image, builds the new address space, and resumes the caller at the new entry
+/// point.
+///
+/// On success PM sends **no** reply — the caller does not return from this call,
+/// it restarts at the new image's `_start`. On failure the caller is untouched on
+/// its old image, so PM replies the errno: `EINVAL` for a malformed name, else
+/// whatever the kernel answered (`ENOENT` for an unknown module).
 #[cfg_attr(test, allow(dead_code))]
 fn handle_exec(system: Endpoint, msg: &mut Message) {
     let caller_e = msg.m_source;
-    let rc = sys_exec(system, caller_e, EXEC_TARGET);
+    // `name` borrows `msg`; `sys_exec` marshals into its own buffer and never
+    // touches it, so the borrow ends before `reply` needs `&mut msg`.
+    let rc = match rd_name(msg, PM_EXEC_NAME_OFF, EXEC_NAME_LEN) {
+        Some(name) => sys_exec(system, caller_e, name),
+        None => EINVAL,
+    };
     if rc != OK {
         reply(caller_e, msg, rc);
     }
@@ -711,9 +715,13 @@ fn sys_exec(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
         payload: [0u8; 96],
     };
     wr_i32(&mut m, 0, target_e);
-    // `EXEC_TARGET` is asserted `<= EXEC_NAME_LEN`, so the name fits the field.
+    // The name came out of a `PM_EXEC` payload field of exactly `EXEC_NAME_LEN`
+    // bytes (`rd_name` stops at the field's end), so it fits this one — the two
+    // widths are the same constant, which is why forwarding is a copy and never
+    // a truncation. Clamped anyway: `sys_exec` is also called with literals.
     let bytes = name.as_bytes();
-    m.payload[4..4 + bytes.len()].copy_from_slice(bytes);
+    let n = bytes.len().min(EXEC_NAME_LEN);
+    m.payload[4..4 + n].copy_from_slice(&bytes[..n]);
     let rc = ipc_sendrec(system, &mut m);
     if rc != OK {
         return rc;

@@ -7,5 +7,5 @@ publish = false
 
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
-minixrs-ipc = { path = "../../minix-ipc" }
+minixrs-ipc = { path = "../../minixrs-ipc" }
 minixrs-driver-rt = { path = "../driver-rt" }

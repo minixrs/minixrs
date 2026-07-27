@@ -12,12 +12,17 @@
 //! (user → server, never user → kernel).
 //!
 //! `init` is the live exercise for the Phase-4 process machinery that the
-//! slice-4.6/4.7 stub E demonstrated: it forks a child, the child execs the
-//! `worker` binary (which runs a few `PM_GETPID` round-trips then exits), and
-//! the parent `wait`s
-//! to reap the zombie before looping to fork again. Each cycle recycles the same
-//! fork-pool slot with an advancing endpoint generation — observable in the boot
-//! trace as `SYS_FORK` / `SYS_EXEC` / `SYS_EXIT` triples.
+//! slice-4.6/4.7 stub E demonstrated: it forks a child, the child execs a
+//! boot-image binary, and the parent `wait`s to reap the zombie before looping
+//! to fork again. Each cycle recycles the same fork-pool slot with an advancing
+//! endpoint generation — observable in the boot trace as `SYS_FORK` /
+//! `SYS_EXEC` / `SYS_EXIT` triples.
+//!
+//! Slice 5.6 makes the exec target the *caller's* choice — `PM_EXEC` carries a
+//! name now, instead of PM hardcoding one — and init alternates between
+//! [`EXEC_TARGETS`]: `worker` (5.5's exec-stack probe) and `hello` (the first C
+//! program on minix.rs). Alternating keeps both proofs live; switching outright
+//! would have retired the exec-ABI markers to make room for the C ones.
 //!
 //! Slice 5.4 gives it a voice. Before the fork loop it writes to **fd 1 and fd
 //! 2** through VFS, which grants the buffer on to the TTY driver — the POSIX
@@ -33,7 +38,7 @@
 //! [`report_exec_stack`].
 //!
 //! Built as a freestanding aarch64 ELF (`userland/init/user.ld`). It uses
-//! `minix-ipc` directly — no `server-rt`/SEF, because it is a plain user program,
+//! `minixrs-ipc` directly — no `server-rt`/SEF, because it is a plain user program,
 //! not a server. The `_start` shim and panic handler are gated to `not(test)`.
 
 #![cfg_attr(not(test), no_std)]
@@ -44,7 +49,8 @@ minixrs_abi_note::brand!();
 use minixrs_ipc::ipc_sendrec;
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    CDEV_MAX_IO, PM_EXEC, PM_FORK, PM_WAIT, VFS_BUF_OFF, VFS_FD_OFF, VFS_LEN_OFF, VFS_WRITE,
+    CDEV_MAX_IO, EXEC_NAME_LEN, PM_EXEC, PM_EXEC_NAME_OFF, PM_FORK, PM_WAIT, VFS_BUF_OFF,
+    VFS_FD_OFF, VFS_LEN_OFF, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -131,6 +137,30 @@ const _: () = assert!(UNMAPPED_VA != 0);
 const _: () = assert!(UNMAPPED_VA < USER_VA_TOP);
 const _: () = assert!(UNMAPPED_VA < USER_DEVICE_WINDOW_BASE);
 
+/// The boot-image modules `init` execs, in rotation — one per fork cycle.
+///
+/// **`worker` must stay first.** It is slice 5.5's exec-stack probe, and the
+/// verdict is keyed on the *first* child's pid ([`main`]'s `probe_pid`), so
+/// reordering this array silently retires the `exec stack ok` marker while
+/// leaving every other marker in place.
+///
+/// Alternating rather than switching outright is the whole point: `hello` is the
+/// slice-5.6 C milestone, but retiring `worker` to make room would take the
+/// exec-ABI proof down with it. Both traces land inside the `[ksys SYS_EXEC]`
+/// head carve-out (6 calls), so both are observable in a boot log.
+const EXEC_TARGETS: [&str; 2] = ["worker", "hello"];
+
+// Each name has to fit the `PM_EXEC` payload field, which is the same width as
+// the kernel's `SYS_EXEC` field — so a name that fits here forwards uncut.
+const _: () = {
+    let mut i = 0;
+    while i < EXEC_TARGETS.len() {
+        assert!(!EXEC_TARGETS[i].is_empty(), "an empty name is EINVAL");
+        assert!(EXEC_TARGETS[i].len() <= EXEC_NAME_LEN);
+        i += 1;
+    }
+};
+
 /// Build a request message to PM: no payload, `m_source` is stamped by the kernel.
 #[cfg_attr(test, allow(dead_code))]
 fn pm_msg(m_type: i32) -> Message {
@@ -161,8 +191,15 @@ fn main() -> ! {
     // like. `alloc_pid` never hands out 0, so it doubles as the "not yet" value.
     let mut probe_pid = 0;
     let mut reported = false;
+    let mut cycle = 0usize;
 
     loop {
+        // Chosen *before* the fork, so both halves of the SENDREC agree on it:
+        // the child is a copy of this address space taken during `SYS_FORK`, so
+        // it inherits this value and needs no way to ask which turn it is. The
+        // parent advances `cycle` only after a successful fork.
+        let target = EXEC_TARGETS[cycle % EXEC_TARGETS.len()];
+
         // fork(): PM replies to both halves of this SENDREC — the child sees
         // `m_type == 0`, the parent sees the child pid (`> 0`); a negative value
         // is an errno (e.g. `EAGAIN` when the fork table is full).
@@ -171,10 +208,12 @@ fn main() -> ! {
 
         match m.m_type {
             0 => {
-                // Child: replace this image with the `worker` binary. PM issues
-                // `SYS_EXEC` and the kernel resumes us at worker's `_start`, so
-                // this SENDREC never returns on success.
+                // Child: replace this image with `target`. PM issues `SYS_EXEC`
+                // and the kernel resumes us at the new image's `_start`, so this
+                // SENDREC never returns on success.
                 let mut e = pm_msg(PM_EXEC);
+                let bytes = target.as_bytes();
+                e.payload[PM_EXEC_NAME_OFF..PM_EXEC_NAME_OFF + bytes.len()].copy_from_slice(bytes);
                 let _ = ipc_sendrec(pm, &mut e);
                 // Unreachable on success; park defensively if exec ever failed.
                 loop {
@@ -182,6 +221,7 @@ fn main() -> ! {
                 }
             }
             n if n > 0 => {
+                cycle = cycle.wrapping_add(1);
                 // Parent: `n` is the new child's pid. Remember the first one —
                 // that is the process whose exec-ABI verdict gets reported.
                 if probe_pid == 0 {
