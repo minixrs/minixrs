@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `minix/errno.h` — the MINIX-specific errno band, plus an opt-in check that
+//! `minixrs/errno.h` — the MINIX-specific errno band, plus an opt-in check that
 //! the C library's POSIX errnos agree with `kernel-shared`.
 //!
 //! The POSIX block (magnitudes 1..=40) is deliberately **not** defined here:
@@ -14,10 +14,10 @@ use minixrs_kernel_shared::error;
 use crate::builder::CFile;
 
 /// Include guard for the generated header.
-pub const GUARD: &str = "_MINIX_ERRNO_H";
+pub const GUARD: &str = "_MINIXRS_ERRNO_H";
 
 /// Guard macro that opts a translation unit into the POSIX errno check.
-pub const CHECK_MACRO: &str = "MINIX_ABI_CHECK_POSIX_ERRNO";
+pub const CHECK_MACRO: &str = "MINIXRS_ABI_CHECK_POSIX_ERRNO";
 
 /// `(name, positive magnitude)` for the POSIX block, in declaration order.
 fn posix_block() -> Vec<(&'static str, i32)> {
@@ -37,7 +37,7 @@ fn minix_band() -> Vec<(&'static str, i32)> {
         .collect()
 }
 
-/// Render `minix/errno.h`.
+/// Render `minixrs/errno.h`.
 pub fn render() -> String {
     let mut f = CFile::new(
         "MINIX-specific errno values, and a check on the C library's POSIX ones.",
@@ -119,12 +119,12 @@ pub fn render_standin() -> String {
         "CI-only stand-in for the C library's <errno.h>.",
         &["kernel-shared/src/error.rs"],
     );
-    f.guard_open("_MINIX_ABI_CHECK_ERRNO_H");
+    f.guard_open("_MINIXRS_ABI_CHECK_ERRNO_H");
 
     f.block_comment(&[
         "NOT A REAL LIBC HEADER.",
         "",
-        "A stand-in so CI can compile <minix/errno.h>'s guarded POSIX",
+        "A stand-in so CI can compile <minixrs/errno.h>'s guarded POSIX",
         "verification block without a musl sysroot. It is generated from the same",
         "Rust table those assertions check, so it is a SYNTAX and MACRO-SPELLING",
         "check, not a value check -- the real value check runs against the fork's",
@@ -138,7 +138,7 @@ pub fn render_standin() -> String {
         f.define_dec(name, magnitude.into());
     }
 
-    f.guard_close("_MINIX_ABI_CHECK_ERRNO_H");
+    f.guard_close("_MINIXRS_ABI_CHECK_ERRNO_H");
     f.finish()
 }
 
@@ -185,7 +185,7 @@ mod tests {
         for (name, magnitude) in posix_block() {
             assert!(
                 builder::define_value(&text, name).is_none(),
-                "{name} must not be #defined by minix/errno.h"
+                "{name} must not be #defined by minixrs/errno.h"
             );
             assert!(
                 text.contains(&format!("_Static_assert({name} == {magnitude},")),

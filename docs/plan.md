@@ -126,7 +126,7 @@ minixrs/
       callnr.rs                 # PM_*, VFS_*, VM_* call numbers
       error.rs                  # MINIX error codes
 
-  minix-ipc/                    # Rust IPC library for userspace
+  minixrs-ipc/                    # Rust IPC library for userspace
     Cargo.toml
     src/
       lib.rs                    # ipc_send, ipc_receive, ipc_sendrec, ipc_notify
@@ -465,7 +465,7 @@ file with no PM/kernel rework), and **scheduling moved to a real user-space
 SCHED** by making the kernel scheduler *delegatable* rather than replacing it.
 Full slice history: [`docs/plans/phase-4-servers.md`](plans/phase-4-servers.md).
 
-- **4.1** ✓ `server-rt` SEF framework, VM migrated onto it, `minix-ipc` finished (PR #23, 2026-06-14)
+- **4.1** ✓ `server-rt` SEF framework, VM migrated onto it, `minixrs-ipc` finished (PR #23, 2026-06-14)
 - **4.2** ✓ MXBI multi-module boot image + DS server + skeletal VFS (PR #24, 2026-06-21)
 - **4.3** ✓ delegatable kernel scheduler + SCHED server (PR #25, 2026-06-27)
 - **4.4** ✓ RS heartbeat monitor + real `SYS_SETALARM` (PR #26, 2026-06-27)
@@ -476,7 +476,7 @@ Full slice history: [`docs/plans/phase-4-servers.md`](plans/phase-4-servers.md).
 
 Aggregate scope (Phase 4 as a whole):
 
-- `minix-ipc`: NOTIFY + SENDNB primitives
+- `minixrs-ipc`: NOTIFY + SENDNB primitives
 - `server-rt`: SEF startup + receive loop + init/signal callbacks (minimal subset)
 - Multi-module boot-image archive (MXBI) + generalized server loader
 - Kernel calls made real: `SYS_FORK`, `SYS_EXEC`, `SYS_EXIT`, `SYS_PRIVCTL`,
@@ -527,9 +527,9 @@ to Phase 7; TTY input/IRQs to Phase 6.
 - **5.3** TTY driver (TX-only, boot-premapped PL011) + CDEV band ✓ shipped (PR #43, merged 2026-07-25)
 - **M1** (toolchain program P1, out-of-band): `aarch64-unknown-minixrs` target JSON + ELF identity brand ✓ shipped (PR #44, merged 2026-07-25)
 - **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS ✓ shipped (PR #45, merged 2026-07-26)
-- **5.5** exec ABI: SysV initial stack + minimal auxv ◀ ready (branch `feature/slice-5.5-exec-abi`, pending merge)
-- **5.6** musl submodule + `src/minix` port + boot-embedded hello — **milestone A** ◀ next
-- **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob
+- **5.5** exec ABI: SysV initial stack + minimal auxv ✓ shipped (PR #46, merged 2026-07-26)
+- **5.6** musl fork (`minixrs/musl-minixrs` @ v1.2.6) + `src/minixrs` port + boot-embedded hello C program — **milestone A; ABI freeze** ◀ ready (branch `feature/slice-5.6-musl-port`, pending merge)
+- **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ◀ next
 - **5.8** MFS server (read-only) + FS band + VFS mount/open/read
 - **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5 complete**
 - **5.10** stretch: MFS write path

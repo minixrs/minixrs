@@ -22,7 +22,7 @@ user program → SENDREC(server_endpoint, &msg) → kernel IPC → server → re
 ```
 
 The kernel routes the message but does not interpret the call. Today this path is
-driven directly through the `minix-ipc` crate (by `init` and `worker`, using the
+driven directly through the `minixrs-ipc` crate (by `init` and `worker`, using the
 live PM request numbers below). The musl C wrappers that will make it transparent
 to C programs — `read(fd, buf, n)` constructing the message for you — arrive in
 Phase 5.
@@ -264,10 +264,10 @@ constants** and never committed (phase-5 decision D8):
 
 | Header | Contents |
 |--------|----------|
-| `minix/ipc.h` | the `message` struct, endpoint packing macros, IPC primitives |
-| `minix/com.h` | process numbers and the boot endpoints derived from them |
-| `minix/callnr.h` | kernel-call numbers and the server request bands |
-| `minix/errno.h` | the MINIX 200-band errnos; an opt-in check on the C library's POSIX ones |
+| `minixrs/ipc.h` | the `message` struct, endpoint packing macros, IPC primitives |
+| `minixrs/com.h` | process numbers and the boot endpoints derived from them |
+| `minixrs/callnr.h` | kernel-call numbers and the server request bands |
+| `minixrs/errno.h` | the MINIX 200-band errnos; an opt-in check on the C library's POSIX ones |
 
 ```sh
 cargo gen-c-headers          # -> target/gen-c-headers/

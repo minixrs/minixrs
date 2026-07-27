@@ -115,12 +115,12 @@ fn ipc_trap_no_msg(endpoint: Endpoint, primitive: i32) -> i32 {
 #[cfg(not(target_arch = "aarch64"))]
 #[inline]
 fn ipc_trap(_endpoint: Endpoint, _primitive: i32, _msg: &mut Message) -> i32 {
-    unreachable!("minix-ipc IPC traps are aarch64-only")
+    unreachable!("minixrs-ipc IPC traps are aarch64-only")
 }
 
 /// Non-aarch64 fallback for [`ipc_trap_no_msg`]; see [`ipc_trap`]'s fallback.
 #[cfg(not(target_arch = "aarch64"))]
 #[inline]
 fn ipc_trap_no_msg(_endpoint: Endpoint, _primitive: i32) -> i32 {
-    unreachable!("minix-ipc IPC traps are aarch64-only")
+    unreachable!("minixrs-ipc IPC traps are aarch64-only")
 }

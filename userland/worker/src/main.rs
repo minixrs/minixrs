@@ -30,7 +30,7 @@
 //!
 //! Built as a freestanding aarch64 ELF (`userland/worker/user.ld`, which uses the
 //! `FILEHDR PHDRS` idiom so the first `PT_LOAD` covers the ELF header and the
-//! kernel has an `AT_PHDR` to report). It uses `minix-ipc` directly — no
+//! kernel has an `AT_PHDR` to report). It uses `minixrs-ipc` directly — no
 //! `server-rt`/SEF, because it is a plain user program, not a server. The
 //! `_start` shim and panic handler are gated to `not(test)`.
 
@@ -58,9 +58,17 @@ const GETPID_ROUNDS: usize = 3;
 /// Standard error, pre-opened by VFS to the console.
 const STDERR: i32 = 2;
 
-/// What `argv[0]` must say: PM's `handle_exec` hardcodes this as its
-/// `EXEC_TARGET`, and the kernel copies the `SYS_EXEC` name field into the frame.
-const ARGV0: &[u8] = b"worker";
+/// What `argv[0]` may say — the names this image can legitimately be exec'd
+/// under. The kernel copies the `SYS_EXEC` name field into the frame, so this
+/// checks the exact bytes it wrote, which is the point of the probe.
+///
+/// Two entries, not one, and the second is not hypothetical. Since slice 5.6 the
+/// exec target is named by the caller (`init`'s `EXEC_TARGETS`), and when the
+/// musl sysroot is absent `kernel/build.rs` packs **this** ELF under the name
+/// `hello` as its fallback — so the same binary really does run as either name.
+/// Hardcoding `worker` made that fallback print `stack FAIL`, which is on the
+/// forbidden list: a missing sysroot would have looked like a broken exec ABI.
+const ARGV0_NAMES: [&[u8]; 2] = [b"worker", b"hello"];
 
 /// Link base of this image (`user.ld`). `AT_PHDR` must point into the first
 /// `PT_LOAD`, whose `p_vaddr` is exactly this.
@@ -192,7 +200,13 @@ fn validate(sp: u64) -> i32 {
         return 2;
     }
     let argv0 = unsafe { rd_u64(sp + 8) };
-    if !unsafe { str_eq(argv0, ARGV0) } {
+    // SAFETY: `argv0` is the frame's argv[0] pointer, which the kernel aimed at
+    // the NUL-terminated name it wrote above the vectors; `str_eq` bounds its
+    // own walk. Matching any legal name still proves the exact bytes.
+    if !ARGV0_NAMES
+        .iter()
+        .any(|want| unsafe { str_eq(argv0, want) })
+    {
         return 3;
     }
     if unsafe { rd_u64(sp + 16) } != 0 {

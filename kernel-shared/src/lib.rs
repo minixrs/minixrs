@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Types and constants shared between the minix.rs microkernel, system servers,
-//! drivers, and the user-space `minix-ipc` library.
+//! drivers, and the user-space `minixrs-ipc` library.
 //!
 //! Everything in this crate is `#![no_std]` and must remain so. Behaviour
-//! belongs in the kernel or in `minix-ipc` / `server-rt`, not here — the one
+//! belongs in the kernel or in `minixrs-ipc` / `server-rt`, not here — the one
 //! carve-out is a pure predicate over an ABI shape defined in this crate (e.g.
 //! [`message::user_va_ok`]), which lives here so it stays host-testable.
 //! Values are pinned to MINIX 3's ABI where possible (see per-module docs for

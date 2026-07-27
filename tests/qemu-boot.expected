@@ -235,3 +235,59 @@ minix.rs init: vfs.deny ok n=4
 # exit_status, so a worker that faulted before reporting is reaped with 0 --
 # which prints `exec stack FAIL no-verdict` rather than passing silently.
 minix.rs init: exec stack ok
+
+# --- slice 5.6: the first C program on minix.rs (milestone A) -------------
+
+# `init` alternates its exec target between `worker` and `hello` (EXEC_TARGETS),
+# so 5.5's exec-stack probe above stays live alongside the C milestone. Both
+# land inside do_exec's 6-call head carve-out, so both traces appear.
+#
+# Deliberately NOT keyed on the `target=` slot number, and therefore not on the
+# whole `[ksys SYS_EXEC] ` prefix either (the slot sits between them): init's
+# fork pool hands out 15 and 16 in alternation, and which one carries `hello`
+# differs between the default and --no-default-features configs (15 stub-free,
+# 16 with stubs). A marker naming a slot passes in one config and is vacuous in
+# the other -- the slice-5.5 lesson, applied before it could bite. `entry=` is
+# kept so this matches do_exec's trace and not some other line.
+name=hello entry=
+
+# The milestone itself: a C program compiled against the musl fork (external/
+# musl), linked with rust-lld, exec'd out of the boot archive, reaching serial
+# through printf -> VFS -> TTY.
+#
+# This line does NOT prove the flush path, despite being the obvious candidate.
+# musl's stdout starts *line* buffered (`.lbf = '\n'`), and it is __stdout_write
+# -- reached on the first flush -- that sets f->lbf = -1 after the fork's ioctl
+# answers -ENOTTY. So this write goes out immediately via the line-buffered
+# path, and only the printfs AFTER it are fully buffered. The `iov ok` and
+# `errno ok` markers below are the ones that reach the console solely because
+# exit() ran __stdio_exit.
+minix.rs hello: Hello from C!
+
+# fd 2, unbuffered, through the same VFS path -- a different descriptor and a
+# different buffering mode than the line above.
+minix.rs hello: stderr works
+
+# Phase-5 decision D7 (errno identity) proven at RUNTIME rather than only at
+# compile time. tools/build-musl.sh statically asserts the POSIX magnitudes
+# against the fork's own bits/errno.h; this checks the whole chain end to end --
+# VFS answers EBADF for fd 3 (in range of the fd row, not open), the driver
+# relays it, syscall_ret.c turns the negative return into errno, and the value C
+# compares against <errno.h>'s EBADF matches. Emitted ONLY when write(3, ...)
+# returns -1 *and* errno == EBADF, so it cannot appear by accident.
+minix.rs hello: errno ok
+
+# The two-iovec writev path. musl's __stdio_write hands writev the PENDING
+# stream buffer as iov[0] and the new data as iov[1]; both are non-empty only
+# when an over-large write arrives with bytes still buffered, which hello sets
+# up deliberately. Without that setup every write in the program is a single
+# iovec and a writev that ignored iov[1..] would pass unnoticed -- mutation-
+# tested: looping only over iov[0] makes __stdio_write spin forever and takes
+# all four lines below with it.
+#
+# Two independent halves, the 5.4 shape. The tail only reaches the console if
+# the second iovec was sent...
+iov-end
+# ...and this says fwrite accounted for every byte. A writev that moved the
+# bytes but under-reported would print the tail and still be broken.
+minix.rs hello: iov ok match=1

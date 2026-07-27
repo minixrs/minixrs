@@ -285,13 +285,26 @@ pub const PM_EXIT: i32 = PM_RQ_BASE + 2;
 /// `ECHILD` in `m_type` if the caller has no children. (slice 4.6b)
 pub const PM_WAIT: i32 = PM_RQ_BASE + 3;
 
-/// User → PM: `execve()`. No request payload in the slice-4.7 demo — PM selects
-/// the boot-embedded target (`"worker"`) and issues `SYS_EXEC` naming the
-/// caller. PM sends **no** reply on success (the kernel resumes the caller at
-/// the new image's entry point); on failure the reply `m_type` carries a
-/// negative errno and the caller continues in its old image. A user-supplied
-/// path arrives with the filesystem/musl wrappers in Phase 5. (slice 4.7)
+/// User → PM: `execve()`. The caller names its own target: the payload carries
+/// the boot-image module name at [`PM_EXEC_NAME_OFF`]`..+`[`EXEC_NAME_LEN`],
+/// NUL-padded, and PM passes it straight through to `SYS_EXEC` (whose kernel
+/// side has been name-driven since slice 4.7). An all-NUL name is `EINVAL`.
+///
+/// PM sends **no** reply on success (the kernel resumes the caller at the new
+/// image's entry point); on failure the reply `m_type` carries a negative errno
+/// and the caller continues in its old image.
+///
+/// Slice 4.7 had no payload at all — PM hardcoded `"worker"`. Slice 5.6 moved the
+/// choice to the caller so `init` can alternate `worker` and `hello`, which is
+/// what keeps 5.5's exec-stack probe alive alongside the C milestone. A real
+/// filesystem *path* (rather than a boot-image module name) arrives with
+/// slice 5.9. (slice 5.6)
 pub const PM_EXEC: i32 = PM_RQ_BASE + 4;
+
+/// Offset of the target's boot-image module name in a [`PM_EXEC`] payload,
+/// [`EXEC_NAME_LEN`] bytes, NUL-padded. Shares the kernel's `SYS_EXEC` name
+/// width so PM can forward it without re-framing.
+pub const PM_EXEC_NAME_OFF: usize = 0;
 
 /// VFS → PM: the slice-5.2 grant demo. Carries a grant id in-band, which is how
 /// grant ids really travel — slice 5.3's [`CDEV_WRITE`] `{minor, grant_id, len,
@@ -326,6 +339,11 @@ pub const NR_PM_MSGS: usize = 6;
 const _: () = assert!(PM_RQ_BASE > KERNEL_CALL + (NR_KERN_CALLS as i32 - 1));
 const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VFS_RQ_BASE);
 const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
+// The `PM_EXEC` name fits the 96-byte payload. It shares `EXEC_NAME_LEN` with
+// the kernel's `SYS_EXEC` so PM forwards the bytes without re-framing; that
+// equality is what makes the forward a memcpy rather than a truncation.
+const _: () = assert!(PM_EXEC_NAME_OFF + EXEC_NAME_LEN <= 96);
 
 // ---------------------------------------------------------------------------
 // VFS (virtual file system) request numbers — `m_type` values for messages

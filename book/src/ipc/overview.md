@@ -8,7 +8,7 @@ This chapter describes IPC as it stands at the end of Phase 4: a fixed-size
 message, five live primitives (with `SENDA` stubbed), generation-aware endpoints,
 deadlock detection, and the per-process privilege bitmaps that gate it all. The
 kernel side lives in `kernel/src/ipc/`; the shared wire types in `kernel-shared`;
-the user-space trap stubs in `minix-ipc`.
+the user-space trap stubs in `minixrs-ipc`.
 
 ## Message structure
 
@@ -91,7 +91,7 @@ and `SENDA`'s bit is 16 — outside the mask. Making it real is deferred (see
 
 ### The user-space trap (aarch64)
 
-`minix-ipc` issues the IPC trap with `svc #0`. The register convention is:
+`minixrs-ipc` issues the IPC trap with `svc #0`. The register convention is:
 
 | Register | Purpose |
 |----------|---------|
