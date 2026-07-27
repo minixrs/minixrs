@@ -1,0 +1,7 @@
+Grok has the following review Top issues
+
+1. [suggestion] kernel/build.rs:513 — pack_mxbi total_size can still truncate past u32::MAX after the last module
+2. [suggestion] drivers/memory/src/main.rs:127 — BDEV_WRITE → bare EROFS skips minor/grant validation (OK for now; tighten before 5.10)
+3. [nit] fs/mfs/src/main.rs:1 — leftover empty main.rs still auto-builds a host bin
+4. [nit] kernel-shared/src/callnr.rs:1031 — inverted assert message on GET_RAMDISK range test
+5. [nit] tools/gen-c-headers/src/callnr_h.rs:207 — optional: emit GET_RAMDISK in generated C headers
