@@ -126,6 +126,20 @@ const _: () = assert!(NR_SERVED_PROCS > NR_BOOT_PROCS + NR_STUB_PROCS);
 /// with this value; the kernel-side skip lives in `userland`'s load loop.
 pub const EXEC_ONLY_PROC_NR: i32 = -1;
 
+/// MXBI archive module name of the root filesystem image (slice 5.7).
+///
+/// The archive's name space is shared by ELFs and non-ELF blobs as of this
+/// slice: `kernel/build.rs` packs the `mkfs-mfs`-built image under this name and
+/// [`EXEC_ONLY_PROC_NR`], the boot loader skips it like any other negative
+/// proc-nr, and `arch::aarch64::userland` resolves it by name to copy it into RAM
+/// frames for the `memory` driver. One literal, shared by the packer, the loader,
+/// and `SYS_GETINFO(GET_RAMDISK)`, so none of the three can drift.
+///
+/// Asking `do_exec` for this name fails safely (the ELF loader's `scan_brand`
+/// rejects a non-ELF blob), but slice 5.9's path→module resolution must not be
+/// able to *name* it.
+pub const ROOTFS_MODULE_NAME: &str = "rootfs";
+
 /// Build a boot-time endpoint (generation 0) for a task or server.
 pub const fn boot_endpoint(p: ProcNr) -> Endpoint {
     make_endpoint(0, p)

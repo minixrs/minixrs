@@ -50,3 +50,9 @@ arrayvec = { version = "0.7", default-features = false }
 [build-dependencies]
 cc = "1"
 minixrs-kernel-shared = { path = "../kernel-shared" }
+# The root filesystem image is built by calling this crate's library directly
+# (slice 5.7), the way the pack-time brand gate calls `kernel_shared::brand`. No
+# nested host cargo invocation is involved, and cargo re-runs this build script
+# whenever a build-dependency changes — so neither this crate nor `fs/mfs` needs a
+# `rerun-if-changed` entry.
+minixrs-mkfs-mfs = { path = "../tools/mkfs-mfs" }

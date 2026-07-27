@@ -27,7 +27,8 @@
 //! | `0x0040_0000` / `0x0080_0000` | demo stub code / stack pages |
 //! | `0x0100_0000` | VM's heap origin (`region::HEAP_BASE`) |
 //! | `0x0200_0000` | VM's anonymous-mmap arena (`region::MMAP_BASE`) |
-//! | `0x4000_0000` | **this window** |
+//! | `0x4000_0000` | **the device window** |
+//! | `0x8000_0000` | [the ramdisk window](RAMDISK_WINDOW_BASE) (slice 5.7) |
 //!
 //! Two of those entries *grow* on request — VM's heap (`brk` raises its end) and
 //! VM's mmap arena (a bump cursor that never reuses addresses) — so
@@ -39,10 +40,28 @@
 //! Phase 6's virtio-mmio drivers get further pages of the same window; the
 //! 16 MiB size is sized for that rather than for TTY's single page.
 //!
+//! ## The ramdisk window
+//!
+//! [`RAMDISK_WINDOW_BASE`] is the second kernel-owned window, and it is placed
+//! *above* the device window on purpose: `REGION_LIMIT` in
+//! `servers/vm/src/region.rs` is the base of the **lowest** kernel-owned window,
+//! so every window added above that low-water mark needs no VM edit at all. The
+//! `USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE <= RAMDISK_WINDOW_BASE`
+//! assert below is what keeps that ordering true, and it is what makes the
+//! ramdisk's separation from every *process* VA transitive through the device
+//! window's.
+//!
+//! Unlike the device window this one maps **ordinary RAM**, not MMIO: the kernel
+//! copies the boot archive's `rootfs` blob into freshly allocated frames and maps
+//! them `Prot::RW_DATA`. So none of the `prot.device` machinery is involved —
+//! these frames take the normal `free_frame` path in every leaf sweep. RW rather
+//! than RO because slice 5.10's write path is then a body change in the driver
+//! rather than a re-mapping in the kernel.
+//!
 //! These constants are deliberately **not** emitted into the generated C headers:
 //! no Phase 5 C touches them (musl's `write()` goes to VFS, not to a driver's
-//! MMIO window), and a header constant is an ABI promise that would be awkward to
-//! retract once Phase 6 reshapes the window.
+//! MMIO window or ramdisk), and a header constant is an ABI promise that would be
+//! awkward to retract once Phase 6 reshapes the windows.
 
 use crate::message::{USER_PAGE_SIZE, USER_VA_TOP};
 
@@ -62,6 +81,29 @@ pub const USER_DEVICE_WINDOW_SIZE: u64 = 0x0100_0000;
 /// device mapping to Phase 6), so this is a bring-up step exactly like the
 /// server stack page.
 pub const TTY_UART_VA: u64 = USER_DEVICE_WINDOW_BASE;
+
+/// Base of the user-space ramdisk window. One whole L1 slot at 2 GiB (slice 5.7).
+///
+/// Kernel-owned like the device window, and deliberately *above* it so
+/// `region::REGION_LIMIT` — the base of the lowest kernel-owned window — does not
+/// move when a window is added.
+pub const RAMDISK_WINDOW_BASE: u64 = 0x8000_0000;
+
+/// Size of the ramdisk window: 4 MiB, i.e. 1024 pages.
+///
+/// Sized from the format rather than from today's image: seven direct zones plus
+/// one single-indirect block address `7 + 1024` zones at a 4 KiB block size,
+/// which is 4.03 MiB — so a window this size can hold any image MinixFS can
+/// address without a double-indirect reader (see `fs/mfs`'s `read` module).
+pub const RAMDISK_WINDOW_SIZE: u64 = 0x0040_0000;
+
+/// VA at which the kernel maps the boot ramdisk into the `memory` driver's
+/// address space (slice 5.7, decision D3). Page 0 of the window.
+///
+/// Installed once, at boot, by `arch::aarch64::userland::load_boot_server` — the
+/// `memory` driver is a boot server with no way to ask for it — and reported to
+/// that driver alone via `SYS_GETINFO(GET_RAMDISK)`.
+pub const RAMDISK_VA: u64 = RAMDISK_WINDOW_BASE;
 
 /// Size of one L1 slot in the 4 KiB-granule, 4-level, 48-bit-VA walk this
 /// kernel uses: 512 L2 entries × 512 L3 entries × 4 KiB = 1 GiB.
@@ -85,6 +127,27 @@ const _: () = assert!(TTY_UART_VA >= USER_DEVICE_WINDOW_BASE);
 const _: () =
     assert!(TTY_UART_VA + USER_PAGE_SIZE <= USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE);
 
+// The ramdisk window's geometry, mirroring the device window's: one L1-slot
+// boundary, no larger than one slot, a whole number of pages, inside the user VA
+// range.
+const _: () = assert!(RAMDISK_WINDOW_BASE.is_multiple_of(L1_SLOT_SIZE));
+const _: () = assert!(RAMDISK_WINDOW_SIZE <= L1_SLOT_SIZE);
+const _: () = assert!(RAMDISK_WINDOW_SIZE > 0);
+const _: () = assert!(RAMDISK_WINDOW_SIZE.is_multiple_of(USER_PAGE_SIZE));
+const _: () = assert!(RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE <= USER_VA_TOP);
+
+const _: () = assert!(RAMDISK_VA.is_multiple_of(USER_PAGE_SIZE));
+const _: () = assert!(RAMDISK_VA >= RAMDISK_WINDOW_BASE);
+const _: () = assert!(RAMDISK_VA < RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE);
+
+// The load-bearing one. Every kernel-owned window must sit at or above the
+// device window's end, because `servers/vm/src/region.rs` caps every *process*
+// region at `USER_DEVICE_WINDOW_BASE` and nothing else. Violate this and VM would
+// happily hand a client's heap or mmap an address the kernel has already
+// promised to a driver — with no compile error anywhere, because VM's cap would
+// still be internally consistent.
+const _: () = assert!(USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE <= RAMDISK_WINDOW_BASE);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,12 +170,56 @@ mod tests {
     }
 
     #[test]
+    fn the_ramdisk_window_is_one_l1_slot_at_two_gib() {
+        assert_eq!(RAMDISK_WINDOW_BASE, 0x8000_0000);
+        assert_eq!(RAMDISK_WINDOW_BASE, 2 * L1_SLOT_SIZE);
+        assert_eq!(RAMDISK_WINDOW_SIZE, 4 * 1024 * 1024);
+        assert_eq!(RAMDISK_WINDOW_SIZE / USER_PAGE_SIZE, 1024);
+        assert_eq!(RAMDISK_VA, RAMDISK_WINDOW_BASE);
+        assert_eq!(RAMDISK_VA % USER_PAGE_SIZE, 0);
+
+        let end = RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE;
+        assert_eq!(end, 0x8040_0000);
+        assert_eq!(
+            end.min(USER_VA_TOP),
+            end,
+            "the window runs past USER_VA_TOP"
+        );
+    }
+
+    #[test]
+    fn the_kernel_windows_are_disjoint_and_ascending() {
+        // `servers/vm/src/region.rs` caps every process region at
+        // `USER_DEVICE_WINDOW_BASE` — the *lowest* kernel-owned window — and
+        // nothing else. So each new window must be placed above the previous
+        // one's end, or VM's cap would stop covering it. (`min` rather than `<`:
+        // an all-constant `assert!` trips clippy's `assertions_on_constants`.)
+        let device_end = USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE;
+        assert_eq!(
+            device_end.min(RAMDISK_WINDOW_BASE),
+            device_end,
+            "the ramdisk window overlaps the device window"
+        );
+        assert_eq!(
+            USER_DEVICE_WINDOW_BASE.min(RAMDISK_WINDOW_BASE),
+            USER_DEVICE_WINDOW_BASE,
+            "the device window must stay the lowest kernel-owned window"
+        );
+    }
+
+    #[test]
     fn the_window_clears_every_occupied_user_va() {
         // Mirrors the table in the module docs. These are the highest VAs any
         // process occupies today (VM's mmap arena base is the top one); the
         // window must sit above all of them. The arena is bump-only and grows,
         // which is why `servers/vm/src/region.rs` bounds it — and the heap, which
         // `brk` also grows — at the window base rather than trusting this gap alone.
+        //
+        // The ramdisk window gets no entry here, and must not: this list
+        // enumerates *process* VAs, and the ramdisk is kernel-owned, so it is not
+        // one. Its separation from every address below is transitive — it sits
+        // above the device window (`the_kernel_windows_are_disjoint_and_ascending`),
+        // which sits above every VA listed here.
         for occupied in [
             0x0010_0000_u64, // server / init / worker ELF base
             0x0020_0000,     // SERVER_STACK_VA

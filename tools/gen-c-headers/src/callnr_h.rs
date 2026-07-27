@@ -72,7 +72,7 @@ struct Band {
 /// The bands, in ascending numeric order — `bands_are_in_ascending_numeric_order`
 /// enforces that, so inserting a new band in the wrong place fails a test rather
 /// than rendering a header whose sections disagree with its ordering asserts.
-fn bands() -> [Band; 7] {
+fn bands() -> [Band; 8] {
     [
         Band {
             title: "PM requests",
@@ -94,6 +94,19 @@ fn bands() -> [Band; 7] {
             base: callnr::VFS_RQ_BASE,
             count: Some(("NR_VFS_MSGS", callnr::NR_VFS_MSGS)),
             members: vec![("VFS_WRITE", callnr::VFS_WRITE)],
+        },
+        // Base + members + count only, mirroring exactly what CDEV emits: no
+        // payload offsets. No C builds a BDEV request — musl's write() goes to
+        // VFS — so the 5.4 "defer the offsets until C needs them" stance holds.
+        Band {
+            title: "block-device requests",
+            base_name: "BDEV_RQ_BASE",
+            base: callnr::BDEV_RQ_BASE,
+            count: Some(("NR_BDEV_MSGS", callnr::NR_BDEV_MSGS)),
+            members: vec![
+                ("BDEV_READ", callnr::BDEV_READ),
+                ("BDEV_WRITE", callnr::BDEV_WRITE),
+            ],
         },
         Band {
             title: "character-device requests",
@@ -340,8 +353,12 @@ pub fn render() -> String {
         "the PM band overlaps the VFS band",
     );
     f.static_assert(
-        "VFS_RQ_BASE + NR_VFS_MSGS - 1 < CDEV_RQ_BASE",
-        "the VFS band overlaps the CDEV band",
+        "VFS_RQ_BASE + NR_VFS_MSGS - 1 < BDEV_RQ_BASE",
+        "the VFS band overlaps the BDEV band",
+    );
+    f.static_assert(
+        "BDEV_RQ_BASE + NR_BDEV_MSGS - 1 < CDEV_RQ_BASE",
+        "the BDEV band overlaps the CDEV band",
     );
     f.static_assert(
         "CDEV_RQ_BASE + NR_CDEV_MSGS - 1 < VM_RQ_BASE",
@@ -453,8 +470,9 @@ mod tests {
     /// A band inserted in the wrong slot would therefore render sections that
     /// disagree with the asserts — so pin the order here rather than in review.
     /// Slice 5.4 inserted VFS (`0x800`) between PM and CDEV on exactly this
-    /// instruction; slices 5.7 (BDEV, `0x900`) and 5.8 (MFS, `0xA00`) each
-    /// insert a band *below* CDEV too, and this test is what tells them where.
+    /// instruction, and slice 5.7 inserted BDEV (`0xA00`) between VFS and CDEV on
+    /// the same one; slice 5.8's VFS↔FS band (`0x900`) inserts *between VFS and
+    /// BDEV*, and this test is what tells it where.
     #[test]
     fn bands_are_in_ascending_numeric_order() {
         let bands = bands();
@@ -584,6 +602,40 @@ mod tests {
             builder::define_value(&text, "SAFECOPY_TO").as_deref(),
             Some(callnr::SAFECOPY_TO.to_string().as_str())
         );
+    }
+
+    /// `GET_RAMDISK` and its reply offsets are deliberately **not** emitted, even
+    /// though `GET_WHOAMI` beside them is.
+    ///
+    /// The asymmetry is the point. `GET_WHOAMI` describes any process; a C program
+    /// linked against the fork could legitimately ask it. `GET_RAMDISK` is gated by
+    /// the kernel to `MEM_PROC_NR`, a Rust driver — so no C can ever call it
+    /// successfully, and past the slice-5.6 ABI freeze a header constant is a
+    /// promise that costs a two-repo PR to retract. Emitting it for symmetry would
+    /// buy nothing and freeze something.
+    ///
+    /// This test is the record of that decision, so the omission reads as
+    /// deliberate rather than forgotten — the `no_grant_struct_is_emitted_yet`
+    /// pattern. Emit it when a C caller exists, and delete this test in the same
+    /// commit.
+    #[test]
+    fn no_ramdisk_selector_is_emitted_yet() {
+        let text = render();
+        assert!(
+            builder::define_value(&text, "GET_WHOAMI").is_some(),
+            "GET_WHOAMI is emitted; only GET_RAMDISK is held back"
+        );
+        for name in [
+            "GET_RAMDISK",
+            "GETINFO_RAMDISK_VA_OFF",
+            "GETINFO_RAMDISK_LEN_OFF",
+        ] {
+            assert_eq!(
+                builder::define_value(&text, name),
+                None,
+                "{name} is a kernel-to-Rust-driver selector and must not be frozen into the C ABI"
+            );
+        }
     }
 
     /// `GrantEntry` is deliberately not emitted as a C struct until a C caller

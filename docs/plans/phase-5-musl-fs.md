@@ -33,9 +33,14 @@ Facts the design rests on (verified against source at session time):
   + a `servers` array row + a `qemu-boot.expected` line.
 - Request bands `0x800`, `0x900`, `0xA00` are free (between PM `0x700` and VM
   `0xC00`, all below `NOTIFY_MESSAGE = 0x1000`). `0xB00` was the fourth until
-  slice 5.3 claimed it for CDEV; the remaining three are earmarked VFS (5.4),
-  BDEV (5.7), and MFS (5.8), and `callnr_h.rs`'s
-  `bands_are_in_ascending_numeric_order` test enforces where each one goes.
+  slice 5.3 claimed it for CDEV; the remaining three are earmarked VFS
+  (`0x800`, 5.4), FS (`0x900`, 5.8), and BDEV (`0xA00`, 5.7), and
+  `callnr_h.rs`'s `bands_are_in_ascending_numeric_order` test enforces where
+  each one goes. (Slices 5.3–5.6 recorded this pairing the other way round —
+  BDEV at `0x900`, the FS band at `0xA00` — in four in-tree comments; slice 5.7
+  corrected them all when it claimed `0xA00`. What is load-bearing is only that
+  the bands stay in ascending numeric order, which is why the correction was
+  free.)
 - The MXBI archive already supports non-ELF blobs: the boot loader skips
   negative `proc_nr` records and `BootImage::module_by_name` returns raw
   bytes with no ELF validation.
@@ -1013,7 +1018,7 @@ proof lives):
 | Skip the `copy_to_user_as` | `exec stack FAIL code=2`: worker reads the zeroed stack page, so `argc` is 0. Confirms the frame really arrives via the copy and is not somehow present already |
 | Revert `user.ld`'s `FILEHDR PHDRS` | `[exec] … auxv=1` (the `auxv=4` marker vanishes) and `exec stack FAIL code=7` — the phdr check. Confirms the `AT_PHDR` arm is live rather than dead |
 
-### Slice 5.6: musl fork + `src/minixrs` port + boot-embedded hello — **milestone A; ABI freeze** ◀ ready (branch `feature/slice-5.6-musl-port`, pending merge)
+### Slice 5.6: musl fork + `src/minixrs` port + boot-embedded hello — **milestone A; ABI freeze** ✓ shipped (PR #47, merged 2026-07-26)
 
 **Goal:** a C program built against the musl fork runs on minix.rs (exec'd
 from the boot archive; the FS comes later).
@@ -1111,7 +1116,7 @@ MXBI archive; marker in `qemu-boot.expected`.
   **a fallback path needs its own boot, not just a code review** — the
   name-level substitution was reviewed twice and read correctly both times.
 
-### Slice 5.7: BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ◀ next
+### Slice 5.7: BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ◀ ready (branch `feature/slice-5.7-bdev-ramdisk`, pending merge)
 
 **Goal:** D3 — a block-device story with a real MFS image behind it.
 
@@ -1123,14 +1128,55 @@ the mfs readers. `kernel/build.rs` runs mkfs and packs the image as
 (`rootfs`, −1). Kernel boot: copy blob to RAM frames, map RW into MEM's AS;
 new `SYS_GETINFO` selector returns `(va, len)`. `drivers/memory` becomes a
 real server (roster +1, proc_nr 3): serves `BDEV_RQ_BASE = 0xA00`
-`BDEV_READ`/`BDEV_WRITE {minor, block, count, granter, grant_id}` against
-the mapped image via safecopy.
+`BDEV_READ`/`BDEV_WRITE` against the mapped image via safecopy.
 
-**Proof:** MEM's init `diag_print`s image size + superblock-magic check
-(`[as]` roster grows to 13); BDEV round-trip is exercised by host tests here
-and by live IPC in 5.8.
+**Proof:** the `[as]` roster grows to 13; `[ramdisk] mem va=… len=… pages=…`
+from the kernel's copy loop; `[diag memory] ramdisk ok blocks=256 tail=1`;
+and a live VFS client exercising `bdev.{ds,read,head,tail,deny}`.
 
-### Slice 5.8: MFS server (read-only) + FS band + VFS mount/open/read
+#### As built — five differences from the sketch above
+
+1. **No `granter` field in the payload, and no grant offset.** The sketch's
+   `{minor, block, count, granter, grant_id}` would have made every
+   grant-holding block driver a confused deputy. The driver takes the granter
+   from the kernel-stamped `m_source`, the 5.2/5.3 rule; the offset is absent
+   because every client through 5.9 grants a buffer whose block starts at 0.
+   The payload is `{minor, grant, len, block}`, mirroring `CDEV_WRITE`.
+2. **A fixed-size image (`ROOTFS_IMAGE_BLOCKS = 256`, 1 MiB), not a
+   content-sized one.** In the musl-sysroot-absent fallback `build_hello`
+   returns the 15 KB *worker* ELF, so a content-sized image would make every
+   size-derived marker config-dependent — the 5.5/5.6 "right in one config,
+   vacuous in the other" trap. Oversizing is a build failure
+   (`MkfsError::TooBig`) naming one constant.
+3. **`/etc/pattern` (40 KiB) is mandatory, not filler.** `/bin/hello` is
+   ~200 KB = 49 blocks and forces the single-indirect zone arm — but in the
+   fallback config it is 15 KB = 4 blocks, *inside* the 7 direct zones, so
+   both the arm and mkfs's indirect writer would be dead in exactly the
+   config CI's non-QEMU jobs build. A constant-size file past the boundary
+   keeps them live in both.
+4. **MEM's init check is device-level, not format-level.** A superblock-magic
+   check would make a *block* driver depend on the *filesystem format* crate,
+   which Phase 6 then has to unwind when virtio-blk replaces MEM under an
+   unchanged MFS. Instead mkfs writes a 32-byte image header into block 0's
+   unused boot block (bytes 0..1024, which MFS never reads) and a 32-byte
+   tail label into a reserved last zone; MEM verifies those, and format-level
+   facts are verified by a client *through a real BDEV round trip* — strictly
+   stronger, since MEM reading its own mapping proves only that the copy loop
+   ran. The header/superblock agreement is a mkfs round-trip test.
+5. **The image-header ABI lives in `kernel-shared::rootfs`, not in
+   `tools/mkfs-mfs`.** mkfs writes those bytes, MEM and VFS read them, and
+   none of the three may depend on the others — the same reason
+   `com::ROOTFS_MODULE_NAME` is shared. `image.rs` re-exports them so the
+   writer's own constants still read locally.
+
+Also: `BDEV_WRITE` is defined now and answers `EROFS` rather than `ENOSYS`
+(which is already the unknown-`m_type` answer, so reusing it would make
+"doesn't know about writes" and "knows and refuses" indistinguishable), and an
+over-long or out-of-range request is `EINVAL` rather than a short read — a
+deliberate departure from CDEV, because a filesystem cannot interpret half a
+block.
+
+### Slice 5.8: MFS server (read-only) + FS band + VFS mount/open/read ◀ next
 
 **Goal:** files readable through the full VFS→MFS→BDEV→ramdisk stack.
 

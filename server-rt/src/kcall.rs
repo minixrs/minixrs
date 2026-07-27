@@ -23,12 +23,31 @@
 //! BDEV, and FS bands.
 
 use minixrs_ipc::ipc_sendrec;
-use minixrs_kernel_shared::callnr::{SYS_COPY, SYS_SAFECOPY};
+use minixrs_kernel_shared::callnr::{SYS_COPY, SYS_GETINFO, SYS_SAFECOPY};
 use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::error::OK;
 use minixrs_kernel_shared::{Endpoint, Message};
 
 use crate::payload::{wr_i32, wr_u64};
+
+/// `SYS_GETINFO` — ask the kernel for the introspection record named by
+/// `request` (`GET_WHOAMI`, `GET_RAMDISK`, …).
+///
+/// The kernel replies **in place**: on `OK` the reply fields are in `m.payload`,
+/// laid out per the selector's documentation in `kernel-shared::callnr`. `m` is
+/// reset before the call, so a caller may reuse one message buffer without a
+/// stale field from a previous request reaching the kernel.
+///
+/// Returns `OK`, or a negative errno — `EINVAL` for an unknown selector, `EPERM`
+/// for one the caller is not allowed to ask (`GET_RAMDISK` is gated on the
+/// `memory` driver).
+pub fn sys_getinfo(request: i32, m: &mut Message) -> i32 {
+    m.m_source = 0;
+    m.m_type = SYS_GETINFO;
+    m.payload = [0u8; 96];
+    wr_i32(m, 0, request);
+    sendrec_to_system(m)
+}
 
 /// `SYS_SAFECOPY` — copy between the range grant `gid` describes and the
 /// caller's own buffer at `addr`.

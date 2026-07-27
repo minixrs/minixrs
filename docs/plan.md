@@ -528,9 +528,9 @@ to Phase 7; TTY input/IRQs to Phase 6.
 - **M1** (toolchain program P1, out-of-band): `aarch64-unknown-minixrs` target JSON + ELF identity brand ✓ shipped (PR #44, merged 2026-07-25)
 - **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS ✓ shipped (PR #45, merged 2026-07-26)
 - **5.5** exec ABI: SysV initial stack + minimal auxv ✓ shipped (PR #46, merged 2026-07-26)
-- **5.6** musl fork (`minixrs/musl-minixrs` @ v1.2.6) + `src/minixrs` port + boot-embedded hello C program — **milestone A; ABI freeze** ◀ ready (branch `feature/slice-5.6-musl-port`, pending merge)
-- **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ◀ next
-- **5.8** MFS server (read-only) + FS band + VFS mount/open/read
+- **5.6** musl fork (`minixrs/musl-minixrs` @ v1.2.6) + `src/minixrs` port + boot-embedded hello C program — **milestone A; ABI freeze** ✓ shipped (PR #47, merged 2026-07-26)
+- **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ◀ ready (branch `feature/slice-5.7-bdev-ramdisk`, pending merge)
+- **5.8** MFS server (read-only) + FS band + VFS mount/open/read ◀ next
 - **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5 complete**
 - **5.10** stretch: MFS write path
 - **5.11** stretch: `/dev/null` + `/dev/zero`
