@@ -8,19 +8,21 @@
 # Kernel banner (kernel/src/main.rs)
 minix.rs booting on aarch64
 
-# Address-space bring-up: 8 servers + init (arch/aarch64/userland.rs). The tty
-# line is new in slice 5.3 -- the first user-space *driver*, packed between ds and
-# vfs so the console is in its receive loop before its first client.
+# Address-space bring-up: 9 servers + init (arch/aarch64/userland.rs). The tty
+# line is new in slice 5.3 and the memory line in 5.7 -- the two user-space
+# *drivers*, packed between ds and vfs so each is in its receive loop before its
+# first client (which is vfs for both).
 [as] vm nr=7 ttbr0_pa=
 [as] ds nr=5 ttbr0_pa=
 [as] tty nr=4 ttbr0_pa=
+[as] memory nr=3 ttbr0_pa=
 [as] vfs nr=1 ttbr0_pa=
 [as] sched nr=9 ttbr0_pa=
 [as] rs nr=2 ttbr0_pa=
 [as] pm nr=0 ttbr0_pa=
 [as] init nr=10 ttbr0_pa=
 
-# ...plus the 4 boot stubs (12 [as] lines total)
+# ...plus the 4 boot stubs (13 [as] lines total)
 [as] stub A nr=11 ttbr0_pa=
 [as] stub B nr=12 ttbr0_pa=
 [as] stub C nr=13 ttbr0_pa=
@@ -291,3 +293,87 @@ iov-end
 # ...and this says fwrite accounted for every byte. A writev that moved the
 # bytes but under-reported would print the tail and still be broken.
 minix.rs hello: iov ok match=1
+
+# ---------------------------------------------------------------------------
+# Slice 5.7: the BDEV band, the `memory` ramdisk driver, and the root image.
+# ---------------------------------------------------------------------------
+#
+# Every marker below is identical with and without `boot-stubs` AND with and
+# without the musl sysroot. That is what the FIXED image size buys: in the
+# sysroot-absent build `kernel/build.rs` packs the 15 KB `worker` ELF as `hello`,
+# so a content-sized image would make len/pages/blocks config-dependent -- the
+# slice-5.5/5.6 "right in one config, vacuous in the other" trap.
+
+# The kernel copies the archive's `rootfs` blob into fresh RAM frames and maps
+# them into the memory driver's address space, page by page. Every field is a
+# constant (uspace::RAMDISK_VA, rootfs::ROOTFS_IMAGE_BYTES / _BLOCKS), so all
+# three are asserted. Unlike the tty device page these are ordinary RAM mapped
+# Prot::RW_DATA -- no `prot.device` carve-out is involved anywhere.
+[ramdisk] mem va=0x80000000 len=1048576 pages=256
+
+# The driver announces itself on the kernel debug channel, exactly like the six
+# SEF servers and the tty driver.
+[diag memory] sef ready
+
+# ...and then proves the mapping is real, complete, and holds this build's image.
+# Two 32-byte SYS_COPY(SELF -> SELF) reads, so the driver never dereferences the
+# mapping and a page the kernel failed to map is an EFAULT return rather than an
+# EL0 data abort.
+#
+# `blocks=256` cross-checks the image header's OWN block count against the length
+# SYS_GETINFO(GET_RAMDISK) reported -- two independently derived numbers, binding
+# mkfs's geometry to the kernel's copy.
+#
+# `tail=1` is the 32-byte label read from the image's LAST block, whose text
+# deliberately differs from the header's. It is the only thing in the whole boot
+# that proves the copy loop reached the end of the blob: a loop that failed to
+# advance would map 256 pages of block 0 and pass every header check.
+#
+# This is a DEVICE-level check, not a format-level one -- no superblock is
+# decoded and `minixrs-mfs` is not a dependency of this driver, so Phase 6 can
+# drop virtio-blk in under an unchanged MFS. `tools/mkfs-mfs`'s round-trip test
+# `the_image_header_agrees_with_the_real_superblock` is what licenses checking the
+# header instead; slice 5.8's READSUPER closes it for real.
+[diag memory] ramdisk ok blocks=256 tail=1
+
+# VFS drives the block device over BDEV_READ, resolving `memory` through DS
+# rather than hard-coding boot_endpoint(MEM_PROC_NR) -- the 5.3 contract, with the
+# same non-deterministic-publish caveat and the same distinguishable
+# `bdev.ds FAIL` fallback.
+[diag vfs] bdev.ds ok ep=
+
+# A real read. The reply *is* the byte count, so a driver replying OK gives a
+# different number here. This is also the first SUCCESSFUL `SAFECOPY_TO` anywhere
+# in the tree -- every other use is a denial probe -- so it is what proves the
+# kernel's CPF_WRITE + Prot::writable success path at all.
+[diag vfs] bdev.read ok n=32
+
+# The header bytes survived IPC + grant + safecopy...
+[diag vfs] bdev.head ok match=1
+
+# ...and the `block` field reached the right page. Head and tail do NOT subsume
+# each other: a driver that ignored `block` would return the header for both, and
+# the driver's own `tail=1` above proves the kernel's copy loop, not BDEV
+# indexing. VFS zeroes its buffer between the two reads, so a read that moved
+# nothing cannot pass this on stale bytes.
+[diag vfs] bdev.tail ok match=1
+
+# Ten refusals, each well-formed but for one field: minor 7 (-> ENXIO, the
+# driver's own minor check), one block past the end (-> EINVAL, not EIO: a block
+# device's size is known to its client), BDEV_MAX_IO + 1 bytes (-> EINVAL, the
+# deliberate departure from CDEV's clamp -- a short block read is useless to a
+# filesystem), a negative length (-> EINVAL, which unchecked would widen into a
+# ~16 EiB u64), a grant issued to PM (-> EPERM, the kernel's `who_to` check), a
+# CPF_READ-only grant used as a copy DESTINATION (-> EPERM: the access mask in the
+# WRITE direction, which slice 5.3 never exercised), BDEV_WRITE (-> EROFS, not
+# ENOSYS -- that distinction is the whole reason the request has a number),
+# BDEV_WRITE to minor 7 (-> ENXIO, not EROFS: the driver validates before it
+# refuses, so it never asserts read-onlyness about a device it does not have --
+# and without this probe that arm could be reduced back to a bare EROFS with no
+# marker moving), a request one past the band (-> ENOSYS, and the reply itself is
+# the assertion: a dropped unknown would block VFS in its SENDREC forever and take
+# every later marker with it), and SYS_GETINFO(GET_RAMDISK) issued by VFS
+# (-> EPERM, the gate that keeps a VA mapped into one address space from being
+# handed to another). A missing check makes its probe succeed and turns this into
+# `bdev.deny FAIL <name>`.
+[diag vfs] bdev.deny ok n=10

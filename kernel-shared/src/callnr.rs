@@ -137,8 +137,19 @@ const _: () = assert!(NR_SYS_CALLS.is_multiple_of(32));
 //
 // `SYS_GETINFO` is a multi-purpose introspection call: the request sub-type
 // in the first 4 bytes of the message payload selects what the kernel reports
-// back. Numbering matches MINIX 3 `include/minix/sysinfo.h` so the same wire
-// values can be reused once musl + servers land.
+// back.
+//
+// **Provenance, stated accurately.** Modern MINIX 3 keeps these selectors in
+// `include/minix/com.h`, numbered `0..=25`, where `GET_WHOAMI` is 19 — not 12.
+// minix.rs's 12 is its own value and always was; the comment that used to claim
+// otherwise (and named `include/minix/sysinfo.h`, which carries the *libsys*
+// wrappers rather than the numbers) was simply wrong. The value stays as it is
+// past the slice-5.6 ABI freeze — C in the musl fork depends on it — so the fix
+// is to the claim, not to the number.
+//
+// `0..=31` is reserved for selectors that mirror a MINIX 3 one, so a future
+// import can keep MINIX's number. minix.rs-specific selectors start at 32;
+// [`GET_RAMDISK`] is the first, at 64.
 // ---------------------------------------------------------------------------
 
 /// `SYS_GETINFO` request: return the caller's endpoint, priv flags, init
@@ -151,6 +162,39 @@ pub const GET_WHOAMI: i32 = 12;
 /// the name is only used for debug/log output and the kernel never stores more
 /// than 16 bytes per slot.
 pub const SYS_GETINFO_NAME_LEN: usize = 16;
+
+/// `SYS_GETINFO` request: report where the kernel mapped the boot ramdisk into
+/// the caller's address space, and how long it is (slice 5.7).
+///
+/// Reply payload: the VA in [`GETINFO_RAMDISK_VA_OFF`]`..+8` (u64) and the byte
+/// length in [`GETINFO_RAMDISK_LEN_OFF`]`..+8` (u64), with `m_type == OK`.
+///
+/// **Gated on the caller being the `memory` driver** (`MEM_PROC_NR`); anyone
+/// else gets `EPERM`. The ramdisk is pre-mapped into exactly one address space,
+/// so the VA is meaningless — and actively misleading — anywhere else. There is
+/// no new kernel call and no new kernel state behind this: the VA is a constant
+/// (`uspace::RAMDISK_VA`) and the length is the `rootfs` MXBI module's.
+///
+/// minix.rs-specific, hence 64 rather than a number in the MINIX-mirrored
+/// `0..=31` block.
+pub const GET_RAMDISK: i32 = 64;
+
+/// Offset of the ramdisk VA in a [`GET_RAMDISK`] reply payload (u64).
+pub const GETINFO_RAMDISK_VA_OFF: usize = 0;
+/// Offset of the ramdisk byte length in a [`GET_RAMDISK`] reply payload (u64).
+pub const GETINFO_RAMDISK_LEN_OFF: usize = 8;
+
+// minix.rs-specific selectors live clear of the `0..=31` block reserved for
+// MINIX 3-mirrored numbers.
+const _: () = assert!(GET_RAMDISK > 31);
+const _: () = assert!(GET_RAMDISK != GET_WHOAMI);
+
+// Both reply fields are u64 and must be 8-aligned within the message, whose
+// payload starts at byte 8.
+const _: () = assert!(GETINFO_RAMDISK_VA_OFF + 8 <= GETINFO_RAMDISK_LEN_OFF);
+const _: () = assert!(GETINFO_RAMDISK_LEN_OFF + 8 <= 96);
+const _: () = assert!((8 + GETINFO_RAMDISK_VA_OFF).is_multiple_of(8));
+const _: () = assert!((8 + GETINFO_RAMDISK_LEN_OFF).is_multiple_of(8));
 
 // ---------------------------------------------------------------------------
 // `SYS_PRIVCTL` subcodes.
@@ -405,10 +449,10 @@ pub const VFS_LEN_OFF: usize = 4;
 /// [`CDEV_OFFSET_OFF`] documents).
 pub const VFS_BUF_OFF: usize = 8;
 
-// The VFS range sits strictly above the PM range and strictly below CDEV's (and
+// The VFS range sits strictly above the PM range and strictly below BDEV's (and
 // therefore every other server request range) and the NOTIFY marker.
 const _: () = assert!(VFS_RQ_BASE > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
-const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < CDEV_RQ_BASE);
+const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < BDEV_RQ_BASE);
 const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
 // The `VFS_WRITE` payload fields are ordered, non-overlapping, and fit the
@@ -421,16 +465,127 @@ const _: () = assert!(VFS_BUF_OFF + 8 <= 96);
 const _: () = assert!((8 + VFS_BUF_OFF).is_multiple_of(8));
 
 // ---------------------------------------------------------------------------
+// BDEV (block device) request numbers — `m_type` values for messages addressed
+// to a block-device driver, the `memory` ramdisk being the first (slice 5.7).
+//
+// Like the PM/VFS/CDEV/VM/DS/SEF/SCHED ranges these are *server IPC requests*,
+// not kernel calls. `0xA00` keeps the bands in numeric order between VFS
+// (`0x800`) and CDEV (`0xB00`), leaving `0x900` free for the VFS↔FS band slice
+// 5.8 still owes. Numbering is minix.rs-specific — MINIX 3 carries `BDEV_*` in
+// `include/minix/com.h` with its own values, which minix.rs does not inherit
+// because its device protocol is narrower (no `BDEV_REPLY` message class and no
+// request id; a driver replies to the SENDREC).
+//
+// The payload carries a **grant id**, not a buffer address — a driver's client
+// lives in a different address space, so the bytes move via `SYS_SAFECOPY`. As in
+// the CDEV band the **granter is deliberately not a payload field**: the driver
+// takes it from the kernel-stamped `m_source`, because a caller-supplied granter
+// would turn any grant-holding driver into a confused deputy. There is no
+// grant-*offset* field either — every client through slice 5.9 grants a buffer
+// whose block starts at offset 0, and a field nothing sets is a field nothing
+// validates.
+// ---------------------------------------------------------------------------
+
+/// Base for block-device driver request `m_type` values.
+pub const BDEV_RQ_BASE: i32 = 0xA00;
+
+/// Client → block driver: read one block into the client's granted buffer.
+///
+/// Payload: minor number in [`BDEV_MINOR_OFF`]`..+4` (i32), grant id in
+/// [`BDEV_GRANT_OFF`]`..+4` (i32), byte count in [`BDEV_LEN_OFF`]`..+4` (i32), and
+/// the block number in [`BDEV_BLOCK_OFF`]`..+8` (u64). The grant must carry
+/// `CPF_WRITE` and name the driver as its grantee; the driver pushes the bytes
+/// with `SYS_SAFECOPY(SAFECOPY_TO, m_source, …)`.
+///
+/// Reply `m_type` is the **number of bytes read** (`>= 0`; `0` is legal), or a
+/// negative errno.
+///
+/// **A request longer than [`BDEV_MAX_IO`] is `EINVAL`, not a short read** — a
+/// deliberate departure from [`CDEV_WRITE`]'s clamp. A short *write* is a POSIX
+/// contract every client already loops over; a short *block read* is useless,
+/// because a filesystem cannot interpret half a block, so clamping here would
+/// push a retry loop into every FS caller for no gain. An out-of-range `block` is
+/// `EINVAL` for the same reason: a block device's size is known to its client
+/// (MFS reads it from the superblock's `s_zones`), so asking past the end is a
+/// caller bug rather than a media condition. `EIO` stays reserved for Phase 6's
+/// real media errors, where the request was well-formed and the *device* failed.
+pub const BDEV_READ: i32 = BDEV_RQ_BASE;
+
+/// Client → block driver: write one block. Payload is [`BDEV_READ`]'s, with the
+/// grant carrying `CPF_READ` instead.
+///
+/// **Answers `EROFS` as of slice 5.7**, not `ENOSYS`. `ENOSYS` is already the
+/// unknown-`m_type` answer, so reusing it would make "this driver has never heard
+/// of writes" and "this driver knows about writes and refuses them"
+/// indistinguishable to a client. Defining the request now also keeps the arm
+/// dispatched and probed, and — past the slice-5.6 ABI freeze — means slice 5.10
+/// changes one line inside one arm rather than adding a call number.
+pub const BDEV_WRITE: i32 = BDEV_RQ_BASE + 1;
+
+/// Number of block-device requests defined so far. Locks a driver's dispatch
+/// coverage the way `NR_DS_REQUESTS` locks the DS server.
+pub const NR_BDEV_MSGS: usize = 2;
+
+/// Offset of the device minor number in a `BDEV_READ` / `BDEV_WRITE` payload (i32).
+pub const BDEV_MINOR_OFF: usize = 0;
+/// Offset of the grant id in a `BDEV_READ` / `BDEV_WRITE` payload (i32).
+pub const BDEV_GRANT_OFF: usize = 4;
+/// Offset of the requested byte count in a `BDEV_READ` / `BDEV_WRITE` payload (i32).
+pub const BDEV_LEN_OFF: usize = 8;
+/// Offset of the block number in a `BDEV_READ` / `BDEV_WRITE` payload (u64, so
+/// 8-aligned relative to the message base — the payload itself starts at message
+/// offset 8, hence 16 rather than 12; the same reasoning [`CDEV_OFFSET_OFF`]
+/// documents).
+pub const BDEV_BLOCK_OFF: usize = 16;
+
+/// Block size of every minix.rs block device, and MinixFS v3's. Equal to
+/// `USER_PAGE_SIZE` so a driver can serve a block straight out of one mapped
+/// frame, which is what makes the ramdisk's copy loop a page loop.
+pub const BDEV_BLOCK_SIZE: usize = 4096;
+
+/// Largest byte count a block driver moves in one request. Equal to
+/// [`BDEV_BLOCK_SIZE`]: one request is one block. A longer request is `EINVAL`
+/// (see [`BDEV_READ`]), *not* clamped the way [`CDEV_MAX_IO`] is.
+pub const BDEV_MAX_IO: usize = BDEV_BLOCK_SIZE;
+
+/// The ramdisk minor: the `memory` driver's boot-image-backed root filesystem.
+/// Any other minor is `ENXIO`.
+pub const BDEV_MINOR_RAMDISK: i32 = 0;
+
+// The BDEV range sits strictly above the VFS range and strictly below CDEV's (and
+// therefore every other server request range) and the NOTIFY marker.
+const _: () = assert!(BDEV_RQ_BASE > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
+const _: () = assert!(BDEV_RQ_BASE + (NR_BDEV_MSGS as i32 - 1) < CDEV_RQ_BASE);
+const _: () = assert!(BDEV_RQ_BASE + (NR_BDEV_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
+// The payload fields are ordered, non-overlapping, and fit the 96-byte payload.
+// `BDEV_BLOCK_OFF` is 8 wide (u64); the rest are 4 (i32).
+const _: () = assert!(BDEV_MINOR_OFF + 4 <= BDEV_GRANT_OFF);
+const _: () = assert!(BDEV_GRANT_OFF + 4 <= BDEV_LEN_OFF);
+const _: () = assert!(BDEV_LEN_OFF + 4 <= BDEV_BLOCK_OFF);
+const _: () = assert!(BDEV_BLOCK_OFF + 8 <= 96);
+// The u64 block number must be 8-aligned within the message, whose payload starts
+// at byte 8.
+const _: () = assert!((8 + BDEV_BLOCK_OFF).is_multiple_of(8));
+
+// One block is one page: the ramdisk driver serves a block by safecopying out of a
+// single mapped frame, and MFS's block size is const-asserted equal to this.
+const _: () = assert!(BDEV_BLOCK_SIZE == crate::message::USER_PAGE_SIZE as usize);
+// A full-size transfer must round-trip through the i32 reply `m_type`, or the
+// count would land in the negative, errno-shaped band and read as a failure.
+const _: () = assert!(BDEV_MAX_IO <= i32::MAX as usize);
+
+// ---------------------------------------------------------------------------
 // CDEV (character device) request numbers — `m_type` values for messages
 // addressed to a character-device driver, TTY being the first (slice 5.3).
 //
-// Like the PM/VFS/VM/DS/SEF/SCHED ranges these are *server IPC requests*, not
-// kernel calls. `0xB00` keeps the bands in numeric order between VFS (`0x800`,
-// claimed in slice 5.4) and VM (`0xC00`) while leaving `0x900` / `0xA00` free for
-// the two bands Phase 5 still owes: BDEV (5.7) and MFS (5.8). Numbering is
-// minix.rs-specific — MINIX 3 carries `CDEV_*` in `include/minix/com.h` with its
-// own values, which minix.rs does not inherit because its device protocol is
-// narrower (no `CDEV_REPLY` message class; a driver replies to the SENDREC).
+// Like the PM/VFS/BDEV/VM/DS/SEF/SCHED ranges these are *server IPC requests*,
+// not kernel calls. `0xB00` keeps the bands in numeric order between BDEV
+// (`0xA00`, claimed in slice 5.7) and VM (`0xC00`), leaving `0x900` free for the
+// VFS↔FS band slice 5.8 still owes. Numbering is minix.rs-specific — MINIX 3
+// carries `CDEV_*` in `include/minix/com.h` with its own values, which minix.rs
+// does not inherit because its device protocol is narrower (no `CDEV_REPLY`
+// message class; a driver replies to the SENDREC).
 //
 // The payload carries a **grant id**, not a buffer address: a driver's client
 // lives in a different address space, so the bytes move via `SYS_SAFECOPY`. The
@@ -489,9 +644,9 @@ pub const CDEV_MINOR_CONSOLE: i32 = 0;
 /// driver's `main` frame on a one-page stack.
 pub const CDEV_MAX_IO: usize = 256;
 
-// The CDEV range sits strictly above the VFS range and strictly below VM's (and
+// The CDEV range sits strictly above the BDEV range and strictly below VM's (and
 // therefore every other server request range) and the NOTIFY marker.
-const _: () = assert!(CDEV_RQ_BASE > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
+const _: () = assert!(CDEV_RQ_BASE > BDEV_RQ_BASE + (NR_BDEV_MSGS as i32 - 1));
 const _: () = assert!(CDEV_RQ_BASE + (NR_CDEV_MSGS as i32 - 1) < VM_RQ_BASE);
 const _: () = assert!(CDEV_RQ_BASE + (NR_CDEV_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
@@ -735,10 +890,44 @@ mod tests {
     }
 
     #[test]
-    fn get_whoami_matches_minix3() {
-        // Pinned by MINIX 3 include/minix/sysinfo.h; servers / musl wrappers
-        // built later in the project depend on this value.
+    fn get_whoami_is_frozen_at_twelve() {
+        // NOT a MINIX 3 value, despite what this test used to claim (and be
+        // named): modern MINIX 3 numbers `GET_WHOAMI` 19, in `include/minix/com.h`.
+        // 12 is minix.rs's own, and it is frozen past slice 5.6 — `server-rt`'s
+        // `sef_startup`, every server's `sef ready` marker, and the musl fork's
+        // generated `minixrs/callnr.h` all depend on it.
         assert_eq!(GET_WHOAMI, 12);
+    }
+
+    #[test]
+    fn getinfo_selectors_are_distinct() {
+        // The two selectors share one kernel call, so a collision would route
+        // `GET_RAMDISK` into `fill_whoami` and hand the caller a name where it
+        // expected a VA. `GET_RAMDISK` also stays clear of the `0..=31` block
+        // reserved for selectors that mirror a MINIX 3 number.
+        assert_ne!(GET_WHOAMI, GET_RAMDISK);
+        assert_eq!(GET_RAMDISK, 64);
+        // Phrased as a diagnosis, not a claim: this message prints only when the
+        // assert *fails*, which happens exactly when `GET_RAMDISK < 32`. Writing
+        // it as "GET_RAMDISK is inside 0..=31" is true at failure time but reads
+        // like the property being asserted, which is the opposite.
+        assert_eq!(
+            GET_RAMDISK.min(32),
+            32,
+            "GET_RAMDISK must stay clear of the 0..=31 MINIX-mirrored block"
+        );
+        assert_eq!(GET_WHOAMI.min(31), GET_WHOAMI);
+
+        // The reply's two u64 fields are ordered, disjoint, in the payload, and
+        // 8-aligned within the message (whose payload starts at byte 8).
+        assert_eq!(GETINFO_RAMDISK_VA_OFF, 0);
+        assert_eq!(GETINFO_RAMDISK_VA_OFF + 8, GETINFO_RAMDISK_LEN_OFF);
+        // `min` rather than `<=`: an all-constant `assert!` trips clippy's
+        // `assertions_on_constants`.
+        let end = GETINFO_RAMDISK_LEN_OFF + 8;
+        assert_eq!(end.min(96), end);
+        assert_eq!((8 + GETINFO_RAMDISK_VA_OFF) % 8, 0);
+        assert_eq!((8 + GETINFO_RAMDISK_LEN_OFF) % 8, 0);
     }
 
     #[test]
@@ -872,6 +1061,8 @@ mod tests {
                 assert_ne!(r, vm);
             }
             assert_ne!(r, VFS_WRITE);
+            assert_ne!(r, BDEV_READ);
+            assert_ne!(r, BDEV_WRITE);
             assert_ne!(r, CDEV_WRITE);
             assert_ne!(r, SEF_INIT);
             assert_ne!(r, SEF_SIGNAL);
@@ -922,6 +1113,8 @@ mod tests {
         ] {
             for other in [
                 VFS_WRITE,
+                BDEV_READ,
+                BDEV_WRITE,
                 CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
@@ -992,6 +1185,8 @@ mod tests {
         for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC, PM_GRANT_TEST] {
             for other in [
                 VFS_WRITE,
+                BDEV_READ,
+                BDEV_WRITE,
                 CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
@@ -1043,6 +1238,8 @@ mod tests {
                 PM_WAIT,
                 PM_EXEC,
                 PM_GRANT_TEST,
+                BDEV_READ,
+                BDEV_WRITE,
                 CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
@@ -1063,7 +1260,7 @@ mod tests {
             }
             assert!(m > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
             assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
-            assert!(m < CDEV_RQ_BASE);
+            assert!(m < BDEV_RQ_BASE);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
         }
@@ -1134,6 +1331,84 @@ mod tests {
                 PM_EXEC,
                 PM_GRANT_TEST,
                 VFS_WRITE,
+                BDEV_READ,
+                BDEV_WRITE,
+                VM_PAGEFAULT,
+                VM_BRK,
+                VM_MMAP,
+                VM_MUNMAP,
+                VM_FORK,
+                DS_PUBLISH,
+                DS_RETRIEVE,
+                DS_CHECK,
+                SEF_INIT,
+                SEF_SIGNAL,
+                SCHEDULING_NO_QUANTUM,
+                SCHEDULING_START,
+                SCHEDULING_STOP,
+                SCHEDULING_SET_NICE,
+            ] {
+                assert_ne!(m, other);
+            }
+            assert!(m > BDEV_RQ_BASE + (NR_BDEV_MSGS as i32 - 1));
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
+            assert!(m < VM_RQ_BASE);
+            assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
+            assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn cdev_band_sits_at_0xb00_leaving_one_band_free() {
+        // The band base is load-bearing for numeric ordering: BDEV (0xA00, taken
+        // in slice 5.7) below, VM (0xC00) above, with 0x900 still reserved for
+        // the VFS↔FS band slice 5.8 owes. Nothing may claim it without also
+        // moving whichever band would then be out of numeric order.
+        assert_eq!(CDEV_RQ_BASE, 0xB00);
+        for reserved in [0x900] {
+            for taken in [
+                PM_RQ_BASE,
+                VFS_RQ_BASE,
+                BDEV_RQ_BASE,
+                CDEV_RQ_BASE,
+                VM_RQ_BASE,
+                SEF_RQ_BASE,
+                DS_RQ_BASE,
+                SCHED_RQ_BASE,
+            ] {
+                assert_ne!(reserved, taken, "{reserved:#x} is no longer free");
+            }
+        }
+    }
+
+    #[test]
+    fn bdev_msgs_contiguous_from_base() {
+        // BDEV requests are contiguous from BDEV_RQ_BASE; NR_BDEV_MSGS locks a
+        // block driver's dispatch coverage.
+        let msgs = [BDEV_READ, BDEV_WRITE];
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(*m, BDEV_RQ_BASE + i as i32);
+        }
+        assert_eq!(msgs.len(), NR_BDEV_MSGS);
+        assert_eq!(BDEV_RQ_BASE, 0xA00);
+    }
+
+    #[test]
+    fn bdev_msgs_distinct_from_other_ranges() {
+        // Each BDEV request must stay distinct from every other band and the
+        // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a driver's m_type
+        // dispatcher and the SEF classifier never collide. BDEV sits between VFS
+        // and CDEV, which is what its two bounds assert.
+        for m in [BDEV_READ, BDEV_WRITE] {
+            for other in [
+                PM_GETPID,
+                PM_FORK,
+                PM_EXIT,
+                PM_WAIT,
+                PM_EXEC,
+                PM_GRANT_TEST,
+                VFS_WRITE,
+                CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -1153,33 +1428,67 @@ mod tests {
             }
             assert!(m > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
             assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
-            assert!(m < VM_RQ_BASE);
+            assert!(m < CDEV_RQ_BASE);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
         }
     }
 
     #[test]
-    fn cdev_band_sits_at_0xb00_leaving_two_bands_free() {
-        // The band base is load-bearing for numeric ordering: VFS (0x800, taken
-        // in slice 5.4) below, VM (0xC00) above, with 0x900 / 0xA00 still
-        // reserved for the two bands Phase 5 owes (BDEV 5.7, MFS 5.8). Nothing
-        // may claim one of those without also moving whichever band would then
-        // be out of numeric order.
-        assert_eq!(CDEV_RQ_BASE, 0xB00);
-        for reserved in [0x900, 0xA00] {
-            for taken in [
-                PM_RQ_BASE,
-                VFS_RQ_BASE,
-                CDEV_RQ_BASE,
-                VM_RQ_BASE,
-                SEF_RQ_BASE,
-                DS_RQ_BASE,
-                SCHED_RQ_BASE,
-            ] {
-                assert_ne!(reserved, taken, "{reserved:#x} is no longer free");
-            }
+    fn bdev_read_payload_offsets_are_ordered_and_disjoint() {
+        // Every field the request defines, in declaration order, with its width:
+        // i32 fields are 4 bytes, the u64 block number is 8.
+        //
+        // There is deliberately NO granter field — the driver takes the granter
+        // from the kernel-stamped `m_source`, because a payload granter would let
+        // a client aim the driver's privileged `SYS_SAFECOPY` at a third party's
+        // address space (a confused deputy). And no grant-*offset* field either:
+        // every client through slice 5.9 grants a buffer whose block starts at
+        // offset 0, so an offset would be a field nothing sets and nothing
+        // validates. This list is the record of both — adding a field means
+        // editing it, and the length assertion below is what makes that a visible
+        // change rather than a quiet one.
+        let fields = [
+            ("minor", BDEV_MINOR_OFF, 4),
+            ("grant", BDEV_GRANT_OFF, 4),
+            ("len", BDEV_LEN_OFF, 4),
+            ("block", BDEV_BLOCK_OFF, 8),
+        ];
+        assert_eq!(fields.len(), 4, "a BDEV_READ payload field was added");
+        assert_eq!(BDEV_MINOR_OFF, 0, "the first field must start the payload");
+
+        for pair in fields.windows(2) {
+            let (name, off, width) = pair[0];
+            let (next_name, next_off, _) = pair[1];
+            assert!(
+                off + width <= next_off,
+                "{name} ({off}..{}) overlaps {next_name} at {next_off}",
+                off + width,
+            );
         }
+        let (last_name, last_off, last_width) = fields[fields.len() - 1];
+        assert!(
+            last_off + last_width <= 96,
+            "{last_name} runs past the 96-byte payload",
+        );
+
+        // The u64 field must be 8-aligned *within the message*, whose payload
+        // starts at byte 8 — so an even multiple of 8 here.
+        assert_eq!((8 + BDEV_BLOCK_OFF) % 8, 0);
+    }
+
+    #[test]
+    fn bdev_block_size_is_one_page_and_is_the_whole_transfer_unit() {
+        // One block is one page: the ramdisk serves a block out of a single
+        // mapped frame. `BDEV_MAX_IO == BDEV_BLOCK_SIZE` is what makes an
+        // over-long request a *malformed* request (EINVAL) rather than a short
+        // read — there is nothing between a block and a clamp to report.
+        assert_eq!(BDEV_BLOCK_SIZE, 4096);
+        assert_eq!(BDEV_BLOCK_SIZE, crate::message::USER_PAGE_SIZE as usize);
+        assert_eq!(BDEV_MAX_IO, BDEV_BLOCK_SIZE);
+        // The reply `m_type` carries the byte count as an i32.
+        assert_eq!(i32::try_from(BDEV_MAX_IO), Ok(4096));
+        assert_eq!(BDEV_MINOR_RAMDISK, 0);
     }
 
     #[test]
@@ -1241,6 +1550,8 @@ mod tests {
         // additionally locked by a module-level const-assert.)
         for m in [SEF_INIT, SEF_SIGNAL] {
             assert_ne!(m, VFS_WRITE);
+            assert_ne!(m, BDEV_READ);
+            assert_ne!(m, BDEV_WRITE);
             assert_ne!(m, CDEV_WRITE);
             assert_ne!(m, VM_PAGEFAULT);
             assert_ne!(m, VM_BRK);

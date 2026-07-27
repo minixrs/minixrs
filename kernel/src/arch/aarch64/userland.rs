@@ -41,8 +41,10 @@ use minixrs_kernel_shared::com::{
     SYSTEM, VM_PROC_NR, boot_endpoint,
 };
 
-use minixrs_kernel_shared::com::TTY_PROC_NR;
-use minixrs_kernel_shared::uspace::{TTY_UART_VA, USER_DEVICE_WINDOW_BASE};
+use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
+use minixrs_kernel_shared::uspace::{
+    RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA, USER_DEVICE_WINDOW_BASE,
+};
 
 use crate::arch::aarch64::addrspace::{AddrSpace, Prot, map_page_in, walk_leaves};
 use crate::arch::aarch64::asid::alloc_asid;
@@ -150,6 +152,12 @@ const SERVER_STACK_VA: u64 = 0x0020_0000; // 2 MiB
 // *here* (and, for the mmap arena, in `servers/vm/src/region.rs`, which carries
 // its own guard plus a runtime cap). So the collision checks live here, where a
 // future slice that raises `SERVER_STACK_VA` or adds a stub trips them.
+//
+// Slice 5.7's ramdisk window needs **no entries of its own here**, and adding six
+// redundant asserts would be a maintenance cost with no coverage: every assert
+// below is `USER_DEVICE_WINDOW_BASE > <va>`, and `uspace`'s
+// `USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE <= RAMDISK_WINDOW_BASE`
+// makes the ramdisk's separation from each of these transitive.
 
 const _: () = assert!(USER_DEVICE_WINDOW_BASE > SERVER_STACK_VA + PAGE_SIZE as u64);
 
@@ -600,6 +608,86 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
             TTY_UART_VA,
             crate::arch::aarch64::uart::PL011_PHYS_BASE,
             mmu::device_attr_idx(),
+        );
+    }
+
+    // The `memory` driver gets the boot ramdisk mapped into its address space, in
+    // the same spirit as TTY's UART page above and answering the same four
+    // questions:
+    //
+    // **Why here and not in `load_exec_image`?** That helper is shared with
+    // `system::do_exec`, so putting it there would hand a copy of the root
+    // filesystem to every binary any process ever exec'd — and, symmetrically,
+    // would make a driver that exec'd *lose* its ramdisk.
+    //
+    // **Why no TLB maintenance?** TTY's two reasons, unchanged: this address space
+    // was built moments ago and has never been installed in TTBR0 (a recycled ASID
+    // is clean — `teardown_addrspace` flushes before `free_asid`), and
+    // `mmu::switch_ttbr0_with_asid` issues `isb; tlbi aside1; dsb ish; isb` on the
+    // driver's first schedule.
+    //
+    // **Why no cache maintenance?** The kernel writes these bytes through the HHDM
+    // alias and the driver reads them through its own mapping; both are Normal-WB,
+    // so they are coherent by the architecture's own rules (this is the ordinary
+    // aliasing every `load_exec_image` segment copy already relies on). And it is
+    // *data*, never fetched as instructions, so none of `elf.rs`'s icache concern
+    // applies.
+    //
+    // **Why this is not the TTY device-page problem.** These frames are ordinary
+    // RAM mapped `Prot::RW_DATA`, so `prot.device` is false and they take the
+    // normal `free_frame` path in all five leaf sweeps. No carve-out is involved
+    // and none should be added.
+    //
+    // Everything here `.expect()`s. That is deliberate and load-bearing: a
+    // `let _ = map_page_in(..)` would turn a non-advancing loop into a one-page
+    // ramdisk with 255 leaked frames and a filesystem that reads as 255 copies of
+    // block 0, whereas `.expect()` makes the second iteration panic on
+    // `AlreadyMapped`. Likewise `alloc_frame()` must panic rather than skip a page:
+    // this runs before `sched::run`, and a half-copied ramdisk is a corrupt
+    // filesystem the driver would then serve for the whole boot.
+    if nr == MEM_PROC_NR {
+        let blob = crate::boot_image::BootImage::get()
+            .module_by_name(ROOTFS_MODULE_NAME)
+            .expect("the rootfs blob is packed into the MXBI archive by kernel/build.rs");
+        assert!(!blob.is_empty(), "rootfs blob is empty");
+        assert!(
+            blob.len().is_multiple_of(PAGE_SIZE),
+            "rootfs blob is not a whole number of pages"
+        );
+        assert!(
+            blob.len() as u64 <= RAMDISK_WINDOW_SIZE,
+            "rootfs blob does not fit the ramdisk VA window"
+        );
+
+        let pages = blob.len() / PAGE_SIZE;
+        for page in 0..pages {
+            let frame = alloc_frame().expect("ramdisk frame alloc failed");
+            // SAFETY: the frame was just allocated, so it is exclusively ours and
+            // not yet mapped into any address space; `phys_to_hhdm` gives the
+            // kernel's linear alias of it, valid for `PAGE_SIZE` bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    blob.as_ptr().add(page * PAGE_SIZE),
+                    crate::mm::phys_to_hhdm(frame.addr()),
+                    PAGE_SIZE,
+                );
+            }
+            map_page_in(
+                img.ttbr0_pa,
+                RAMDISK_VA + (page * PAGE_SIZE) as u64,
+                frame.addr(),
+                Prot::RW_DATA,
+            )
+            .expect("ramdisk page map");
+        }
+
+        // SAFETY: single-threaded boot; console write only.
+        let _ = writeln!(
+            Pl011::new(),
+            "[ramdisk] mem va={:#x} len={} pages={}",
+            RAMDISK_VA,
+            blob.len(),
+            pages,
         );
     }
 

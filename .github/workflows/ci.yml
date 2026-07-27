@@ -188,7 +188,10 @@ jobs:
       # `minixrs-tty` qualifies despite owning volatile MMIO: its only `unsafe`
       # lives in `pl011.rs`, which no test reaches — the measured logic is
       # `cdev.rs`'s pure parse/validate.
-      - run: cargo miri test -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm -p minixrs-tty
+      - run: >
+          cargo miri test
+          -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm -p minixrs-tty
+          -p minixrs-mfs -p minixrs-mkfs-mfs -p minixrs-memory
 
   qemu-smoke:
     name: QEMU boot smoke

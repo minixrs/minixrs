@@ -63,16 +63,22 @@ mod write;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    CDEV_GRANT_OFF, CDEV_LEN_OFF, CDEV_MAX_IO, CDEV_MINOR_CONSOLE, CDEV_MINOR_OFF, CDEV_OFFSET_OFF,
-    CDEV_WRITE, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_WRITE,
+    BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF, BDEV_MINOR_RAMDISK,
+    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, CDEV_GRANT_OFF, CDEV_LEN_OFF, CDEV_MAX_IO,
+    CDEV_MINOR_CONSOLE, CDEV_MINOR_OFF, CDEV_OFFSET_OFF, CDEV_WRITE, GET_RAMDISK, NR_BDEV_MSGS,
+    PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_WRITE,
 };
-use minixrs_kernel_shared::com::{PM_PROC_NR, TTY_PROC_NR, boot_endpoint};
+use minixrs_kernel_shared::com::{MEM_PROC_NR, PM_PROC_NR, TTY_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
-use minixrs_kernel_shared::error::{EBADF, ENOSYS, ENXIO, EPERM, OK};
+use minixrs_kernel_shared::error::{EBADF, EINVAL, ENOSYS, ENXIO, EPERM, EROFS, OK};
 use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE};
+use minixrs_kernel_shared::rootfs::{
+    IMAGE_HDR_LEN, IMAGE_LABEL, IMAGE_LABEL_LEN, IMAGE_TAIL_LABEL, ROOTFS_IMAGE_BLOCKS,
+    ROOTFS_TAIL_BLOCK,
+};
 use minixrs_server_rt::{
-    GrantPool, SefConfig, diag_fmt, sef_publish_to_ds, sef_retrieve_from_ds, sef_startup, wr_i32,
-    wr_u64,
+    GrantPool, SefConfig, buf_addr, diag_fmt, sef_publish_to_ds, sef_retrieve_from_ds, sef_startup,
+    sys_getinfo, wr_i32, wr_u64,
 };
 
 use fd::Fd;
@@ -177,6 +183,11 @@ fn main() -> ! {
 
     grant_test(&mut grants);
     tty_demo(&mut grants, tty);
+    // The block demo runs **last**, and the order is load-bearing: it is the
+    // newest and least-proven code in this prologue, so a hang inside it localizes
+    // to the `bdev.*` markers instead of blacking out 5.2's, 5.3's, and 5.4's as
+    // well. Do not tidy this prologue into alphabetical order.
+    bdev_demo(&mut grants, mem_endpoint());
 
     let mut msg = Message {
         m_source: 0,
@@ -506,6 +517,325 @@ fn cdev_write(tty: Endpoint, minor: i32, gid: i32, len: i32, offset: u64) -> i32
     wr_i32(&mut m, CDEV_LEN_OFF, len);
     wr_u64(&mut m, CDEV_OFFSET_OFF, offset);
     let trap_rc = ipc_sendrec(tty, &mut m);
+    if trap_rc != OK {
+        return trap_rc;
+    }
+    m.m_type
+}
+
+// ----- Slice 5.7: the BDEV ramdisk demo -------------------------------------
+
+/// Bytes each block probe moves: the image header's length, which is also the
+/// tail label's.
+///
+/// Small on purpose. VFS's stack is one page, so a whole-block (4096-byte) local
+/// would run it off the end and fault into VM's out-of-region SIGSEGV arm — which
+/// prints no `!!! EL0 data abort` for the forbidden list to catch. That is the
+/// slice-5.5 lesson, and it is why this demo does not read a superblock (which
+/// starts at byte 1024) either.
+const BDEV_PROBE_LEN: usize = IMAGE_HDR_LEN;
+
+/// One denial probe: a request that is well-formed in every respect but one.
+#[cfg_attr(test, allow(dead_code))]
+struct Probe {
+    name: &'static str,
+    m_type: i32,
+    minor: i32,
+    gid: i32,
+    len: i32,
+    block: u64,
+    want: i32,
+}
+
+/// Resolve the `memory` driver's endpoint through DS, falling back to its boot
+/// endpoint.
+///
+/// A copy of [`tty_endpoint`], and it carries the same contract: the lookup is the
+/// point, but DS publish-before-retrieve is **not** guaranteed by construction — it
+/// works because `kernel/build.rs` packs `memory` before `vfs`. So a failed lookup
+/// falls back and emits a *distinguishable* line: the rest of the demo still runs
+/// and still proves the BDEV path, while the required `bdev.ds ok` marker
+/// disappears and CI goes red on the ordering regression specifically.
+#[cfg_attr(test, allow(dead_code))]
+fn mem_endpoint() -> Endpoint {
+    let mut key = [0u8; SYS_GETINFO_NAME_LEN];
+    key[0..6].copy_from_slice(b"memory");
+    match sef_retrieve_from_ds(&key) {
+        Ok(ep) => {
+            diag_fmt(format_args!("bdev.ds ok ep={ep}"));
+            ep
+        }
+        Err(rc) => {
+            let ep = boot_endpoint(MEM_PROC_NR);
+            diag_fmt(format_args!("bdev.ds FAIL rc={rc} fallback={ep}"));
+            ep
+        }
+    }
+}
+
+/// Slice 5.7 demo: read the ramdisk's first and last blocks over `BDEV_READ`.
+///
+/// **Why a live client at all**, when slice 5.8 is what really needs BDEV: there is
+/// no successful `SAFECOPY_TO` anywhere else in the tree. Its only other uses are
+/// PM's two denial probes, which expect `EPERM` and `EFAULT`. `BDEV_READ` is the
+/// first copy that writes *into* a grantee's buffer and succeeds, so without this
+/// the kernel's `CPF_WRITE` + `Prot::writable` success path would stay unproven
+/// until 5.8 — which would then be debugging a new protocol, a new server, and a
+/// never-exercised copy direction simultaneously. The anti-spoof rule (the absence
+/// of a granter field) also cannot be host-tested, and `EROFS`-vs-`ENOSYS` is just
+/// a comment until something observes the difference.
+///
+/// Four things get proven, in order:
+///
+/// 1. **DS lookup**, by [`mem_endpoint`] above.
+/// 2. **A real read.** The reply *is* the byte count, so `n=32` fails for a driver
+///    that replied `OK`.
+/// 3. **The header survived** IPC, the grant, and the safecopy.
+/// 4. **The `block` field reached the right page.** Head and tail do not subsume
+///    each other: a driver that ignored `block` would return the header for both,
+///    and the *driver's* own `tail=1` check proves only that the kernel's copy loop
+///    reached the end of the blob, not that BDEV indexes into it correctly.
+///
+/// The granted buffer is a **local**, not a `static`: the driver writes into it, and
+/// VFS's other granted buffers are all `.rodata` (right for `CPF_READ`, and the
+/// kernel's `Prot::writable` check would refuse a copy into one).
+///
+/// Best-effort throughout: a failure here must not stop VFS from serving.
+#[cfg_attr(test, allow(dead_code))]
+fn bdev_demo(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) {
+    let mut buf = [0u8; BDEV_PROBE_LEN];
+    let addr = buf_addr(&mut buf);
+    let len = BDEV_PROBE_LEN as u64;
+
+    // `CPF_WRITE`, because the driver copies *into* this buffer. That direction is
+    // what makes this the first live exercise of the kernel's write-side grant
+    // checks.
+    let Ok(gid) = grants.grant_direct(mem, addr, len, CPF_WRITE) else {
+        return diag_fmt(format_args!("bdev.read FAIL grant"));
+    };
+
+    // 2 + 3. Block 0: the image header.
+    let rc = bdev_request(mem, BDEV_READ, BDEV_MINOR_RAMDISK, gid, len as i32, 0);
+    if rc == len as i32 {
+        diag_fmt(format_args!("bdev.read ok n={rc}"));
+    } else {
+        diag_fmt(format_args!("bdev.read FAIL rc={rc}"));
+    }
+    if buf[..IMAGE_LABEL_LEN] == IMAGE_LABEL {
+        diag_fmt(format_args!("bdev.head ok match=1"));
+    } else {
+        diag_fmt(format_args!("bdev.head FAIL"));
+    }
+
+    // 4. The last block: the tail label, which differs from the header's. Zero the
+    // buffer first — otherwise a read that moved nothing at all would leave the
+    // header bytes in place and the comparison below would be against stale data
+    // rather than against what the driver returned.
+    buf = [0u8; BDEV_PROBE_LEN];
+    let rc = bdev_request(
+        mem,
+        BDEV_READ,
+        BDEV_MINOR_RAMDISK,
+        gid,
+        len as i32,
+        u64::from(ROOTFS_TAIL_BLOCK),
+    );
+    if rc == len as i32 && buf[..IMAGE_LABEL_LEN] == IMAGE_TAIL_LABEL {
+        diag_fmt(format_args!("bdev.tail ok match=1"));
+    } else {
+        diag_fmt(format_args!("bdev.tail FAIL rc={rc}"));
+    }
+    let _ = grants.revoke(gid);
+
+    bdev_denials(grants, mem, addr);
+}
+
+/// Probe every `BDEV_READ` refusal that a successful read does not exercise.
+///
+/// Slice 5.1's lesson, again: a check no marker exercises is a check that can
+/// regress silently. Each probe is well-formed in every respect but one.
+///
+///   - `bad-minor` — a good grant aimed at minor 7. The driver's own minor check
+///     is the only thing that stops it: `ENXIO`, because the *device* does not
+///     exist; nothing is wrong with the grant.
+///   - `bad-block` — one block past the end. `EINVAL` rather than `EIO`: the
+///     device's size is known to its client, so this is a caller bug.
+///   - `too-long` — one byte more than [`BDEV_MAX_IO`]. The deliberate departure
+///     from CDEV: `EINVAL`, not a short read.
+///   - `neg-len` — a negative length, which unchecked would widen into a ~16 EiB
+///     `u64` byte count for the kernel copy.
+///   - `not-mine` — the same bytes granted to **PM** instead of the driver. The
+///     driver passes it to `SYS_SAFECOPY` in good faith and the *kernel* refuses
+///     it, on `verify_grant`'s `who_to` check.
+///   - `read-only` — a `CPF_READ`-only grant used as a copy *destination*.
+///     **The access mask in the write direction, which slice 5.3 never
+///     exercised**: every grant in the tree until now was read-side.
+///   - `write` — `BDEV_WRITE`, which must answer `EROFS`. Fold that arm into the
+///     driver's `_` case and this becomes `ENOSYS`, which is the whole reason the
+///     request has a number of its own.
+///   - `unknown` — a request one past the band. `ENOSYS`, and **the reply itself is
+///     the assertion**: a driver that dropped an unknown request would leave VFS
+///     blocked in its SENDREC forever and take every later marker with it.
+///
+/// Plus one probe that is not a BDEV request at all: `SYS_GETINFO(GET_RAMDISK)`
+/// issued by VFS, which the kernel must refuse with `EPERM`. The ramdisk is mapped
+/// into exactly one address space, so that gate is what stops the VA being handed
+/// to a process where it faults — and VFS, a `SYS_PROC` server that holds the call,
+/// is the strongest caller available to test it with.
+#[cfg_attr(test, allow(dead_code))]
+fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint, addr: u64) {
+    let len = BDEV_PROBE_LEN as u64;
+    let (Ok(good), Ok(not_mine), Ok(read_only)) = (
+        grants.grant_direct(mem, addr, len, CPF_WRITE),
+        grants.grant_direct(boot_endpoint(PM_PROC_NR), addr, len, CPF_WRITE),
+        grants.grant_direct(mem, addr, len, CPF_READ),
+    ) else {
+        return diag_fmt(format_args!("bdev.deny FAIL setup"));
+    };
+
+    let n = len as i32;
+    let probes = [
+        Probe {
+            name: "bad-minor",
+            m_type: BDEV_READ,
+            minor: 7,
+            gid: good,
+            len: n,
+            block: 0,
+            want: ENXIO,
+        },
+        Probe {
+            name: "bad-block",
+            m_type: BDEV_READ,
+            minor: BDEV_MINOR_RAMDISK,
+            gid: good,
+            len: n,
+            block: u64::from(ROOTFS_IMAGE_BLOCKS),
+            want: EINVAL,
+        },
+        Probe {
+            name: "too-long",
+            m_type: BDEV_READ,
+            minor: BDEV_MINOR_RAMDISK,
+            gid: good,
+            len: BDEV_MAX_IO as i32 + 1,
+            block: 0,
+            want: EINVAL,
+        },
+        Probe {
+            name: "neg-len",
+            m_type: BDEV_READ,
+            minor: BDEV_MINOR_RAMDISK,
+            gid: good,
+            len: -1,
+            block: 0,
+            want: EINVAL,
+        },
+        Probe {
+            name: "not-mine",
+            m_type: BDEV_READ,
+            minor: BDEV_MINOR_RAMDISK,
+            gid: not_mine,
+            len: n,
+            block: 0,
+            want: EPERM,
+        },
+        Probe {
+            name: "read-only",
+            m_type: BDEV_READ,
+            minor: BDEV_MINOR_RAMDISK,
+            gid: read_only,
+            len: n,
+            block: 0,
+            want: EPERM,
+        },
+        Probe {
+            name: "write",
+            m_type: BDEV_WRITE,
+            minor: BDEV_MINOR_RAMDISK,
+            gid: good,
+            len: n,
+            block: 0,
+            want: EROFS,
+        },
+        // A write to a device that does not exist. `ENXIO`, not `EROFS`: the
+        // driver validates the request before refusing it, so it never asserts
+        // read-onlyness about a device it does not have. Without this probe the
+        // `BDEV_WRITE` arm could be reduced back to a bare `EROFS` and no marker
+        // would move.
+        Probe {
+            name: "write-bad-minor",
+            m_type: BDEV_WRITE,
+            minor: 7,
+            gid: good,
+            len: n,
+            block: 0,
+            want: ENXIO,
+        },
+        Probe {
+            name: "unknown",
+            m_type: BDEV_RQ_BASE + NR_BDEV_MSGS as i32,
+            minor: BDEV_MINOR_RAMDISK,
+            gid: good,
+            len: n,
+            block: 0,
+            want: ENOSYS,
+        },
+    ];
+
+    let mut denied = 0usize;
+    for p in &probes {
+        let rc = bdev_request(mem, p.m_type, p.minor, p.gid, p.len, p.block);
+        if rc == p.want {
+            denied += 1;
+        } else {
+            diag_fmt(format_args!("bdev.deny FAIL {} rc={rc}", p.name));
+        }
+    }
+
+    // The kernel's own gate, which no BDEV message can reach.
+    let mut m = Message {
+        m_source: 0,
+        m_type: 0,
+        payload: [0u8; 96],
+    };
+    let rc = sys_getinfo(GET_RAMDISK, &mut m);
+    if rc == EPERM {
+        denied += 1;
+    } else {
+        diag_fmt(format_args!("bdev.deny FAIL getinfo rc={rc}"));
+    }
+
+    if denied == probes.len() + 1 {
+        diag_fmt(format_args!("bdev.deny ok n={denied}"));
+    }
+    for gid in [good, not_mine, read_only] {
+        let _ = grants.revoke(gid);
+    }
+}
+
+/// Issue one block-device request and return the reply `m_type` — the byte count
+/// read, or a negative errno.
+///
+/// `m_type` is a parameter rather than hardcoded to `BDEV_READ` so the `BDEV_WRITE`
+/// and unknown-request probes ride the same marshaling as a real read; a probe
+/// built by a second, hand-written marshaller would prove less.
+///
+/// No granter goes in the payload — the driver takes it from the kernel-stamped
+/// `m_source`, so this message cannot aim the driver's privileged `SYS_SAFECOPY`
+/// anywhere but VFS's own address space. There is no grant-offset field either.
+#[cfg_attr(test, allow(dead_code))]
+fn bdev_request(mem: Endpoint, m_type: i32, minor: i32, gid: i32, len: i32, block: u64) -> i32 {
+    let mut m = Message {
+        m_source: 0,
+        m_type,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, BDEV_MINOR_OFF, minor);
+    wr_i32(&mut m, BDEV_GRANT_OFF, gid);
+    wr_i32(&mut m, BDEV_LEN_OFF, len);
+    wr_u64(&mut m, BDEV_BLOCK_OFF, block);
+    let trap_rc = ipc_sendrec(mem, &mut m);
     if trap_rc != OK {
         return trap_rc;
     }

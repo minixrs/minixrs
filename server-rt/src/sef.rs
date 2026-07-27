@@ -3,10 +3,11 @@
 //! SEF startup handshake and control-aware receive loop.
 
 use crate::diag::diag_print;
-use minixrs_ipc::{ipc_notify, ipc_receive, ipc_sendrec};
+use crate::kcall::sys_getinfo;
+use minixrs_ipc::{ipc_notify, ipc_receive};
 use minixrs_kernel_shared::Message;
-use minixrs_kernel_shared::callnr::{GET_WHOAMI, SYS_GETINFO, SYS_GETINFO_NAME_LEN};
-use minixrs_kernel_shared::com::{RS_PROC_NR, SYSTEM, boot_endpoint};
+use minixrs_kernel_shared::callnr::{GET_WHOAMI, SYS_GETINFO_NAME_LEN};
+use minixrs_kernel_shared::com::{RS_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
 use minixrs_kernel_shared::error::OK;
 
@@ -42,19 +43,18 @@ pub fn sef_startup(cfg: SefConfig) -> Result<Sef, i32> {
     // SYS_GETINFO(GET_WHOAMI): request selector goes in payload[0..4]; the
     // kernel replies in-place with our endpoint (0..4), priv flags (4..8),
     // init flags (8..12), and name (12..28), setting m_type = OK.
+    //
+    // Marshalled by `kcall::sys_getinfo` since slice 5.7, when the `memory`
+    // driver became the second caller (`GET_RAMDISK`). Every server's
+    // `[diag <name>] sef ready` marker is therefore also a check on that helper.
     let mut msg = Message {
         m_source: 0,
-        m_type: SYS_GETINFO,
+        m_type: 0,
         payload: [0u8; 96],
     };
-    msg.payload[0..4].copy_from_slice(&GET_WHOAMI.to_ne_bytes());
-
-    let trap_rc = ipc_sendrec(boot_endpoint(SYSTEM), &mut msg);
-    if trap_rc != OK {
-        return Err(trap_rc);
-    }
-    if msg.m_type != OK {
-        return Err(msg.m_type);
+    let rc = sys_getinfo(GET_WHOAMI, &mut msg);
+    if rc != OK {
+        return Err(rc);
     }
 
     let endpoint = i32::from_ne_bytes(

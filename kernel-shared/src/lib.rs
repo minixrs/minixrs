@@ -21,6 +21,7 @@ pub mod execstack;
 pub mod grant;
 pub mod ipc_const;
 pub mod message;
+pub mod rootfs;
 pub mod signal;
 pub mod sys_limits;
 pub mod uspace;

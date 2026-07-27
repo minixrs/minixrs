@@ -90,6 +90,7 @@ dependencies = [
  "arrayvec",
  "cc",
  "minixrs-kernel-shared",
+ "minixrs-mkfs-mfs",
 ]
 
 [[package]]
@@ -100,18 +101,25 @@ version = "0.1.0"
 name = "minixrs-memory"
 version = "0.1.0"
 dependencies = [
- "minixrs-driver-rt",
+ "minixrs-abi-note",
  "minixrs-ipc",
  "minixrs-kernel-shared",
+ "minixrs-server-rt",
 ]
 
 [[package]]
 name = "minixrs-mfs"
 version = "0.1.0"
 dependencies = [
- "minixrs-ipc",
  "minixrs-kernel-shared",
- "minixrs-server-rt",
+]
+
+[[package]]
+name = "minixrs-mkfs-mfs"
+version = "0.1.0"
+dependencies = [
+ "minixrs-kernel-shared",
+ "minixrs-mfs",
 ]
 
 [[package]]

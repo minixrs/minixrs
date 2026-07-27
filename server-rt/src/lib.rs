@@ -48,7 +48,7 @@ pub use diag::{DIAG_LINE_MAX, diag_fmt, diag_print};
 pub use ds::{sef_publish_to_ds, sef_retrieve_from_ds};
 pub use grant::GrantPool;
 pub use init::SefInitCb;
-pub use kcall::{sys_copy, sys_safecopy};
+pub use kcall::{sys_copy, sys_getinfo, sys_safecopy};
 pub use payload::{buf_addr, rd_i32, rd_name, rd_u64, wr_i32, wr_u64};
 pub use sef::{Sef, SefConfig, sef_startup};
 pub use signal::SefSignalCb;
