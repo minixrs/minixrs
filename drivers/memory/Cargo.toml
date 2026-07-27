@@ -5,7 +5,26 @@ edition = "2024"
 license = "BSD-3-Clause"
 publish = false
 
+[[bin]]
+name = "minixrs-memory"
+path = "src/main.rs"
+
+# Deliberately NOT `minixrs-driver-rt`, for the reason `drivers/tty` gives: it is
+# a 4-line placeholder today, and depending on it would mean adding
+# `drivers/driver-rt/src` to the shared `rerun-if-changed` list in
+# `kernel/build.rs` for zero benefit. Phase 6, when driver-rt grows a real IRQ/DMA
+# runtime, is when that dependency (and the watch entry) should be added.
+#
+# Nor `minixrs-mfs`: a *block* driver must not depend on the *filesystem format*.
+# The device-level checks this driver makes read the image header out of
+# `kernel-shared::rootfs`, which is a build-time-to-run-time ABI rather than a
+# format. Keeping it that way is what lets Phase 6 drop virtio-blk in under an
+# unchanged MFS.
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minixrs-ipc" }
-minixrs-driver-rt = { path = "../driver-rt" }
+minixrs-server-rt = { path = "../../server-rt" }
+minixrs-abi-note = { path = "../../minixrs-abi-note" }
+
+[lints]
+workspace = true

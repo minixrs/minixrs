@@ -10,10 +10,17 @@ What separates a driver from a server is one page in its address space that no
 other process has: the device's memory-mapped registers. Everything interesting
 about this chapter follows from that page.
 
-As of Phase 5 there is exactly one driver, **TTY** (`drivers/tty/`), the console.
-The VirtIO block, network, and console drivers under `drivers/` are still empty
-placeholders (Phase 6), and so is `drivers/driver-rt` — the shared driver runtime
-they will eventually use.
+As of Phase 5 there are two drivers: **TTY** (`drivers/tty/`), the console, and
+**`memory`** (`drivers/memory/`), the boot ramdisk. The VirtIO block, network, and
+console drivers under `drivers/` are still empty placeholders (Phase 6), and so is
+`drivers/driver-rt` — the shared driver runtime they will eventually use.
+
+The two are worth contrasting up front, because `memory` is the counter-example to
+the paragraph above: **its window is ordinary RAM, not MMIO**. It owns no hardware
+at all. What makes it a driver rather than a server is its *protocol* — it answers
+[BDEV](#the-bdev-protocol-and-the-memory-ramdisk) requests and knows nothing about
+what its blocks contain. That is exactly the property Phase 6 needs, when
+virtio-blk replaces it underneath an unchanged MFS.
 
 ## The device window
 
@@ -254,3 +261,129 @@ attribute index changes no marker in the boot log. The attribute is proved by
 construction and assertion, not empirically. The same is true of the `FR.TXFF` poll
 (TCG's FIFO never fills) and of the LF→CRLF translation (the log checker matches
 literal substrings and cannot express a carriage return).
+
+## The BDEV protocol and the `memory` ramdisk
+
+Block drivers answer requests in the `BDEV_RQ_BASE = 0xA00` band — between VFS
+(`0x800`) and CDEV (`0xB00`), with `0x900` reserved for the VFS↔FS band. Two
+requests are defined:
+
+| Field | Payload offset | Meaning |
+|---|---|---|
+| minor | `0..4` (i32) | which device; `BDEV_MINOR_RAMDISK = 0` is the boot image |
+| grant id | `4..8` (i32) | names the client's buffer |
+| length | `8..12` (i32) | bytes requested; at most `BDEV_MAX_IO` = one block |
+| block | `16..24` (u64) | which block of the device |
+
+`BDEV_READ` fills the client's buffer (so the grant needs `CPF_WRITE`, and the
+driver pushes with `SAFECOPY_TO`). `BDEV_WRITE` is defined and answers `EROFS`.
+
+Most of that table repeats CDEV's rules — no granter field, and the reply `m_type`
+*is* the byte count. Three things are deliberately different:
+
+**An over-long request is `EINVAL`, not a short read.** A short *write* is a POSIX
+contract every client already loops over. A short *block read* is useless: a
+filesystem cannot interpret half a block, so clamping would push a retry loop into
+every caller for nothing.
+
+**An out-of-range block is `EINVAL`, not `EIO`.** A block device's size is known to
+its client — MFS reads it from the superblock's `s_zones` — so asking past the end
+is a caller bug. `EIO` stays reserved for Phase 6's real media errors, where the
+request was well-formed and the *device* failed.
+
+**`BDEV_WRITE` answers `EROFS`, not `ENOSYS`.** `ENOSYS` is already the
+unknown-`m_type` answer, so reusing it would make "this driver has never heard of
+writes" and "this driver knows about writes and refuses them" indistinguishable to
+a client. Keeping the arm dispatched also keeps it probed, and slice 5.10 changes
+one line inside it.
+
+### Where the blocks come from
+
+`kernel/build.rs` builds a MinixFS v3 image at compile time (`tools/mkfs-mfs`,
+called as a build-dependency library) and packs it into the MXBI archive as a
+**non-ELF blob** named `rootfs`. At boot the kernel copies it, page by page, into
+freshly allocated frames and maps them into the `memory` driver's address space —
+in the same `load_boot_server` arm the UART page uses, and for the same reason: the
+driver has no way to ask.
+
+The window is declared beside the device window, and is **ordinary RAM**:
+
+```rust
+pub const RAMDISK_WINDOW_BASE: u64 = 0x8000_0000;   // 2 GiB — one whole L1 slot
+pub const RAMDISK_WINDOW_SIZE: u64 = 0x0040_0000;   // 4 MiB
+pub const RAMDISK_VA: u64 = RAMDISK_WINDOW_BASE;    // page 0 of the window
+```
+
+Two choices there are worth stating. It sits **above** the device window on
+purpose: `region::REGION_LIMIT` is the base of the *lowest* kernel-owned window, so
+placing every new window above that low-water mark means VM needs no edit at all
+when one is added — and `assert!(USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE
+<= RAMDISK_WINDOW_BASE)` is what keeps that true. And the pages are mapped
+`Prot::RW_DATA`, not device: none of the `prot.device` machinery above applies, and
+these frames take the ordinary `free_frame` path in every leaf sweep. (RW rather
+than RO so slice 5.10's write path is a change in the driver rather than in the
+kernel.)
+
+The 4 MiB size comes from the *format*, not from today's image: seven direct zones
+plus one single-indirect block address `7 + 1024` zones at 4 KiB, which is 4.03 MiB.
+An image that fits the window is therefore an image `fs/mfs`'s reader can address
+without a double-indirect arm.
+
+The driver learns where it is through a new `SYS_GETINFO` selector, `GET_RAMDISK`,
+which returns `(va, len)` and is **gated on the caller being `MEM_PROC_NR`**: the
+ramdisk is mapped into exactly one address space, so the VA is meaningless — and
+actively misleading — anywhere else.
+
+### The driver has no `unsafe` block
+
+`drivers/memory/` never dereferences its mapping. Client transfers go through
+`SYS_SAFECOPY`, and even the boot self-check reads the image through
+`SYS_COPY(SELF → SELF)` rather than a raw load. So a page the kernel failed to map
+surfaces as an `EFAULT` *return value* from a kernel call — a better diagnostic
+than TTY's equivalent, which is an EL0 data abort — and there is no MMIO sibling
+module to exclude from coverage.
+
+The self-check is deliberately **device-level, not format-level**: it reads a
+32-byte image header that `mkfs-mfs` writes into block 0's boot block (bytes
+`0..1024`, which MinixFS never reads), never a superblock. A block driver that
+decoded a superblock would depend on the filesystem format, which is precisely the
+dependency Phase 6 has to unwind when virtio-blk replaces the ramdisk. What
+licenses that shortcut is a host test in `tools/mkfs-mfs` asserting the header's
+three fields equal the real superblock's.
+
+It also reads a **tail label** from the image's reserved last block, whose text
+differs from the header's. That is not decoration: a kernel copy loop that failed to
+advance would map 256 pages of block 0 and pass every header check. The tail is the
+only thing in the boot that proves the copy reached the end of the blob — confirmed
+by mutation, where sourcing every page from block 0 moved exactly one marker,
+`ramdisk FAIL tail label`.
+
+### What the boot log proves
+
+```
+[ramdisk] mem va=0x80000000 len=1048576 pages=256
+[diag memory] ramdisk ok blocks=256 tail=1
+[diag vfs] bdev.ds ok ep=3
+[diag vfs] bdev.read ok n=32
+[diag vfs] bdev.head ok match=1
+[diag vfs] bdev.tail ok match=1
+[diag vfs] bdev.deny ok n=9
+```
+
+`blocks=256` cross-checks the header's own block count against the length
+`GET_RAMDISK` reported — two independently derived numbers, binding the build-time
+image geometry to the kernel's runtime copy.
+
+VFS then drives the protocol as the first client, and `bdev.read` matters beyond
+this driver: it is the first **successful** `SAFECOPY_TO` anywhere in the tree.
+Every other use of that direction is a denial probe, so until now the kernel's
+`CPF_WRITE` + `Prot::writable` success path had never run. `bdev.head` and
+`bdev.tail` do not subsume each other — a driver that ignored the `block` field
+would return the header for both — and the nine refusals include the one grant check
+slice 5.3 could not reach: a `CPF_READ`-only grant used as a copy *destination*.
+
+Every one of those markers is identical with and without the `boot-stubs` feature
+**and** with and without the musl sysroot. That is what the fixed 1 MiB image size
+buys: in the sysroot-absent build the archive packs a 15 KB `worker` ELF under the
+name `hello`, so a content-sized image would make every size-derived marker
+config-dependent — passing in one configuration and proving nothing in the other.

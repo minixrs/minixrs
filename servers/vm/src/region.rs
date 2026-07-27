@@ -28,7 +28,7 @@ use core::cell::UnsafeCell;
 
 use minixrs_kernel_shared::com::NR_SERVED_PROCS;
 use minixrs_kernel_shared::error::{EINVAL, ENOMEM};
-use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
+use minixrs_kernel_shared::uspace::{RAMDISK_WINDOW_BASE, USER_DEVICE_WINDOW_BASE};
 
 /// Fixed heap origin. Until PM supplies a real per-process memory layout
 /// (Phase 4), VM and stub D agree on this VA by convention: `brk` grows the
@@ -49,24 +49,35 @@ pub const HEAP_BASE: u64 = 0x0100_0000;
 /// `ENOMEM`.
 pub const MMAP_BASE: u64 = 0x0200_0000;
 
-/// Exclusive upper bound of **every** tracked region: the base of the kernel's
-/// user-space device window (slice 5.3). No heap and no mmap may extend past here.
+/// Exclusive upper bound of **every** tracked region: the base of the **lowest**
+/// kernel-owned window, which is the device window (slice 5.3). No heap and no
+/// mmap may extend past here.
 ///
 /// A `const _` on the *bases* would not be enough — it proves only where each
 /// region starts, and both grow on request: the mmap arena's bump cursor advances,
 /// and `set_brk` raises the heap's `end` to whatever the client asks for. So both
 /// carry a runtime check against this bound, returning `ENOMEM`.
 ///
-/// Why it matters even though nothing is exploitable today: the window's whole
-/// purpose is to be kernel-owned in *every* address space, so Phase 6 can pre-map a
-/// device page into any driver without first asking whether VM already promised
-/// that VA to the process's heap.
+/// Why it matters even though nothing is exploitable today: a kernel-owned window's
+/// whole purpose is to be kernel-owned in *every* address space, so Phase 6 can
+/// pre-map a device page into any driver without first asking whether VM already
+/// promised that VA to the process's heap.
+///
+/// **This constant does not move when a window is added.** Slice 5.7's ramdisk
+/// window sits at 2 GiB, above the device window, precisely so that the lowest
+/// kernel-owned window stays the low-water mark and VM needs no edit — the
+/// disjoint-and-ascending assert in `kernel-shared::uspace` is what enforces that,
+/// and the assert below is this file's half of it.
 pub const REGION_LIMIT: u64 = USER_DEVICE_WINDOW_BASE;
 
 // Both region origins must sit below the bound, or their first request would be
 // refused outright.
 const _: () = assert!(MMAP_BASE < USER_DEVICE_WINDOW_BASE);
 const _: () = assert!(HEAP_BASE < USER_DEVICE_WINDOW_BASE);
+
+// ...and the bound must stay at or below every *other* kernel-owned window, or a
+// window added above it would be reachable by a growing heap or mmap arena.
+const _: () = assert!(REGION_LIMIT <= RAMDISK_WINDOW_BASE);
 
 /// aarch64 4 KiB page.
 const PAGE_SIZE: u64 = 4096;

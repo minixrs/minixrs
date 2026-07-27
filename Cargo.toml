@@ -25,9 +25,11 @@ members = [
     "userland/coreutils",
     "userland/worker",
     "minixrs",
-    # Host-side build tooling. Unlike every other member this is a std binary
-    # that runs on the developer's machine, not on minix.rs.
+    # Host-side build tooling. Unlike every other member these are std crates
+    # that run on the developer's machine (and inside `kernel/build.rs`), not on
+    # minix.rs.
     "tools/gen-c-headers",
+    "tools/mkfs-mfs",
 ]
 
 # NOTE: there is deliberately no `default-members` here. `minixrs-kernel` pins

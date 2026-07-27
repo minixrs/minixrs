@@ -5,7 +5,21 @@ edition = "2024"
 license = "BSD-3-Clause"
 publish = false
 
+# Exactly one dependency, deliberately. `kernel/build.rs` reaches this crate (via
+# the `tools/mkfs-mfs` build-dependency) to generate the root filesystem image,
+# and `minixrs-kernel-shared` is already in that graph — so the format library
+# costs the kernel build nothing, and `MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE` can be
+# const-asserted rather than kept in sync by hand.
+#
+# Slice 5.8 adds the MFS *server* in `src/main.rs`. When it does, re-add
+# `minixrs-ipc` / `minixrs-server-rt` / `minixrs-abi-note` as `optional = true`
+# behind a `server` feature with `[[bin]] required-features = ["server"]`, and
+# thread `--features server` through `kernel/build.rs`'s nested build — the same
+# way PM's `--no-default-features` is threaded through today. That keeps the
+# kernel's build-script graph lean while the server still builds for the minixrs
+# target.
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
-minixrs-ipc = { path = "../../minixrs-ipc" }
-minixrs-server-rt = { path = "../../server-rt" }
+
+[lints]
+workspace = true

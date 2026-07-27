@@ -1,0 +1,28 @@
+[package]
+name = "minixrs-mkfs-mfs"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+name = "minixrs_mkfs_mfs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mkfs-mfs"
+path = "src/main.rs"
+
+# Two path dependencies and zero third-party crates. `deny.toml`'s allow-list is
+# what makes that a rule rather than a preference, which is why argv parsing here
+# is hand-rolled rather than reaching for a CLI crate.
+#
+# `kernel/build.rs` calls this crate's *library* directly as a `[build-dependencies]`
+# path dep — the `minixrs_kernel_shared::brand::scan_brand` precedent — so building
+# the root image needs no nested host cargo invocation.
+[dependencies]
+minixrs-mfs = { path = "../../fs/mfs" }
+minixrs-kernel-shared = { path = "../../kernel-shared" }
+
+[lints]
+workspace = true

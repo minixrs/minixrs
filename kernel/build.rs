@@ -127,14 +127,18 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // the right proc slot. `worker` is packed with proc_nr -1
     // (`com::EXEC_ONLY_PROC_NR`): it is not a boot server — the loader skips any
     // negative proc_nr — but it is resolvable by name for `SYS_EXEC` (slice 4.7).
-    let servers: [(&str, std::path::PathBuf, i32); 9] = [
+    let servers: [(&str, std::path::PathBuf, i32); 10] = [
         ("minixrs-vm", workspace.join("servers/vm"), 7), // VM_PROC_NR
         ("minixrs-ds", workspace.join("servers/ds"), 5), // DS_PROC_NR
-        // TTY sits between DS and VFS on purpose. DS must come first so every
-        // later server's `DS_PUBLISH` lands; the console driver should reach its
+        // The drivers sit between DS and VFS on purpose. DS must come first so
+        // every later server's `DS_PUBLISH` lands; each driver should reach its
         // receive loop before its first client, which is VFS today (slice 5.3's
-        // demo) and stays VFS for 5.4's fd 1/2 and 5.6's musl `printf`.
+        // console demo and 5.7's block demo) and stays VFS for 5.4's fd 1/2 and
+        // 5.6's musl `printf`. MEM specifically precedes VFS so 5.7's demo lookup
+        // — and 5.8's MFS lookup, which is the one that matters — resolve through
+        // DS deterministically by construction rather than by luck.
         ("minixrs-tty", workspace.join("drivers/tty"), 4), // TTY_PROC_NR
+        ("minixrs-memory", workspace.join("drivers/memory"), 3), // MEM_PROC_NR
         ("minixrs-vfs", workspace.join("servers/vfs"), 1), // VFS_PROC_NR
         ("minixrs-sched", workspace.join("servers/sched"), 9), // SCHED_PROC_NR
         ("minixrs-rs", workspace.join("servers/rs"), 2),   // RS_PROC_NR
@@ -195,15 +199,76 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // Same pack-time brand gate the servers get. For the real C build this is
     // what turns a regressed crt1.c brand block into a *build* failure rather
     // than a boot failure.
+    //
+    // (The gate is written out at all three sites rather than factored into a
+    // per-module helper on purpose: the `rootfs` blob below is NOT an ELF, and a
+    // helper that branded every module would panic on it.)
     if let Err(e) = minixrs_kernel_shared::brand::scan_brand(&hello_bytes) {
         panic!("hello: missing/bad minixrs brand: {e:?}");
     }
-    modules.push((-1, "hello".to_string(), hello_bytes)); // EXEC_ONLY_PROC_NR
+    modules.push((-1, "hello".to_string(), hello_bytes.clone())); // EXEC_ONLY_PROC_NR
+
+    // The root filesystem image (slice 5.7, decision D3): a MinixFS v3 image built
+    // here and packed as a non-ELF blob, which the kernel copies into RAM frames
+    // and maps into the `memory` driver's address space at boot.
+    //
+    // Deliberately a separate statement outside the server loop, and with **no**
+    // `scan_brand` gate: it is not an ELF and has no `.note.minixrs.ident`.
+    //
+    // `hello_bytes` is reused rather than calling `build_hello` a second time.
+    // Building it twice would let the image and the `hello` module disagree in the
+    // musl-sysroot-absent configuration, where `build_hello` returns `None` and the
+    // fallback substitutes the `worker` ELF — the image would then hold whichever
+    // one the second call produced.
+    modules.push((
+        -1,
+        "rootfs".to_string(), // com::ROOTFS_MODULE_NAME
+        build_rootfs(&hello_bytes),
+    ));
 
     let archive = pack_mxbi(&modules);
     let archive_path = out_dir.join("boot_image.mxbi");
     std::fs::write(&archive_path, &archive).expect("writing boot-image archive");
     println!("cargo:rustc-env=BOOT_IMAGE_PATH={}", archive_path.display());
+}
+
+/// Build the MinixFS v3 root filesystem image (slice 5.7).
+///
+/// The image is a **fixed** 1 MiB regardless of its contents (see
+/// `kernel_shared::rootfs::ROOTFS_IMAGE_BLOCKS`), so every size-derived boot
+/// marker is a literal in every build configuration — including the one where
+/// `build_hello` fell back to the 15 KB `worker` ELF.
+///
+/// Three files, and each earns its place:
+///
+///   * `/bin/hello` — what slice 5.9 execs out of the filesystem. Passed in rather
+///     than rebuilt, so the image and the archive's `hello` module can never
+///     disagree.
+///   * `/etc/motd` — a greppable line for slice 5.8's read proof, which needs a
+///     file whose *contents* it can assert on rather than just its length.
+///   * `/etc/pattern` — 40 KiB, and **mandatory rather than filler**. It is what
+///     keeps the single-indirect zone arm (and mkfs's indirect writer) live in
+///     *both* configurations: the real `hello` is ~200 KB and needs the indirect
+///     block, but the fallback `worker` is 15 KB and fits inside the seven direct
+///     zones, so without a constant-size file past that boundary the indirect path
+///     would be dead code in exactly the configuration CI's non-QEMU jobs build.
+fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
+    use minixrs_mkfs_mfs::Manifest;
+
+    // Position-dependent and non-repeating over a block, so a copy that lost,
+    // duplicated, or reordered a block changes the bytes. Same generator the
+    // mkfs round-trip tests use.
+    const PATTERN_LEN: usize = 40 * 1024;
+    let pattern: Vec<u8> = (0..PATTERN_LEN).map(|i| (i % 251) as u8).collect();
+
+    let mut manifest = Manifest::new();
+    manifest
+        .add("/bin/hello", hello_bytes.to_vec())
+        .add("/etc/motd", b"minix.rs rootfs: motd from MFS\n".to_vec())
+        .add("/etc/pattern", pattern);
+
+    minixrs_mkfs_mfs::build_image(&manifest)
+        .unwrap_or_else(|e| panic!("building the root filesystem image: {e}"))
 }
 
 /// Build `userland/hello` — the slice-5.6 C milestone — against the musl fork's
@@ -440,6 +505,20 @@ fn pack_mxbi(modules: &[(i32, String, Vec<u8>)]) -> Vec<u8> {
             name_bytes.len() < NAME_LEN,
             "server name {name:?} too long for MXBI {NAME_LEN}-byte name field"
         );
+        // The record's offset and length are u32 on the wire. These casts were
+        // unchecked until slice 5.7 added a 1 MiB non-ELF blob to the archive —
+        // the same latent-cast class the workspace's `checked_add` convention
+        // exists to kill. A silent truncation here would produce an archive whose
+        // table points into the middle of a payload.
+        assert!(
+            bytes.len() <= u32::MAX as usize,
+            "MXBI module {name:?} is {} bytes, past the u32 length field",
+            bytes.len()
+        );
+        assert!(
+            offset <= u32::MAX as usize,
+            "MXBI archive exceeds the u32 offset field at module {name:?}"
+        );
         records.extend_from_slice(&proc_nr.to_le_bytes());
         records.extend_from_slice(&(offset as u32).to_le_bytes());
         records.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -448,6 +527,15 @@ fn pack_mxbi(modules: &[(i32, String, Vec<u8>)]) -> Vec<u8> {
         records.extend_from_slice(&name_field);
         offset += bytes.len();
     }
+    // The loop checks `offset` *before* adding the module's length, so the final
+    // total is the one value it cannot have covered: the last module may start
+    // inside the u32 range and end past it. `total_size` is itself a u32 header
+    // field, so check it here or the cast below truncates the archive's own
+    // recorded size while every per-record assert passes.
+    assert!(
+        offset <= u32::MAX as usize,
+        "MXBI archive is {offset} bytes, past the u32 total-size field"
+    );
     let total_size = offset;
 
     let mut archive = Vec::with_capacity(total_size);
