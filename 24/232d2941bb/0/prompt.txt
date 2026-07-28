@@ -1,0 +1,1 @@
+Update CLAUDE.md with a comment to make sure commits follow DCO and use --signoff to annotate the author

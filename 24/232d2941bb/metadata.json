@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "24232d2941bb",
+  "strategy": "manual-commit",
+  "branch": "chore/claude-md-dco-signoff",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/24/232d2941bb/0/metadata.json",
+      "transcript": "/24/232d2941bb/0/full.jsonl",
+      "compact_transcript": "/24/232d2941bb/0/transcript.jsonl",
+      "content_hash": "/24/232d2941bb/0/content_hash.txt",
+      "prompt": "/24/232d2941bb/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1066,
+    "cache_creation_tokens": 72193,
+    "cache_read_tokens": 991189,
+    "output_tokens": 8291,
+    "api_call_count": 12
+  }
+}
