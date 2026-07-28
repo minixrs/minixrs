@@ -157,6 +157,25 @@ feeds the LCOV report to SonarQube Cloud (org `minixrs`, project `minixrs_minixr
   on a `v*` tag push, bottom-up dependency order mandatory; verify locally with the five-crate
   `cargo package -p …` command documented there
 
+## Commits
+
+- **Every commit must carry a DCO sign-off** — always `git commit --signoff` (`-s`), which appends
+  `Signed-off-by: Kevin Barnard <kevin.barnard@gmail.com>` from `user.name`/`user.email`. It is the
+  Developer Certificate of Origin attestation, not a stylistic trailer: it asserts the author has
+  the right to contribute the code under BSD-3-Clause. Never hand-write the trailer for someone
+  else, and never add one on their behalf — `--signoff` signs off *as the committer*, which is the
+  whole point. Every non-merge commit in this repo's history has one; keep it that way
+- Sign-off is **orthogonal to GPG signing** — `--signoff` is the DCO trailer, `--gpg-sign` (on by
+  default here) is the cryptographic signature. Both are required, and neither substitutes for the
+  other. The global rules still hold: never `--no-gpg-sign`, never `--no-verify`
+- Trailer **presence** is what matters, not order: `--signoff` appends the sign-off last, but the
+  `Entire-Checkpoint:` trailer is inserted by a hook that may run either side of the commit, so it
+  lands before *or* after `Signed-off-by:` depending on timing — both orderings are in the history
+  and neither is wrong. Verify with `git log -1 --format='%(trailers:key=Signed-off-by)'` before
+  pushing, especially after a `git commit --amend` that omitted `-s`
+- Merge commits created by GitHub's UI have **no** sign-off; that is expected and not worth fixing.
+  Only the authored commits inside a PR need one
+
 ## Architecture
 
 See `docs/architecture.md` for the full system design. Key concepts:
