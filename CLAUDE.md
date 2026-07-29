@@ -105,19 +105,29 @@ against the host libc. `check`/`clippy`/`test` are the host gates, not `build`.)
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Ten gates run in
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Eleven gates run in
 parallel — `fmt`, `clippy`, `clippy-kernel` (aarch64 kernel lint + compile), `c-headers`
 (regenerate + `clang -fsyntax-only` the generated C ABI headers), `audit`
-(cargo-audit), `deny` (cargo-deny, config in `deny.toml`), `geiger`, `miri`, `qemu-smoke`
+(cargo-audit), `deny` (cargo-deny, config in `deny.toml`), `dco` (DCO sign-off,
+PR-only), `geiger`, `miri`, `qemu-smoke`
 (aarch64 QEMU boot smoke), `coverage` (cargo-llvm-cov → `lcov.info`) — then a `sonar` job
 feeds the LCOV report to SonarQube Cloud (org `minixrs`, project `minixrs_minixrs`, config in
 `sonar-project.properties`). The Sonar scan auto-detects PR vs branch: PRs get decoration,
 `main` pushes refresh the whole-project picture.
 
-- Only `geiger` and `miri` are **advisory** (`continue-on-error`); the other eight block. miri
+- Only `geiger` and `miri` are **advisory** (`continue-on-error`); the other nine block. miri
   only covers the host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm`) —
   `minixrs-ipc` has inline asm. `geiger`'s per-package sweep filters out `minixrs-kernel` (it can't
   host-build)
+- `dco` runs `tools/check-dco.sh <base>..<head>` and is **PR-only** (`if: github.event_name ==
+  'pull_request'`): a push to `main` lands a GitHub merge commit, which by design has no sign-off,
+  and the authored commits under it were already checked on their own PR. It needs
+  `fetch-depth: 0` — the default shallow clone has neither endpoint of the range — and passes the
+  two SHAs through `env:` rather than `${{ }}`-interpolating them into the `run:` (the standard
+  expression-injection guard, kept even though these fields are hex). An **empty range is a
+  failure, not a pass**: zero authored commits means the range was computed wrong, and a gate that
+  greens on a broken range is worse than none. The script is bash 3.2-clean (no `mapfile`, no
+  `${var,,}`) so it runs on a stock macOS `/bin/bash` before you push, not just on CI's bash 5
 - `qemu-smoke` checks out **submodules recursively** and runs `tools/build-musl.sh` before
   `cargo kernel-aarch64` (slice 5.6), with `target/musl-sysroot` cached on the submodule's
   resolved commit + `rust-toolchain.toml`/`build-musl.sh` — keyed on the *commit*, not a tracked
@@ -175,6 +185,12 @@ feeds the LCOV report to SonarQube Cloud (org `minixrs`, project `minixrs_minixr
   pushing, especially after a `git commit --amend` that omitted `-s`
 - Merge commits created by GitHub's UI have **no** sign-off; that is expected and not worth fixing.
   Only the authored commits inside a PR need one
+- This is **enforced, not just documented**: the blocking `dco` CI gate runs `tools/check-dco.sh`
+  over every non-merge commit a PR adds. Run it locally before pushing — bare `tools/check-dco.sh`
+  defaults to `<merge-base with origin/main>..HEAD`. It matches the sign-off's **email** against the
+  commit author's (case-insensitively), not the display name, so a trailer naming someone else
+  fails: `--signoff` signs off as the committer, and a relayed patch needs its *author's* sign-off.
+  Fixes are `git commit --amend --signoff` for the tip, `git rebase --signoff <base>` for a branch
 
 ## Architecture
 
