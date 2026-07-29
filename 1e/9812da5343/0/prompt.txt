@@ -1,0 +1,5 @@
+Yes change the branch protection
+
+---
+
+On more thing to add here change the workflow to prefer rebase merge over regular merge
