@@ -183,8 +183,17 @@ feeds the LCOV report to SonarQube Cloud (org `minixrs`, project `minixrs_minixr
   lands before *or* after `Signed-off-by:` depending on timing — both orderings are in the history
   and neither is wrong. Verify with `git log -1 --format='%(trailers:key=Signed-off-by)'` before
   pushing, especially after a `git commit --amend` that omitted `-s`
-- Merge commits created by GitHub's UI have **no** sign-off; that is expected and not worth fixing.
-  Only the authored commits inside a PR need one
+- PRs land by **rebase merge** by default (regular merge only where rebasing is wrong for the
+  series; never squash). Rebase replays each commit under a new SHA, keeping the message — so the
+  `Signed-off-by:` trailer survives and every commit reaching `main` is an authored, signed-off
+  one. The original **GPG signature cannot survive** (it covers the old commit object); what signs
+  the replayed commit depends on where the rebase happens — a local `git rebase` + push re-signs
+  with your key (`commit.gpgsign`), while GitHub's own rebase-merge button signs with its web-flow
+  key or not at all. This repo's existing merge commits carry Kevin's key, i.e. they were made
+  locally rather than through the button; keep it that way and the signing story does not change
+- Where a regular merge is used, its merge commit has **no** sign-off; that is expected and not
+  worth fixing, and `tools/check-dco.sh` skips merge commits for exactly that reason. Only
+  authored commits need one
 - This is **enforced, not just documented**: the blocking `dco` CI gate runs `tools/check-dco.sh`
   over every non-merge commit a PR adds. Run it locally before pushing — bare `tools/check-dco.sh`
   defaults to `<merge-base with origin/main>..HEAD`. It matches the sign-off's **email** against the
