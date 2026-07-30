@@ -221,7 +221,9 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // trigger a multi-minute musl build from inside a cargo build script. The
     // fallback keeps every boot green with no feature flag — only the
     // hello-specific markers go missing.
-    let hello_bytes = match build_hello(workspace) {
+    let src = workspace.join("userland/hello/hello.c");
+    println!("cargo:rerun-if-changed={}", src.display());
+    let hello_bytes = match build_hello_musl(workspace, &src) {
         Some(bytes) => bytes,
         None => {
             println!(
@@ -310,8 +312,16 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
         .unwrap_or_else(|e| panic!("building the root filesystem image: {e}"))
 }
 
-/// Build `userland/hello` — the slice-5.6 C milestone — against the musl fork's
-/// sysroot, returning the linked ELF's bytes.
+/// Build `userland/hello` — the slice-5.6 C milestone — against the **in-tree
+/// musl sysroot** (`tools/build-musl.sh` → `target/musl-sysroot`), returning the
+/// linked ELF's bytes.
+///
+/// This is the stand-in-triple flavor: `--target=aarch64-unknown-linux-musl`, a
+/// hand-written `hello.ld`, a `compiler_builtins` rlib scraped out of the nested
+/// build dir, and a hand-assembled `rust-lld` line. It is what CI's blocking
+/// `qemu-smoke` job builds, which makes it a real dependency rather than a
+/// fallback: that job cannot install an SDK, and `tests/qemu-boot.expected`
+/// requires the five C markers.
 ///
 /// Returns `None` when the sysroot is missing or stale, so the caller can fall
 /// back to packing `worker` under the name `hello`. It deliberately does **not**
@@ -324,13 +334,12 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
 /// foreign libc. clang is already a hard build requirement (the kernel's `.S`
 /// files go through it) and `rust-lld` ships with the pinned toolchain, so no
 /// platform linker and no Homebrew LLVM are involved.
-fn build_hello(workspace: &std::path::Path) -> Option<Vec<u8>> {
-    let src = workspace.join("userland/hello/hello.c");
+fn build_hello_musl(workspace: &std::path::Path, src: &std::path::Path) -> Option<Vec<u8>> {
     let script = workspace.join("userland/hello/hello.ld");
     let sysroot = workspace.join("target/musl-sysroot");
     let stamp = sysroot.join(".stamp");
 
-    for path in [&src, &script, &stamp] {
+    for path in [&script, &stamp] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
@@ -347,14 +356,14 @@ fn build_hello(workspace: &std::path::Path) -> Option<Vec<u8>> {
 
     // -nostdinc + -isystem <sysroot>/include: the fork's headers and nothing
     // else. The host libc must not creep in — its errno values differ.
-    let cc = std::process::Command::new("clang")
+    let cc = clang_command("clang")
         .args(["--target=aarch64-unknown-linux-musl", "-nostdinc"])
         .arg("-isystem")
         .arg(&sysroot_inc)
         .args(["-ffreestanding", "-O2", "-Wall", "-Wextra", "-Werror", "-c"])
         .arg("-o")
         .arg(&obj)
-        .arg(&src)
+        .arg(src)
         .status()
         .expect("running clang for userland/hello");
     assert!(
