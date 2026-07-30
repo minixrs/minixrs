@@ -95,6 +95,28 @@ fn main() {
     }
 }
 
+/// Which toolchain built the packed `hello` module, in strict preference order.
+///
+/// `Musl` is **not** a fallback, and the distinction matters. CI's blocking
+/// `qemu-smoke` job cannot install an SDK — an LLVM build is hours — while
+/// `tests/qemu-boot.expected` *requires* the five C markers, so the in-tree
+/// `tools/build-musl.sh` sysroot is that gate's real dependency and has to keep
+/// working. Selection is genuinely three-way: SDK, then in-tree musl, then no C
+/// toolchain at all.
+///
+/// Only `Worker` is a fallback, and only it loses markers.
+enum HelloFlavor {
+    /// `$MINIXRS_SDK` (M3): one `clang --target=aarch64-unknown-minixrs` call
+    /// does the whole job. Carries the prefix and the sysroot stamp for the
+    /// host-side report — the boot log cannot distinguish flavors.
+    Sdk { prefix: PathBuf, stamp: String },
+    /// `target/musl-sysroot` (slice 5.6): the stand-in triple
+    /// `aarch64-unknown-linux-musl`, `hello.ld`, and an explicit `rust-lld` line.
+    Musl,
+    /// No C toolchain: the `worker` ELF packed *under the name* `hello`.
+    Worker,
+}
+
 /// A `clang` invocation with the host's C environment scrubbed.
 ///
 /// This is **required, not hygiene.** clang's driver folds `CPATH` and the
@@ -210,33 +232,50 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
         modules.push((*proc_nr, name.to_string(), bytes));
     }
 
-    // `hello` — the first C program (slice 5.6), built from userland/hello
-    // against the musl fork rather than by cargo. Packed under proc_nr -1 like
-    // `worker`: resolvable by name for SYS_EXEC, never boot-loaded.
+    // `hello` — the first C program (slice 5.6), built from userland/hello rather
+    // than by cargo. Packed under proc_nr -1 like `worker`: resolvable by name for
+    // SYS_EXEC, never boot-loaded.
     //
-    // When the musl sysroot is absent or stale, fall back to packing the
-    // `worker` ELF *under the name* `hello`. Presence-checking the SYSROOT
-    // rather than the submodule is deliberate: a fresh clone that ran
-    // `git submodule update` but not `tools/build-musl.sh` would otherwise
-    // trigger a multi-minute musl build from inside a cargo build script. The
-    // fallback keeps every boot green with no feature flag — only the
-    // hello-specific markers go missing.
+    // With neither C toolchain available, fall back to packing the `worker` ELF
+    // *under the name* `hello`. Presence-checking the SYSROOTS rather than the
+    // musl submodule is deliberate: a fresh clone that ran `git submodule update`
+    // but not `tools/build-musl.sh` would otherwise trigger a multi-minute musl
+    // build from inside a cargo build script. The fallback keeps every boot green
+    // with no feature flag — only the hello-specific markers go missing.
     let src = workspace.join("userland/hello/hello.c");
     println!("cargo:rerun-if-changed={}", src.display());
-    let hello_bytes = match build_hello_musl(workspace, &src) {
-        Some(bytes) => bytes,
+    let (hello_flavor, hello_bytes) = match build_hello(workspace, &src) {
+        Some(pair) => pair,
         None => {
-            println!(
-                "cargo::warning=musl sysroot missing or stale; packing `worker` as `hello`. \
-                 Run tools/build-musl.sh to build the real C program (slice 5.6)."
-            );
-            modules
+            let bytes = modules
                 .iter()
                 .find(|(_, name, _)| name == "worker")
                 .map(|(_, _, bytes)| bytes.clone())
-                .expect("worker must be packed before the hello fallback")
+                .expect("worker must be packed before the hello fallback");
+            (HelloFlavor::Worker, bytes)
         }
     };
+
+    // Which toolchain built it, reported **host-side only**. There is deliberately
+    // no boot marker and no kernel change: the five C markers are byte-identical
+    // across the SDK and musl flavors, so the log physically cannot distinguish
+    // them and these lines plus the host-side ELF checks are what do.
+    //
+    // `Musl` stays silent on purpose. It is what every CI job builds, and warning
+    // on the norm is how people learn to ignore build-script warnings — which
+    // would cost us the two that actually mean something.
+    match &hello_flavor {
+        HelloFlavor::Sdk { prefix, stamp } => println!(
+            "cargo::warning=hello: built with the minix.rs SDK at {} ({stamp})",
+            prefix.display()
+        ),
+        HelloFlavor::Musl => {}
+        HelloFlavor::Worker => println!(
+            "cargo::warning=no C toolchain for `hello`; packing `worker` under that name. \
+             Run tools/build-musl.sh for the in-tree musl sysroot, or install the SDK and \
+             set $MINIXRS_SDK (slice 5.6 / P3c)."
+        ),
+    }
     // Same pack-time brand gate the servers get. For the real C build this is
     // what turns a regressed crt1.c brand block into a *build* failure rather
     // than a boot failure.
@@ -310,6 +349,160 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
 
     minixrs_mkfs_mfs::build_image(&manifest)
         .unwrap_or_else(|e| panic!("building the root filesystem image: {e}"))
+}
+
+/// Locate a usable minix.rs SDK (`$MINIXRS_SDK`), or `None`.
+///
+/// The prefix is `$MINIXRS_SDK` when set, else `$HOME/toolchains/minixrs`. That
+/// default is **contractual**, not a guess — it is the layout tooling's
+/// `docs/sysroot-layout.md` documents and the shape `cmake/minixrs.cmake` uses.
+/// Nothing else about the SDK may be hard-coded here.
+///
+/// "Usable" is exactly three files: `bin/clang`, `sysroot/.stamp`, and
+/// `sysroot/usr/lib/libc.a`. The crt objects, `libclang_rt.builtins.a` and the
+/// `lib/clang/<ver>` resource dir are deliberately **not** probed — the driver
+/// names those itself, and one driver invocation never mentions the version
+/// component, which is tooling's rule: derive it, never hard-code the `22`. A
+/// sysroot missing them is a *broken* SDK, and a broken SDK must fail loudly
+/// rather than quietly demote to another flavor (see `build_hello_sdk`).
+///
+/// An **explicitly set** but unusable `MINIXRS_SDK` warns once and falls through
+/// — which is also how `MINIXRS_SDK=/nonexistent` forces the musl flavor. An
+/// unset variable whose default prefix does not exist stays silent, since that is
+/// the ordinary case for everyone without an SDK.
+fn usable_sdk() -> Option<PathBuf> {
+    println!("cargo:rerun-if-env-changed=MINIXRS_SDK");
+
+    let explicit = std::env::var_os("MINIXRS_SDK");
+    let prefix = match &explicit {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(std::env::var_os("HOME")?).join("toolchains/minixrs"),
+    };
+
+    // Watched **unconditionally**, exactly as the musl stamp is. Watching it only
+    // when it exists looks like a free optimization — it would stop build.rs
+    // re-running for the SDK-less builds that are the common case — but it would
+    // break the documented flow "run tooling's build-sysroot.sh, then
+    // `cargo kernel-aarch64`": a declared-but-missing rerun-if-changed path is
+    // precisely what makes cargo notice the stamp *appearing*.
+    let stamp = prefix.join("sysroot/.stamp");
+    println!("cargo:rerun-if-changed={}", stamp.display());
+
+    for path in [
+        prefix.join("bin/clang"),
+        stamp,
+        prefix.join("sysroot/usr/lib/libc.a"),
+    ] {
+        if !path.is_file() {
+            if explicit.is_some() {
+                println!(
+                    "cargo::warning=MINIXRS_SDK is set to {} but {} is missing; \
+                     falling back to the in-tree musl sysroot.",
+                    prefix.display(),
+                    path.display()
+                );
+            }
+            return None;
+        }
+    }
+    Some(prefix)
+}
+
+/// Pick a `hello` flavor and build it: the SDK if one is usable, else the in-tree
+/// musl sysroot. `None` means no C toolchain at all, and the caller substitutes
+/// the `worker` ELF.
+fn build_hello(
+    workspace: &std::path::Path,
+    src: &std::path::Path,
+) -> Option<(HelloFlavor, Vec<u8>)> {
+    if let Some(prefix) = usable_sdk() {
+        let stamp_path = prefix.join("sysroot/.stamp");
+        let stamp = std::fs::read_to_string(&stamp_path)
+            .unwrap_or_else(|e| panic!("reading the SDK stamp {}: {e}", stamp_path.display()))
+            .trim()
+            .to_string();
+        let bytes = build_hello_sdk(&prefix, workspace, src, &stamp);
+        return Some((HelloFlavor::Sdk { prefix, stamp }, bytes));
+    }
+    build_hello_musl(workspace, src).map(|bytes| (HelloFlavor::Musl, bytes))
+}
+
+/// Build `userland/hello` with the minix.rs SDK: **one** driver invocation that
+/// compiles and links, on the real triple.
+///
+/// ```text
+///   <sdk>/bin/clang --target=aarch64-unknown-minixrs -O2 -Wall -Wextra -Werror \
+///       -o target/hello/hello userland/hello/hello.c
+/// ```
+///
+/// That is the entire command, and the absences are the milestone. The patched
+/// driver supplies, from the triple alone: `-static`; `--image-base=0x100000`
+/// (patch 0006, which is why this flavor needs no linker script); `-z
+/// max-page-size=4096 -z separate-loadable-segments` (decision D13 — 4 KiB pages
+/// and no two `PT_LOAD`s sharing one, because the kernel's loader maps
+/// segment-by-segment with per-segment permissions); `crt1.o`/`crti.o`/`crtn.o`
+/// and `-lc` out of `<sdk>/sysroot/usr/lib`; and `libclang_rt.builtins.a` from
+/// its own resource dir, which is where this flavor gets the soft-float
+/// `binary128` helpers that `build_hello_musl` has to scrape out of a nested
+/// `compiler_builtins` rlib.
+///
+/// So there is no `-T`, `-nostdinc`, `-isystem`, `--sysroot`, `-L`, `-static`,
+/// `-ffreestanding`, explicit crt object, builtins glob, or separate `rust-lld`
+/// step — and no `-std=` either, since the musl path passes none and both
+/// flavors should stay on one dialect. Tooling's rule applies:
+/// **anything that has to be added back here is a bug to fix in the fork, not a
+/// flag to paper over.**
+///
+/// Once the SDK is usable, every failure is a `panic!` and never a demotion to
+/// `HelloFlavor::Musl`. The boot markers are byte-identical across flavors, so a
+/// silent demotion would turn "your patched clang regressed" into "nothing looks
+/// wrong" — the one outcome that makes this whole path untestable.
+fn build_hello_sdk(
+    prefix: &std::path::Path,
+    workspace: &std::path::Path,
+    src: &std::path::Path,
+    stamp: &str,
+) -> Vec<u8> {
+    let clang = prefix.join("bin/clang");
+    let out = workspace.join("target/hello");
+    std::fs::create_dir_all(&out).expect("creating target/hello");
+    let elf = out.join("hello");
+
+    let status = clang_command(&clang)
+        .args([
+            "--target=aarch64-unknown-minixrs",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-o",
+        ])
+        .arg(&elf)
+        .arg(src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", clang.display()));
+
+    if !status.success() {
+        panic!(
+            "the minix.rs SDK failed to build userland/hello.\n\
+             \x20 SDK prefix: {prefix}\n\
+             \x20 SDK stamp:  {stamp}\n\
+             A usable SDK never falls back to the in-tree musl sysroot: the boot \
+             markers are byte-identical across flavors, so demoting here would \
+             report a regressed toolchain as a healthy build.\n\
+             Reproduce with the driver's own view of the link:\n\
+             \x20 {clang} -### --target=aarch64-unknown-minixrs -O2 -Wall -Wextra \
+             -Werror -o /dev/null {src}\n\
+             To build against the in-tree musl sysroot instead, point the variable \
+             at nothing:\n\
+             \x20 MINIXRS_SDK=/nonexistent cargo kernel-aarch64",
+            prefix = prefix.display(),
+            clang = clang.display(),
+            src = src.display(),
+        );
+    }
+
+    std::fs::read(&elf).unwrap_or_else(|e| panic!("reading {}: {e}", elf.display()))
 }
 
 /// Build `userland/hello` — the slice-5.6 C milestone — against the **in-tree
