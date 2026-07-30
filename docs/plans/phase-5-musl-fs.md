@@ -272,6 +272,35 @@ flavor) so no platform linker is involved. musl is configured
 *Rejected:* a dedicated cross-gcc (per-developer install, different names
 per platform); zig cc (hermetic, but a third-party toolchain dependency).
 
+**Amendment (P3c, toolchain milestone M3a).** D10 stands as the *in-tree*
+toolchain and remains what CI builds, but it is no longer the only one.
+The toolchain program's `minixrs/llvm-minixrs` fork now provides a real
+`aarch64-unknown-minixrs` target, so when a usable SDK is present at
+`$MINIXRS_SDK` (default `$HOME/toolchains/minixrs`) `kernel/build.rs` builds
+`hello` with a single driver invocation instead:
+
+```sh
+$MINIXRS_SDK/bin/clang --target=aarch64-unknown-minixrs \
+    -O2 -Wall -Wextra -Werror -o target/hello/hello userland/hello/hello.c
+```
+
+Every part of D10 that this replaces is supplied by the patched driver from
+the triple alone: `-static`, the crt objects and `-lc` from its own sysroot,
+both `-z` flags from D13, and `--image-base=0x100000` from LLVM patch 0006 —
+which is why this flavor needs **no linker script at all**. `rust-lld` and
+`llvm-ar` are not involved; the fork's `ld.lld` does the link.
+
+Selection is three-way — SDK, then D10's in-tree sysroot, then
+`worker`-as-`hello` — and **D10 is not demoted to a fallback**: no CI job
+installs an SDK (an LLVM build is hours) while `tests/qemu-boot.expected`
+requires the five C markers, so D10 is the blocking `qemu-smoke` gate's real
+dependency and has to keep working. Only the third case loses markers.
+
+A usable SDK that fails to build **panics** rather than falling through to
+D10, because the boot markers are byte-identical across the two flavors: the
+log cannot tell them apart, so demoting would report a regressed toolchain as
+a healthy build.
+
 ### D11. Scope fences
 
 **In (post-milestone stretch):** MFS write path (5.10); `/dev/null` +
@@ -1084,6 +1113,12 @@ MXBI archive; marker in `qemu-boot.expected`.
   `-Zbuild-std` for `aarch64-unknown-minixrs`**; the prebuilt
   `aarch64-unknown-none` rlib in the rustup sysroot does *not* export the C-ABI
   names. No compiler-rt/LLVM build was added.
+  *P3c counterpart:* in the SDK flavor the problem does not arise — the patched
+  driver links `libclang_rt.builtins.a` out of its own resource dir, under
+  `$MINIXRS_SDK/lib/clang/<ver>/lib/aarch64-unknown-minixrs/`. Nothing in this
+  repo may hard-code that `<ver>`, which is why `usable_sdk` probes neither the
+  archive nor the resource dir: one driver invocation never names the version
+  component, so the driver derives it.
 - **`hello.ld` places what a musl link brings and a Rust one does not** —
   `.init`/`.fini`, `.init_array`/`.fini_array` with bracketing symbols, `.got`,
   `.data.rel.ro` — since an orphan past the last `PT_LOAD` is a silent load
@@ -1116,7 +1151,7 @@ MXBI archive; marker in `qemu-boot.expected`.
   **a fallback path needs its own boot, not just a code review** — the
   name-level substitution was reviewed twice and read correctly both times.
 
-### Slice 5.7: BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ◀ ready (branch `feature/slice-5.7-bdev-ramdisk`, pending merge)
+### Slice 5.7: BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ✓ shipped (PR #48, merged 2026-07-27)
 
 **Goal:** D3 — a block-device story with a real MFS image behind it.
 

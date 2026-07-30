@@ -253,9 +253,20 @@ minix.rs init: exec stack ok
 # kept so this matches do_exec's trace and not some other line.
 name=hello entry=
 
-# The milestone itself: a C program compiled against the musl fork (external/
-# musl), linked with rust-lld, exec'd out of the boot archive, reaching serial
-# through printf -> VFS -> TTY.
+# The milestone itself: a C program compiled against a forked musl, exec'd out of
+# the boot archive, reaching serial through printf -> VFS -> TTY.
+#
+# Two toolchains can produce it, and this log cannot tell them apart. The SDK
+# flavor (P3c) is one `clang --target=aarch64-unknown-minixrs` call against
+# $MINIXRS_SDK; the in-tree musl flavor (slice 5.6) compiles on the stand-in
+# triple and links with rust-lld against target/musl-sysroot. The two binaries
+# differ in size and segment count, but the markers below are BYTE-IDENTICAL
+# across them -- same source, same libc, same ABI -- so nothing here needs to
+# change per flavor, and equally nothing here can *prove* a flavor. That is what
+# kernel/build.rs's host-side cargo::warning and the ELF checks in
+# book/src/libc/overview.md are for.
+#
+# CI has no SDK, so qemu-smoke always exercises the musl flavor.
 #
 # This line does NOT prove the flush path, despite being the obvious candidate.
 # musl's stdout starts *line* buffered (`.lbf = '\n'`), and it is __stdout_write
