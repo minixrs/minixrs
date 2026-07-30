@@ -64,7 +64,7 @@ fn main() {
                     .unwrap()
                     .to_string_lossy();
                 let obj = out_dir.join(format!("{stem}.o"));
-                let status = Command::new("clang")
+                let status = clang_command("clang")
                     .args([
                         "--target=aarch64-unknown-none",
                         "-ffreestanding",
@@ -93,6 +93,45 @@ fn main() {
         }
         other => panic!("unsupported target arch: {other}"),
     }
+}
+
+/// A `clang` invocation with the host's C environment scrubbed.
+///
+/// This is **required, not hygiene.** clang's driver folds `CPATH` and the
+/// `*_INCLUDE_PATH` family into the *front* of the include search list — ahead of
+/// its own resource dir and ahead of the sysroot — and `-nostdinc` does **not**
+/// suppress them. On a machine with `C_INCLUDE_PATH` set, the search order for
+/// `--target=aarch64-unknown-minixrs` really begins with that foreign directory:
+///
+/// ```text
+///   $ clang -E -v --target=aarch64-unknown-minixrs -x c /dev/null
+///    /Users/…/.wasmedge/include                    <- from C_INCLUDE_PATH, FIRST
+///    …/toolchains/minixrs/lib/clang/22/include
+///    …/toolchains/minixrs/sysroot/usr/include
+/// ```
+///
+/// A foreign `errno.h` reachable there would shadow musl's, and phase-5 decision
+/// D7 turns on the fork's errno *values* being the ones the kernel agrees with.
+/// (The pre-SDK musl path leaks the same directory; it is harmless there only by
+/// accident, because its explicit `-isystem` happens to sort ahead of it.)
+/// `LIBRARY_PATH` and `SDKROOT` get the same treatment for the link step.
+///
+/// Same reflex as `build_server`'s `.env_remove("RUSTFLAGS")`: a cross build must
+/// not inherit the host's idea of where things live.
+fn clang_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    for var in [
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH",
+        "OBJCPLUS_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "SDKROOT",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 /// Build every boot server, pack the resulting ELFs into the MXBI boot-image
