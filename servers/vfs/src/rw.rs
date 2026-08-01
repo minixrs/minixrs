@@ -1,11 +1,27 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `VFS_WRITE` request parsing, validation, and the short-write loop's policy.
+//! `VFS_WRITE` / `VFS_READ` request parsing, validation, and the short-write
+//! loop's policy.
 //!
 //! Everything here is a total function over plain values, so it carries the
 //! crate's unit tests; the IPC round-trip lives in `main.rs` and is verified
 //! through the boot log. Same split as `drivers/tty`'s `cdev.rs` / `main.rs` and
 //! `servers/ds`'s `registry.rs` / `main.rs`.
+//!
+//! ## Why `read` and `write` share this module
+//!
+//! It was `write.rs` until slice 5.8, and the rename is the point: `VFS_READ`
+//! reuses `VFS_WRITE`'s payload **field for field**, so [`parse`] and [`validate`]
+//! serve both without a line of change. And [`advance`]'s four rules turn out to
+//! be direction-agnostic — "a peer reporting `0` ends the transfer" is exactly
+//! what EOF means on the read side, and "an error after partial progress reports
+//! the progress" is POSIX's rule for both.
+//!
+//! What is *not* shared is the looping. VFS drives `write` to completion because
+//! `write()` may not expose a driver's staging limit; it does **not** loop on
+//! `read`, because `read()` is allowed to return less than asked for. So `read`
+//! uses [`parse`]/[`validate`] and never touches [`advance`] — the asymmetry is
+//! in `main.rs`, where the two handlers are.
 //!
 //! ## Why the loop is a step function
 //!
@@ -21,7 +37,7 @@
 //! [`validate`] owns the `len`/`buf` checks; the descriptor is `fd.rs`'s business
 //! and is resolved separately by the caller. The two are deliberately not merged:
 //! a descriptor is looked up in per-process state, a length is judged on its own,
-//! and only the first will grow a mount table under it in slice 5.8.
+//! and only the first grows a mount and a seek position under it.
 
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{VFS_BUF_OFF, VFS_FD_OFF, VFS_LEN_OFF};
@@ -29,13 +45,13 @@ use minixrs_kernel_shared::error::{EFAULT, EINVAL};
 use minixrs_kernel_shared::message::user_range_ok;
 use minixrs_server_rt::{rd_i32, rd_u64};
 
-/// A parsed `VFS_WRITE` request. Field-for-field the payload, with no
-/// interpretation applied — [`validate`] and `fd::resolve` do that.
+/// A parsed `VFS_WRITE` / `VFS_READ` request. Field-for-field the payload, with
+/// no interpretation applied — [`validate`] and `fd::resolve` do that.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct WriteRequest {
-    /// The descriptor to write to. Resolved against the caller's fd row.
+pub struct Request {
+    /// The descriptor to transfer on. Resolved against the caller's fd row.
     pub fd: i32,
-    /// Bytes the caller asked to write.
+    /// Bytes the caller asked to move.
     pub len: i32,
     /// The buffer's address **in the caller's own address space**. Not a grant
     /// id: the caller is an ordinary user process with no grant table, and VFS is
@@ -43,14 +59,15 @@ pub struct WriteRequest {
     pub buf: u64,
 }
 
-/// Read a `VFS_WRITE` request out of a message payload.
+/// Read a `VFS_WRITE` or `VFS_READ` request out of a message payload — the two
+/// share one payload, so they share one parser.
 ///
 /// Total: every field is a fixed-offset scalar read that cannot fail
 /// (`server-rt`'s accessors return `0` for an out-of-range offset), so a
 /// malformed request becomes an invalid *value* that the checks reject, never a
 /// panic.
-pub fn parse(msg: &Message) -> WriteRequest {
-    WriteRequest {
+pub fn parse(msg: &Message) -> Request {
+    Request {
         fd: rd_i32(msg, VFS_FD_OFF),
         len: rd_i32(msg, VFS_LEN_OFF),
         buf: rd_u64(msg, VFS_BUF_OFF),
@@ -59,11 +76,12 @@ pub fn parse(msg: &Message) -> WriteRequest {
 
 /// Decide how many bytes this request is asking for, or which errno to reply.
 ///
-/// `Ok(0)` is a legal empty write, not an error — and it is checked **before**
-/// the buffer, so a caller writing zero bytes is never asked to supply a valid
+/// `Ok(0)` is a legal empty transfer, not an error — and it is checked **before**
+/// the buffer, so a caller moving zero bytes is never asked to supply a valid
 /// pointer (POSIX does not require one) and no grant is issued for it. That last
-/// part matters: a zero-length write must not be usable to probe the granting
-/// path, which is the rule TTY applies one layer down.
+/// part matters: a zero-length request must not be usable to probe the granting
+/// path, which is the rule TTY applies one layer down and the FS server applies
+/// one layer up.
 ///
 /// The checks, in order:
 ///
@@ -163,7 +181,7 @@ mod tests {
         let m = request(1, 64, BUF);
         assert_eq!(
             parse(&m),
-            WriteRequest {
+            Request {
                 fd: 1,
                 len: 64,
                 buf: BUF,
@@ -280,6 +298,42 @@ mod tests {
         // POSIX: those bytes really went out, so reporting the error instead
         // would make the caller send them a second time.
         assert_eq!(advance(64, 100, EFAULT), Step::Done(64));
+    }
+
+    #[test]
+    fn the_same_parse_and_validate_serve_a_read() {
+        // `VFS_READ` reuses `VFS_WRITE`'s payload field for field, which is what
+        // the slice-5.8 rename of this module records. The assertion is that a
+        // request built for one direction parses identically for the other —
+        // there is no read-specific offset, and giving read its own would be a
+        // divergence this test turns into a failure.
+        let m = request(3, 4096, BUF);
+        let req = parse(&m);
+        assert_eq!(
+            req,
+            Request {
+                fd: 3,
+                len: 4096,
+                buf: BUF
+            }
+        );
+        assert_eq!(validate(req.len, req.buf), Ok(4096));
+
+        // The refusals are shared too: a read with a negative length or an
+        // unmapped buffer is wrong for exactly the reasons a write is.
+        assert_eq!(validate(-1, BUF), Err(EINVAL));
+        assert_eq!(validate(8, 0), Err(EFAULT));
+    }
+
+    #[test]
+    fn advance_is_direction_agnostic_and_zero_means_eof() {
+        // The other half of why this module is `rw` and not `write`: `advance`'s
+        // four rules never mention a direction. "A peer reporting 0 ends the
+        // transfer" is a driver that cannot take more on the write side and
+        // *end of file* on the read side — the same rule, and the reason
+        // `VFS_READ` needs no step function of its own.
+        assert_eq!(advance(0, 100, 0), Step::Done(0));
+        assert_eq!(advance(40, 100, 0), Step::Done(40));
     }
 
     #[test]

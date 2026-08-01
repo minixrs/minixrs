@@ -1211,21 +1211,91 @@ over-long or out-of-range request is `EINVAL` rather than a short read — a
 deliberate departure from CDEV, because a filesystem cannot interpret half a
 block.
 
-### Slice 5.8: MFS server (read-only) + FS band + VFS mount/open/read ◀ next
+### Slice 5.8: MFS server (read-only) + FS band + VFS mount/open/read ◀ ready (branch `feature/slice-5.8-mfs-server`, pending merge)
 
 **Goal:** files readable through the full VFS→MFS→BDEV→ramdisk stack.
 
-**Scope:** `fs/mfs` server half (roster +1, proc_nr 6): SEF loop serving
-`FS_RQ_BASE = 0x900` — READSUPER (via BDEV_READ to MEM), LOOKUP (whole-path
-per D13), PUTNODE, READ (data moved by magic grant direct to the
-requester's buffer), STAT-lite. VFS: lazy root mount on first open;
-`VFS_OPEN`/`VFS_READ`/`VFS_CLOSE` (+`VFS_STAT` if free) against the static
-fd table; read path forwards a magic grant to MFS. Sonar `fs/**/src/main.rs`
-exclusion + miri list addition land here with the code. May split a/b
-(MFS half / VFS half) like 4.6 — one slice number.
+**Shipped as two commits on one branch** (5.8a MFS half, 5.8b VFS half), boot
+green at each — the a/b split this entry anticipated.
 
-**Proof:** init opens `/etc/motd`, reads it, writes it to fd 1 — the motd
-text crosses BDEV→MFS→VFS→TTY and lands on serial.
+**Scope, as built.** `fs/mfs` server half (roster +1, proc_nr 6, packed between
+`memory` and `vfs`): SEF loop serving `FS_RQ_BASE = 0x900`. The request set is
+**`FS_READSUPER` + `FS_LOOKUP` + `FS_READ` only** — three departures from this
+entry's original list, each deliberate:
+
+- **No `PUTNODE`.** MFS keeps no per-open state, so there is no node to put.
+- **No STAT-lite / `VFS_STAT`.** `FS_LOOKUP`'s reply already carries mode and
+  size, which is the whole of what a client needs before reading.
+- **No GETDENTS.** Nothing consumes it — the `CDEV_READ` precedent that a request
+  without a consumer is better absent than stubbed.
+
+The path travels **inline** (NUL-padded, `FS_PATH_MAX = 64`), not by grant: it is
+control plane, it costs MFS no staging buffer, and it deletes the confused-deputy
+question outright. Data travels by grant, with no granter and no grant-offset
+field. An over-long `FS_READ` is **clamped** (a short read), the deliberate
+departure back towards `CDEV_WRITE` and away from `BDEV_READ`.
+
+`0x900` was the last reserved band slot, so `0x700..0xC00` is now fully
+allocated; the callnr test that recorded it as free is replaced by one recording
+that it is not.
+
+VFS: `VFS_OPEN`/`VFS_READ`/`VFS_CLOSE` (`NR_VFS_MSGS` 1→4), lazy root mount whose
+*failure is not cached*, `write.rs` renamed `rw.rs` (read reuses write's payload
+and `advance`'s rules are direction-agnostic) plus a new `open.rs`, and an fd
+table that is now interior-mutable with `Fd::File { ino, pos }` and `NR_FDS` 4→8.
+VFS's slice-5.7 `bdev_demo`/`bdev_denials` **retire** — MFS is the real BDEV
+client, so the battery relocates there and VFS goes back to knowing nothing about
+block devices. Sonar `fs/**/src/main.rs` exclusion landed with the code; the miri
+`-p` entry already existed.
+
+Two hazards found during design, both real:
+
+1. init's `("no-such", VFS_WRITE + 1, …)` probe would have become `VFS_OPEN` and
+   silently retired the `vfs.deny ok n=4` marker. Fixed to the band-relative
+   `VFS_RQ_BASE + NR_VFS_MSGS`.
+2. `[[bin]] required-features = ["server"]` removes `fs/mfs/src/main.rs` from
+   every CI job. Mitigated by a lib-heavy layout (`proto.rs`/`walk.rs` hold every
+   decision), one extra clippy step in `ci.yml`, and a note in `Cargo.toml`.
+
+**Proof.** MFS's own prologue is self-driving: `[as] mfs nr=6`,
+`[diag mfs] sef ready`, `bdev.ds ok ep=`, `mount ok root=1 bs=4096 blocks=256`,
+`fs.selfcheck ok n=31 match=1`, `fs.indirect ok match=1` (the only marker that
+reaches the single-indirect arm), `bdev.tail ok match=1`, `bdev.deny ok n=10`.
+Then VFS: `fs.ds ok ep=`, `fs.mount ok root=1 bs=4096 blocks=256`,
+`fs.deny ok n=10`. Then the milestone — **`minix.rs rootfs: motd from MFS`**,
+`/etc/motd` read by init and written to fd 1 — plus `fs.read ok match=1` (bytes
+moved *and* `pos` advanced *and* EOF is `0`), `fs.fd ok match=1` (open→3, open→4,
+close both, re-open→3), and `open.deny ok n=8`. Retired: `bdev.read ok n=32` and
+`bdev.head ok match=1`, strictly subsumed by `mount ok`.
+
+**Mutation results** (applied to an uncommitted tree, restored from the
+scratchpad, `grep -rn MUTATION` clean afterwards). Nine mutations moved the marker
+they were aimed at:
+
+| mutation | marker that moved |
+|---|---|
+| drop the `mfs` row from `servers` | every `[diag mfs]` line (0 remain); VFS then wedges in `mount_root`'s SENDREC, taking init's markers too |
+| decode the superblock at `&blk[0..]` | `mount FAIL rc=-22`, cascading to `fs.mount FAIL` and `fs.read FAIL open` — and MFS *keeps answering*, which is the degraded-not-fatal design working |
+| `zone_for_offset`'s `Indirect` arm → `Hole` | `fs.indirect FAIL n=32`, with `fs.selfcheck` untouched — the two probes really are independent arms |
+| delete `memory`'s over-long check | `bdev.deny FAIL too-long rc=-1` |
+| `CPF_READ` for `CPF_WRITE` in `do_read`'s grant | the **milestone line vanishes** (kernel refuses the copy) + `fs.read FAIL` |
+| delete `do_read`'s `fd::advance` | `fs.read FAIL` — the second read repeats the first |
+| `.rev()` on `alloc_in`'s scan | `fs.fd FAIL` — the first open returns 7 |
+| delete `open::classify`'s `EISDIR` arm | `open.deny FAIL is-dir` |
+| break MFS's `"memory"` DS key | `bdev.ds FAIL rc=-3 fallback=3`, everything downstream still green |
+
+Two results worth keeping, because both contradict what the slice plan predicted:
+
+- **Deleting MFS's `!node.is_dir() → ENOTDIR` guard does not move
+  `fs.selfcheck`.** It cannot: resolving `/etc/motd` only ever walks through real
+  directories, so the guard never fires on that path. What moves is
+  `fs.deny FAIL not-dir rc=-2` — which is the probe that exists for exactly this
+  check, and the better answer.
+- **Swapping the `memory`/`mfs` rows does not move `bdev.ds`** — `bdev.ds ok ep=3`
+  still resolves. This is the documented non-result (publish-before-retrieve is
+  scheduler-dependent and usually still wins the race), so the DS *fallback*
+  branch was exercised the recommended way instead: break the key, and separately
+  drop the peer, which produced `fs.ds FAIL rc=-3 fallback=6` for VFS's lookup.
 
 ### Slice 5.9: exec-from-FS — **milestone B, Phase 5 complete**
 

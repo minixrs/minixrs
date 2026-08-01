@@ -49,14 +49,18 @@ minixrs_abi_note::brand!();
 use minixrs_ipc::ipc_sendrec;
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    CDEV_MAX_IO, EXEC_NAME_LEN, PM_EXEC, PM_EXEC_NAME_OFF, PM_FORK, PM_WAIT, VFS_BUF_OFF,
-    VFS_FD_OFF, VFS_LEN_OFF, VFS_WRITE,
+    CDEV_MAX_IO, EXEC_NAME_LEN, FS_PATH_MAX, NR_VFS_MSGS, PM_EXEC, PM_EXEC_NAME_OFF, PM_FORK,
+    PM_WAIT, VFS_BUF_OFF, VFS_CLOSE, VFS_FD_OFF, VFS_LEN_OFF, VFS_OPEN, VFS_PATH_LEN_OFF,
+    VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
-use minixrs_kernel_shared::error::{EBADF, EFAULT, EINVAL, ENOSYS, OK};
+use minixrs_kernel_shared::error::{
+    EBADF, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, EROFS, OK,
+};
 use minixrs_kernel_shared::execstack::EXEC_STACK_PROBE_PASS;
 use minixrs_kernel_shared::message::USER_VA_TOP;
+use minixrs_kernel_shared::rootfs::{ROOTFS_MOTD, ROOTFS_MOTD_PATH};
 use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
 
 /// The boot loader primes `SP_EL0` before `eret`, so `_start` can dive straight
@@ -180,6 +184,11 @@ fn main() -> ! {
     let vfs = boot_endpoint(VFS_PROC_NR);
 
     announce(vfs);
+    // The read path runs after the write path, and the order is load-bearing in
+    // the usual direction: it is the newest code here, so a hang inside it
+    // localizes to the `fs.*` markers instead of taking 5.4's, 5.5's, and 5.6's
+    // with it. Do not reorder this prologue.
+    fs_demo(vfs);
 
     // One-shot: the exec-ABI verdict of the first child init forks (slice 5.5).
     //
@@ -316,9 +325,23 @@ fn deny_probes(vfs: Endpoint) {
     let len = HELLO.len() as i32;
 
     // (name, request, fd, buffer, length, expected reply)
+    //
+    // `no-such` is **band-relative**, not `VFS_WRITE + 1`. It was the latter until
+    // slice 5.8, at which point `VFS_WRITE + 1` became `VFS_OPEN` — a real request
+    // that would have answered `EINVAL` for this payload and quietly retired the
+    // marker below while every other line stayed green. One past the *band* is the
+    // only spelling that stays an unknown request as the band grows, and it is the
+    // form `bdev_denials` already used.
     let probes: [(&str, i32, i32, u64, i32, i32); 4] = [
         ("bad-fd", VFS_WRITE, 3, addr, len, EBADF),
-        ("no-such", VFS_WRITE + 1, STDOUT, addr, len, ENOSYS),
+        (
+            "no-such",
+            VFS_RQ_BASE + NR_VFS_MSGS as i32,
+            STDOUT,
+            addr,
+            len,
+            ENOSYS,
+        ),
         ("bad-buf", VFS_WRITE, STDOUT, UNMAPPED_VA, len, EFAULT),
         ("bad-len", VFS_WRITE, STDOUT, addr, -1, EINVAL),
     ];
@@ -329,6 +352,254 @@ fn deny_probes(vfs: Endpoint) {
         }
     }
     let _ = vfs_write(vfs, STDERR, "minix.rs init: vfs.deny ok n=4\n".as_bytes());
+}
+
+// ----- Slice 5.8: the read path ---------------------------------------------
+
+/// Bytes init reads `/etc/motd` into.
+///
+/// A **local** in [`fs_demo`]'s frame, sized to hold the whole file with room to
+/// spare so one `read()` empties it and the second is a clean EOF. init's stack is
+/// one page, so this stays small deliberately — and it is what VFS grants on to
+/// MFS, which is legal because init stays blocked in the SENDREC for the whole
+/// copy, so the frame outlives every use of it.
+const MOTD_BUF_LEN: usize = 64;
+
+// The buffer must be able to hold the whole file, or the "second read is EOF"
+// half of the proof would be measuring the buffer rather than the file.
+const _: () = assert!(MOTD_BUF_LEN > ROOTFS_MOTD.len());
+
+/// Read a file out of the root filesystem and print it — the slice-5.8 milestone.
+///
+/// Three things get proven, in order, and none subsumes another:
+///
+/// 1. **The milestone.** `/etc/motd`'s bytes reach the console: `mkfs` → MXBI blob
+///    → RAM frames → BDEV → MFS → magic grant → init → VFS → TTY → serial. The
+///    line is the file's own contents, so it cannot be printed by anything that
+///    did not read the file.
+/// 2. **`fs.read`.** Emitted only when the first read moved bytes *and the second
+///    returned `0`* — which says the descriptor's position advanced (proved
+///    nowhere else) and that EOF is `0` rather than an error. Self-checking: no
+///    build-time constant appears in the condition, so it cannot go stale when the
+///    file's contents change.
+/// 3. **`fs.fd`.** open → 3, open → 4, close both, re-open → 3. The lowest-free
+///    contract, and the only exercise of `VFS_CLOSE` anywhere.
+///
+/// Best-effort: init's job is to keep the system running, so a failure here is
+/// reported and stepped over, never fatal.
+#[cfg_attr(test, allow(dead_code))]
+fn fs_demo(vfs: Endpoint) {
+    let mut buf = [0u8; MOTD_BUF_LEN];
+
+    let fd = vfs_open(vfs, ROOTFS_MOTD_PATH);
+    if fd < 0 {
+        return report_line(vfs, b"minix.rs init: fs.read FAIL open");
+    }
+
+    let n1 = vfs_read(vfs, fd, &mut buf);
+    if n1 > 0 {
+        // The milestone. Written from the buffer the filesystem filled, so this
+        // line is the file rather than a copy of it kept somewhere else.
+        let _ = vfs_write(vfs, STDOUT, &buf[..n1 as usize]);
+    }
+    // The same descriptor again: `pos` advanced past the end, so this must be a
+    // clean EOF rather than the same bytes a second time.
+    let n2 = vfs_read(vfs, fd, &mut buf);
+    let verdict: &[u8] = if n1 > 0 && n2 == 0 {
+        b"minix.rs init: fs.read ok match=1\n"
+    } else {
+        b"minix.rs init: fs.read FAIL\n"
+    };
+    let _ = vfs_write(vfs, STDOUT, verdict);
+    let _ = vfs_close(vfs, fd);
+
+    fd_demo(vfs);
+    open_denials(vfs);
+}
+
+/// Prove the descriptor allocator: lowest free, and freed by `close`.
+///
+/// The numbers are absolute rather than relative because they are a *contract*:
+/// fds 0/1/2 are pre-opened in every process, so the first `open` must be 3. An
+/// allocator scanning from the wrong end would return 7 here and pass any
+/// "did I get a descriptor" check.
+///
+/// The re-open is what makes `close` observable at all — without it a `close` that
+/// did nothing would look identical.
+#[cfg_attr(test, allow(dead_code))]
+fn fd_demo(vfs: Endpoint) {
+    let a = vfs_open(vfs, ROOTFS_MOTD_PATH);
+    let b = vfs_open(vfs, ROOTFS_MOTD_PATH);
+    let closed_a = vfs_close(vfs, a);
+    let closed_b = vfs_close(vfs, b);
+    let again = vfs_open(vfs, ROOTFS_MOTD_PATH);
+
+    let ok = a == 3 && b == 4 && closed_a == OK && closed_b == OK && again == 3;
+    let _ = vfs_close(vfs, again);
+    let _ = vfs_write(
+        vfs,
+        STDOUT,
+        if ok {
+            &b"minix.rs init: fs.fd ok match=1\n"[..]
+        } else {
+            &b"minix.rs init: fs.fd FAIL\n"[..]
+        },
+    );
+}
+
+/// The `open`/`read`/`close` requests that must be refused, each valid but for
+/// one thing.
+///
+///   - `no-such` — a path with no such file. `ENOENT`, from MFS's directory scan.
+///   - `is-dir` — `/etc`, a directory. `EISDIR`, from VFS's `open::classify`;
+///     delete that arm and this *succeeds*, handing back a descriptor every later
+///     `read` would have to refuse.
+///   - `too-long` — a path filling the FS band's inline field. `ENAMETOOLONG`,
+///     refused by VFS before the wire, so a truncated path can never resolve to a
+///     different file.
+///   - `bad-len` — a negative path length, which unchecked would widen into a
+///     ~16 EiB `u64` on the `SYS_COPY`.
+///   - `bad-buf` — an unmapped path buffer ([`UNMAPPED_VA`]). `EFAULT` from the
+///     kernel's page-table walk in the middle of VFS's `SYS_COPY`, relayed back
+///     unflattened — the read-path twin of the write path's `bad-buf`.
+///   - `read-console` — `read()` on fd 1. `ENOSYS`, not `EBADF`: the descriptor is
+///     perfectly good, and `CDEV_READ` is what does not exist until Phase 6.
+///   - `write-file` — `write()` on a descriptor opened on the read-only
+///     filesystem. `EROFS`, not `EBADF` — and that distinction is the whole reason
+///     `do_write` has a `File` arm rather than folding it into the unused case.
+///   - `close-twice` — closing an already-closed descriptor. `EBADF`, which is
+///     what makes the `fs.fd` re-open above mean something.
+///
+/// Reported as a count on fd 2, so that descriptor stays exercised on the path
+/// that matters.
+#[cfg_attr(test, allow(dead_code))]
+fn open_denials(vfs: Endpoint) {
+    let mut denied = 0usize;
+
+    for (name, path, want) in [
+        ("no-such", "/no-such-file", ENOENT),
+        ("is-dir", "/etc", EISDIR),
+    ] {
+        let rc = vfs_open(vfs, path);
+        if rc == want {
+            denied += 1;
+        } else {
+            return report_open_fail(vfs, name);
+        }
+    }
+
+    // Malformed `VFS_OPEN` payloads, built directly so VFS's own checks are what
+    // refuse them. The path address is valid in every case but `bad-buf`.
+    let addr = ROOTFS_MOTD_PATH.as_ptr() as usize as u64;
+    for (name, path, len, want) in [
+        ("too-long", addr, FS_PATH_MAX as i32, ENAMETOOLONG),
+        ("bad-len", addr, -1, EINVAL),
+        ("bad-buf", UNMAPPED_VA, 9, EFAULT),
+    ] {
+        if open_request(vfs, path, len) == want {
+            denied += 1;
+        } else {
+            return report_open_fail(vfs, name);
+        }
+    }
+
+    // A console descriptor cannot be read from...
+    let mut buf = [0u8; 8];
+    if vfs_read(vfs, STDOUT, &mut buf) == ENOSYS {
+        denied += 1;
+    } else {
+        return report_open_fail(vfs, "read-console");
+    }
+
+    // ...and a file descriptor cannot be written to, on a read-only filesystem.
+    let fd = vfs_open(vfs, ROOTFS_MOTD_PATH);
+    if fd < 0 {
+        return report_open_fail(vfs, "setup");
+    }
+    if vfs_write(vfs, fd, ROOTFS_MOTD_PATH.as_bytes()) == EROFS {
+        denied += 1;
+    } else {
+        return report_open_fail(vfs, "write-file");
+    }
+    if vfs_close(vfs, fd) == OK && vfs_close(vfs, fd) == EBADF {
+        denied += 1;
+    } else {
+        return report_open_fail(vfs, "close-twice");
+    }
+
+    if denied == 8 {
+        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=8\n");
+    }
+}
+
+/// Report a failing `open` probe by name, on fd 2.
+#[cfg_attr(test, allow(dead_code))]
+fn report_open_fail(vfs: Endpoint, name: &str) {
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: open.deny FAIL ");
+    n = append(&mut line, n, name.as_bytes());
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
+}
+
+/// Print one fixed line on fd 2, with a trailing newline.
+#[cfg_attr(test, allow(dead_code))]
+fn report_line(vfs: Endpoint, text: &[u8]) {
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, text);
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
+}
+
+/// `open(path)` through VFS. Returns the new descriptor, or a negative errno.
+#[cfg_attr(test, allow(dead_code))]
+fn vfs_open(vfs: Endpoint, path: &str) -> i32 {
+    open_request(vfs, path.as_ptr() as usize as u64, path.len() as i32)
+}
+
+/// Send one `VFS_OPEN` and return the reply `m_type`.
+///
+/// The path travels as a **raw address in init's own address space**: init is an
+/// ordinary user process with no grant table, so VFS is what reads the bytes out —
+/// with `SYS_COPY`, taking the source from the kernel-stamped `m_source` and never
+/// from this payload, which is why there is no field here for it.
+///
+/// The address and length are parameters rather than a `&str` so the malformed
+/// probes can vary each independently.
+#[cfg_attr(test, allow(dead_code))]
+fn open_request(vfs: Endpoint, path: u64, len: i32) -> i32 {
+    let mut m = Message {
+        m_source: 0,
+        m_type: VFS_OPEN,
+        payload: [0u8; 96],
+    };
+    m.payload[VFS_PATH_OFF..VFS_PATH_OFF + 8].copy_from_slice(&path.to_ne_bytes());
+    m.payload[VFS_PATH_LEN_OFF..VFS_PATH_LEN_OFF + 4].copy_from_slice(&len.to_ne_bytes());
+
+    let trap_rc = ipc_sendrec(vfs, &mut m);
+    if trap_rc != OK {
+        return trap_rc;
+    }
+    m.m_type
+}
+
+/// `read(fd, buf, buf.len())` through VFS. Returns the byte count (`0` is EOF), or
+/// a negative errno.
+#[cfg_attr(test, allow(dead_code))]
+fn vfs_read(vfs: Endpoint, fd: i32, buf: &mut [u8]) -> i32 {
+    vfs_request(
+        vfs,
+        VFS_READ,
+        fd,
+        buf.as_mut_ptr() as usize as u64,
+        buf.len() as i32,
+    )
+}
+
+/// `close(fd)` through VFS. Returns `OK` or `EBADF`.
+#[cfg_attr(test, allow(dead_code))]
+fn vfs_close(vfs: Endpoint, fd: i32) -> i32 {
+    vfs_request(vfs, VFS_CLOSE, fd, 0, 0)
 }
 
 /// Report the first failing probe by name, on fd 2.

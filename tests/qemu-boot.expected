@@ -432,3 +432,77 @@ minix.rs hello: iov ok match=1
 # one server that would otherwise have a use for such a VA). A missing check makes
 # its probe succeed and turns this into `bdev.deny FAIL <name>`.
 [diag mfs] bdev.deny ok n=10
+
+# ---------------------------------------------------------------------------
+# Slice 5.8b: VFS's read path -- open, read, close, from an ordinary process.
+# ---------------------------------------------------------------------------
+
+# VFS resolves MFS through DS rather than hard-coding boot_endpoint(MFS_PROC_NR)
+# -- the 5.3 contract, with the same non-deterministic-publish caveat (it works
+# because build.rs packs mfs before vfs) and the same distinguishable
+# `fs.ds FAIL ... fallback=` line.
+[diag vfs] fs.ds ok ep=
+
+# The mount, over a real FS_READSUPER round trip rather than a peek at MFS's own
+# boot-time decode -- so this line and `[diag mfs] mount ok` are independent
+# statements, and a broken FS band shows up here while MFS's stays green.
+[diag vfs] fs.mount ok root=1 bs=4096 blocks=256
+
+# Ten refusals from the FS band, each well-formed but for one thing: a path that
+# does not exist (-> ENOENT), `/etc/motd/x` naming a FILE as an intermediate
+# component (-> ENOTDIR, the `is_dir` gate without which MFS would read a file's
+# bytes as directory entries), a relative path (-> EINVAL: there is no working
+# directory on minix.rs), a path field with no NUL anywhere (-> ENAMETOOLONG,
+# never a silent truncation that could resolve to a different file), FS_READ on
+# inode 0 (-> EINVAL), FS_READ on the root inode, a directory (-> EISDIR, the
+# second line of defence behind open's), a grant issued to PM (-> EPERM, the
+# kernel's `who_to` check), a CPF_READ-only grant used as a copy DESTINATION
+# (-> EPERM), FS_READSUPER on minor 7 (-> ENXIO: the DEVICE does not exist), and a
+# request one past the band (-> ENOSYS, and the reply itself is the assertion: a
+# dropped unknown would block VFS in its SENDREC forever). None is reachable from
+# init's open/read -- VFS refuses most of them before the wire -- which is exactly
+# why they are sent from VFS's own prologue.
+[diag vfs] fs.deny ok n=10
+
+# ---------------------------------------------------------------------------
+# THE MILESTONE. A file's contents, read out of a MinixFS image by an ordinary
+# user process and printed. The path is:
+#
+#   mkfs (build time) -> MXBI blob -> RAM frames -> memory driver -> BDEV_READ
+#   -> MFS -> magic grant -> init's buffer -> VFS_WRITE -> TTY -> serial
+#
+# The line IS the file (kernel_shared::rootfs::ROOTFS_MOTD), written from the
+# buffer the filesystem filled -- so nothing that did not actually read /etc/motd
+# can print it.
+# ---------------------------------------------------------------------------
+minix.rs rootfs: motd from MFS
+
+# ...and the two properties printing it does not prove. Emitted only when the
+# first read moved bytes AND the second returned 0: the descriptor's position
+# advanced (proved nowhere else in the boot), and EOF is 0 rather than an error.
+# Self-checking -- no build-time constant appears in the condition -- so it cannot
+# go stale if the file's contents change. Delete `do_read`'s `fd::advance` and the
+# second read repeats the first, turning this into `fs.read FAIL`.
+minix.rs init: fs.read ok match=1
+
+# The descriptor allocator: open -> 3, open -> 4, close both, re-open -> 3. The
+# numbers are absolute because they are a contract (0/1/2 are pre-opened in every
+# process), and an allocator scanning from the wrong end would return 7 and pass
+# any "did I get a descriptor" check. The re-open is what makes `close` observable
+# at all, and this is the only exercise of VFS_CLOSE anywhere.
+minix.rs init: fs.fd ok match=1
+
+# Eight refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
+# a path with no such file (-> ENOENT), `/etc` (-> EISDIR from open::classify --
+# delete that arm and open succeeds, handing back a descriptor every later read
+# would have to refuse), a path filling the FS band's inline field
+# (-> ENAMETOOLONG, refused before the wire), a negative path length (-> EINVAL,
+# which unchecked would widen into a ~16 EiB u64 on the SYS_COPY), an unmapped
+# path buffer (-> EFAULT from the kernel's page-table walk inside VFS's SYS_COPY),
+# read() on fd 1 (-> ENOSYS, not EBADF: the descriptor is fine and CDEV_READ is
+# what does not exist until Phase 6), write() on a file descriptor (-> EROFS, not
+# EBADF -- the whole reason do_write has a File arm rather than folding it into
+# the unused case, and slice 5.10's one-line landing site), and closing an
+# already-closed descriptor (-> EBADF, which is what makes the re-open above mean
+# something).
+minix.rs init: open.deny ok n=8

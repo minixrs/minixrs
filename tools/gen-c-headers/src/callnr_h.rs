@@ -93,7 +93,12 @@ fn bands() -> [Band; 9] {
             base_name: "VFS_RQ_BASE",
             base: callnr::VFS_RQ_BASE,
             count: Some(("NR_VFS_MSGS", callnr::NR_VFS_MSGS)),
-            members: vec![("VFS_WRITE", callnr::VFS_WRITE)],
+            members: vec![
+                ("VFS_WRITE", callnr::VFS_WRITE),
+                ("VFS_OPEN", callnr::VFS_OPEN),
+                ("VFS_READ", callnr::VFS_READ),
+                ("VFS_CLOSE", callnr::VFS_CLOSE),
+            ],
         },
         // Base + members + count only, like BDEV and CDEV below: no payload
         // offsets. No C builds an FS request — a C program calls `open`/`read`,

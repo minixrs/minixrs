@@ -437,19 +437,78 @@ pub const VFS_RQ_BASE: i32 = 0x800;
 /// success beats an error.
 pub const VFS_WRITE: i32 = VFS_RQ_BASE;
 
+/// User → VFS: `open(path)`.
+///
+/// Payload: the path buffer's address *in the caller's own address space* in
+/// [`VFS_PATH_OFF`]`..+8` (u64), and its length in [`VFS_PATH_LEN_OFF`]`..+4`
+/// (i32). VFS reads the bytes out with `SYS_COPY`; a user process has no grant
+/// table to describe them with.
+///
+/// Reply `m_type` is the **new descriptor** (`>= 0`), or a negative errno:
+/// `ENOENT` for a path that does not exist, `EISDIR` for a directory (there is no
+/// `O_DIRECTORY` and nothing that could read one), `ENOTDIR` for an intermediate
+/// component that is not a directory, `ENAMETOOLONG` past [`FS_PATH_MAX`],
+/// `EINVAL` for a relative or empty path, `EMFILE` when the caller's descriptor
+/// row is full, `ENODEV` when no filesystem is mounted.
+///
+/// **There is deliberately no `flags` field.** Everything is read-only until
+/// slice 5.10, so an `O_WRONLY` a client could pass and VFS would have to refuse
+/// is worse than no field at all — and adding one later is an ABI bump this
+/// request is already numbered for. The lowest free descriptor is returned, which
+/// is POSIX's rule and what makes the `fs.fd` boot probe (open, open, close both,
+/// re-open) mean anything.
+pub const VFS_OPEN: i32 = VFS_RQ_BASE + 1;
+
+/// User → VFS: `read(fd, buf, len)`.
+///
+/// Payload is **[`VFS_WRITE`]'s, field for field** — descriptor, byte count,
+/// buffer address — because the two requests differ only in which way the bytes
+/// travel. One set of offsets, one parser, one validator.
+///
+/// Reply `m_type` is the **number of bytes read** (`>= 0`), or a negative errno.
+/// `0` is end of file, not an error: no size is cached anywhere along the path, so
+/// this is the only way a client learns where a file ends. The descriptor's
+/// position advances by the count returned.
+///
+/// A short read is possible and legal — `FS_MAX_IO` bounds one FS transfer — and
+/// unlike [`VFS_WRITE`], VFS does **not** loop to hide it. `read()` is allowed to
+/// return less than asked for; `write()` is not, which is the whole asymmetry.
+pub const VFS_READ: i32 = VFS_RQ_BASE + 2;
+
+/// User → VFS: `close(fd)`.
+///
+/// Payload: the descriptor in [`VFS_FD_OFF`]`..+4` (i32). Reply `m_type` is `OK`
+/// or `EBADF`.
+///
+/// Closing a descriptor frees its slot for the next [`VFS_OPEN`], which is what
+/// makes "the lowest free descriptor" observable at all. Nothing else happens:
+/// MFS keeps no per-open state, so there is no FS-side request to send.
+pub const VFS_CLOSE: i32 = VFS_RQ_BASE + 3;
+
 /// Number of VFS server requests defined so far. Locks VFS's dispatch coverage
 /// the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_VFS_MSGS: usize = 1;
+pub const NR_VFS_MSGS: usize = 4;
 
-/// Offset of the file descriptor in a `VFS_WRITE` payload (i32).
+/// Offset of the file descriptor in a `VFS_WRITE` / `VFS_READ` / `VFS_CLOSE`
+/// payload (i32).
 pub const VFS_FD_OFF: usize = 0;
-/// Offset of the requested byte count in a `VFS_WRITE` payload (i32).
+/// Offset of the requested byte count in a `VFS_WRITE` / `VFS_READ` payload (i32).
 pub const VFS_LEN_OFF: usize = 4;
-/// Offset of the caller's buffer address in a `VFS_WRITE` payload (u64, so
-/// 8-aligned relative to the message base — the payload itself starts at message
-/// offset 8, and 8 + 8 is a multiple of 8; the same reasoning
+/// Offset of the caller's buffer address in a `VFS_WRITE` / `VFS_READ` payload
+/// (u64, so 8-aligned relative to the message base — the payload itself starts at
+/// message offset 8, and 8 + 8 is a multiple of 8; the same reasoning
 /// [`CDEV_OFFSET_OFF`] documents).
 pub const VFS_BUF_OFF: usize = 8;
+
+/// Offset of the caller's path-buffer address in a `VFS_OPEN` payload (u64, and
+/// 8-aligned within the message for the reason [`VFS_BUF_OFF`] gives).
+///
+/// `VFS_OPEN` is a different message from `VFS_WRITE`, so sharing byte 0 with
+/// [`VFS_FD_OFF`] is not an overlap — the FS band's `FS_SUPER_MINOR_OFF` /
+/// `FS_SUPER_ROOT_OFF` pair does the same thing.
+pub const VFS_PATH_OFF: usize = 0;
+/// Offset of the path's length in a `VFS_OPEN` payload (i32).
+pub const VFS_PATH_LEN_OFF: usize = 8;
 
 // The VFS range sits strictly above the PM range and strictly below FS's (and
 // therefore every other server request range) and the NOTIFY marker.
@@ -457,14 +516,19 @@ const _: () = assert!(VFS_RQ_BASE > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
 const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < FS_RQ_BASE);
 const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
-// The `VFS_WRITE` payload fields are ordered, non-overlapping, and fit the
-// 96-byte payload. `VFS_BUF_OFF` is 8 wide (u64); the rest are 4 (i32).
+// The `VFS_WRITE` / `VFS_READ` payload fields are ordered, non-overlapping, and
+// fit the 96-byte payload. `VFS_BUF_OFF` is 8 wide (u64); the rest are 4 (i32).
 const _: () = assert!(VFS_FD_OFF + 4 <= VFS_LEN_OFF);
 const _: () = assert!(VFS_LEN_OFF + 4 <= VFS_BUF_OFF);
 const _: () = assert!(VFS_BUF_OFF + 8 <= 96);
 // The u64 buffer address must be 8-aligned within the message, whose payload
 // starts at byte 8.
 const _: () = assert!((8 + VFS_BUF_OFF).is_multiple_of(8));
+
+// The `VFS_OPEN` payload, likewise. A separate message, so it may reuse byte 0.
+const _: () = assert!(VFS_PATH_OFF + 8 <= VFS_PATH_LEN_OFF);
+const _: () = assert!(VFS_PATH_LEN_OFF + 4 <= 96);
+const _: () = assert!((8 + VFS_PATH_OFF).is_multiple_of(8));
 
 // ---------------------------------------------------------------------------
 // FS (file system) request numbers — `m_type` values for messages addressed to a
@@ -592,9 +656,13 @@ pub const FS_LEN_OFF: usize = 8;
 /// hence 16 rather than 12; the same reasoning [`CDEV_OFFSET_OFF`] documents).
 pub const FS_POS_OFF: usize = 16;
 
-/// Largest path an `FS_LOOKUP` can carry, including no NUL terminator when the
-/// path fills the field exactly. A longer path is `ENAMETOOLONG`, and VFS refuses
-/// it before building the request — see [`FS_LOOKUP`].
+/// Width of the inline path field in an [`FS_LOOKUP`] payload.
+///
+/// The path is NUL-**padded** into it, so the longest path that can travel is
+/// `FS_PATH_MAX - 1` bytes: a field with no NUL anywhere is `ENAMETOOLONG` rather
+/// than a silently truncated path that could resolve to a different file. VFS
+/// applies the same cap before building the request, so a client hears the errno
+/// without a round trip.
 pub const FS_PATH_MAX: usize = 64;
 
 /// Largest byte count an FS server moves in one [`FS_READ`]. One block, the
@@ -1236,6 +1304,9 @@ mod tests {
                 assert_ne!(r, vm);
             }
             assert_ne!(r, VFS_WRITE);
+            assert_ne!(r, VFS_OPEN);
+            assert_ne!(r, VFS_READ);
+            assert_ne!(r, VFS_CLOSE);
             assert_ne!(r, FS_READSUPER);
             assert_ne!(r, FS_LOOKUP);
             assert_ne!(r, FS_READ);
@@ -1291,6 +1362,9 @@ mod tests {
         ] {
             for other in [
                 VFS_WRITE,
+                VFS_OPEN,
+                VFS_READ,
+                VFS_CLOSE,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1366,6 +1440,9 @@ mod tests {
         for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC, PM_GRANT_TEST] {
             for other in [
                 VFS_WRITE,
+                VFS_OPEN,
+                VFS_READ,
+                VFS_CLOSE,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1400,7 +1477,7 @@ mod tests {
     fn vfs_msgs_contiguous_from_base() {
         // VFS requests are contiguous from VFS_RQ_BASE; NR_VFS_MSGS locks the
         // VFS server's dispatch coverage.
-        let msgs = [VFS_WRITE];
+        let msgs = [VFS_WRITE, VFS_OPEN, VFS_READ, VFS_CLOSE];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, VFS_RQ_BASE + i as i32);
         }
@@ -1414,7 +1491,7 @@ mod tests {
         // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a server's m_type
         // dispatcher and the SEF classifier never collide. VFS sits between PM
         // and CDEV, which is what its two bounds assert.
-        for m in [VFS_WRITE] {
+        for m in [VFS_WRITE, VFS_OPEN, VFS_READ, VFS_CLOSE] {
             for other in [
                 PM_GETPID,
                 PM_FORK,
@@ -1494,6 +1571,50 @@ mod tests {
     }
 
     #[test]
+    fn vfs_open_payload_offsets_are_ordered_and_disjoint() {
+        // Like `VFS_WRITE`, this payload carries a **raw buffer address** rather
+        // than a grant id — VFS's client is an ordinary user process with no
+        // grant table. Unlike `VFS_WRITE`, VFS reads these bytes itself, with
+        // `SYS_COPY` out of the kernel-stamped `m_source`. There is deliberately
+        // no source-process field here for the sharpest form of the 5.2 rule:
+        // `SYS_COPY` has *no* per-target authorization at all, so a
+        // payload-supplied source would let any client read any process's memory
+        // through VFS.
+        //
+        // There is also no `flags` field until slice 5.10 — everything is
+        // read-only, and an `O_WRONLY` a client could pass and VFS would have to
+        // refuse is worse than no field. The length assertion below is what makes
+        // adding either a visible change rather than a quiet one.
+        let fields = [("path", VFS_PATH_OFF, 8), ("path_len", VFS_PATH_LEN_OFF, 4)];
+        assert_eq!(fields.len(), 2, "a VFS_OPEN payload field was added");
+        assert_eq!(VFS_PATH_OFF, 0, "the first field must start the payload");
+        assert_ordered_and_disjoint(&fields);
+
+        // The u64 field must be 8-aligned *within the message*, whose payload
+        // starts at byte 8 — so an even multiple of 8 here.
+        assert_eq!((8 + VFS_PATH_OFF) % 8, 0);
+    }
+
+    #[test]
+    fn vfs_read_reuses_the_write_payload_verbatim() {
+        // Not a tautology: it is the record of a decision. `read` and `write`
+        // differ only in which way the bytes travel, so they share one set of
+        // offsets, one parser, and one validator — and this test is what turns
+        // "give read its own offsets" into a failure rather than a quiet
+        // divergence that only shows up as a mis-parsed request at run time.
+        assert_eq!(VFS_READ, VFS_RQ_BASE + 2);
+        for (name, off) in [
+            ("fd", VFS_FD_OFF),
+            ("len", VFS_LEN_OFF),
+            ("buf", VFS_BUF_OFF),
+        ] {
+            assert!(off + 4 <= 96, "{name} runs past the payload");
+        }
+        // `VFS_CLOSE` takes only the descriptor, at the same offset again.
+        assert_eq!(VFS_FD_OFF, 0);
+    }
+
+    #[test]
     fn cdev_msgs_contiguous_from_base() {
         // CDEV requests are contiguous from CDEV_RQ_BASE; NR_CDEV_MSGS locks a
         // character driver's dispatch coverage.
@@ -1518,6 +1639,9 @@ mod tests {
                 PM_EXEC,
                 PM_GRANT_TEST,
                 VFS_WRITE,
+                VFS_OPEN,
+                VFS_READ,
+                VFS_CLOSE,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1612,6 +1736,9 @@ mod tests {
                 PM_EXEC,
                 PM_GRANT_TEST,
                 VFS_WRITE,
+                VFS_OPEN,
+                VFS_READ,
+                VFS_CLOSE,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1777,6 +1904,9 @@ mod tests {
                 PM_EXEC,
                 PM_GRANT_TEST,
                 VFS_WRITE,
+                VFS_OPEN,
+                VFS_READ,
+                VFS_CLOSE,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1922,6 +2052,9 @@ mod tests {
         // additionally locked by a module-level const-assert.)
         for m in [SEF_INIT, SEF_SIGNAL] {
             assert_ne!(m, VFS_WRITE);
+            assert_ne!(m, VFS_OPEN);
+            assert_ne!(m, VFS_READ);
+            assert_ne!(m, VFS_CLOSE);
             assert_ne!(m, FS_READSUPER);
             assert_ne!(m, FS_LOOKUP);
             assert_ne!(m, FS_READ);

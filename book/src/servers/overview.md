@@ -41,13 +41,16 @@ Every server's request numbers occupy a distinct band below `NOTIFY_MESSAGE`, so
 a message type unambiguously identifies both its server and its meaning
 (`kernel-shared/src/callnr.rs`, const-asserted disjoint). The bands are listed —
 and rendered into the generated C header — in ascending numeric order. VFS took
-`0x800` in slice 5.4; `0x900` and `0xA00` stay reserved for the two bands Phase 5
-still owes, BDEV and MFS.
+`0x800` in slice 5.4, BDEV `0xA00` in 5.7, and the VFS↔FS band `0x900` in 5.8 —
+which fills `0x700..0xC00` completely. A tenth band has no reserved slot left to
+take; it has to find a home outside that span.
 
 | Base | Value | Server / purpose |
 |------|-------|------------------|
 | `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC` |
-| `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` |
+| `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` |
+| `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` (MFS) |
+| `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`) |
 | `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK` |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init) |
@@ -162,12 +165,12 @@ disposes of each — `SYS_ENDKSIG` to acknowledge a survivor, or `SYS_EXIT` to
 terminate. Handlers (catching, `sigaction`) are Phase 5; Phase 4's default action
 for a user process is termination.
 
-## VFS: the write path
+## VFS: the write and read paths
 
-**VFS** (`servers/vfs/`) turns a small integer into something you can write to.
-That is the whole of its job in Phase 5 so far, and since slice 5.4 it does it for
-real: an ordinary user process can `write(1, buf, len)` and see bytes on the
-console. Mount points, `open`, and reads arrive with the MFS server in slice 5.8.
+**VFS** (`servers/vfs/`) turns a small integer into something you can read from or
+write to. Since slice 5.4 it does the writing for real — an ordinary user process
+can `write(1, buf, len)` and see bytes on the console — and since 5.8 it does the
+reading too, against a real filesystem served by MFS.
 
 ### One request, one copy
 
@@ -206,19 +209,104 @@ Three properties hold that path together:
 
 `servers/vfs/src/fd.rs` holds one row of descriptors per process, indexed by
 kernel proc number and sized from the shared `NR_SERVED_PROCS` ceiling that PM's
-`mproc` and VM's `ClientRegions` also derive from. Nothing opens or closes yet, so
-every row is identical — fds 0, 1, and 2 name the console, everything else is
-`EBADF` — which is POSIX's inheritance convention and is what lets init write
-before any filesystem exists. Because nothing mutates, the storage is an ordinary
-immutable `static` and VFS carries no `unsafe`; slice 5.8's `open` flips it to the
-`UnsafeCell` newtype that VM's region table already uses.
+`mproc` and VM's `ClientRegions` also derive from. Every row *starts* identical —
+fds 0, 1, and 2 name the console, everything else is `EBADF` — which is POSIX's
+inheritance convention and is what lets init write before any filesystem exists.
+Slice 5.8's `open` is what makes rows diverge, and it moved the storage to the
+`UnsafeCell` newtype VM's region table already uses. That brings a rule with it:
+**never hold a borrow of the table across a SENDREC**. `Fd` is `Copy` precisely so
+that is easy to obey — a resolve's borrow dies at the destructuring `let`, and the
+handler carries values into the round trip.
+
+`open` hands out the **lowest free descriptor**, POSIX's rule and the only thing
+about it a client can observe without reading the file: close one and the next
+`open` reuses that number. `close` frees the slot and sends the filesystem
+nothing, because MFS keeps no per-open state — which is also why the FS band has
+no `PUTNODE`.
+
+### The read path, and its two copies
+
+```text
+user ──VFS_OPEN{path,len}───► VFS ──SYS_COPY──────────► (the path, into VFS)
+                               │
+                               └──FS_LOOKUP{path}─────► MFS  → (ino, mode)
+
+user ──VFS_READ{fd,buf,len}──► VFS ──FS_READ{ino,gid,len,pos}──► MFS
+                                │                                 │
+                                └── magic grant: caller's buf ────┘
+```
+
+Two copies, not one, and the difference from the write path is deliberate: MFS
+stages a block through its own buffer before safecopying the requested slice out
+of it. A MinixFS read is rarely block-aligned in both the file and the
+destination, and a *hole* has no device block to copy from at all — so the staging
+cannot be elided. This is MINIX 3's own shape. Only the second copy is VFS's
+grant; the bytes still never pass through VFS.
+
+Two more properties, each with its own boot marker:
+
+- **`SYS_COPY` reads the path, and its source is the kernel-stamped `m_source`.**
+  This is the first live consumer of decision D4's "`SYS_COPY` for small
+  control-plane reads" sentence, and the confused-deputy rule in its sharpest
+  form: `SYS_COPY` has *no per-target authorization whatsoever* — the caller's
+  `k_call_mask` bit is the whole check — so a payload-supplied source process
+  would let any client read any process's memory through VFS.
+- **VFS does not loop on read.** It loops on `write` because a driver's staging
+  limit may not reach `write()`'s return value; `read()` is explicitly allowed to
+  return less than asked for, and a file read is short at EOF regardless. EOF is a
+  read returning `0` — no file's size is cached anywhere along the path, so that
+  is the single source of truth.
 
 VFS also remains the system's first *grant* client and first *console* client:
 its startup still direct-grants a read-only buffer to PM (slice 5.2) and drives
 `CDEV_WRITE` by hand (slice 5.3). Those are kept deliberately, as the regression
 battery for three contracts the real write path never reaches — the direct-grant
 form, a *visible* short write, and the two `CDEV_WRITE` refusals a well-formed
-`write()` cannot provoke.
+`write()` cannot provoke. Slice 5.7's block-device demo, by contrast, is **gone**:
+MFS is the real BDEV client now, so the battery moved there and VFS is back to
+knowing nothing about block devices.
+
+## MFS: the file system
+
+**MFS** (`fs/mfs/`) is the first file system in minix.rs, read-only as of slice
+5.8. It sits between VFS and a block driver, and it is the piece that makes a path
+resolve to bytes: VFS asks `FS_LOOKUP` for an inode and `FS_READ` for its
+contents, and MFS answers by fetching blocks from the `memory` ramdisk over BDEV
+and decoding them with the `minixrs-mfs` format library (`superblock`, `inode`,
+`layout`, `dirent`, `read`) that slice 5.7 already shipped and host-tested.
+
+The crate is split unusually hard. Its `[[bin]]` carries
+`required-features = ["server"]` so the format library stays a one-dependency
+crate the kernel's build script can use for free — and the price is that **the
+binary is invisible to every CI job except the QEMU boot smoke test**. So every
+line with a decision in it lives in the library (`proto.rs` for the wire codec,
+`walk.rs` for traversal and read policy), and `main.rs` is SEF/IPC/grant glue.
+
+Three things characterise the server itself:
+
+- **One 4 KiB block buffer, in `.bss`.** A boot server's stack is exactly one page
+  and a block is exactly one page, so the buffer cannot be a local — the frame
+  base would land below the mapping, and VM turns that fault into a SIGSEGV that
+  prints nothing the forbidden-marker list catches. It is reached only through a
+  `Blocks` capability token whose `read(&mut self) -> &[u8; N]` makes "hold a
+  directory block across the next fetch" a *borrow-check error* rather than a
+  promise. Every intermediate the walk needs is a small `Copy` value.
+- **Streaming, not buffering.** `tools/mkfs-mfs`'s `verify.rs` is the reference
+  implementation of the same reader, but it materializes a whole directory into a
+  `Vec`; MFS asks about one block at a time and keeps nothing but a `u32`. The
+  `fs.selfcheck` boot marker is the one place the two readers meet over a real
+  image.
+- **Degraded, never fatal.** Past `sef_startup` nothing panics and nothing spins:
+  a failed mount answers `ENODEV` to every request, and every device-derived loop
+  bound has a cap, because a corrupt inode claiming `size = i32::MAX` would
+  otherwise spin MFS — which would block VFS, which would block init.
+
+Two error-relay rules sit side by side and read as contradictory. A failed
+`BDEV_READ` becomes `EIO`, because MFS's client addressed a *file* and the device
+beneath it is an implementation detail. A failed `SYS_SAFECOPY` against VFS's
+grant is relayed **verbatim**, because `EPERM` ("your grant does not authorize
+this") and `EFAULT` ("your buffer is not mapped") are different bugs on the
+caller's side.
 
 ## init: PID 1
 
