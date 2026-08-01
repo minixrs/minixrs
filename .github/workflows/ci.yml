@@ -41,6 +41,13 @@ jobs:
       # cost, not correctness: clippy-kernel below lints it natively on arm64,
       # and a local `cargo clippy --workspace` does lint it.
       - run: cargo clippy --workspace --exclude minixrs-kernel --all-targets -- -D warnings
+      # The MFS *server* is a `[[bin]]` with `required-features = ["server"]`, so
+      # the sweep above silently skips it — as do miri and coverage, none of which
+      # passes the feature. Without this step the only thing in CI that compiles
+      # `fs/mfs/src/main.rs` at all is the qemu-smoke boot, which would report a
+      # lint failure as a mysterious build-script panic. Slice 5.8; see the note
+      # in fs/mfs/Cargo.toml for the rest of the mitigation.
+      - run: cargo clippy -p minixrs-mfs --features server --all-targets -- -D warnings
 
   clippy-kernel:
     name: clippy (kernel aarch64)

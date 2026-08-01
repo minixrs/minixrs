@@ -72,7 +72,7 @@ struct Band {
 /// The bands, in ascending numeric order — `bands_are_in_ascending_numeric_order`
 /// enforces that, so inserting a new band in the wrong place fails a test rather
 /// than rendering a header whose sections disagree with its ordering asserts.
-fn bands() -> [Band; 8] {
+fn bands() -> [Band; 9] {
     [
         Band {
             title: "PM requests",
@@ -94,6 +94,22 @@ fn bands() -> [Band; 8] {
             base: callnr::VFS_RQ_BASE,
             count: Some(("NR_VFS_MSGS", callnr::NR_VFS_MSGS)),
             members: vec![("VFS_WRITE", callnr::VFS_WRITE)],
+        },
+        // Base + members + count only, like BDEV and CDEV below: no payload
+        // offsets. No C builds an FS request — a C program calls `open`/`read`,
+        // which musl turns into a VFS request — so the 5.4 "defer the offsets
+        // until C needs them" stance holds here too. Emitting the numbers anyway
+        // keeps the band-ordering `_Static_assert`s below able to name it.
+        Band {
+            title: "file-system requests",
+            base_name: "FS_RQ_BASE",
+            base: callnr::FS_RQ_BASE,
+            count: Some(("NR_FS_MSGS", callnr::NR_FS_MSGS)),
+            members: vec![
+                ("FS_READSUPER", callnr::FS_READSUPER),
+                ("FS_LOOKUP", callnr::FS_LOOKUP),
+                ("FS_READ", callnr::FS_READ),
+            ],
         },
         // Base + members + count only, mirroring exactly what CDEV emits: no
         // payload offsets. No C builds a BDEV request — musl's write() goes to
@@ -353,8 +369,12 @@ pub fn render() -> String {
         "the PM band overlaps the VFS band",
     );
     f.static_assert(
-        "VFS_RQ_BASE + NR_VFS_MSGS - 1 < BDEV_RQ_BASE",
-        "the VFS band overlaps the BDEV band",
+        "VFS_RQ_BASE + NR_VFS_MSGS - 1 < FS_RQ_BASE",
+        "the VFS band overlaps the FS band",
+    );
+    f.static_assert(
+        "FS_RQ_BASE + NR_FS_MSGS - 1 < BDEV_RQ_BASE",
+        "the FS band overlaps the BDEV band",
     );
     f.static_assert(
         "BDEV_RQ_BASE + NR_BDEV_MSGS - 1 < CDEV_RQ_BASE",
@@ -470,9 +490,11 @@ mod tests {
     /// A band inserted in the wrong slot would therefore render sections that
     /// disagree with the asserts — so pin the order here rather than in review.
     /// Slice 5.4 inserted VFS (`0x800`) between PM and CDEV on exactly this
-    /// instruction, and slice 5.7 inserted BDEV (`0xA00`) between VFS and CDEV on
-    /// the same one; slice 5.8's VFS↔FS band (`0x900`) inserts *between VFS and
-    /// BDEV*, and this test is what tells it where.
+    /// instruction, slice 5.7 inserted BDEV (`0xA00`) between VFS and CDEV on the
+    /// same one, and slice 5.8 inserted the VFS↔FS band (`0x900`) between VFS and
+    /// BDEV. That fills `0x700..0xC00`: a tenth band has no reserved slot left to
+    /// take, so it must find a home outside this span — see
+    /// `the_server_band_space_below_vm_is_fully_allocated` in `callnr.rs`.
     #[test]
     fn bands_are_in_ascending_numeric_order() {
         let bands = bands();

@@ -105,6 +105,22 @@ pub const RAMDISK_WINDOW_SIZE: u64 = 0x0040_0000;
 /// that driver alone via `SYS_GETINFO(GET_RAMDISK)`.
 pub const RAMDISK_VA: u64 = RAMDISK_WINDOW_BASE;
 
+/// Bytes of stack the kernel gives a boot server: exactly one page.
+///
+/// The VA is the kernel's own business (`arch::aarch64::userland`'s
+/// `SERVER_STACK_VA`, which nothing in user space may name — each server has its
+/// own TTBR0 and reaches its stack through `SP_EL0`, never through a constant).
+/// The *size* is shared because a server has to know how much frame it can spend:
+/// it is what decides whether a buffer may be a local at all.
+///
+/// Slice 5.8's MFS is the first server for which that question has a "no". Its
+/// block buffer is [`crate::callnr::BDEV_BLOCK_SIZE`] — the whole stack — so it
+/// lives in `.bss` behind a capability token instead, and `fs/mfs` carries the
+/// `const _` tripwire that fires if this ever grows enough to make a local
+/// plausible again. That tripwire is the only reason this constant exists; it is
+/// severable if it ever costs more than it earns.
+pub const SERVER_STACK_BYTES: u64 = USER_PAGE_SIZE;
+
 /// Size of one L1 slot in the 4 KiB-granule, 4-level, 48-bit-VA walk this
 /// kernel uses: 512 L2 entries × 512 L3 entries × 4 KiB = 1 GiB.
 const L1_SLOT_SIZE: u64 = 1 << 30;
@@ -233,6 +249,15 @@ mod tests {
                 "{occupied:#x} collides with the device window"
             );
         }
+    }
+
+    #[test]
+    fn a_server_stack_is_exactly_one_page() {
+        // What `fs/mfs`'s tripwire keys on. The kernel maps one page and points
+        // `SP_EL0` at its top (`load_boot_server`), and a `const _` there asserts
+        // that against this value — so the two cannot drift.
+        assert_eq!(SERVER_STACK_BYTES, USER_PAGE_SIZE);
+        assert_eq!(SERVER_STACK_BYTES, 4096);
     }
 
     #[test]

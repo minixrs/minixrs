@@ -188,18 +188,26 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // the right proc slot. `worker` is packed with proc_nr -1
     // (`com::EXEC_ONLY_PROC_NR`): it is not a boot server — the loader skips any
     // negative proc_nr — but it is resolvable by name for `SYS_EXEC` (slice 4.7).
-    let servers: [(&str, std::path::PathBuf, i32); 10] = [
+    let servers: [(&str, std::path::PathBuf, i32); 11] = [
         ("minixrs-vm", workspace.join("servers/vm"), 7), // VM_PROC_NR
         ("minixrs-ds", workspace.join("servers/ds"), 5), // DS_PROC_NR
-        // The drivers sit between DS and VFS on purpose. DS must come first so
-        // every later server's `DS_PUBLISH` lands; each driver should reach its
-        // receive loop before its first client, which is VFS today (slice 5.3's
-        // console demo and 5.7's block demo) and stays VFS for 5.4's fd 1/2 and
-        // 5.6's musl `printf`. MEM specifically precedes VFS so 5.7's demo lookup
-        // — and 5.8's MFS lookup, which is the one that matters — resolve through
-        // DS deterministically by construction rather than by luck.
+        // **This ordering is load-bearing, and it is a chain, not a preference.**
+        // DS must come first so every later server's `DS_PUBLISH` lands. After
+        // that, each server has to reach its receive loop before its first client
+        // does a `DS_RETRIEVE`, because publish-before-retrieve is not guaranteed
+        // by construction — it holds only because the archive is packed in this
+        // order. The chain as of slice 5.8 is:
+        //
+        //     ds  <  tty  <  memory  <  mfs  <  vfs
+        //
+        // TTY and MEM before VFS/MFS (their clients), and **MEM before MFS**
+        // (MFS's `bdev.ds` lookup) and **MFS before VFS** (VFS's `fs.ds` lookup).
+        // Each of those two lookups has a `boot_endpoint` fallback and a
+        // distinguishable diag line, so a regression here turns CI red on the
+        // `bdev.ds ok` / `fs.ds ok` markers specifically rather than hanging.
         ("minixrs-tty", workspace.join("drivers/tty"), 4), // TTY_PROC_NR
         ("minixrs-memory", workspace.join("drivers/memory"), 3), // MEM_PROC_NR
+        ("minixrs-mfs", workspace.join("fs/mfs"), 6),      // MFS_PROC_NR
         ("minixrs-vfs", workspace.join("servers/vfs"), 1), // VFS_PROC_NR
         ("minixrs-sched", workspace.join("servers/sched"), 9), // SCHED_PROC_NR
         ("minixrs-rs", workspace.join("servers/rs"), 2),   // RS_PROC_NR
@@ -210,14 +218,22 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 
     let mut modules: Vec<(i32, String, Vec<u8>)> = Vec::with_capacity(servers.len());
     for (crate_name, crate_dir, proc_nr) in &servers {
-        // PM seeds mproc slots for the stubs, so it must resolve the same
-        // `NR_STUB_PROCS` as the kernel. This nested build has its own cargo
-        // feature resolution, so when the kernel is stub-free force PM's
-        // `boot-stubs` off too. Only PM (of the servers) depends on the count.
-        let extra: &[&str] = if !stubs && *crate_name == "minixrs-pm" {
-            &["--no-default-features"]
-        } else {
-            &[]
+        // Per-crate feature flags for the nested build, which has its own feature
+        // resolution and inherits nothing from the kernel's.
+        //
+        //   * PM seeds mproc slots for the stubs, so it must resolve the same
+        //     `NR_STUB_PROCS` as the kernel: when the kernel is stub-free, force
+        //     PM's `boot-stubs` off too. Only PM (of the servers) depends on the
+        //     count.
+        //   * MFS keeps its server half behind a `server` feature so the *format
+        //     library* — which this very build script reaches through the
+        //     `tools/mkfs-mfs` build-dependency — stays a one-dependency crate.
+        //     Without this flag the nested build would produce a library and no
+        //     ELF, and `build_server`'s existence assertion would fire.
+        let extra: &[&str] = match *crate_name {
+            "minixrs-pm" if !stubs => &["--no-default-features"],
+            "minixrs-mfs" => &["--features", "server"],
+            _ => &[],
         };
         let elf = build_server(crate_name, crate_dir, workspace, extra);
         let bytes = std::fs::read(&elf)
@@ -332,20 +348,26 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 ///     block, but the fallback `worker` is 15 KB and fits inside the seven direct
 ///     zones, so without a constant-size file past that boundary the indirect path
 ///     would be dead code in exactly the configuration CI's non-QEMU jobs build.
+///
+/// **Every path and every byte comes from `kernel_shared::rootfs`** as of slice
+/// 5.8, not from literals here. The MFS server reads the same constants back over
+/// BDEV and compares, so its `fs.selfcheck` / `fs.indirect` boot markers are a
+/// *check* rather than a transcription — the failure mode where both sides get
+/// edited together and the proof keeps passing while the content silently changed.
 fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
+    use minixrs_kernel_shared::rootfs::{
+        ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
+        rootfs_pattern_byte,
+    };
     use minixrs_mkfs_mfs::Manifest;
 
-    // Position-dependent and non-repeating over a block, so a copy that lost,
-    // duplicated, or reordered a block changes the bytes. Same generator the
-    // mkfs round-trip tests use.
-    const PATTERN_LEN: usize = 40 * 1024;
-    let pattern: Vec<u8> = (0..PATTERN_LEN).map(|i| (i % 251) as u8).collect();
+    let pattern: Vec<u8> = (0..ROOTFS_PATTERN_LEN).map(rootfs_pattern_byte).collect();
 
     let mut manifest = Manifest::new();
     manifest
-        .add("/bin/hello", hello_bytes.to_vec())
-        .add("/etc/motd", b"minix.rs rootfs: motd from MFS\n".to_vec())
-        .add("/etc/pattern", pattern);
+        .add(ROOTFS_HELLO_PATH, hello_bytes.to_vec())
+        .add(ROOTFS_MOTD_PATH, ROOTFS_MOTD.to_vec())
+        .add(ROOTFS_PATTERN_PATH, pattern);
 
     minixrs_mkfs_mfs::build_image(&manifest)
         .unwrap_or_else(|e| panic!("building the root filesystem image: {e}"))

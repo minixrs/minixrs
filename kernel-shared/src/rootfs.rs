@@ -60,6 +60,67 @@ pub const ROOTFS_TAIL_BLOCK: u32 = ROOTFS_IMAGE_BLOCKS - 1;
 /// Bytes of image header at the start of block 0.
 pub const IMAGE_HDR_LEN: usize = 32;
 
+// ---------------------------------------------------------------------------
+// The image's contents — a second build-time to run-time ABI (slice 5.8).
+//
+// `kernel/build.rs` builds the image from these; the MFS server reads them back
+// over BDEV and compares. Exactly the reasoning [`IMAGE_LABEL`] above already
+// carries, one level up: three crates that may not depend on each other
+// (`tools/mkfs-mfs` writes, `fs/mfs` reads, `kernel/build.rs` orchestrates) have
+// to agree on bytes, so the bytes live here.
+//
+// Until this slice these literals sat inline in `build_rootfs`, which made the
+// server's read proof a *transcription* of them rather than a check against
+// them — the failure mode where both sides are edited together and the test
+// keeps passing while the content silently changed.
+// ---------------------------------------------------------------------------
+
+/// Path of the C milestone program inside the root image. Slice 5.9 execs it.
+pub const ROOTFS_HELLO_PATH: &str = "/bin/hello";
+
+/// Path of the greppable message-of-the-day file.
+pub const ROOTFS_MOTD_PATH: &str = "/etc/motd";
+
+/// Contents of [`ROOTFS_MOTD_PATH`], byte for byte.
+///
+/// Short enough to cross the whole stack in one `FS_READ`, and *greppable*: it
+/// reaches the console verbatim when init reads the file and writes it to fd 1,
+/// which is the slice-5.8 milestone marker. Content rather than length is what
+/// the proof asserts — a path that moved the right number of wrong bytes is the
+/// bug a length check cannot see.
+pub const ROOTFS_MOTD: &[u8] = b"minix.rs rootfs: motd from MFS\n";
+
+/// Path of the file that forces MinixFS's single-indirect zone arm.
+pub const ROOTFS_PATTERN_PATH: &str = "/etc/pattern";
+
+/// Length of [`ROOTFS_PATTERN_PATH`]: 40 KiB, i.e. 10 blocks.
+///
+/// **Mandatory rather than filler.** Seven direct zones cover 28 KiB, so a file
+/// past that boundary is what keeps the single-indirect arm (and mkfs's indirect
+/// writer) live. `/bin/hello` cannot serve: it is ~200 KB with a real C
+/// toolchain but the 15 KB `worker` ELF in the musl-sysroot-absent fallback,
+/// which fits inside the direct zones — so an indirect proof keyed on it would be
+/// dead in exactly the configuration CI's non-QEMU jobs build. This length is
+/// constant in every configuration.
+pub const ROOTFS_PATTERN_LEN: usize = 40 * 1024;
+
+/// Byte `i` of [`ROOTFS_PATTERN_PATH`]'s contents.
+///
+/// Position-dependent and non-repeating over a block (251 is prime and coprime
+/// with the 4096-byte block size), so a read that lost, duplicated, or reordered
+/// a block changes the bytes rather than landing on the same value again.
+pub const fn rootfs_pattern_byte(i: usize) -> u8 {
+    (i % 251) as u8
+}
+
+// The pattern really does run past the direct zones, which is the whole reason
+// it exists. Seven zones at 4 KiB is 28 KiB; anything shorter would make the
+// single-indirect arm unreachable without saying so.
+const _: () = assert!(ROOTFS_PATTERN_LEN > 7 * BDEV_BLOCK_SIZE);
+// ...and the motd must fit one FS transfer, so the read proof is one round trip.
+const _: () = assert!(!ROOTFS_MOTD.is_empty());
+const _: () = assert!(ROOTFS_MOTD.len() <= BDEV_BLOCK_SIZE);
+
 /// Label at the start of the image. NUL-padded to [`IMAGE_LABEL_LEN`].
 pub const IMAGE_LABEL: [u8; IMAGE_LABEL_LEN] = *b"minix.rs rootfs\0";
 
@@ -153,6 +214,76 @@ mod tests {
         assert!(last_off + last_width <= IMAGE_HDR_LEN);
         // MinixFS's superblock starts at byte 1024; the header must not reach it.
         assert_eq!(IMAGE_HDR_LEN.min(1024), IMAGE_HDR_LEN);
+    }
+
+    #[test]
+    fn the_motd_is_one_greppable_line() {
+        // It reaches the console verbatim as the slice-5.8 milestone marker, so
+        // it must be exactly one line: no interior newline (which would split the
+        // marker across two console writes and two log lines) and a trailing one.
+        assert_eq!(*ROOTFS_MOTD.last().unwrap(), b'\n');
+        assert_eq!(
+            ROOTFS_MOTD.iter().filter(|&&b| b == b'\n').count(),
+            1,
+            "an interior newline would split the boot marker"
+        );
+        assert!(
+            ROOTFS_MOTD[..ROOTFS_MOTD.len() - 1]
+                .iter()
+                .all(|&b| (0x20..0x7f).contains(&b)),
+            "the marker must be printable ASCII to survive `grep -aF`"
+        );
+    }
+
+    #[test]
+    fn the_pattern_reaches_past_the_direct_zones() {
+        // 40 KiB is ten 4 KiB blocks; the seven direct zones cover 28 KiB. So the
+        // file's last three blocks are addressed through the single-indirect
+        // block, which is the arm the `fs.indirect` boot marker exists to reach.
+        assert_eq!(ROOTFS_PATTERN_LEN, 40 * 1024);
+        assert_eq!(ROOTFS_PATTERN_LEN / BDEV_BLOCK_SIZE, 10);
+        let direct = 7 * BDEV_BLOCK_SIZE;
+        assert_eq!(direct, 28 * 1024);
+        assert_eq!(
+            ROOTFS_PATTERN_LEN.min(direct),
+            direct,
+            "the pattern no longer needs the indirect block"
+        );
+    }
+
+    #[test]
+    fn the_pattern_generator_does_not_repeat_within_a_block() {
+        // Non-repeating over a block is what makes a lost or duplicated block
+        // visible: two different offsets 4096 apart must not produce the same
+        // byte, or a copy that returned the wrong block could still compare equal.
+        for i in 0..BDEV_BLOCK_SIZE {
+            assert_ne!(
+                rootfs_pattern_byte(i),
+                rootfs_pattern_byte(i + BDEV_BLOCK_SIZE),
+                "offset {i} repeats one block later"
+            );
+        }
+        // And it really is position-dependent at the offset the indirect proof
+        // reads from (block 7, the first indirect one).
+        let indirect_off = 7 * BDEV_BLOCK_SIZE;
+        assert_ne!(
+            rootfs_pattern_byte(indirect_off),
+            rootfs_pattern_byte(indirect_off + 1)
+        );
+    }
+
+    #[test]
+    fn every_image_path_is_absolute_and_distinct() {
+        let paths = [ROOTFS_HELLO_PATH, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_PATH];
+        for p in paths {
+            assert!(p.starts_with('/'), "{p} is not absolute");
+            assert!(!p.ends_with('/'), "{p} names a directory");
+        }
+        for (i, a) in paths.iter().enumerate() {
+            for b in &paths[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
     }
 
     #[test]

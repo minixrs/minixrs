@@ -43,7 +43,7 @@ use minixrs_kernel_shared::com::{
 
 use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
 use minixrs_kernel_shared::uspace::{
-    RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA, USER_DEVICE_WINDOW_BASE,
+    RAMDISK_VA, RAMDISK_WINDOW_SIZE, SERVER_STACK_BYTES, TTY_UART_VA, USER_DEVICE_WINDOW_BASE,
 };
 
 use crate::arch::aarch64::addrspace::{AddrSpace, Prot, map_page_in, walk_leaves};
@@ -144,6 +144,13 @@ unsafe extern "C" {
 /// TTBR0, so the same low VA resolves to a distinct frame per server with no
 /// collision (the same reason `user.ld`'s `0x0010_0000` base is shared).
 const SERVER_STACK_VA: u64 = 0x0020_0000; // 2 MiB
+
+// The VA stays private to the kernel — each server reaches its stack through
+// `SP_EL0`, never through a constant — but the *size* is published as
+// `uspace::SERVER_STACK_BYTES`, because a server has to know how much frame it
+// can spend (slice 5.8's MFS block buffer is the first case where the answer is
+// "none of it"). One page here, so the two must agree.
+const _: () = assert!(SERVER_STACK_BYTES == PAGE_SIZE as u64);
 
 // ----- The device window must clear every VA declared above ------------------
 //

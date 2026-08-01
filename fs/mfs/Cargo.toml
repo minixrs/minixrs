@@ -5,21 +5,43 @@ edition = "2024"
 license = "BSD-3-Clause"
 publish = false
 
-# Exactly one dependency, deliberately. `kernel/build.rs` reaches this crate (via
-# the `tools/mkfs-mfs` build-dependency) to generate the root filesystem image,
-# and `minixrs-kernel-shared` is already in that graph — so the format library
-# costs the kernel build nothing, and `MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE` can be
-# const-asserted rather than kept in sync by hand.
+# The MFS *server* (slice 5.8). Gated behind a `server` feature so the format
+# library stays a one-dependency crate that `kernel/build.rs` can pull into its
+# build-script graph (via the `tools/mkfs-mfs` build-dependency) for free, and so
+# `MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE` stays const-asserted rather than kept in
+# sync by hand.
 #
-# Slice 5.8 adds the MFS *server* in `src/main.rs`. When it does, re-add
-# `minixrs-ipc` / `minixrs-server-rt` / `minixrs-abi-note` as `optional = true`
-# behind a `server` feature with `[[bin]] required-features = ["server"]`, and
-# thread `--features server` through `kernel/build.rs`'s nested build — the same
-# way PM's `--no-default-features` is threaded through today. That keeps the
-# kernel's build-script graph lean while the server still builds for the minixrs
-# target.
+# **The cost of that gate, stated where someone will read it: this binary is
+# invisible to every CI job.** `clippy --workspace --all-targets`, `miri`, and
+# `cargo llvm-cov` all run without `--features server`, so a `required-features`
+# target is silently skipped. Three things hold the line:
+#
+#   1. Every line with a decision in it lives in the **lib** (`proto.rs`,
+#      `walk.rs`) — the bin is SEF/IPC/grant/diag glue and nothing else, the
+#      `servers/ds` `registry.rs`/`main.rs` split taken further than usual.
+#   2. `.github/workflows/ci.yml` runs one extra step,
+#      `cargo clippy -p minixrs-mfs --features server --all-targets -- -D warnings`.
+#   3. The QEMU boot smoke test builds it for real, because `kernel/build.rs`
+#      threads `--features server` through the nested build — the same mechanism
+#      that threads PM's `--no-default-features`.
+#
+# `name` is mandatory and must equal the package name: `build_server` in
+# `kernel/build.rs` looks the ELF up by that basename.
+[[bin]]
+name = "minixrs-mfs"
+path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+# Everything the server half needs. Off by default so the format library — which
+# `kernel/build.rs` reaches at build-script time — costs the kernel build nothing.
+server = ["dep:minixrs-ipc", "dep:minixrs-server-rt", "dep:minixrs-abi-note"]
+
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
+minixrs-ipc = { path = "../../minixrs-ipc", optional = true }
+minixrs-server-rt = { path = "../../server-rt", optional = true }
+minixrs-abi-note = { path = "../../minixrs-abi-note", optional = true }
 
 [lints]
 workspace = true

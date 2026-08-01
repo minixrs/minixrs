@@ -393,13 +393,15 @@ const _: () = assert!(PM_EXEC_NAME_OFF + EXEC_NAME_LEN <= 96);
 // VFS (virtual file system) request numbers — `m_type` values for messages
 // addressed to VFS, the POSIX file-descriptor layer (slice 5.4).
 //
-// Like the PM/CDEV/VM/DS/SEF/SCHED ranges these are *server IPC requests*, not
-// kernel calls. `0x800` was reserved for VFS when the CDEV band claimed `0xB00`,
-// keeping the bands in numeric order between PM (`0x700`) and CDEV; `0x900` and
-// `0xA00` stay free for the two bands Phase 5 still owes, BDEV (5.7) and MFS
-// (5.8). Numbering is minix.rs-specific — MINIX 3 carries VFS's call numbers in
-// `include/minix/callnr.h` as POSIX syscall numbers, a layer minix.rs does not
-// have (a libc wrapper builds the server request directly).
+// Like the PM/FS/CDEV/VM/DS/SEF/SCHED ranges these are *server IPC requests*,
+// not kernel calls. `0x800` was reserved for VFS when the CDEV band claimed
+// `0xB00`, keeping the bands in numeric order between PM (`0x700`) and CDEV.
+// With the FS band claiming `0x900` in slice 5.8 the `0x700..0xC00` span is now
+// **fully allocated** — PM, VFS, FS, BDEV, CDEV — so a new band needs a new home
+// rather than a reserved slot. Numbering is minix.rs-specific — MINIX 3 carries
+// VFS's call numbers in `include/minix/callnr.h` as POSIX syscall numbers, a
+// layer minix.rs does not have (a libc wrapper builds the server request
+// directly).
 //
 // Unlike the CDEV band, the payload carries a **raw buffer address**, not a
 // grant id: VFS's client is an ordinary user process with no grant table and no
@@ -449,10 +451,10 @@ pub const VFS_LEN_OFF: usize = 4;
 /// [`CDEV_OFFSET_OFF`] documents).
 pub const VFS_BUF_OFF: usize = 8;
 
-// The VFS range sits strictly above the PM range and strictly below BDEV's (and
+// The VFS range sits strictly above the PM range and strictly below FS's (and
 // therefore every other server request range) and the NOTIFY marker.
 const _: () = assert!(VFS_RQ_BASE > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
-const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < BDEV_RQ_BASE);
+const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < FS_RQ_BASE);
 const _: () = assert!(VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
 // The `VFS_WRITE` payload fields are ordered, non-overlapping, and fit the
@@ -465,13 +467,185 @@ const _: () = assert!(VFS_BUF_OFF + 8 <= 96);
 const _: () = assert!((8 + VFS_BUF_OFF).is_multiple_of(8));
 
 // ---------------------------------------------------------------------------
+// FS (file system) request numbers — `m_type` values for messages addressed to a
+// file-system server, MFS being the first and only one (slice 5.8).
+//
+// Like the PM/VFS/BDEV/CDEV/VM/DS/SEF/SCHED ranges these are *server IPC
+// requests*, not kernel calls. `0x900` was reserved for this band when VFS took
+// `0x800` and BDEV `0xA00`, so it slots in between them and the numeric ordering
+// the whole scheme rests on is preserved. Numbering is minix.rs-specific — MINIX
+// 3 carries its VFS↔FS protocol in `include/minix/vfsif.h` with a far larger
+// request set (PUTNODE, STAT, GETDENTS, the whole write path), none of which
+// minix.rs inherits: this band is exactly the three requests a read-only open →
+// read → close needs, on the `CDEV_READ` precedent that a request absent until it
+// has a consumer is better than a request stubbed out.
+//
+// Two shapes travel here, and the split is deliberate:
+//
+// **The path travels inline** ([`FS_PATH_OFF`], NUL-padded to [`FS_PATH_MAX`]),
+// not by grant. It is control plane, not the data path D4 provisioned grants
+// for — the same call the `PM_EXEC` name and the `DS_PUBLISH` key already make.
+// It costs the FS server no staging buffer, which is its scarcest resource (one
+// page of stack, all of it already spoken for by the block buffer), and it
+// deletes the confused-deputy question outright, because there is no granter to
+// name. The cost is the cap: a path longer than [`FS_PATH_MAX`] is
+// `ENAMETOOLONG`, refused by VFS before it reaches the wire.
+//
+// **The data travels by grant** ([`FS_GRANT_OFF`]), and as everywhere else in
+// this file there is **no granter field and no grant-offset field** — the server
+// takes the granter from the kernel-stamped `m_source` (the confused-deputy rule
+// the CDEV band's comment states in full), and VFS issues a fresh grant over the
+// remaining tail each round rather than advancing an offset.
+// ---------------------------------------------------------------------------
+
+/// Base for file-system server request `m_type` values.
+pub const FS_RQ_BASE: i32 = 0x900;
+
+/// VFS → FS: mount a block-device minor and report the geometry of what is on it.
+///
+/// Payload: the block-device minor in [`FS_SUPER_MINOR_OFF`]`..+4` (i32).
+///
+/// Reply `m_type` is `OK` or a negative errno (`EINVAL` for a device that holds
+/// no filesystem this build reads, `EIO` for a device that could not be read).
+/// On success the reply payload carries the root inode number in
+/// [`FS_SUPER_ROOT_OFF`]`..+4` (i32), the filesystem's block size in
+/// [`FS_SUPER_BLOCK_SIZE_OFF`]`..+4` (i32), and its size in blocks in
+/// [`FS_SUPER_BLOCKS_OFF`]`..+4` (i32).
+///
+/// Those three are what make the reply worth having: a client that only wanted
+/// "did it mount" would take the `m_type`. They are the numbers a boot marker can
+/// cross-check against the *device*'s independently derived geometry.
+pub const FS_READSUPER: i32 = FS_RQ_BASE;
+
+/// VFS → FS: resolve an absolute path to an inode.
+///
+/// Payload: the path in [`FS_PATH_OFF`]`..+`[`FS_PATH_MAX`], NUL-**padded** (not
+/// merely NUL-terminated: the server reads the whole fixed field and stops at the
+/// first NUL, so trailing bytes cannot leak between requests).
+///
+/// Reply `m_type` is `OK` or a negative errno — `ENOENT` for a component that
+/// does not exist, `ENOTDIR` for an intermediate component that is not a
+/// directory, `ENAMETOOLONG` for a path that fills the field with no NUL,
+/// `EINVAL` for a relative path, `ENODEV` if nothing is mounted. On success the
+/// reply carries the inode number in [`FS_INO_OFF`]`..+4` (i32), the inode's mode
+/// in [`FS_MODE_OFF`]`..+4` (i32, widened from MinixFS's `u16`), and its size in
+/// [`FS_SIZE_OFF`]`..+4` (i32).
+///
+/// Mode and size ride along so there is **no separate stat request**: the two
+/// facts a client needs before reading — is this a directory, and how big is it —
+/// are exactly what a lookup already had to decode.
+pub const FS_LOOKUP: i32 = FS_RQ_BASE + 1;
+
+/// VFS → FS: read from an inode into the client's granted buffer.
+///
+/// Payload: the inode number in [`FS_INO_OFF`]`..+4` (i32), the grant id in
+/// [`FS_GRANT_OFF`]`..+4` (i32), the byte count in [`FS_LEN_OFF`]`..+4` (i32), and
+/// the file offset in [`FS_POS_OFF`]`..+8` (u64). The grant must carry `CPF_WRITE`
+/// and name the FS server as its grantee.
+///
+/// Reply `m_type` is the **number of bytes read** (`>= 0`), or a negative errno.
+/// `0` means end of file — not an error, and the only way a client learns where
+/// the file ends, since no size is cached anywhere along the path.
+///
+/// **A request longer than [`FS_MAX_IO`] is clamped — a short read, not
+/// `EINVAL`.** This is the deliberate departure from [`BDEV_READ`] and back
+/// towards [`CDEV_WRITE`], and both halves of the reasoning matter. BDEV refuses
+/// because its client is a *filesystem*, which cannot interpret half a block, so
+/// clamping there would push a pointless retry loop into every FS caller. Here
+/// the client is VFS, whose entire job is hiding staging details from POSIX — and
+/// a short `read()` is what `read()` means. A file read is also short at EOF
+/// regardless, so a client that could not cope with a short read could not use
+/// this request at all.
+pub const FS_READ: i32 = FS_RQ_BASE + 2;
+
+/// Number of file-system requests defined so far. Locks an FS server's dispatch
+/// coverage the way `NR_DS_REQUESTS` locks the DS server.
+pub const NR_FS_MSGS: usize = 3;
+
+/// Offset of the block-device minor in an `FS_READSUPER` payload (i32).
+pub const FS_SUPER_MINOR_OFF: usize = 0;
+/// Offset of the root inode number in an `FS_READSUPER` **reply** (i32).
+pub const FS_SUPER_ROOT_OFF: usize = 0;
+/// Offset of the filesystem block size in an `FS_READSUPER` **reply** (i32).
+pub const FS_SUPER_BLOCK_SIZE_OFF: usize = 4;
+/// Offset of the filesystem size in blocks in an `FS_READSUPER` **reply** (i32).
+pub const FS_SUPER_BLOCKS_OFF: usize = 8;
+
+/// Offset of the path in an `FS_LOOKUP` payload ([`FS_PATH_MAX`] NUL-padded bytes).
+pub const FS_PATH_OFF: usize = 0;
+
+/// Offset of the inode number — in an `FS_LOOKUP` **reply** and in an `FS_READ`
+/// **request** (i32). One constant because it is one field: the number `FS_LOOKUP`
+/// hands out is the number `FS_READ` takes back.
+pub const FS_INO_OFF: usize = 0;
+/// Offset of the inode's mode in an `FS_LOOKUP` reply (i32, widened from `u16`).
+pub const FS_MODE_OFF: usize = 4;
+/// Offset of the inode's size in an `FS_LOOKUP` reply (i32).
+pub const FS_SIZE_OFF: usize = 8;
+
+/// Offset of the grant id in an `FS_READ` payload (i32).
+pub const FS_GRANT_OFF: usize = 4;
+/// Offset of the requested byte count in an `FS_READ` payload (i32).
+pub const FS_LEN_OFF: usize = 8;
+/// Offset of the file position in an `FS_READ` payload (u64, so 8-aligned
+/// relative to the message base — the payload itself starts at message offset 8,
+/// hence 16 rather than 12; the same reasoning [`CDEV_OFFSET_OFF`] documents).
+pub const FS_POS_OFF: usize = 16;
+
+/// Largest path an `FS_LOOKUP` can carry, including no NUL terminator when the
+/// path fills the field exactly. A longer path is `ENAMETOOLONG`, and VFS refuses
+/// it before building the request — see [`FS_LOOKUP`].
+pub const FS_PATH_MAX: usize = 64;
+
+/// Largest byte count an FS server moves in one [`FS_READ`]. One block, the
+/// staging buffer a server on a one-page stack can afford. A longer request is
+/// **clamped** (a short read), not refused.
+pub const FS_MAX_IO: usize = BDEV_BLOCK_SIZE;
+
+// The FS range sits strictly above the VFS range and strictly below BDEV's (and
+// therefore every other server request range) and the NOTIFY marker.
+const _: () = assert!(FS_RQ_BASE > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
+const _: () = assert!(FS_RQ_BASE + (NR_FS_MSGS as i32 - 1) < BDEV_RQ_BASE);
+const _: () = assert!(FS_RQ_BASE + (NR_FS_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
+
+// The `FS_READSUPER` request and reply fields fit the 96-byte payload. Request
+// and reply are separate messages, so `FS_SUPER_MINOR_OFF` and
+// `FS_SUPER_ROOT_OFF` sharing offset 0 is not an overlap.
+const _: () = assert!(FS_SUPER_MINOR_OFF + 4 <= 96);
+const _: () = assert!(FS_SUPER_ROOT_OFF + 4 <= FS_SUPER_BLOCK_SIZE_OFF);
+const _: () = assert!(FS_SUPER_BLOCK_SIZE_OFF + 4 <= FS_SUPER_BLOCKS_OFF);
+const _: () = assert!(FS_SUPER_BLOCKS_OFF + 4 <= 96);
+
+// The `FS_LOOKUP` path fills its own field and fits the payload; its reply's
+// three i32s are ordered and disjoint.
+const _: () = assert!(FS_PATH_OFF + FS_PATH_MAX <= 96);
+const _: () = assert!(FS_INO_OFF + 4 <= FS_MODE_OFF);
+const _: () = assert!(FS_MODE_OFF + 4 <= FS_SIZE_OFF);
+const _: () = assert!(FS_SIZE_OFF + 4 <= 96);
+
+// The `FS_READ` payload fields are ordered, non-overlapping, and fit the 96-byte
+// payload. `FS_POS_OFF` is 8 wide (u64); the rest are 4 (i32).
+const _: () = assert!(FS_INO_OFF + 4 <= FS_GRANT_OFF);
+const _: () = assert!(FS_GRANT_OFF + 4 <= FS_LEN_OFF);
+const _: () = assert!(FS_LEN_OFF + 4 <= FS_POS_OFF);
+const _: () = assert!(FS_POS_OFF + 8 <= 96);
+// The u64 file position must be 8-aligned within the message, whose payload
+// starts at byte 8.
+const _: () = assert!((8 + FS_POS_OFF).is_multiple_of(8));
+
+// A full-size transfer must round-trip through the i32 reply `m_type`, or the
+// count would land in the negative, errno-shaped band and read as a failure.
+const _: () = assert!(FS_MAX_IO <= i32::MAX as usize);
+const _: () = assert!(FS_PATH_MAX > 0);
+
+// ---------------------------------------------------------------------------
 // BDEV (block device) request numbers — `m_type` values for messages addressed
 // to a block-device driver, the `memory` ramdisk being the first (slice 5.7).
 //
-// Like the PM/VFS/CDEV/VM/DS/SEF/SCHED ranges these are *server IPC requests*,
-// not kernel calls. `0xA00` keeps the bands in numeric order between VFS
-// (`0x800`) and CDEV (`0xB00`), leaving `0x900` free for the VFS↔FS band slice
-// 5.8 still owes. Numbering is minix.rs-specific — MINIX 3 carries `BDEV_*` in
+// Like the PM/VFS/FS/CDEV/VM/DS/SEF/SCHED ranges these are *server IPC
+// requests*, not kernel calls. `0xA00` keeps the bands in numeric order between
+// the FS band (`0x900`, claimed in slice 5.8) and CDEV (`0xB00`). Numbering is
+// minix.rs-specific — MINIX 3 carries `BDEV_*` in
 // `include/minix/com.h` with its own values, which minix.rs does not inherit
 // because its device protocol is narrower (no `BDEV_REPLY` message class and no
 // request id; a driver replies to the SENDREC).
@@ -552,9 +726,9 @@ pub const BDEV_MAX_IO: usize = BDEV_BLOCK_SIZE;
 /// Any other minor is `ENXIO`.
 pub const BDEV_MINOR_RAMDISK: i32 = 0;
 
-// The BDEV range sits strictly above the VFS range and strictly below CDEV's (and
+// The BDEV range sits strictly above the FS range and strictly below CDEV's (and
 // therefore every other server request range) and the NOTIFY marker.
-const _: () = assert!(BDEV_RQ_BASE > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
+const _: () = assert!(BDEV_RQ_BASE > FS_RQ_BASE + (NR_FS_MSGS as i32 - 1));
 const _: () = assert!(BDEV_RQ_BASE + (NR_BDEV_MSGS as i32 - 1) < CDEV_RQ_BASE);
 const _: () = assert!(BDEV_RQ_BASE + (NR_BDEV_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
@@ -579,10 +753,11 @@ const _: () = assert!(BDEV_MAX_IO <= i32::MAX as usize);
 // CDEV (character device) request numbers — `m_type` values for messages
 // addressed to a character-device driver, TTY being the first (slice 5.3).
 //
-// Like the PM/VFS/BDEV/VM/DS/SEF/SCHED ranges these are *server IPC requests*,
-// not kernel calls. `0xB00` keeps the bands in numeric order between BDEV
-// (`0xA00`, claimed in slice 5.7) and VM (`0xC00`), leaving `0x900` free for the
-// VFS↔FS band slice 5.8 still owes. Numbering is minix.rs-specific — MINIX 3
+// Like the PM/VFS/FS/BDEV/VM/DS/SEF/SCHED ranges these are *server IPC
+// requests*, not kernel calls. `0xB00` keeps the bands in numeric order between
+// BDEV (`0xA00`, claimed in slice 5.7) and VM (`0xC00`). With the FS band taking
+// `0x900` in slice 5.8, `0x700..0xC00` is now fully allocated — PM, VFS, FS,
+// BDEV, CDEV. Numbering is minix.rs-specific — MINIX 3
 // carries `CDEV_*` in `include/minix/com.h` with its own values, which minix.rs
 // does not inherit because its device protocol is narrower (no `CDEV_REPLY`
 // message class; a driver replies to the SENDREC).
@@ -1061,6 +1236,9 @@ mod tests {
                 assert_ne!(r, vm);
             }
             assert_ne!(r, VFS_WRITE);
+            assert_ne!(r, FS_READSUPER);
+            assert_ne!(r, FS_LOOKUP);
+            assert_ne!(r, FS_READ);
             assert_ne!(r, BDEV_READ);
             assert_ne!(r, BDEV_WRITE);
             assert_ne!(r, CDEV_WRITE);
@@ -1113,6 +1291,9 @@ mod tests {
         ] {
             for other in [
                 VFS_WRITE,
+                FS_READSUPER,
+                FS_LOOKUP,
+                FS_READ,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1185,6 +1366,9 @@ mod tests {
         for m in [PM_GETPID, PM_FORK, PM_EXIT, PM_WAIT, PM_EXEC, PM_GRANT_TEST] {
             for other in [
                 VFS_WRITE,
+                FS_READSUPER,
+                FS_LOOKUP,
+                FS_READ,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1238,6 +1422,9 @@ mod tests {
                 PM_WAIT,
                 PM_EXEC,
                 PM_GRANT_TEST,
+                FS_READSUPER,
+                FS_LOOKUP,
+                FS_READ,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1260,7 +1447,7 @@ mod tests {
             }
             assert!(m > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
             assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
-            assert!(m < BDEV_RQ_BASE);
+            assert!(m < FS_RQ_BASE);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
             assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
         }
@@ -1331,6 +1518,9 @@ mod tests {
                 PM_EXEC,
                 PM_GRANT_TEST,
                 VFS_WRITE,
+                FS_READSUPER,
+                FS_LOOKUP,
+                FS_READ,
                 BDEV_READ,
                 BDEV_WRITE,
                 VM_PAGEFAULT,
@@ -1359,26 +1549,205 @@ mod tests {
     }
 
     #[test]
-    fn cdev_band_sits_at_0xb00_leaving_one_band_free() {
-        // The band base is load-bearing for numeric ordering: BDEV (0xA00, taken
-        // in slice 5.7) below, VM (0xC00) above, with 0x900 still reserved for
-        // the VFS↔FS band slice 5.8 owes. Nothing may claim it without also
-        // moving whichever band would then be out of numeric order.
+    fn the_server_band_space_below_vm_is_fully_allocated() {
+        // The successor to `cdev_band_sits_at_0xb00_leaving_one_band_free`, whose
+        // premise — that `0x900` was still free — slice 5.8 made false by putting
+        // the FS band there.
+        //
+        // Every `0x100`-aligned slot from PM's base up to VM's now belongs to a
+        // named band, in ascending numeric order. That is the record: a new band
+        // has no reserved slot to take, so it must either find a home outside this
+        // span or move one of these — and either way this test is what says so out
+        // loud rather than leaving it to be rediscovered.
+        let bands = [
+            ("PM", PM_RQ_BASE),
+            ("VFS", VFS_RQ_BASE),
+            ("FS", FS_RQ_BASE),
+            ("BDEV", BDEV_RQ_BASE),
+            ("CDEV", CDEV_RQ_BASE),
+        ];
+        assert_eq!(PM_RQ_BASE, 0x700);
         assert_eq!(CDEV_RQ_BASE, 0xB00);
-        for reserved in [0x900] {
-            for taken in [
-                PM_RQ_BASE,
-                VFS_RQ_BASE,
-                BDEV_RQ_BASE,
-                CDEV_RQ_BASE,
-                VM_RQ_BASE,
-                SEF_RQ_BASE,
-                DS_RQ_BASE,
-                SCHED_RQ_BASE,
-            ] {
-                assert_ne!(reserved, taken, "{reserved:#x} is no longer free");
-            }
+        assert_eq!(VM_RQ_BASE, 0xC00);
+
+        // Contiguous, ascending, and exactly tiling `0x700..0xC00`.
+        for (i, (name, base)) in bands.iter().enumerate() {
+            assert_eq!(
+                *base,
+                PM_RQ_BASE + (i as i32) * 0x100,
+                "the {name} band is not the {i}th slot from PM's base"
+            );
         }
+        assert_eq!(
+            bands.last().unwrap().1 + 0x100,
+            VM_RQ_BASE,
+            "a gap or an overlap opened between the CDEV band and VM's"
+        );
+    }
+
+    #[test]
+    fn fs_msgs_contiguous_from_base() {
+        // FS requests are contiguous from FS_RQ_BASE; NR_FS_MSGS locks an FS
+        // server's dispatch coverage.
+        let msgs = [FS_READSUPER, FS_LOOKUP, FS_READ];
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(*m, FS_RQ_BASE + i as i32);
+        }
+        assert_eq!(msgs.len(), NR_FS_MSGS);
+        assert_eq!(FS_RQ_BASE, 0x900);
+    }
+
+    #[test]
+    fn fs_msgs_distinct_from_other_ranges() {
+        // Each FS request must stay distinct from every other band and the
+        // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a server's m_type
+        // dispatcher and the SEF classifier never collide. FS sits between VFS
+        // and BDEV, which is what its two bounds assert.
+        for m in [FS_READSUPER, FS_LOOKUP, FS_READ] {
+            for other in [
+                PM_GETPID,
+                PM_FORK,
+                PM_EXIT,
+                PM_WAIT,
+                PM_EXEC,
+                PM_GRANT_TEST,
+                VFS_WRITE,
+                BDEV_READ,
+                BDEV_WRITE,
+                CDEV_WRITE,
+                VM_PAGEFAULT,
+                VM_BRK,
+                VM_MMAP,
+                VM_MUNMAP,
+                VM_FORK,
+                DS_PUBLISH,
+                DS_RETRIEVE,
+                DS_CHECK,
+                SEF_INIT,
+                SEF_SIGNAL,
+                SCHEDULING_NO_QUANTUM,
+                SCHEDULING_START,
+                SCHEDULING_STOP,
+                SCHEDULING_SET_NICE,
+            ] {
+                assert_ne!(m, other);
+            }
+            assert!(m > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
+            assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
+            assert!(m < BDEV_RQ_BASE);
+            assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
+            assert!(m < crate::ipc_const::NOTIFY_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn fs_readsuper_payload_offsets_are_ordered_and_disjoint() {
+        // The request is one field; the *reply* is three, and they are what make
+        // the request worth more than its `m_type`. Request and reply are separate
+        // messages, which is why `minor` and `root` may share offset 0.
+        let request = [("minor", FS_SUPER_MINOR_OFF, 4)];
+        assert_eq!(request.len(), 1, "an FS_READSUPER payload field was added");
+        assert_eq!(
+            FS_SUPER_MINOR_OFF, 0,
+            "the first field must start the payload"
+        );
+
+        let reply = [
+            ("root", FS_SUPER_ROOT_OFF, 4),
+            ("block_size", FS_SUPER_BLOCK_SIZE_OFF, 4),
+            ("blocks", FS_SUPER_BLOCKS_OFF, 4),
+        ];
+        assert_eq!(reply.len(), 3, "an FS_READSUPER reply field was added");
+        assert_ordered_and_disjoint(&reply);
+    }
+
+    #[test]
+    fn fs_lookup_payload_offsets_are_ordered_and_disjoint() {
+        // The path travels INLINE, NUL-padded to FS_PATH_MAX — not by grant.
+        // It is control plane rather than the data path grants were provisioned
+        // for (the `PM_EXEC` name and the `DS_PUBLISH` key make the same call), it
+        // costs the FS server no staging buffer, and there being no granter is
+        // what deletes the confused-deputy question outright. This list is the
+        // record of that: turning the path into a grant means editing it, and the
+        // length assertion is what makes such a change visible.
+        let request = [("path", FS_PATH_OFF, FS_PATH_MAX)];
+        assert_eq!(request.len(), 1, "an FS_LOOKUP payload field was added");
+        assert_eq!(FS_PATH_OFF, 0, "the first field must start the payload");
+        assert_ordered_and_disjoint(&request);
+
+        let reply = [
+            ("ino", FS_INO_OFF, 4),
+            ("mode", FS_MODE_OFF, 4),
+            ("size", FS_SIZE_OFF, 4),
+        ];
+        assert_eq!(reply.len(), 3, "an FS_LOOKUP reply field was added");
+        assert_ordered_and_disjoint(&reply);
+    }
+
+    #[test]
+    fn fs_read_payload_offsets_are_ordered_and_disjoint() {
+        // Every field the request defines, in declaration order, with its width:
+        // i32 fields are 4 bytes, the u64 file position is 8.
+        //
+        // There is deliberately NO granter field — the server takes the granter
+        // from the kernel-stamped `m_source`, because a payload granter would let
+        // a client aim the server's privileged `SYS_SAFECOPY` at a third party's
+        // address space (a confused deputy). And no grant-*offset* field either:
+        // VFS issues a fresh grant over the remaining tail each round, which is
+        // what makes the offset unnecessary rather than merely unused.
+        let fields = [
+            ("ino", FS_INO_OFF, 4),
+            ("grant", FS_GRANT_OFF, 4),
+            ("len", FS_LEN_OFF, 4),
+            ("pos", FS_POS_OFF, 8),
+        ];
+        assert_eq!(fields.len(), 4, "an FS_READ payload field was added");
+        assert_eq!(FS_INO_OFF, 0, "the first field must start the payload");
+        assert_ordered_and_disjoint(&fields);
+
+        // The u64 field must be 8-aligned *within the message*, whose payload
+        // starts at byte 8 — so an even multiple of 8 here.
+        assert_eq!((8 + FS_POS_OFF) % 8, 0);
+    }
+
+    #[test]
+    fn the_fs_transfer_and_path_limits_fit_their_wire_fields() {
+        // One FS_READ moves at most one block — the staging buffer a server on a
+        // one-page stack can afford — and the reply `m_type` carries that count as
+        // an i32, so it must round-trip or it would land in the negative,
+        // errno-shaped band and read as a failure.
+        assert_eq!(FS_MAX_IO, BDEV_BLOCK_SIZE);
+        assert_eq!(i32::try_from(FS_MAX_IO), Ok(4096));
+        // ...and the path must fit its own inline field with room for the rest of
+        // the payload, which is what makes the inline choice viable at all.
+        assert_eq!(FS_PATH_MAX, 64);
+        assert_eq!(
+            (FS_PATH_OFF + FS_PATH_MAX).min(96),
+            FS_PATH_OFF + FS_PATH_MAX
+        );
+    }
+
+    /// Assert a `(name, offset, width)` field list is ordered, non-overlapping,
+    /// and inside the 96-byte payload.
+    ///
+    /// Factored out because slice 5.8 added four more of these lists at once; the
+    /// older per-request tests keep their inlined copies rather than churning
+    /// them, since the assertion text is what a failure prints.
+    fn assert_ordered_and_disjoint(fields: &[(&str, usize, usize)]) {
+        for pair in fields.windows(2) {
+            let (name, off, width) = pair[0];
+            let (next_name, next_off, _) = pair[1];
+            assert!(
+                off + width <= next_off,
+                "{name} ({off}..{}) overlaps {next_name} at {next_off}",
+                off + width,
+            );
+        }
+        let (last_name, last_off, last_width) = fields[fields.len() - 1];
+        assert!(
+            last_off + last_width <= 96,
+            "{last_name} runs past the 96-byte payload",
+        );
     }
 
     #[test]
@@ -1408,6 +1777,9 @@ mod tests {
                 PM_EXEC,
                 PM_GRANT_TEST,
                 VFS_WRITE,
+                FS_READSUPER,
+                FS_LOOKUP,
+                FS_READ,
                 CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
@@ -1426,7 +1798,7 @@ mod tests {
             ] {
                 assert_ne!(m, other);
             }
-            assert!(m > VFS_RQ_BASE + (NR_VFS_MSGS as i32 - 1));
+            assert!(m > FS_RQ_BASE + (NR_FS_MSGS as i32 - 1));
             assert!(m > KERNEL_CALL + NR_KERN_CALLS as i32 - 1);
             assert!(m < CDEV_RQ_BASE);
             assert_ne!(m, crate::ipc_const::NOTIFY_MESSAGE);
@@ -1550,6 +1922,9 @@ mod tests {
         // additionally locked by a module-level const-assert.)
         for m in [SEF_INIT, SEF_SIGNAL] {
             assert_ne!(m, VFS_WRITE);
+            assert_ne!(m, FS_READSUPER);
+            assert_ne!(m, FS_LOOKUP);
+            assert_ne!(m, FS_READ);
             assert_ne!(m, BDEV_READ);
             assert_ne!(m, BDEV_WRITE);
             assert_ne!(m, CDEV_WRITE);

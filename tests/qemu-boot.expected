@@ -8,21 +8,27 @@
 # Kernel banner (kernel/src/main.rs)
 minix.rs booting on aarch64
 
-# Address-space bring-up: 9 servers + init (arch/aarch64/userland.rs). The tty
-# line is new in slice 5.3 and the memory line in 5.7 -- the two user-space
-# *drivers*, packed between ds and vfs so each is in its receive loop before its
-# first client (which is vfs for both).
+# Address-space bring-up: 10 servers + init (arch/aarch64/userland.rs). The tty
+# line is new in slice 5.3, the memory line in 5.7, and the mfs line in 5.8.
+#
+# The order below is `kernel/build.rs`'s `servers` array, and it is load-bearing
+# rather than cosmetic: DS first so every later DS_PUBLISH lands, then each
+# server before its first client's DS_RETRIEVE -- ds < tty < memory < mfs < vfs.
+# MEM precedes MFS (MFS's `bdev.ds` lookup) and MFS precedes VFS (VFS's `fs.ds`
+# lookup). Both lookups fall back to boot_endpoint and say so, so a reordering
+# turns those two markers red rather than hanging the boot.
 [as] vm nr=7 ttbr0_pa=
 [as] ds nr=5 ttbr0_pa=
 [as] tty nr=4 ttbr0_pa=
 [as] memory nr=3 ttbr0_pa=
+[as] mfs nr=6 ttbr0_pa=
 [as] vfs nr=1 ttbr0_pa=
 [as] sched nr=9 ttbr0_pa=
 [as] rs nr=2 ttbr0_pa=
 [as] pm nr=0 ttbr0_pa=
 [as] init nr=10 ttbr0_pa=
 
-# ...plus the 4 boot stubs (13 [as] lines total)
+# ...plus the 4 boot stubs (14 [as] lines total)
 [as] stub A nr=11 ttbr0_pa=
 [as] stub B nr=12 ttbr0_pa=
 [as] stub C nr=13 ttbr0_pa=
@@ -347,27 +353,64 @@ minix.rs hello: iov ok match=1
 # header instead; slice 5.8's READSUPER closes it for real.
 [diag memory] ramdisk ok blocks=256 tail=1
 
-# VFS drives the block device over BDEV_READ, resolving `memory` through DS
-# rather than hard-coding boot_endpoint(MEM_PROC_NR) -- the 5.3 contract, with the
-# same non-deterministic-publish caveat and the same distinguishable
-# `bdev.ds FAIL` fallback.
-[diag vfs] bdev.ds ok ep=
+# ---------------------------------------------------------------------------
+# Slice 5.8a: MFS, the MinixFS v3 file-system server.
+# ---------------------------------------------------------------------------
+#
+# Slice 5.7's `bdev.*` markers were emitted by VFS, which was standing in as the
+# block device's only client. MFS is the real one now, so the whole battery moved
+# to `[diag mfs]` -- `bdev.ds` / `bdev.tail` / `bdev.deny` below are the same
+# probes with a better caller. Two of 5.7's are RETIRED rather than moved:
+# `bdev.read ok n=32` and `bdev.head ok match=1`, both strictly subsumed by
+# `mount ok` (which decodes a real 4096-byte block and validates it as MinixFS v3
+# -- a read that returned nothing, or the wrong page, cannot produce that line).
+#
+# Every marker here is identical with and without `boot-stubs` AND with and
+# without the musl sysroot. Nothing below names a proc-nr or a fork-pool slot, and
+# every count derives from fixed image geometry (ROOTFS_IMAGE_BLOCKS = 256,
+# MFS_BLOCK_SIZE = 4096) or from a `kernel-shared::rootfs` constant.
 
-# A real read. The reply *is* the byte count, so a driver replying OK gives a
-# different number here. This is also the first SUCCESSFUL `SAFECOPY_TO` anywhere
-# in the tree -- every other use is a denial probe -- so it is what proves the
-# kernel's CPF_WRITE + Prot::writable success path at all.
-[diag vfs] bdev.read ok n=32
+# MFS announces itself on the kernel debug channel, like every other SEF server.
+[diag mfs] sef ready
 
-# The header bytes survived IPC + grant + safecopy...
-[diag vfs] bdev.head ok match=1
+# It resolves the `memory` driver through DS rather than hard-coding
+# boot_endpoint(MEM_PROC_NR) -- the 5.3 contract, with the same
+# non-deterministic-publish caveat (it works because build.rs packs memory before
+# mfs) and the same distinguishable `bdev.ds FAIL ... fallback=` line.
+[diag mfs] bdev.ds ok ep=
 
-# ...and the `block` field reached the right page. Head and tail do NOT subsume
-# each other: a driver that ignored `block` would return the header for both, and
-# the driver's own `tail=1` above proves the kernel's copy loop, not BDEV
-# indexing. VFS zeroes its buffer between the two reads, so a read that moved
-# nothing cannot pass this on stale bytes.
-[diag vfs] bdev.tail ok match=1
+# The mount: block 0 read over BDEV, its superblock decoded at byte 1024 and
+# VALIDATED as MinixFS v3. All three fields are constants, so all three are
+# asserted. `blocks=256` comes from the superblock's own s_zones, while the
+# driver's `ramdisk ok blocks=256` above comes from the image HEADER -- two
+# independently derived numbers that must agree, which is what makes the pair
+# worth more than either. This is also what retires 5.7's `bdev.read`/`bdev.head`:
+# a driver that replied OK, or returned the wrong page, fails to decode here.
+[diag mfs] mount ok root=1 bs=4096 blocks=256
+
+# The whole reader, over the real image, in one line: lookup `/etc/motd` from the
+# root inode, decode its inode, resolve zone 0, fetch the block, and compare the
+# bytes against `kernel_shared::rootfs::ROOTFS_MOTD` -- the same constant
+# kernel/build.rs built the image from, so this is a CHECK rather than a
+# transcription. `match=1` is content, not length: a reader that moved the right
+# NUMBER of wrong bytes is exactly the bug a length check cannot see. n=31 is
+# ROOTFS_MOTD's length and is constant in every configuration.
+[diag mfs] fs.selfcheck ok n=31 match=1
+
+# ...and the single-indirect arm, read at offset 7*4096 of `/etc/pattern`. This is
+# THE ONLY MARKER IN THE WHOLE BOOT THAT REACHES THAT ARM, which is why slice 5.7
+# made that file mandatory rather than filler. Deliberately NOT keyed on
+# /bin/hello: hello is ~200 KB with a real C toolchain but the 15 KB `worker` ELF
+# in the sysroot-absent fallback, which fits inside the seven direct zones -- so a
+# proof keyed on it would be vacuous in exactly the configuration CI's non-QEMU
+# jobs build. /etc/pattern is 40 KiB in both.
+[diag mfs] fs.indirect ok match=1
+
+# The image's reserved LAST block, whose label deliberately differs from the
+# header's. It proves the `block` field reaches the right page -- the driver's own
+# `tail=1` proves only that the kernel's copy loop reached the end of the blob,
+# not that BDEV indexes into it correctly.
+[diag mfs] bdev.tail ok match=1
 
 # Ten refusals, each well-formed but for one field: minor 7 (-> ENXIO, the
 # driver's own minor check), one block past the end (-> EINVAL, not EIO: a block
@@ -382,9 +425,10 @@ minix.rs hello: iov ok match=1
 # refuses, so it never asserts read-onlyness about a device it does not have --
 # and without this probe that arm could be reduced back to a bare EROFS with no
 # marker moving), a request one past the band (-> ENOSYS, and the reply itself is
-# the assertion: a dropped unknown would block VFS in its SENDREC forever and take
-# every later marker with it), and SYS_GETINFO(GET_RAMDISK) issued by VFS
+# the assertion: a dropped unknown would block MFS in its SENDREC forever and take
+# every later marker with it), and SYS_GETINFO(GET_RAMDISK) issued by MFS
 # (-> EPERM, the gate that keeps a VA mapped into one address space from being
-# handed to another). A missing check makes its probe succeed and turns this into
-# `bdev.deny FAIL <name>`.
-[diag vfs] bdev.deny ok n=10
+# handed to another -- and MFS is a stronger caller for it than VFS was, being the
+# one server that would otherwise have a use for such a VA). A missing check makes
+# its probe succeed and turns this into `bdev.deny FAIL <name>`.
+[diag mfs] bdev.deny ok n=10
