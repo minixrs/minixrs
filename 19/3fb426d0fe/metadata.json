@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "193fb426d0fe",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.8-mfs-server",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "fs/mfs/src/main.rs",
+    "fs/mfs/src/walk.rs",
+    "servers/vfs/src/fd.rs",
+    "servers/vfs/src/main.rs",
+    "userland/init/src/main.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/19/3fb426d0fe/0/metadata.json",
+      "transcript": "/19/3fb426d0fe/0/full.jsonl",
+      "compact_transcript": "/19/3fb426d0fe/0/transcript.jsonl",
+      "content_hash": "/19/3fb426d0fe/0/content_hash.txt",
+      "prompt": "/19/3fb426d0fe/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 84,
+    "cache_creation_tokens": 272751,
+    "cache_read_tokens": 6043815,
+    "output_tokens": 25880,
+    "api_call_count": 45
+  }
+}
