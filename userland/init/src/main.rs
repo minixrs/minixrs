@@ -527,10 +527,19 @@ fn open_denials(vfs: Endpoint) {
         return report_open_fail(vfs, "close-twice");
     }
 
-    if denied == 8 {
+    if denied == OPEN_DENIAL_PROBES {
         let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=8\n");
     }
 }
+
+/// Probes [`open_denials`] runs, named rather than counted inline — VFS's
+/// `FS_DENIAL_PROBES` reason: adding one without counting it must make the marker
+/// *vanish*, which CI catches, rather than silently under-report, which it cannot.
+///
+/// The `n=` in the marker line is this number spelled out as a literal, because
+/// init has no formatting machinery and the line is a `grep -aF` marker. The two
+/// move together; the const below is what makes forgetting the second half loud.
+const OPEN_DENIAL_PROBES: usize = 8;
 
 /// Report a failing `open` probe by name, on fd 2.
 #[cfg_attr(test, allow(dead_code))]

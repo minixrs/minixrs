@@ -36,6 +36,28 @@
 //! `free_frame` / `is_usable_pa`), caught in review rather than by a test. The
 //! pure `*_in` helpers below all take the rows as a borrowed slice, which is what
 //! keeps every decision testable without touching the static at all.
+//!
+//! **The same rule binds the tests, where it is not even single-threaded.**
+//! libtest runs `#[test]` functions on several threads at once, so two tests that
+//! both name the static really can hold `&` and `&mut` to it simultaneously —
+//! aliasing UB under a `cargo test` that no assertion would notice. Exactly one
+//! test below therefore names it ([`tests::the_live_table_round_trips_through_its_wrappers`],
+//! which exists to cover the four `unsafe` wrappers); everything else runs against
+//! the local fixture, `servers/vm/src/region.rs`'s arrangement.
+//!
+//! ## What this table still does not know about
+//!
+//! **Nothing resets a row when a process exits, and proc numbers are recycled.**
+//! Rows became mutable this slice, so a [`Fd::File`] entry now outlives the
+//! process that opened it: PM hands the fork pool's proc numbers back out every
+//! init cycle, and VFS is told nothing about exit (`signal_handler: None`, and no
+//! PM→VFS request exists). Today only init opens files, so no row is ever
+//! inherited — but the first forked child that calls `open` would leave a live
+//! descriptor onto an arbitrary inode for whatever process lands on that slot
+//! next, and slice 5.9 (exec-from-FS) is the slice that makes children open files.
+//! **`fork` also does not duplicate the parent's descriptors**, which POSIX
+//! requires. Both are known debt for 5.9, not oversights: closing them needs a
+//! PM→VFS notification the ABI does not have yet.
 
 use minixrs_kernel_shared::callnr::CDEV_MINOR_CONSOLE;
 use minixrs_kernel_shared::com::NR_SERVED_PROCS;
@@ -118,7 +140,9 @@ struct Table(UnsafeCell<[FdRow; NR_FD_ROWS]>);
 // SAFETY: VFS is a single EL0 thread running a straight-line receive loop with no
 // interrupt handlers of its own, so there is never a second accessor. Every path
 // to the table goes through the four wrappers below, each of which takes its
-// borrow and releases it within one call.
+// borrow and releases it within one call. Under `cargo test` "single thread" is
+// not free: libtest is multi-threaded, so the invariant is upheld there by exactly
+// one test naming the static — see the module note.
 unsafe impl Sync for Table {}
 
 static ROWS: Table = Table(UnsafeCell::new([DEFAULT_ROW; NR_FD_ROWS]));
@@ -250,9 +274,16 @@ mod tests {
     };
     const FILE: Fd = Fd::File { ino: 5, pos: 0 };
 
-    /// A private table to mutate, so no test can disturb the live one.
-    fn rows() -> [FdRow; 2] {
-        [DEFAULT_ROW; 2]
+    /// A private table, built from the same expression as the live static, so no
+    /// test has to name that static to say something about it.
+    ///
+    /// Full-size rather than a two-row stub: the pre-open contract below is about
+    /// the whole proc-number range, and a fixture narrower than the real table
+    /// could not state it. Every test here works on its own copy — libtest is
+    /// multi-threaded, so sharing the static between a reader and a writer would
+    /// be aliasing UB (see the module note).
+    fn rows() -> [FdRow; NR_FD_ROWS] {
+        [DEFAULT_ROW; NR_FD_ROWS]
     }
 
     #[test]
@@ -260,9 +291,14 @@ mod tests {
         // The pre-open contract, checked across the whole proc-number range
         // rather than for one process: init, a boot server, and a forked child
         // must all find fd 1 without anything having opened it.
+        let r = rows();
         for proc_nr in 0..NR_SERVED_PROCS as i32 {
             for fd in 0..3 {
-                assert_eq!(resolve(proc_nr, fd), Ok(CONSOLE), "proc {proc_nr} fd {fd}");
+                assert_eq!(
+                    resolve_in(&r, proc_nr, fd),
+                    Ok(CONSOLE),
+                    "proc {proc_nr} fd {fd}"
+                );
             }
         }
     }
@@ -291,16 +327,18 @@ mod tests {
 
     #[test]
     fn a_descriptor_past_the_end_of_the_row_is_ebadf() {
+        let r = rows();
         for fd in [NR_FDS as i32, NR_FDS as i32 + 1, 64, i32::MAX] {
-            assert_eq!(resolve(0, fd), Err(EBADF), "fd {fd}");
+            assert_eq!(resolve_in(&r, 0, fd), Err(EBADF), "fd {fd}");
         }
     }
 
     #[test]
     fn a_negative_descriptor_is_ebadf() {
         // A client that passed through an errno by mistake, or a wrapped count.
+        let r = rows();
         for fd in [-1i32, -3, i32::MIN] {
-            assert_eq!(resolve(0, fd), Err(EBADF), "fd {fd}");
+            assert_eq!(resolve_in(&r, 0, fd), Err(EBADF), "fd {fd}");
         }
     }
 
@@ -319,7 +357,7 @@ mod tests {
             i32::MAX,
         ] {
             let mut r = rows();
-            assert_eq!(resolve(proc_nr, 1), Err(EBADF), "proc {proc_nr}");
+            assert_eq!(resolve_in(&r, proc_nr, 1), Err(EBADF), "proc {proc_nr}");
             assert_eq!(alloc_in(&mut r, proc_nr, FILE), Err(EBADF), "{proc_nr}");
             assert_eq!(close_in(&mut r, proc_nr, 1), Err(EBADF), "{proc_nr}");
             // `advance_in` has no way to report, so the assertion is that it
@@ -332,7 +370,12 @@ mod tests {
     #[test]
     fn resolve_in_reads_the_row_it_is_given() {
         // The pure helper must not reach the static: hand it a table whose fd 1
-        // is closed and whose fd 3 is open, the opposite of the real one.
+        // is closed and whose fd 3 is open, the opposite of the real one. The two
+        // `Err`/`Ok` answers below are the proof on their own — the live table's
+        // fd 1 is open and its fd 3 is not, so a helper that consulted the static
+        // could not produce either. (It used to be stated by reading the static
+        // back as well; that is the borrow this test must not take, since a
+        // sibling test holds `&mut` to it on another libtest thread.)
         let mut r = rows();
         r[1][1] = Fd::Unused;
         r[1][3] = Fd::CharDev { minor: 7 };
@@ -340,8 +383,8 @@ mod tests {
         assert_eq!(resolve_in(&r, 0, 1), Ok(CONSOLE));
         assert_eq!(resolve_in(&r, 1, 1), Err(EBADF));
         assert_eq!(resolve_in(&r, 1, 3), Ok(Fd::CharDev { minor: 7 }));
-        // ...and the static is unchanged, so the two really are independent.
-        assert_eq!(resolve(1, 1), Ok(CONSOLE));
+        // ...and no other row moved, so the write really was row-local.
+        assert_eq!(r[0], DEFAULT_ROW);
     }
 
     #[test]
@@ -470,9 +513,12 @@ mod tests {
     #[test]
     fn the_live_table_round_trips_through_its_wrappers() {
         // The four `unsafe` wrappers, exercised once each against the real static
-        // — the only thing here that is not covered by the pure helpers. Uses a
-        // high proc number so it cannot collide with another test's expectations
-        // about proc 0's row.
+        // — the only thing here that is not covered by the pure helpers, and for
+        // that reason **the only test in this module that names `ROWS`**. It holds
+        // `&mut` to it; libtest would run any other test touching the static
+        // concurrently, and `&`/`&mut` at once is UB no assertion here would see.
+        // Uses a high proc number so a future second accessor collides loudly
+        // rather than silently sharing proc 0's row.
         let p = NR_SERVED_PROCS as i32 - 1;
         let fd = alloc(p, Fd::File { ino: 9, pos: 0 }).expect("a free descriptor");
         assert_eq!(resolve(p, fd), Ok(Fd::File { ino: 9, pos: 0 }));

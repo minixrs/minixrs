@@ -128,6 +128,38 @@ pub fn dir_size(size: i32) -> Result<usize, i32> {
     Ok(size)
 }
 
+/// How many bytes to scan in the directory round starting at `off`, or `None`
+/// when the directory is out.
+///
+/// The step function of the loop that drives [`dir_size`] and [`find_in_block`].
+/// It lives here rather than in the server's `find_component` for the reason
+/// `rw::advance` lives in VFS's library: `main.rs` is behind
+/// `required-features = ["server"]`, so clippy, miri and llvm-cov never compile
+/// it, and this is the only arithmetic in that loop. It is also **unreachable at
+/// boot** — `tools/mkfs-mfs` never builds a directory past one block, so the
+/// second iteration has no image to run against and unit tests are the only thing
+/// that will ever exercise it.
+///
+/// Three answers, in the order they can arise:
+///
+/// 1. `off >= size` → `None`. The termination condition, and the reason the caller
+///    needs no bound of its own: [`dir_size`] has already refused a `size` this
+///    could not converge on.
+/// 2. `bs == 0` → `None`. Unreachable (the superblock validator rejects it), but a
+///    zero-length round would advance `off` by nothing and spin forever, which is
+///    precisely the failure mode this module exists to make impossible.
+/// 3. Otherwise `min(size - off, bs)` — the rest of the directory, capped at one
+///    block, because one block is the whole staging buffer.
+///
+/// The returned length is always `> 0` and never carries `off` past `size`, so a
+/// caller advancing by it terminates in at most `size.div_ceil(bs)` rounds.
+pub fn next_dir_chunk(off: usize, size: usize, bs: usize) -> Option<usize> {
+    if off >= size || bs == 0 {
+        return None;
+    }
+    Some((size - off).min(bs))
+}
+
 /// Decide how much of one read request to serve in this round.
 ///
 /// `size` is the inode's (signed on disk, so a negative one is a corrupt inode →
@@ -317,6 +349,66 @@ mod tests {
         assert_eq!(dir_size(i32::MIN), Err(EIO));
         assert_eq!(dir_size(MAX_DIR_BYTES as i32 + 1), Err(EIO));
         assert_eq!(dir_size(i32::MAX), Err(EIO));
+    }
+
+    #[test]
+    fn a_one_block_directory_is_one_round() {
+        // The only shape any image `mkfs-mfs` builds actually has: one block, and
+        // then the scan is over.
+        assert_eq!(next_dir_chunk(0, 128, BS), Some(128));
+        assert_eq!(next_dir_chunk(128, 128, BS), None);
+        // An empty directory is no rounds at all.
+        assert_eq!(next_dir_chunk(0, 0, BS), None);
+    }
+
+    #[test]
+    fn driving_next_dir_chunk_over_a_three_block_directory_converges_on_the_size() {
+        // The arm no image reaches — `mkfs-mfs` never builds a directory past one
+        // block — so this is the only thing that will ever run it. Each round is a
+        // whole block and the third lands exactly on `size`, which is the case a
+        // `<=`/`<` slip in the termination test would turn into a fourth round
+        // scanning bytes that are not there.
+        let size = BS * 3;
+        let mut off = 0usize;
+        let mut rounds = 0;
+        while let Some(want) = next_dir_chunk(off, size, BS) {
+            rounds += 1;
+            assert!(rounds <= 8, "the directory scan failed to converge");
+            assert_eq!(want, BS);
+            off += want;
+        }
+        assert_eq!(rounds, 3);
+        assert_eq!(off, size, "the scan must stop exactly on the size");
+    }
+
+    #[test]
+    fn a_directory_whose_size_is_not_a_whole_number_of_blocks_ends_on_a_short_round() {
+        // The final round is the remainder, never a whole block: reading a whole
+        // one would hand `find_in_block` bytes past the directory's end, which is
+        // where a stale entry from a shrunken directory would live.
+        let size = BS * 2 + 37;
+        let mut off = 0usize;
+        let mut seen = [0usize; 4];
+        let mut rounds = 0;
+        while let Some(want) = next_dir_chunk(off, size, BS) {
+            assert!(rounds < seen.len(), "the directory scan failed to converge");
+            seen[rounds] = want;
+            rounds += 1;
+            off += want;
+        }
+        assert_eq!(rounds, 3);
+        assert_eq!(seen[..3], [BS, BS, 37]);
+        assert_eq!(off, size);
+    }
+
+    #[test]
+    fn a_zero_block_size_ends_the_scan_rather_than_spinning() {
+        // Unreachable — the superblock validator rejects it — but a zero-length
+        // round would advance `off` by nothing forever, which is the one failure
+        // mode this module exists to prevent.
+        assert_eq!(next_dir_chunk(0, MAX_DIR_BYTES, 0), None);
+        // ...as does an offset already past the end, however far past.
+        assert_eq!(next_dir_chunk(usize::MAX, MAX_DIR_BYTES, BS), None);
     }
 
     #[test]

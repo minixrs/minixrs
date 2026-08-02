@@ -295,6 +295,12 @@ fn mfs_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
 /// independent round trip rather than an echo of MFS's, and a boot-time mount
 /// failure is retried the first time a client asks — the same "failure is not
 /// cached" stance VFS takes on its lazy root mount.
+///
+/// The converse is deliberate too: **a failed re-read leaves a previously
+/// successful mount installed**, because `*mount` is only assigned on success. A
+/// transient device error must not unmount a filesystem other descriptors are
+/// still reading through — the failure is reported to this one caller and nothing
+/// else changes.
 #[cfg_attr(test, allow(dead_code))]
 fn do_readsuper(msg: &mut Message, blocks: &mut Blocks, mount: &mut Option<Mount>) -> i32 {
     if proto::parse_readsuper(msg) != BDEV_MINOR_RAMDISK {
@@ -532,17 +538,22 @@ fn lookup(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode)
 /// `verify.rs` materializes the whole directory into a `Vec` and iterates it;
 /// there is no allocator here and no second buffer, so this asks about each block
 /// in turn and keeps nothing but a `u32`. [`walk::dir_size`] is what bounds the
-/// loop — a corrupt inode claiming `size = i32::MAX` would otherwise spin.
+/// loop — a corrupt inode claiming `size = i32::MAX` would otherwise spin — and
+/// [`walk::next_dir_chunk`] is the round itself, in the library because this file
+/// is compiled by no CI job.
 #[cfg_attr(test, allow(dead_code))]
 fn find_component(blocks: &mut Blocks, mount: &Mount, dir: &Inode, name: &str) -> Result<u32, i32> {
     let size = walk::dir_size(dir.size)?;
     let mut off = 0usize;
-    while off < size {
-        let want = (size - off).min(mount.block_size);
+    while let Some(want) = walk::next_dir_chunk(off, size, mount.block_size) {
         if let Some(ino) = scan_block(blocks, mount, dir, off as u64, want, name)? {
             return Ok(ino);
         }
-        off += want;
+        // `want <= size - off` by construction, so this cannot overflow — but
+        // `--release` builds this crate with `overflow-checks = false`, where a
+        // bare `+` would wrap silently rather than reproduce the `cargo test`
+        // panic, so every offset add in `fs/` is spelled out.
+        off = off.checked_add(want).ok_or(EIO)?;
     }
     Err(ENOENT)
 }
@@ -708,11 +719,20 @@ fn selfcheck(blocks: &mut Blocks, mount: &Mount) {
 }
 
 /// Do `got`'s bytes equal `/etc/pattern`'s contents from file offset `pos`?
+///
+/// `false` rather than a panic for an offset that does not fit a `usize` or whose
+/// arithmetic would wrap: both are unreachable (`pos` is a compile-time constant
+/// here), but this crate ships with `overflow-checks = false`, so a bare `+` would
+/// wrap into a *matching* byte in release while panicking under `cargo test`.
 #[cfg_attr(test, allow(dead_code))]
 fn pattern_matches(got: &[u8], pos: u64) -> bool {
-    got.iter()
-        .enumerate()
-        .all(|(i, &b)| b == rootfs_pattern_byte(pos as usize + i))
+    let Ok(base) = usize::try_from(pos) else {
+        return false;
+    };
+    got.iter().enumerate().all(|(i, &b)| {
+        base.checked_add(i)
+            .is_some_and(|off| b == rootfs_pattern_byte(off))
+    })
 }
 
 /// Read the image's reserved last block and check its label — slice 5.7's probe,

@@ -237,7 +237,7 @@ fn main() -> ! {
     // take everything after it down. Behind the mount proof, such a wedge
     // localizes to `fs.deny` instead of blacking out 5.2's, 5.3's, and 5.4's
     // markers as well. Do not tidy this prologue into alphabetical order.
-    fs_denials(&mut grants, mfs);
+    fs_denials(&mut grants, mfs, mount);
 
     let mut msg = Message {
         m_source: 0,
@@ -732,8 +732,17 @@ fn fs_lookup_raw(mfs: Endpoint, field: &[u8; FS_PATH_MAX]) -> i32 {
 ///
 /// Best-effort throughout: a failure here must not stop VFS from serving.
 #[cfg_attr(test, allow(dead_code))]
-fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint) {
+fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<Mount>) {
     let mut denied = 0usize;
+
+    // The root's inode number comes from the mount [`mount_root`] just took, not
+    // from a literal `1`: MFS reports it in `FS_READSUPER` and this battery is the
+    // only place VFS would have had to know it independently. Nothing to probe
+    // without a mount — every lookup below would answer `ENODEV` — so say which
+    // setup step failed rather than reporting eight probe failures.
+    let Some(mount) = mount else {
+        return diag_fmt(format_args!("fs.deny FAIL setup mount"));
+    };
 
     // Path-shaped refusals. Each is a real `FS_LOOKUP` through the real
     // marshaller, so a probe cannot pass by being built differently.
@@ -783,7 +792,7 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint) {
     let n = len as i32;
     for (name, ino, gid, want) in [
         ("bad-ino", 0, good, EINVAL),
-        ("read-dir", 1, good, EISDIR),
+        ("read-dir", mount.root, good, EISDIR),
         ("not-mine", motd_ino as i32, not_mine, EPERM),
         ("read-only", motd_ino as i32, read_only, EPERM),
     ] {
