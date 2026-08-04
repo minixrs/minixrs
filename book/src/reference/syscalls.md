@@ -44,7 +44,7 @@ control in the driver era). The dispatch table is `kernel/src/system/mod.rs`.
 | `0x600` | `SYS_GETINFO` | live | Kernel introspection (e.g. `GET_WHOAMI`). |
 | `0x601` | `SYS_PRIVCTL` | live | Set up a target's privilege slot (`PRIVCTL_SET_USER`). |
 | `0x602` | `SYS_FORK` | live | Clone a process slot as a frozen child. |
-| `0x603` | `SYS_EXEC` | live | Replace a target's image with a boot-embedded binary. |
+| `0x603` | `SYS_EXEC` | live | Replace a target's image, from the boot archive or a grant (see below). |
 | `0x604` | `SYS_EXIT` | live | Full process teardown (address space, endpoint, slot). |
 | `0x605` | `SYS_COPY` | stub | Inter-space copy — placeholder. |
 | `0x606` | `SYS_SAFECOPY` | stub | Grant-validated copy — real grants are Phase 5. |
@@ -86,10 +86,13 @@ The layout, upward from `sp` (16-byte aligned, as the AAPCS64 requires at entry 
 | …      | zero padding up to the stack-page top |
 
 There is exactly one argument (`argc == 1`, `argv[0]` the exec name) and no
-environment: `SYS_EXEC` names a boot-embedded binary, and user-supplied
-`argv`/`envp` arrive with exec-from-FS. The auxiliary vector is emitted in a
-fixed order rather than Linux's incidental one, so traces and tests are
-deterministic:
+environment. Slice 5.9 added exec-from-FS and deliberately **did not** add
+user-supplied `argv`/`envp`: the kernel keeps synthesising `argc = 1` with
+`argv[0]` set to the path's *basename*, which is what leaves `EXEC_NAME_LEN`,
+`PROC_NAME_LEN`, and this frame's whole geometry untouched by that slice. Real
+`argv`/`envp` need a place to carry an unbounded vector, which is a separate
+design rather than a field. The auxiliary vector is emitted in a fixed order
+rather than Linux's incidental one, so traces and tests are deterministic:
 
 | Entry | Value | Emitted |
 |-------|-------|---------|
@@ -98,6 +101,37 @@ deterministic:
 | `AT_PHENT` (4) | `e_phentsize` (56) | with `AT_PHDR` |
 | `AT_PAGESZ` (6) | 4096 | always |
 | `AT_NULL` (0) | 0 | always, last |
+
+### The `SYS_EXEC` payload and its two source forms
+
+Slice 5.9 gave `SYS_EXEC` a **source selector**, so the same call number covers
+loading a boot-archive module and loading a file the filesystem staged.
+
+| Offset | Field |
+|-------:|-------|
+| `0..4` | target endpoint (`i32`) |
+| `4..20` | `argv[0]` / the new proc name, NUL-padded (`EXEC_NAME_LEN` = 16) |
+| `20..24` | source selector — `EXEC_SRC_NAME` (1) or `EXEC_SRC_GRANT` (2); 0 is invalid |
+| `24..28` | granter endpoint (`i32`, grant form only) |
+| `28..32` | grant id (`i32`, grant form only) |
+| `32..40` | image length (`u64`, grant form only) |
+
+`4..20` is `argv[0]` and the proc's new name in **both** forms; only where the
+image's bytes come from changes. In the name form that field doubles as the MXBI
+module name.
+
+The grant form is decision D6: the kernel keeps ELF authority, and PM/VFS do the
+staging. VFS reads the whole file into its own buffer and direct-grants it to PM;
+PM names that grant here; the kernel reads the ELF **through the grant** using the
+same page-walking copy engine every `SYS_SAFECOPY` uses, a header at a time onto
+its own stack. There is no kernel filesystem, no kernel heap, and no kernel
+staging buffer. The grant is validated by the ordinary `verify_grant` — `who_to`
+must be PM's own stored endpoint — and the read completes **before the point of no
+return**, so a granted buffer that turns out not to be an ELF leaves the target
+untouched on its old image and PM relays `ENOEXEC` to it.
+
+There is deliberately no grant-*offset* field: the granted buffer holds the image
+from its start, the rule the BDEV and FS bands already state.
 
 `AT_PHDR` is conditional because it must not be invented: a linker script that
 does not pull the ELF header into the first `PT_LOAD` leaves `e_phoff` in an
