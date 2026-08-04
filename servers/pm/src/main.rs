@@ -46,9 +46,10 @@ mod mproc;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    EXEC_NAME_LEN, PM_EXEC, PM_EXEC_NAME_OFF, PM_EXIT, PM_FORK, PM_GETPID, PM_GRANT_TEST, PM_WAIT,
-    PRIVCTL_SET_USER, SAFECOPY_FROM, SAFECOPY_TO, SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG,
-    SYS_EXEC, SYS_EXIT, SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
+    EXEC_NAME_LEN, EXEC_SRC_NAME, EXEC_SRC_OFF, PM_EXEC, PM_EXEC_NAME_OFF, PM_EXIT, PM_FORK,
+    PM_GETPID, PM_GRANT_TEST, PM_WAIT, PRIVCTL_SET_USER, SAFECOPY_FROM, SAFECOPY_TO,
+    SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT, SYS_FORK,
+    SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
 };
 use minixrs_kernel_shared::com::{
     INIT_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
@@ -350,7 +351,7 @@ fn handle_exec(system: Endpoint, msg: &mut Message) {
     // `name` borrows `msg`; `sys_exec` marshals into its own buffer and never
     // touches it, so the borrow ends before `reply` needs `&mut msg`.
     let rc = match rd_name(msg, PM_EXEC_NAME_OFF, EXEC_NAME_LEN) {
-        Some(name) => sys_exec(system, caller_e, name),
+        Some(name) => sys_exec_name(system, caller_e, name),
         None => EINVAL,
     };
     if rc != OK {
@@ -704,24 +705,30 @@ fn sys_fork(system: Endpoint, parent_e: Endpoint, child_nr: i32) -> (i32, Endpoi
 }
 
 /// `SYS_EXEC` — ask the kernel to replace `target_e`'s image with the
-/// boot-embedded binary `name` (SENDREC to SYSTEM). Payload: target endpoint in
-/// `0..4`, the NUL-padded name in `4..4+EXEC_NAME_LEN`. Returns the kernel-call
-/// result; on `OK` the kernel has already resumed the target at the new entry.
+/// boot-embedded module `name` (SENDREC to SYSTEM). Payload: target endpoint in
+/// `0..4`, the NUL-padded name in `4..4+EXEC_NAME_LEN`, and
+/// [`EXEC_SRC_NAME`] in [`EXEC_SRC_OFF`]. Returns the kernel-call result; on `OK`
+/// the kernel has already resumed the target at the new entry.
+///
+/// The selector is written explicitly rather than left zero: a zeroed payload is
+/// deliberately *not* a valid form (slice 5.9), so a caller that forgot it gets
+/// `EINVAL` instead of whichever source happened to be the default.
 #[cfg_attr(test, allow(dead_code))]
-fn sys_exec(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
+fn sys_exec_name(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
     let mut m = Message {
         m_source: 0,
         m_type: SYS_EXEC,
         payload: [0u8; 96],
     };
     wr_i32(&mut m, 0, target_e);
-    // The name came out of a `PM_EXEC` payload field of exactly `EXEC_NAME_LEN`
-    // bytes (`rd_name` stops at the field's end), so it fits this one — the two
-    // widths are the same constant, which is why forwarding is a copy and never
-    // a truncation. Clamped anyway: `sys_exec` is also called with literals.
+    // The name came out of a `PM_EXEC` payload field, so it may be longer than
+    // this one — a path's basename is capped at `EXEC_NAME_LEN` by its caller,
+    // but a *module* name is written straight through. Clamped either way:
+    // `sys_exec_name` is also called with literals.
     let bytes = name.as_bytes();
     let n = bytes.len().min(EXEC_NAME_LEN);
     m.payload[4..4 + n].copy_from_slice(&bytes[..n]);
+    wr_i32(&mut m, EXEC_SRC_OFF, EXEC_SRC_NAME);
     let rc = ipc_sendrec(system, &mut m);
     if rc != OK {
         return rc;

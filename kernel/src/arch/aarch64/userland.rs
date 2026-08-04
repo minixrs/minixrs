@@ -46,11 +46,14 @@ use minixrs_kernel_shared::uspace::{
     RAMDISK_VA, RAMDISK_WINDOW_SIZE, SERVER_STACK_BYTES, TTY_UART_VA, USER_DEVICE_WINDOW_BASE,
 };
 
-use crate::arch::aarch64::addrspace::{AddrSpace, Prot, map_page_in, walk_leaves};
+use minixrs_kernel_shared::error::{EFAULT, ENOEXEC, ENOMEM};
+
+use crate::arch::aarch64::addrspace::{AddrSpace, MapError, Prot, map_page_in, walk_leaves};
 use crate::arch::aarch64::asid::alloc_asid;
 #[cfg(feature = "boot-stubs")]
 use crate::arch::aarch64::mmu::flush_icache_range;
 use crate::arch::aarch64::mmu::{self, PAGE_SIZE};
+use crate::boot_image::elf::{ElfError, ElfSource};
 #[cfg(feature = "boot-stubs")]
 use crate::mm::phys_to_hhdm;
 use crate::mm::{Frame, alloc_frame, free_frame};
@@ -445,29 +448,42 @@ pub(crate) struct ExecImage {
 /// one zeroed RW stack page at [`SERVER_STACK_VA`], and allocate an ASID. The
 /// `AddrSpace` is `mem::forget`-ed — the page-table tree is now owned via the
 /// returned `ttbr0_pa` (tear it down with the `do_exit` teardown sequence, never
-/// `AddrSpace::destroy`). Returns `None` on OOM or a malformed ELF, freeing any
-/// partial tree first so nothing leaks (the do_fork `copy_addrspace` contract).
+/// `AddrSpace::destroy`). On failure any partial tree is freed first so nothing
+/// leaks (the do_fork `copy_addrspace` contract).
+///
+/// The image arrives as an [`ElfSource`] rather than a slice as of slice 5.9:
+/// boot passes `ElfSource::Bytes` over the MXBI archive, `do_exec` passes either
+/// that or a `UserGrant` naming the buffer VFS staged and PM granted.
+///
+/// ## The errno is the loader's, not a blanket `ENOMEM`
+///
+/// Until 5.9 every failure here folded into `ENOMEM`, which was defensible while
+/// the only images were build products: a malformed one was a build bug, not a
+/// user error. exec-from-FS makes "these bytes are not an executable" an ordinary
+/// runtime outcome, so the three cases are now told apart —
+/// `Map(OutOfMemory)` → `ENOMEM` (the machine is out of frames), `Source` →
+/// `EFAULT` (the granted buffer could not be read), everything else → `ENOEXEC`
+/// (POSIX's answer, and what makes init's "stage `/etc/motd` and refuse it"
+/// probe mean something).
 ///
 /// The stack VA is shared with every boot server because each image gets its own
 /// TTBR0, so the same low VA resolves to a distinct frame per proc.
 ///
 /// SAFETY: single-threaded EL1; the sole caller of the frame allocator + ASID
 /// pool for its duration. Must run after `mm::init_from_limine_memmap`.
-pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
-    let mut aspace = AddrSpace::new().ok()?;
+pub(crate) unsafe fn load_exec_image(source: &ElfSource) -> Result<ExecImage, i32> {
+    let mut aspace = AddrSpace::new().map_err(|_| ENOMEM)?;
 
-    let loaded = match crate::boot_image::elf::load_into(elf, &mut aspace) {
+    let loaded = match crate::boot_image::elf::load_into(source, &mut aspace) {
         Ok(l) => l,
         Err(e) => {
             // A brand rejection (M1, `elf::load_into`'s scan) is surfaced
             // before the load unwinds — the boot path panics right after
             // (`load_boot_server`'s "server image load failed"), and the exec
-            // path folds every failure into `ENOMEM`. `[brand]` is uncounted —
-            // a stable marker, like `[efault]`. Other ElfErrors stay silent
-            // as before.
+            // path answers `ENOEXEC`. `[brand]` is uncounted — a stable marker,
+            // like `[efault]`. Other ElfErrors stay silent as before.
             {
                 use crate::arch::aarch64::uart::Pl011;
-                use crate::boot_image::elf::ElfError;
                 use core::fmt::Write;
                 match e {
                     ElfError::MissingBrand => {
@@ -480,7 +496,7 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
                 }
             }
             destroy_addrspace_with_leaves(aspace);
-            return None;
+            return Err(elf_errno(e));
         }
     };
 
@@ -489,7 +505,7 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
         Some(f) => f,
         None => {
             destroy_addrspace_with_leaves(aspace);
-            return None;
+            return Err(ENOMEM);
         }
     };
     if aspace
@@ -500,7 +516,7 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
         // frame explicitly; the leaf sweep below won't see it.
         free_frame(stack_frame);
         destroy_addrspace_with_leaves(aspace);
-        return None;
+        return Err(ENOMEM);
     }
 
     let ttbr0_pa = aspace.ttbr0_pa;
@@ -511,7 +527,7 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
     // the tree that stays live via `ttbr0_pa`.
     #[allow(clippy::forget_non_drop)]
     core::mem::forget(aspace);
-    Some(ExecImage {
+    Ok(ExecImage {
         ttbr0_pa,
         asid,
         entry: loaded.entry,
@@ -520,6 +536,16 @@ pub(crate) unsafe fn load_exec_image(elf: &[u8]) -> Option<ExecImage> {
         phnum: loaded.phnum,
         phentsize: loaded.phentsize,
     })
+}
+
+/// Map a loader failure onto the errno `SYS_EXEC` reports. See
+/// [`load_exec_image`]'s note for why the three cases are kept apart.
+fn elf_errno(e: ElfError) -> i32 {
+    match e {
+        ElfError::Map(MapError::OutOfMemory) => ENOMEM,
+        ElfError::Source => EFAULT,
+        _ => ENOEXEC,
+    }
 }
 
 /// Free every mapped leaf frame of a partially-built address space, then the
@@ -556,7 +582,7 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
 
     // SAFETY: single-threaded boot; sole caller of the frame allocator + ASID
     // pool at this point.
-    let img = unsafe { load_exec_image(elf) }.expect("server image load failed");
+    let img = unsafe { load_exec_image(&ElfSource::Bytes(elf)) }.expect("server image load failed");
 
     // SAFETY: single-threaded boot; sole borrow of this server's slot.
     unsafe {

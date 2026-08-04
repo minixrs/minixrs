@@ -3,11 +3,11 @@
 //! `SYS_EXEC` — replace a target process's program image in place.
 //!
 //! PM owns exec (MINIX 3 `pm/exec.c` → `sys_exec`): a user proc `SENDREC`s
-//! `PM_EXEC` to PM, PM selects a boot-embedded binary and issues `SYS_EXEC`
+//! `PM_EXEC` to PM, PM works out where the image is, and issues `SYS_EXEC`
 //! naming that proc as the target. The kernel's half is mechanical:
 //!
-//! - resolve the binary by name in the MXBI archive
-//!   ([`BootImage::module_by_name`]);
+//! - resolve the image ([`resolve_source`]) — either by name in the MXBI archive
+//!   ([`BootImage::module_by_name`]) or through a grant PM names;
 //! - build a brand-new address space and load the ELF into it
 //!   ([`userland::load_exec_image`] — the same helper that boots the servers);
 //! - write the SysV/Linux initial stack frame into it
@@ -36,26 +36,53 @@
 //! model identical to `do_fork` — the `k_call_mask` gate is the only check.
 //! Takes `priv_table` to drop the old image's grant-table registration.
 //!
+//! ## The two source forms (slice 5.9, decision D6)
+//!
+//! `EXEC_SRC_NAME` is slice 4.7's: the name field doubles as an MXBI module name.
+//! `EXEC_SRC_GRANT` is exec-from-FS: VFS stages the file into its own memory and
+//! direct-grants it to PM, PM names that grant here, and the kernel reads the ELF
+//! **through the grant** with slice 5.1's page-walking copy engine. The kernel
+//! keeps ELF authority and gains no filesystem, no heap, and no staging buffer —
+//! `ElfSource::UserGrant` is read a header at a time onto this call's own stack.
+//!
+//! The grant is validated by [`do_safecopy::verify_grant`], not by anything
+//! written here: `who_to` must be PM's own stored endpoint, the sequence must
+//! match, `CPF_READ` must be granted, and the range must fit — the same eleven
+//! checks `bdev.deny` and `fs.deny` already exercise on every boot. The read
+//! happens **before the point of no return**, so a granted buffer that turns out
+//! not to be an ELF leaves the target untouched on its old image and PM relays
+//! `ENOEXEC` to it.
+//!
 //! ## Message payload layout (offsets within `Message::payload`)
 //!
-//! | offset             | field                            | direction |
-//! |--------------------|----------------------------------|-----------|
-//! |  0..4              | target endpoint (i32)            | in        |
-//! |  4..4+EXEC_NAME_LEN| binary name (NUL-padded)         | in        |
+//! | offset             | field                                  | direction |
+//! |--------------------|----------------------------------------|-----------|
+//! |  0..4              | target endpoint (i32)                  | in        |
+//! |  4..4+EXEC_NAME_LEN| `argv[0]` / proc name (NUL-padded)     | in        |
+//! | 20..24             | source selector (`EXEC_SRC_*`)         | in        |
+//! | 24..28             | granter endpoint (i32, grant form)     | in        |
+//! | 28..32             | grant id (i32, grant form)             | in        |
+//! | 32..40             | image length (u64, grant form)         | in        |
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
-use minixrs_kernel_shared::callnr::EXEC_NAME_LEN;
+use minixrs_kernel_shared::callnr::{
+    EXEC_GRANT_OFF, EXEC_GRANTER_OFF, EXEC_LEN_OFF, EXEC_NAME_LEN, EXEC_SRC_GRANT, EXEC_SRC_NAME,
+    EXEC_SRC_OFF,
+};
 use minixrs_kernel_shared::com::NR_SYS_PROCS;
-use minixrs_kernel_shared::endpoint::{NONE, SELF};
-use minixrs_kernel_shared::error::{E2BIG, EINVAL, ENOENT, ENOMEM, OK};
+use minixrs_kernel_shared::endpoint::{Endpoint, NONE, SELF};
+use minixrs_kernel_shared::error::{E2BIG, EINVAL, ENOENT, OK};
+use minixrs_kernel_shared::execimage::MAX_IMAGE_BYTES;
 use minixrs_kernel_shared::execstack;
+use minixrs_kernel_shared::grant::CPF_READ;
 use minixrs_kernel_shared::message::{Message, USER_PAGE_SIZE};
 
 use crate::arch::aarch64::context::ArchRegisterFrame;
 use crate::arch::aarch64::userland;
+use crate::boot_image::elf::ElfSource;
 use crate::proc::flags::{MF_DELIVERMSG, RTS_RECEIVING, RTS_SENDING};
 use crate::proc::proc_struct::PROC_NAME_LEN;
 use crate::proc::table::{N_PROC_SLOTS, proc_index};
@@ -87,6 +114,13 @@ pub(super) fn do_exec(
     if target_e == SELF {
         return EINVAL;
     }
+    // The source selector is a pure payload check, so it sits with the other
+    // payload checks rather than beside the resolution it governs. Selector 0 —
+    // a zeroed payload — is invalid, never a default form.
+    let src = read_i32(msg, EXEC_SRC_OFF);
+    if src != EXEC_SRC_NAME && src != EXEC_SRC_GRANT {
+        return EINVAL;
+    }
     let target_idx = match super::resolve_target(proc_table, caller_nr, target_e) {
         Ok(idx) => idx,
         Err(e) => return e,
@@ -96,8 +130,10 @@ pub(super) fn do_exec(
         return EINVAL;
     }
 
-    // Binary name: payload `4..4+EXEC_NAME_LEN`, NUL-padded. Copied into a
-    // proc-name-sized buffer so a successful exec can adopt it as the proc name.
+    // `argv[0]` / the new proc name: payload `4..4+EXEC_NAME_LEN`, NUL-padded.
+    // Copied into a proc-name-sized buffer so a successful exec adopts it as the
+    // proc name. In the grant form PM sends the path's *basename* here, which is
+    // what keeps this field — and `execstack`'s geometry — unchanged by 5.9.
     let mut name_buf = [0u8; PROC_NAME_LEN];
     name_buf[..EXEC_NAME_LEN].copy_from_slice(&msg.payload[4..4 + EXEC_NAME_LEN]);
     let nul = name_buf
@@ -109,11 +145,13 @@ pub(super) fn do_exec(
         _ => return EINVAL,
     };
 
-    // Resolve the boot-embedded module by name.
-    let elf = match crate::boot_image::BootImage::get().module_by_name(name) {
-        Some(elf) => elf,
-        None => return ENOENT,
-    };
+    // Resolve where the image's bytes are. Both arms fail before anything is
+    // allocated, so the target stays on its old image.
+    let (source, granter_e, image_len) =
+        match resolve_source(proc_table, priv_table, caller_idx, src, name, msg) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
 
     // Gate the target: a clean blocked receiver with its whole frame parked and
     // no half-done delivery (the `do_fork` parent gate). This is the last point
@@ -129,9 +167,13 @@ pub(super) fn do_exec(
     // (OOM, malformed ELF) leaves it untouched on its old image.
     // SAFETY: single-threaded EL1; the sole caller of the frame allocator + ASID
     // pool here.
-    let img = match unsafe { userland::load_exec_image(elf) } {
-        Some(img) => img,
-        None => return ENOMEM,
+    let img = match unsafe { userland::load_exec_image(&source) } {
+        Ok(img) => img,
+        // Relayed verbatim rather than folded into `ENOMEM`: since slice 5.9 the
+        // bytes can be a file, so `ENOEXEC` ("that is not an executable") is an
+        // ordinary answer and is a different thing to tell PM than `ENOMEM` or
+        // `EFAULT`.
+        Err(e) => return e,
     };
 
     // Hand the new image a real SysV/Linux initial stack (slice 5.5, D13):
@@ -239,9 +281,19 @@ pub(super) fn do_exec(
 
     let n = EXEC_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if n <= EXEC_TRACE_HEAD || n.is_multiple_of(EXEC_TRACE_EVERY) {
+        // `name=… src=… entry=` keeps the two asserted substrings adjacent, so
+        // one marker proves *program and form together* — which is what makes
+        // "the C program came out of the filesystem" assertable at all, since
+        // `hello`'s own console output is byte-identical either way. The
+        // run-variable fields go last, as they have since slice 4.7.
+        let src_name = if src == EXEC_SRC_GRANT {
+            "grant"
+        } else {
+            "name"
+        };
         let _ = writeln!(
             Uart::new(),
-            "[ksys SYS_EXEC] target={target_nr} name={name} entry={:#x} old_asid={old_asid} new_asid={} freed={freed}",
+            "[ksys SYS_EXEC] target={target_nr} name={name} src={src_name} entry={:#x} old_asid={old_asid} new_asid={} freed={freed} granter={granter_e} len={image_len}",
             img.entry,
             img.asid,
         );
@@ -259,10 +311,76 @@ pub(super) fn do_exec(
     OK
 }
 
+/// Work out where the image's bytes are, and hand back what the trace needs to
+/// say about it.
+///
+/// Returns `(source, granter_endpoint, length)`. For the name form the granter is
+/// [`NONE`] and the length is the module's, so the trace's two trailing fields
+/// stay meaningful in both — a `granter=0 len=0` would read as a broken grant
+/// rather than as "there was no grant".
+///
+/// Both arms are total and allocate nothing: a failure here is a failure with the
+/// target still cleanly on its old image, which is the invariant every check
+/// before the point of no return exists to preserve.
+fn resolve_source<'a>(
+    proc_table: &[Proc; N_PROC_SLOTS],
+    priv_table: &[Priv; NR_SYS_PROCS],
+    caller_idx: usize,
+    src: i32,
+    name: &str,
+    msg: &Message,
+) -> Result<(ElfSource<'a>, Endpoint, usize), i32> {
+    if src == EXEC_SRC_NAME {
+        let elf = crate::boot_image::BootImage::get()
+            .module_by_name(name)
+            .ok_or(ENOENT)?;
+        return Ok((ElfSource::Bytes(elf), NONE, elf.len()));
+    }
+
+    // The grant form. `MAX_IMAGE_BYTES` bounds the length *before* the grant is
+    // even looked at, so a caller cannot ask the validator to reason about a
+    // ~16 EiB range; zero is refused outright, since an empty image can only fail
+    // the header read a few lines later with a less useful errno.
+    let granter_e: Endpoint = read_i32(msg, EXEC_GRANTER_OFF);
+    let gid = read_i32(msg, EXEC_GRANT_OFF);
+    let len = read_u64(msg, EXEC_LEN_OFF);
+    if len == 0 || len > MAX_IMAGE_BYTES as u64 {
+        return Err(EINVAL);
+    }
+
+    // The shared validator, with nothing added: offset 0 (the granted buffer
+    // holds the image from its start — the BDEV/FS bands' no-grant-offset rule)
+    // and `CPF_READ`, because the kernel only ever reads an image. A magic grant
+    // resolves to `who_from` here exactly as it would for `SYS_SAFECOPY`, which
+    // is why nothing about "the granter is not the owner" needs saying twice.
+    let (owner_ttbr0, va) = super::do_safecopy::verify_grant(
+        proc_table, priv_table, caller_idx, granter_e, gid, 0, len, CPF_READ,
+    )?;
+
+    Ok((
+        ElfSource::UserGrant {
+            ttbr0_pa: owner_ttbr0,
+            va,
+            len: len as usize,
+        },
+        granter_e,
+        len as usize,
+    ))
+}
+
 #[inline]
 fn read_i32(msg: &Message, off: usize) -> i32 {
     i32::from_ne_bytes(
         msg.payload[off..off + 4]
+            .try_into()
+            .expect("payload in range"),
+    )
+}
+
+#[inline]
+fn read_u64(msg: &Message, off: usize) -> u64 {
+    u64::from_ne_bytes(
+        msg.payload[off..off + 8]
             .try_into()
             .expect("payload in range"),
     )

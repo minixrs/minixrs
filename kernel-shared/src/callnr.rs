@@ -14,11 +14,27 @@ pub const KERNEL_CALL: i32 = 0x600;
 pub const SYS_GETINFO: i32 = KERNEL_CALL + 0;
 pub const SYS_PRIVCTL: i32 = KERNEL_CALL + 1;
 pub const SYS_FORK: i32 = KERNEL_CALL + 2;
-/// PM → kernel: replace a target proc's program image (slice 4.7). Target
-/// endpoint in payload `0..4` (i32); the boot-embedded binary name (NUL-padded,
-/// `EXEC_NAME_LEN` bytes) in `4..4+EXEC_NAME_LEN`. The kernel resolves the name
-/// in the MXBI archive (`BootImage::module_by_name`), builds a fresh address
-/// space, resets the target to the new entry point, and tears down the old AS.
+/// PM → kernel: replace a target proc's program image (slice 4.7, extended in
+/// 5.9). Target endpoint in payload `0..4` (i32); `argv[0]` / the new proc name
+/// (NUL-padded, [`EXEC_NAME_LEN`] bytes) in `4..4+EXEC_NAME_LEN`; a source
+/// selector in [`EXEC_SRC_OFF`]`..+4`.
+///
+/// Two source forms, and the selector is what tells them apart:
+///
+/// * [`EXEC_SRC_NAME`] — the `4..20` field doubles as an MXBI module name, which
+///   the kernel resolves with `BootImage::module_by_name`. The slice-4.7 form.
+/// * [`EXEC_SRC_GRANT`] — the image's bytes live in a *granted* buffer described
+///   by [`EXEC_GRANTER_OFF`] / [`EXEC_GRANT_OFF`] / [`EXEC_LEN_OFF`], and the
+///   kernel reads them through the grant with the ordinary `verify_grant`
+///   validator. This is what makes exec-from-FS possible without a kernel
+///   filesystem: VFS stages the file and grants it to PM, PM names the grant here
+///   (decision D6 — the kernel keeps ELF authority, PM/VFS do the staging).
+///
+/// In **both** forms `4..20` is `argv[0]` and the proc's new name; only where the
+/// image's bytes come from changes. That is what keeps [`EXEC_NAME_LEN`],
+/// `PROC_NAME_LEN`, and the initial stack's geometry untouched by 5.9 — PM passes
+/// the path's *basename*, never the path.
+///
 /// Target-taking (like `SYS_FORK`). On success the target is resumed at the new
 /// image with no reply; failures return a negative errno to PM.
 pub const SYS_EXEC: i32 = KERNEL_CALL + 3;
@@ -108,10 +124,69 @@ pub const SAFECOPY_FROM: i32 = 1;
 /// `CPF_WRITE` on the grant.
 pub const SAFECOPY_TO: i32 = 2;
 
-/// Length of the boot-embedded binary name carried in the `SYS_EXEC` payload
+/// Length of the `argv[0]` / proc-name field carried in the `SYS_EXEC` payload
 /// (`4..4+EXEC_NAME_LEN`), NUL-padded. Sized to fit the MXBI record name field
 /// (`< 20` bytes); a short name like `"worker"` fits with room to spare.
+///
+/// In the [`EXEC_SRC_NAME`] form this field is *also* the module name the kernel
+/// resolves. In the [`EXEC_SRC_GRANT`] form it is only the name — slice 5.9's
+/// deliberate choice not to carry a user `argv`, which is what leaves this width,
+/// `PROC_NAME_LEN`, and `execstack::INITIAL_STACK_MAX` all unchanged by
+/// exec-from-FS.
 pub const EXEC_NAME_LEN: usize = 16;
+
+// ---------------------------------------------------------------------------
+// `SYS_EXEC` source selector and the grant triple (slice 5.9, decision D6).
+//
+// Numbered from 1 so a zeroed payload is an obvious "invalid" rather than
+// defaulting to a form — the `SAFECOPY_FROM` / `SAFECOPY_TO` convention, and the
+// same reason `VMCTL_*` / `PRIVCTL_*` / `DIAGCTL_*` start at 1.
+//
+// There is deliberately **no grant-offset field**: the granted buffer holds the
+// image starting at offset 0. That is the rule the BDEV and FS bands already
+// state — a field nothing sets is a field nothing validates.
+// ---------------------------------------------------------------------------
+
+/// Offset of the `SYS_EXEC` source selector (i32).
+pub const EXEC_SRC_OFF: usize = 20;
+
+/// Source selector: resolve the `4..20` name against the MXBI boot archive.
+pub const EXEC_SRC_NAME: i32 = 1;
+/// Source selector: read the image out of the grant described by
+/// [`EXEC_GRANTER_OFF`] / [`EXEC_GRANT_OFF`] / [`EXEC_LEN_OFF`].
+pub const EXEC_SRC_GRANT: i32 = 2;
+
+/// Offset of the granting process's endpoint in an [`EXEC_SRC_GRANT`] payload
+/// (i32).
+///
+/// Unlike every *device* request in this file, the granter **is** a payload field
+/// here, and that is not a confused deputy: `SYS_EXEC`'s caller is PM, a
+/// server-grade process the kernel already trusts with a target-taking call, and
+/// the grant it names was issued *to PM* by VFS. The kernel re-validates the whole
+/// grant with the ordinary `verify_grant` — `who_to` must be PM's own stored
+/// endpoint — so naming someone else's grant here buys nothing. The rule those
+/// device bands state is about a *server* taking a granter from its own client;
+/// this is the kernel taking one from a caller holding the kernel-call bit.
+pub const EXEC_GRANTER_OFF: usize = 24;
+/// Offset of the grant id in an [`EXEC_SRC_GRANT`] payload (i32).
+pub const EXEC_GRANT_OFF: usize = 28;
+/// Offset of the image's byte length in an [`EXEC_SRC_GRANT`] payload (u64, so
+/// 8-aligned relative to the message base — the payload starts at message offset
+/// 8, hence 32; the reasoning [`CDEV_OFFSET_OFF`] documents).
+pub const EXEC_LEN_OFF: usize = 32;
+
+// The `SYS_EXEC` payload fields are ordered, non-overlapping, and fit the 96-byte
+// payload. `EXEC_LEN_OFF` is 8 wide (u64); the rest are 4 (i32), except the name
+// field, which is `EXEC_NAME_LEN`.
+const _: () = assert!(4 + EXEC_NAME_LEN <= EXEC_SRC_OFF);
+const _: () = assert!(EXEC_SRC_OFF + 4 <= EXEC_GRANTER_OFF);
+const _: () = assert!(EXEC_GRANTER_OFF + 4 <= EXEC_GRANT_OFF);
+const _: () = assert!(EXEC_GRANT_OFF + 4 <= EXEC_LEN_OFF);
+const _: () = assert!(EXEC_LEN_OFF + 8 <= 96);
+const _: () = assert!((8 + EXEC_LEN_OFF).is_multiple_of(8));
+// Selector 0 must stay invalid, so neither form may take it.
+const _: () = assert!(EXEC_SRC_NAME != 0 && EXEC_SRC_GRANT != 0);
+const _: () = assert!(EXEC_SRC_NAME != EXEC_SRC_GRANT);
 
 /// Number of kernel calls defined. Reached 18 in Phase 4 (slice 4.3 made
 /// `SYS_SCHEDULE` real and added `SYS_SCHEDCTL`; slice 4.5 added the signal
@@ -1130,6 +1205,42 @@ mod tests {
     #[test]
     fn kernel_call_base_matches_minix3() {
         assert_eq!(KERNEL_CALL, 0x600);
+    }
+
+    #[test]
+    fn sys_exec_payload_offsets_are_ordered_and_disjoint() {
+        // Every field the request defines, in declaration order, with its width.
+        // The `fields.len()` assertion is the point: slice 5.9 added three, and a
+        // fourth must be a *visible* edit rather than a quiet one — this payload
+        // is past the slice-5.6 ABI freeze and there is C in another repository
+        // reading the same numbers.
+        let fields = [
+            ("target", 0usize, 4usize),
+            ("name", 4, EXEC_NAME_LEN),
+            ("src", EXEC_SRC_OFF, 4),
+            ("granter", EXEC_GRANTER_OFF, 4),
+            ("grant", EXEC_GRANT_OFF, 4),
+            ("len", EXEC_LEN_OFF, 8),
+        ];
+        assert_eq!(fields.len(), 6, "a SYS_EXEC payload field was added");
+        assert_ordered_and_disjoint(&fields);
+
+        // The u64 length must be 8-aligned *within the message*, whose payload
+        // starts at byte 8.
+        assert_eq!((8 + EXEC_LEN_OFF) % 8, 0);
+    }
+
+    #[test]
+    fn the_exec_source_selector_reserves_zero() {
+        // A zeroed payload must not name a form. Same convention as
+        // `SAFECOPY_FROM`/`SAFECOPY_TO`, `VMCTL_*` and `PRIVCTL_*`, and the reason
+        // `do_exec` validates the selector before it looks at anything else.
+        assert_eq!(EXEC_SRC_NAME, 1);
+        assert_eq!(EXEC_SRC_GRANT, 2);
+        assert_ne!(EXEC_SRC_NAME, EXEC_SRC_GRANT);
+        for sel in [EXEC_SRC_NAME, EXEC_SRC_GRANT] {
+            assert_ne!(sel, 0);
+        }
     }
 
     #[test]

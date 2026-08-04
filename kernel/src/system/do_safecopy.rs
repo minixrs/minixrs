@@ -156,10 +156,17 @@ pub(super) fn do_safecopy(
 /// failures `okendpt` reports. Collapsing the checks onto one code is
 /// deliberate: a grantee learns "you may not do this", never *which* of the
 /// granter's internal states blocked it.
+///
+/// `pub(super)` as of slice 5.9: `do_exec`'s grant source resolves its image
+/// through **this** validator rather than a second one. Nothing about a grant
+/// naming an ELF is special — `who_to == caller`, `CPF_USED | CPF_VALID`, the
+/// sequence, the access mask, `offset + bytes <= entry.len`, and `user_range_ok`
+/// are all wanted there unchanged — and a private copy would be a second place
+/// for the eleven checks below to be got wrong.
 #[allow(clippy::too_many_arguments)] // one argument per validated field; the
 // alternative is a request struct that exists only to be destructured here
 // (the `elf.rs` / boot-helper precedent).
-fn verify_grant(
+pub(super) fn verify_grant(
     proc_table: &[Proc; N_PROC_SLOTS],
     priv_table: &[Priv; NR_SYS_PROCS],
     caller_idx: usize,

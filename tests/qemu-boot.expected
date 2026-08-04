@@ -37,7 +37,7 @@ minix.rs booting on aarch64
 # init's fork/exec/wait cycle (head-carved kernel traces; slot 15 is the
 # fork-pool base, recycled every cycle; exec renames the child to "worker")
 [ksys SYS_FORK] parent=i nr=10 child_nr=15
-[ksys SYS_EXEC] target=15 name=worker entry=
+[ksys SYS_EXEC] target=15 name=worker src=name entry=
 [ksys SYS_EXIT] target=w nr=15 freed=
 
 # Stub D's designed SIGSEGV chain: page fault -> VM -> SYS_KILL sig=11 -> PM
@@ -257,7 +257,7 @@ minix.rs init: exec stack ok
 # 16 with stubs). A marker naming a slot passes in one config and is vacuous in
 # the other -- the slice-5.5 lesson, applied before it could bite. `entry=` is
 # kept so this matches do_exec's trace and not some other line.
-name=hello entry=
+name=hello src=name entry=
 
 # The milestone itself: a C program compiled against a forked musl, exec'd out of
 # the boot archive, reaching serial through printf -> VFS -> TTY.
