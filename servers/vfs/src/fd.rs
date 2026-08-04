@@ -48,16 +48,24 @@
 //! ## What this table still does not know about
 //!
 //! **Nothing resets a row when a process exits, and proc numbers are recycled.**
-//! Rows became mutable this slice, so a [`Fd::File`] entry now outlives the
-//! process that opened it: PM hands the fork pool's proc numbers back out every
-//! init cycle, and VFS is told nothing about exit (`signal_handler: None`, and no
+//! Rows became mutable in slice 5.8, so a [`Fd::File`] entry outlives the process
+//! that opened it: PM hands the fork pool's proc numbers back out every init
+//! cycle, and VFS is told nothing about exit (`signal_handler: None`, and no
 //! PM→VFS request exists). Today only init opens files, so no row is ever
 //! inherited — but the first forked child that calls `open` would leave a live
 //! descriptor onto an arbitrary inode for whatever process lands on that slot
-//! next, and slice 5.9 (exec-from-FS) is the slice that makes children open files.
-//! **`fork` also does not duplicate the parent's descriptors**, which POSIX
-//! requires. Both are known debt for 5.9, not oversights: closing them needs a
-//! PM→VFS notification the ABI does not have yet.
+//! next. **`fork` also does not duplicate the parent's descriptors**, which POSIX
+//! requires.
+//!
+//! **Slice 5.9 was predicted to force this and did not.** exec-from-FS resolves a
+//! binary by *inode*, through [`VFS_EXEC_STAGE`], with PM staging on the child's
+//! behalf — so no forked child ever holds a descriptor and no row is inherited by
+//! anything. The debt is real and still deferred; what changed is that it now has
+//! no scheduled forcing slice, and closing it needs a PM→VFS exit notification the
+//! ABI does not have. The first thing that will force it is a program that opens a
+//! file *after* being exec'd.
+//!
+//! [`VFS_EXEC_STAGE`]: minixrs_kernel_shared::callnr::VFS_EXEC_STAGE
 
 use minixrs_kernel_shared::callnr::CDEV_MINOR_CONSOLE;
 use minixrs_kernel_shared::com::NR_SERVED_PROCS;

@@ -276,7 +276,7 @@ jobs:
         run: tools/build-musl.sh
       - name: Build kernel
         run: cargo kernel-aarch64
-      - name: Boot in QEMU (45 s wall clock)
+      - name: Boot in QEMU (120 s wall clock)
         env:
           QEMU_EFI_AARCH64: /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
         run: |
@@ -286,7 +286,14 @@ jobs:
           # than letting the log checker report a confusing missing-marker
           # error. The checker step below is the verdict on log content.
           status=0
-          timeout 45 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+          # 45 s until slice 5.9. exec-from-FS made the boot genuinely longer:
+          # `hello` is no longer a memcpy out of the boot archive but ~200 KB
+          # read off the ramdisk through MFS and VFS, one FS_MAX_IO round at a
+          # time, before the first C marker can appear. Locally the last marker
+          # moved from ~27% to ~71% of a 45 s run; CI's TCG is slower than local,
+          # so the budget is raised with real headroom rather than trimmed to
+          # what passes here. The job's own `timeout-minutes` still bounds it.
+          timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
             > qemu.log 2>&1 || status=$?
           echo "qemu run finished with status $status (124 = timeout, expected)"
           if [ "$status" -ne 124 ]; then

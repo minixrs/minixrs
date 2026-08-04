@@ -14,11 +14,27 @@ pub const KERNEL_CALL: i32 = 0x600;
 pub const SYS_GETINFO: i32 = KERNEL_CALL + 0;
 pub const SYS_PRIVCTL: i32 = KERNEL_CALL + 1;
 pub const SYS_FORK: i32 = KERNEL_CALL + 2;
-/// PM → kernel: replace a target proc's program image (slice 4.7). Target
-/// endpoint in payload `0..4` (i32); the boot-embedded binary name (NUL-padded,
-/// `EXEC_NAME_LEN` bytes) in `4..4+EXEC_NAME_LEN`. The kernel resolves the name
-/// in the MXBI archive (`BootImage::module_by_name`), builds a fresh address
-/// space, resets the target to the new entry point, and tears down the old AS.
+/// PM → kernel: replace a target proc's program image (slice 4.7, extended in
+/// 5.9). Target endpoint in payload `0..4` (i32); `argv[0]` / the new proc name
+/// (NUL-padded, [`EXEC_NAME_LEN`] bytes) in `4..4+EXEC_NAME_LEN`; a source
+/// selector in [`EXEC_SRC_OFF`]`..+4`.
+///
+/// Two source forms, and the selector is what tells them apart:
+///
+/// * [`EXEC_SRC_NAME`] — the `4..20` field doubles as an MXBI module name, which
+///   the kernel resolves with `BootImage::module_by_name`. The slice-4.7 form.
+/// * [`EXEC_SRC_GRANT`] — the image's bytes live in a *granted* buffer described
+///   by [`EXEC_GRANTER_OFF`] / [`EXEC_GRANT_OFF`] / [`EXEC_LEN_OFF`], and the
+///   kernel reads them through the grant with the ordinary `verify_grant`
+///   validator. This is what makes exec-from-FS possible without a kernel
+///   filesystem: VFS stages the file and grants it to PM, PM names the grant here
+///   (decision D6 — the kernel keeps ELF authority, PM/VFS do the staging).
+///
+/// In **both** forms `4..20` is `argv[0]` and the proc's new name; only where the
+/// image's bytes come from changes. That is what keeps [`EXEC_NAME_LEN`],
+/// `PROC_NAME_LEN`, and the initial stack's geometry untouched by 5.9 — PM passes
+/// the path's *basename*, never the path.
+///
 /// Target-taking (like `SYS_FORK`). On success the target is resumed at the new
 /// image with no reply; failures return a negative errno to PM.
 pub const SYS_EXEC: i32 = KERNEL_CALL + 3;
@@ -108,10 +124,69 @@ pub const SAFECOPY_FROM: i32 = 1;
 /// `CPF_WRITE` on the grant.
 pub const SAFECOPY_TO: i32 = 2;
 
-/// Length of the boot-embedded binary name carried in the `SYS_EXEC` payload
+/// Length of the `argv[0]` / proc-name field carried in the `SYS_EXEC` payload
 /// (`4..4+EXEC_NAME_LEN`), NUL-padded. Sized to fit the MXBI record name field
 /// (`< 20` bytes); a short name like `"worker"` fits with room to spare.
+///
+/// In the [`EXEC_SRC_NAME`] form this field is *also* the module name the kernel
+/// resolves. In the [`EXEC_SRC_GRANT`] form it is only the name — slice 5.9's
+/// deliberate choice not to carry a user `argv`, which is what leaves this width,
+/// `PROC_NAME_LEN`, and `execstack::INITIAL_STACK_MAX` all unchanged by
+/// exec-from-FS.
 pub const EXEC_NAME_LEN: usize = 16;
+
+// ---------------------------------------------------------------------------
+// `SYS_EXEC` source selector and the grant triple (slice 5.9, decision D6).
+//
+// Numbered from 1 so a zeroed payload is an obvious "invalid" rather than
+// defaulting to a form — the `SAFECOPY_FROM` / `SAFECOPY_TO` convention, and the
+// same reason `VMCTL_*` / `PRIVCTL_*` / `DIAGCTL_*` start at 1.
+//
+// There is deliberately **no grant-offset field**: the granted buffer holds the
+// image starting at offset 0. That is the rule the BDEV and FS bands already
+// state — a field nothing sets is a field nothing validates.
+// ---------------------------------------------------------------------------
+
+/// Offset of the `SYS_EXEC` source selector (i32).
+pub const EXEC_SRC_OFF: usize = 20;
+
+/// Source selector: resolve the `4..20` name against the MXBI boot archive.
+pub const EXEC_SRC_NAME: i32 = 1;
+/// Source selector: read the image out of the grant described by
+/// [`EXEC_GRANTER_OFF`] / [`EXEC_GRANT_OFF`] / [`EXEC_LEN_OFF`].
+pub const EXEC_SRC_GRANT: i32 = 2;
+
+/// Offset of the granting process's endpoint in an [`EXEC_SRC_GRANT`] payload
+/// (i32).
+///
+/// Unlike every *device* request in this file, the granter **is** a payload field
+/// here, and that is not a confused deputy: `SYS_EXEC`'s caller is PM, a
+/// server-grade process the kernel already trusts with a target-taking call, and
+/// the grant it names was issued *to PM* by VFS. The kernel re-validates the whole
+/// grant with the ordinary `verify_grant` — `who_to` must be PM's own stored
+/// endpoint — so naming someone else's grant here buys nothing. The rule those
+/// device bands state is about a *server* taking a granter from its own client;
+/// this is the kernel taking one from a caller holding the kernel-call bit.
+pub const EXEC_GRANTER_OFF: usize = 24;
+/// Offset of the grant id in an [`EXEC_SRC_GRANT`] payload (i32).
+pub const EXEC_GRANT_OFF: usize = 28;
+/// Offset of the image's byte length in an [`EXEC_SRC_GRANT`] payload (u64, so
+/// 8-aligned relative to the message base — the payload starts at message offset
+/// 8, hence 32; the reasoning [`CDEV_OFFSET_OFF`] documents).
+pub const EXEC_LEN_OFF: usize = 32;
+
+// The `SYS_EXEC` payload fields are ordered, non-overlapping, and fit the 96-byte
+// payload. `EXEC_LEN_OFF` is 8 wide (u64); the rest are 4 (i32), except the name
+// field, which is `EXEC_NAME_LEN`.
+const _: () = assert!(4 + EXEC_NAME_LEN <= EXEC_SRC_OFF);
+const _: () = assert!(EXEC_SRC_OFF + 4 <= EXEC_GRANTER_OFF);
+const _: () = assert!(EXEC_GRANTER_OFF + 4 <= EXEC_GRANT_OFF);
+const _: () = assert!(EXEC_GRANT_OFF + 4 <= EXEC_LEN_OFF);
+const _: () = assert!(EXEC_LEN_OFF + 8 <= 96);
+const _: () = assert!((8 + EXEC_LEN_OFF).is_multiple_of(8));
+// Selector 0 must stay invalid, so neither form may take it.
+const _: () = assert!(EXEC_SRC_NAME != 0 && EXEC_SRC_GRANT != 0);
+const _: () = assert!(EXEC_SRC_NAME != EXEC_SRC_GRANT);
 
 /// Number of kernel calls defined. Reached 18 in Phase 4 (slice 4.3 made
 /// `SYS_SCHEDULE` real and added `SYS_SCHEDCTL`; slice 4.5 added the signal
@@ -329,26 +404,46 @@ pub const PM_EXIT: i32 = PM_RQ_BASE + 2;
 /// `ECHILD` in `m_type` if the caller has no children. (slice 4.6b)
 pub const PM_WAIT: i32 = PM_RQ_BASE + 3;
 
-/// User → PM: `execve()`. The caller names its own target: the payload carries
-/// the boot-image module name at [`PM_EXEC_NAME_OFF`]`..+`[`EXEC_NAME_LEN`],
-/// NUL-padded, and PM passes it straight through to `SYS_EXEC` (whose kernel
-/// side has been name-driven since slice 4.7). An all-NUL name is `EINVAL`.
+/// User → PM: `execve()`. The caller names its own target inline, at
+/// [`PM_EXEC_PATH_OFF`]`..+`[`PM_EXEC_PATH_MAX`], NUL-padded. An all-NUL field is
+/// `EINVAL`; a field with no NUL anywhere is `ENAMETOOLONG`, never a truncation
+/// that could resolve somewhere else.
+///
+/// **A leading `/` is the discriminator** (slice 5.9): an absolute path names a
+/// file in the root filesystem, and anything else names a boot-image module. One
+/// field rather than a path plus a form flag, because two fields can disagree —
+/// and it is already the FS band's rule, where `walk::parse_path` answers
+/// `EINVAL` to a relative path since minix.rs has no working directory. It also
+/// settles the warning on `com::ROOTFS_MODULE_NAME`: module names and paths are
+/// disjoint namespaces, so nothing that resolves a *path* can ever name the
+/// `rootfs` blob.
+///
+/// For a path, PM asks VFS to stage the file ([`VFS_EXEC_STAGE`]) and then hands
+/// the kernel the resulting grant; for a module name it forwards the name as it
+/// has since 4.7. Either way `argv[0]` is the **basename**, which is why the
+/// kernel's [`EXEC_NAME_LEN`] field does not have to grow.
 ///
 /// PM sends **no** reply on success (the kernel resumes the caller at the new
 /// image's entry point); on failure the reply `m_type` carries a negative errno
-/// and the caller continues in its old image.
+/// and the caller continues in its old image — so a failed exec is also the
+/// rollback proof.
 ///
-/// Slice 4.7 had no payload at all — PM hardcoded `"worker"`. Slice 5.6 moved the
-/// choice to the caller so `init` can alternate `worker` and `hello`, which is
-/// what keeps 5.5's exec-stack probe alive alongside the C milestone. A real
-/// filesystem *path* (rather than a boot-image module name) arrives with
-/// slice 5.9. (slice 5.6)
+/// Slice 4.7 had no payload at all (PM hardcoded `"worker"`); 5.6 moved the
+/// choice to the caller as a 16-byte module name; 5.9 widened that field to a
+/// path. (slice 5.9)
 pub const PM_EXEC: i32 = PM_RQ_BASE + 4;
 
-/// Offset of the target's boot-image module name in a [`PM_EXEC`] payload,
-/// [`EXEC_NAME_LEN`] bytes, NUL-padded. Shares the kernel's `SYS_EXEC` name
-/// width so PM can forward it without re-framing.
-pub const PM_EXEC_NAME_OFF: usize = 0;
+/// Offset of the target's path or module name in a [`PM_EXEC`] payload.
+pub const PM_EXEC_PATH_OFF: usize = 0;
+
+/// Width of that field, NUL-padded — so the longest path that can travel is
+/// `PM_EXEC_PATH_MAX - 1` bytes.
+///
+/// Equal to [`FS_PATH_MAX`] deliberately: the path's next hop is
+/// [`VFS_EXEC_STAGE`] and then `FS_LOOKUP`, both of which carry it inline in a
+/// field of exactly that width, so a path that fits here fits the whole way down
+/// and PM never has to refuse one the filesystem would have accepted.
+pub const PM_EXEC_PATH_MAX: usize = FS_PATH_MAX;
 
 /// VFS → PM: the slice-5.2 grant demo. Carries a grant id in-band, which is how
 /// grant ids really travel — slice 5.3's [`CDEV_WRITE`] `{minor, grant_id, len,
@@ -384,10 +479,14 @@ const _: () = assert!(PM_RQ_BASE > KERNEL_CALL + (NR_KERN_CALLS as i32 - 1));
 const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < VFS_RQ_BASE);
 const _: () = assert!(PM_RQ_BASE + (NR_PM_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
-// The `PM_EXEC` name fits the 96-byte payload. It shares `EXEC_NAME_LEN` with
-// the kernel's `SYS_EXEC` so PM forwards the bytes without re-framing; that
-// equality is what makes the forward a memcpy rather than a truncation.
-const _: () = assert!(PM_EXEC_NAME_OFF + EXEC_NAME_LEN <= 96);
+// The `PM_EXEC` path fills its own field and fits the 96-byte payload. It shares
+// `FS_PATH_MAX` with the FS band, so a path PM accepts survives every hop down to
+// `FS_LOOKUP` without being re-framed or truncated.
+const _: () = assert!(PM_EXEC_PATH_OFF + PM_EXEC_PATH_MAX <= 96);
+const _: () = assert!(PM_EXEC_PATH_MAX == FS_PATH_MAX);
+// A module name still has to fit the kernel's `SYS_EXEC` field, and so does a
+// path's basename — PM refuses a longer one rather than truncating it.
+const _: () = assert!(EXEC_NAME_LEN <= PM_EXEC_PATH_MAX);
 
 // ---------------------------------------------------------------------------
 // VFS (virtual file system) request numbers — `m_type` values for messages
@@ -485,9 +584,36 @@ pub const VFS_READ: i32 = VFS_RQ_BASE + 2;
 /// MFS keeps no per-open state, so there is no FS-side request to send.
 pub const VFS_CLOSE: i32 = VFS_RQ_BASE + 3;
 
+/// PM → VFS: read a whole executable into VFS's staging buffer and grant it
+/// back (slice 5.9, decision D6).
+///
+/// Payload: the path inline at [`VFS_EXEC_PATH_OFF`], NUL-padded to
+/// [`FS_PATH_MAX`]. **Inline, unlike [`VFS_OPEN`]'s pointer-and-length**, and the
+/// reason is the client: PM already holds the path inline in the `PM_EXEC` it is
+/// serving, so passing it by value costs no `SYS_COPY` — and it deletes the
+/// confused-deputy question outright, because there is no source process for a
+/// caller to misname.
+///
+/// Reply `m_type` is the **file's byte count** (`>= 0`, the band's rule since
+/// slice 5.4), with the grant id at [`VFS_EXEC_GRANT_OFF`] in the reply payload.
+/// The grant is a **direct** one over VFS's own staging buffer carrying
+/// `CPF_READ`, whose grantee is the kernel-stamped `m_source` — there is no
+/// payload field for the grantee and there must never be one.
+///
+/// Errors: `EPERM` for any caller but PM (nothing else has business asking VFS to
+/// stage an image), `EINVAL` for a relative or empty path, `ENAMETOOLONG` for a
+/// field with no NUL, `ENOENT` / `ENOTDIR` from the lookup, `EISDIR` for a
+/// directory, `ENOMEM` for a file larger than [`VFS_EXEC_MAX`], `ENODEV` when
+/// nothing is mounted, and `EIO` for a stream that ended early.
+///
+/// **Nothing releases the grant, and nothing needs to.** Each request re-grants
+/// the same buffer, which bumps the sequence and kills the previous id; PM
+/// serialises exec, so there is never a second staged image alive at once.
+pub const VFS_EXEC_STAGE: i32 = VFS_RQ_BASE + 4;
+
 /// Number of VFS server requests defined so far. Locks VFS's dispatch coverage
 /// the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_VFS_MSGS: usize = 4;
+pub const NR_VFS_MSGS: usize = 5;
 
 /// Offset of the file descriptor in a `VFS_WRITE` / `VFS_READ` / `VFS_CLOSE`
 /// payload (i32).
@@ -499,6 +625,28 @@ pub const VFS_LEN_OFF: usize = 4;
 /// message offset 8, and 8 + 8 is a multiple of 8; the same reasoning
 /// [`CDEV_OFFSET_OFF`] documents).
 pub const VFS_BUF_OFF: usize = 8;
+
+/// Offset of the inline path in a [`VFS_EXEC_STAGE`] payload ([`FS_PATH_MAX`]
+/// NUL-padded bytes). A separate message again, so byte 0 is free.
+pub const VFS_EXEC_PATH_OFF: usize = 0;
+/// Offset of the grant id in a [`VFS_EXEC_STAGE`] **reply** (i32).
+pub const VFS_EXEC_GRANT_OFF: usize = 0;
+
+/// Largest executable VFS will stage for a [`VFS_EXEC_STAGE`].
+///
+/// 256 KiB — a cap on a `.bss` buffer VFS carries for the whole run, so it is
+/// sized against the largest thing that has to fit rather than against what would
+/// be convenient. That is the **musl-flavour** `hello` at ~200 KB, not the SDK
+/// one at ~46 KB: no CI job installs the SDK, so the musl flavour is what
+/// `qemu-smoke` actually builds and the only one this number may be tuned to.
+/// `kernel/build.rs` asserts the built bytes fit and names this constant when
+/// they do not, the `ROOTFS_IMAGE_BLOCKS` precedent.
+///
+/// Sits beside [`CDEV_MAX_IO`] / [`BDEV_MAX_IO`] / [`FS_MAX_IO`] as the fourth
+/// transfer cap in this file, and is the only one that is not a staging chunk: a
+/// short stage is useless, because an ELF cannot be loaded in pieces by a loader
+/// that has no filesystem.
+pub const VFS_EXEC_MAX: usize = 256 * 1024;
 
 /// Offset of the caller's path-buffer address in a `VFS_OPEN` payload (u64, and
 /// 8-aligned within the message for the reason [`VFS_BUF_OFF`] gives).
@@ -529,6 +677,17 @@ const _: () = assert!((8 + VFS_BUF_OFF).is_multiple_of(8));
 const _: () = assert!(VFS_PATH_OFF + 8 <= VFS_PATH_LEN_OFF);
 const _: () = assert!(VFS_PATH_LEN_OFF + 4 <= 96);
 const _: () = assert!((8 + VFS_PATH_OFF).is_multiple_of(8));
+
+// The `VFS_EXEC_STAGE` request's inline path and its reply's grant id each fill
+// their own message, so both may start at byte 0.
+const _: () = assert!(VFS_EXEC_PATH_OFF + FS_PATH_MAX <= 96);
+const _: () = assert!(VFS_EXEC_GRANT_OFF + 4 <= 96);
+// A staged image's byte count must round-trip through the i32 reply `m_type`, or
+// it would land in the negative, errno-shaped band and read as a failure...
+const _: () = assert!(VFS_EXEC_MAX <= i32::MAX as usize);
+// ...and the kernel must be willing to map what VFS is willing to stage, or a
+// file inside this cap could still be refused with `EINVAL` by `do_exec`.
+const _: () = assert!(VFS_EXEC_MAX <= crate::execimage::MAX_IMAGE_BYTES);
 
 // ---------------------------------------------------------------------------
 // FS (file system) request numbers — `m_type` values for messages addressed to a
@@ -1133,6 +1292,42 @@ mod tests {
     }
 
     #[test]
+    fn sys_exec_payload_offsets_are_ordered_and_disjoint() {
+        // Every field the request defines, in declaration order, with its width.
+        // The `fields.len()` assertion is the point: slice 5.9 added three, and a
+        // fourth must be a *visible* edit rather than a quiet one — this payload
+        // is past the slice-5.6 ABI freeze and there is C in another repository
+        // reading the same numbers.
+        let fields = [
+            ("target", 0usize, 4usize),
+            ("name", 4, EXEC_NAME_LEN),
+            ("src", EXEC_SRC_OFF, 4),
+            ("granter", EXEC_GRANTER_OFF, 4),
+            ("grant", EXEC_GRANT_OFF, 4),
+            ("len", EXEC_LEN_OFF, 8),
+        ];
+        assert_eq!(fields.len(), 6, "a SYS_EXEC payload field was added");
+        assert_ordered_and_disjoint(&fields);
+
+        // The u64 length must be 8-aligned *within the message*, whose payload
+        // starts at byte 8.
+        assert_eq!((8 + EXEC_LEN_OFF) % 8, 0);
+    }
+
+    #[test]
+    fn the_exec_source_selector_reserves_zero() {
+        // A zeroed payload must not name a form. Same convention as
+        // `SAFECOPY_FROM`/`SAFECOPY_TO`, `VMCTL_*` and `PRIVCTL_*`, and the reason
+        // `do_exec` validates the selector before it looks at anything else.
+        assert_eq!(EXEC_SRC_NAME, 1);
+        assert_eq!(EXEC_SRC_GRANT, 2);
+        assert_ne!(EXEC_SRC_NAME, EXEC_SRC_GRANT);
+        for sel in [EXEC_SRC_NAME, EXEC_SRC_GRANT] {
+            assert_ne!(sel, 0);
+        }
+    }
+
+    #[test]
     fn get_whoami_is_frozen_at_twelve() {
         // NOT a MINIX 3 value, despite what this test used to claim (and be
         // named): modern MINIX 3 numbers `GET_WHOAMI` 19, in `include/minix/com.h`.
@@ -1365,6 +1560,7 @@ mod tests {
                 VFS_OPEN,
                 VFS_READ,
                 VFS_CLOSE,
+                VFS_EXEC_STAGE,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1443,6 +1639,7 @@ mod tests {
                 VFS_OPEN,
                 VFS_READ,
                 VFS_CLOSE,
+                VFS_EXEC_STAGE,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1477,7 +1674,7 @@ mod tests {
     fn vfs_msgs_contiguous_from_base() {
         // VFS requests are contiguous from VFS_RQ_BASE; NR_VFS_MSGS locks the
         // VFS server's dispatch coverage.
-        let msgs = [VFS_WRITE, VFS_OPEN, VFS_READ, VFS_CLOSE];
+        let msgs = [VFS_WRITE, VFS_OPEN, VFS_READ, VFS_CLOSE, VFS_EXEC_STAGE];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, VFS_RQ_BASE + i as i32);
         }
@@ -1491,7 +1688,7 @@ mod tests {
         // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a server's m_type
         // dispatcher and the SEF classifier never collide. VFS sits between PM
         // and CDEV, which is what its two bounds assert.
-        for m in [VFS_WRITE, VFS_OPEN, VFS_READ, VFS_CLOSE] {
+        for m in [VFS_WRITE, VFS_OPEN, VFS_READ, VFS_CLOSE, VFS_EXEC_STAGE] {
             for other in [
                 PM_GETPID,
                 PM_FORK,
@@ -1596,6 +1793,57 @@ mod tests {
     }
 
     #[test]
+    fn vfs_exec_stage_payload_offsets_are_ordered_and_disjoint() {
+        // One field each way, and that is the record: the path travels **inline**
+        // rather than as a pointer, because the client is PM — which already
+        // holds it inline in the `PM_EXEC` it is serving — so passing it by value
+        // costs no `SYS_COPY` and there is no source process for a caller to
+        // misname. There is deliberately no grantee field in the reply either:
+        // VFS grants the staged bytes to the kernel-stamped `m_source`.
+        let request = [("path", VFS_EXEC_PATH_OFF, FS_PATH_MAX)];
+        let reply = [("grant", VFS_EXEC_GRANT_OFF, 4usize)];
+        assert_eq!(request.len(), 1, "a VFS_EXEC_STAGE request field was added");
+        assert_eq!(reply.len(), 1, "a VFS_EXEC_STAGE reply field was added");
+        assert_ordered_and_disjoint(&request);
+        assert_ordered_and_disjoint(&reply);
+        assert_eq!(VFS_EXEC_PATH_OFF, 0);
+        assert_eq!(VFS_EXEC_GRANT_OFF, 0, "the FS band's reuse-byte-0 shape");
+    }
+
+    #[test]
+    fn the_exec_staging_cap_clears_the_musl_hello() {
+        // Sized against the flavour CI actually builds. The musl `hello` is
+        // ~200 KB and the SDK one ~46 KB, and no CI job installs an SDK — so a
+        // cap tuned to the smaller number would pass locally and fail
+        // `qemu-smoke`. `kernel/build.rs` asserts the built bytes fit; this is
+        // the standing headroom claim beside it.
+        assert_eq!(VFS_EXEC_MAX, 256 * 1024);
+        assert_eq!(VFS_EXEC_MAX.max(200_152), VFS_EXEC_MAX);
+
+        // The count comes back as the reply `m_type`, so it must stay positive
+        // in an i32; and the kernel must be willing to map what VFS will stage,
+        // or a file inside this cap could still be refused by `do_exec`.
+        assert_eq!(VFS_EXEC_MAX.min(i32::MAX as usize), VFS_EXEC_MAX);
+        assert_eq!(
+            VFS_EXEC_MAX.min(crate::execimage::MAX_IMAGE_BYTES),
+            VFS_EXEC_MAX
+        );
+    }
+
+    #[test]
+    fn the_pm_exec_field_carries_a_whole_path() {
+        // Slice 5.9 widened it from a 16-byte module name. It matches the FS
+        // band's width so a path PM accepts survives every hop down to
+        // `FS_LOOKUP` unrefrained, and `EXEC_NAME_LEN` still fits inside it
+        // because `argv[0]` is the path's *basename*, not the path.
+        assert_eq!(PM_EXEC_PATH_OFF, 0);
+        assert_eq!(PM_EXEC_PATH_MAX, FS_PATH_MAX);
+        assert_eq!(EXEC_NAME_LEN.min(PM_EXEC_PATH_MAX), EXEC_NAME_LEN);
+        let end = PM_EXEC_PATH_OFF + PM_EXEC_PATH_MAX;
+        assert_eq!(end.min(96), end);
+    }
+
+    #[test]
     fn vfs_read_reuses_the_write_payload_verbatim() {
         // Not a tautology: it is the record of a decision. `read` and `write`
         // differ only in which way the bytes travel, so they share one set of
@@ -1642,6 +1890,7 @@ mod tests {
                 VFS_OPEN,
                 VFS_READ,
                 VFS_CLOSE,
+                VFS_EXEC_STAGE,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1739,6 +1988,7 @@ mod tests {
                 VFS_OPEN,
                 VFS_READ,
                 VFS_CLOSE,
+                VFS_EXEC_STAGE,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1907,6 +2157,7 @@ mod tests {
                 VFS_OPEN,
                 VFS_READ,
                 VFS_CLOSE,
+                VFS_EXEC_STAGE,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,

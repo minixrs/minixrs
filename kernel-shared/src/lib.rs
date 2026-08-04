@@ -17,6 +17,7 @@ pub mod callnr;
 pub mod com;
 pub mod endpoint;
 pub mod error;
+pub mod execimage;
 pub mod execstack;
 pub mod grant;
 pub mod ipc_const;

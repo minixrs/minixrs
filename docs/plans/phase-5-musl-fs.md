@@ -1211,7 +1211,7 @@ over-long or out-of-range request is `EINVAL` rather than a short read — a
 deliberate departure from CDEV, because a filesystem cannot interpret half a
 block.
 
-### Slice 5.8: MFS server (read-only) + FS band + VFS mount/open/read ◀ ready (branch `feature/slice-5.8-mfs-server`, pending merge)
+### Slice 5.8: MFS server (read-only) + FS band + VFS mount/open/read ✓ shipped (PR #51, merged 2026-08-02)
 
 **Goal:** files readable through the full VFS→MFS→BDEV→ramdisk stack.
 
@@ -1297,21 +1297,100 @@ Two results worth keeping, because both contradict what the slice plan predicted
   branch was exercised the recommended way instead: break the key, and separately
   drop the peer, which produced `fs.ds FAIL rc=-3 fallback=6` for VFS's lookup.
 
-### Slice 5.9: exec-from-FS — **milestone B, Phase 5 complete**
+### Slice 5.9: exec-from-FS — **milestone B, Phase 5 complete** ◀ ready (branch `feature/slice-5.9-exec-from-fs`, pending merge)
 
 **Goal:** D6 + D12 — `PM_EXEC("/bin/hello")` end-to-end from the MFS root.
 
-**Scope:** `PM_EXEC` payload gains a path form; PM asks VFS to stage the
-binary (VFS reads it from MFS into a static exec buffer — capped, asserted
-against hello's size — and direct-grants it to PM's flow); `SYS_EXEC` grant
-form `(target, granter, grant_id, len)`; `elf.rs` chunked-source refactor
-(boot-slice source + grant source) + `p_memsz` cap hardening; rollback on
-every staging failure (the 4.6 rollback discipline). The name form and
-worker stay as boot-embedded regression. init execs `/bin/hello`.
+**Scope as planned:** `PM_EXEC` payload gains a path form; PM asks VFS to
+stage the binary (VFS reads it from MFS into a static exec buffer — capped,
+asserted against hello's size — and direct-grants it to PM's flow);
+`SYS_EXEC` grant form `(target, granter, grant_id, len)`; `elf.rs`
+chunked-source refactor (boot-slice source + grant source) + `p_memsz` cap
+hardening; rollback on every staging failure (the 4.6 rollback discipline).
+The name form and worker stay as boot-embedded regression. init execs
+`/bin/hello`.
 
 **Proof (milestone B):** full-stack trace — `[ksys SYS_EXEC]` grant form,
 MFS/BDEV read traffic, then hello's printf on serial. `docs/plan.md` Phase 5
 milestone flips; Phase 5 complete.
+
+#### As built
+
+Landed as two boot-green commits: **5.9a** the kernel half, **5.9b** the
+VFS/PM/init half plus the `kernel/build.rs` drop.
+
+**The boot-archive `hello` module is gone.** Keeping it would have made
+`minix.rs hello: Hello from C!` unable to distinguish a boot-archive exec
+from a filesystem one — the same bytes reach the console either way, the
+5.5/5.6 "byte-identical markers" trap. `/bin/hello` in the MinixFS image is
+now the only copy, so the five C markers *are* the exec-from-FS proof.
+`worker` stays boot-embedded as the name-form regression, which is why
+`EXEC_ONLY_PROC_NR` is still in use.
+
+**`argv[0]` is the path's basename, never the path.** That one choice left
+`EXEC_NAME_LEN`, `PROC_NAME_LEN`, `execstack::INITIAL_STACK_MAX`, `worker`'s
+`ARGV0_NAMES` set, and the `name=hello` marker all untouched — and it is what
+makes the sysroot-absent configuration (where `/bin/hello` holds the `worker`
+ELF) boot clean instead of printing the forbidden `worker: stack FAIL`.
+
+**Three things came out differently from the plan:**
+
+1. **`rd_name` cannot express the NUL rule.** It reports "no NUL anywhere"
+   and "a full-width name" identically, and those are `ENAMETOOLONG` and
+   `EINVAL`. PM's `path::parse` therefore takes the payload's whole
+   fixed-width field as raw bytes. Caught by the `too-long` probe on the
+   first boot of 5.9b, not by review.
+2. **VFS's boot selftest stages `/etc/pattern`, not `/bin/hello`.** Two
+   reasons, both discovered by measurement: `hello`'s size is
+   configuration-dependent (SDK ~46 KB, musl ~200 KB, fallback ~15 KB) so a
+   count keyed on it is vacuous in two configurations out of three, while
+   `/etc/pattern` is 40 KiB in all of them and the marker can assert
+   `n=40960`; and it is ~5× cheaper, which matters because VFS's whole
+   prologue runs before its receive loop and every client waits behind it.
+3. **`qemu-smoke`'s boot budget went 45 s → 120 s.** exec-from-FS makes the
+   boot genuinely longer — `hello` is no longer a memcpy out of the boot
+   archive but ~200 KB read off the ramdisk through MFS and VFS, one
+   `FS_MAX_IO` round at a time. Measured locally on the musl flavour: the
+   last C marker moved from ~27% to ~71% of a 45 s run. CI's TCG is slower
+   than local, so the budget was raised with real headroom rather than
+   trimmed to what passes here.
+
+**The fd-table debt was *not* forced, contrary to `fd.rs`'s prediction.** PM
+stages on the child's behalf and VFS resolves the binary by inode with no
+descriptor at all, so no forked child ever holds an fd. The comment is
+re-pointed rather than the debt closed; the first thing that will force it is
+a program that opens a file *after* being exec'd.
+
+#### Mutation table
+
+Applied to an uncommitted tree, observed, restored from the scratchpad. Every
+run was checked for `error[E` first — a mutation that fails to compile is
+indistinguishable from one that worked.
+
+| mutation | predicted | observed |
+|---|---|---|
+| drop VFS's `m_source != PM` guard | `exec.deny FAIL not-pm` | `exec.deny FAIL stage-not-pm` ✓ |
+| VFS grants PM `CPF_WRITE` not `CPF_READ` | C markers vanish | C markers **and** `name=hello src=grant` vanish, plus `exec.deny FAIL not-elf` — louder than predicted, because the `/etc/motd` probe now gets `EPERM` where it expected `ENOEXEC` |
+| drop the `off` advance in VFS's stage loop | C markers vanish | VFS **wedges** — the loop never converges, so `exec.stage` never prints and every VFS client blocks behind it. Loud, but as a hang rather than a marker change |
+| break the chunked source's `p_offset + off` | `src=grant` present, C markers vanish | *every* marker vanishes: `ElfSource::read` is shared, so the boot **servers** fail to load too. Less targeted than planned, and inherently so |
+| `load_exec_image` folds every `ElfError` to `ENOMEM` | `exec.deny FAIL not-elf` | `exec.deny FAIL not-elf` ✓ |
+| PM ignores the leading `/` | C markers vanish | C markers and `src=grant` vanish, `name=worker src=name` only, plus `exec.deny FAIL is-dir` ✓ |
+| PM passes the whole path as `argv[0]` | `name=hello src=grant entry=` vanishes | vanishes; the trace reads `name=/bin/hello src=grant`, and the C program still runs ✓ |
+
+**Expected non-results, recorded rather than chased:** the `p_memsz` /
+`MAX_PHNUM` caps and the `size > VFS_EXEC_MAX` refusal move nothing, because
+no file in the image is large enough to trip them — they are covered by the
+`execimage` and `stage` host tests instead. Likewise stubbing the brand scan
+to `Ok` moves nothing, since every binary in the tree is branded.
+
+**Boot matrix, all four rows.** (1) default/SDK: 85/85. (2)
+`MINIXRS_SDK=/nonexistent`, the in-tree musl flavour CI builds: 85/85 at 45 s
+after the selftest was made cheaper (it needed 70 s before). (3)
+`--no-default-features`: every 5.9 marker present, nothing forbidden; the only
+misses are the stub markers the expected file requires and that configuration
+has no stubs, as designed. (4) musl sysroot moved aside, so `/bin/hello` holds
+the `worker` ELF: nothing forbidden, boot does not hang, `/bin/hello` execs
+from the filesystem with `argv[0] = "hello"`.
 
 ### Slice 5.10 (stretch): MFS write path
 

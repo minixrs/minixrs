@@ -49,18 +49,18 @@ minixrs_abi_note::brand!();
 use minixrs_ipc::ipc_sendrec;
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    CDEV_MAX_IO, EXEC_NAME_LEN, FS_PATH_MAX, NR_VFS_MSGS, PM_EXEC, PM_EXEC_NAME_OFF, PM_FORK,
-    PM_WAIT, VFS_BUF_OFF, VFS_CLOSE, VFS_FD_OFF, VFS_LEN_OFF, VFS_OPEN, VFS_PATH_LEN_OFF,
-    VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE, VFS_WRITE,
+    CDEV_MAX_IO, FS_PATH_MAX, NR_VFS_MSGS, PM_EXEC, PM_EXEC_PATH_MAX, PM_EXEC_PATH_OFF, PM_FORK,
+    PM_WAIT, VFS_BUF_OFF, VFS_CLOSE, VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE, VFS_FD_OFF, VFS_LEN_OFF,
+    VFS_OPEN, VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{
-    EBADF, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, EROFS, OK,
+    EBADF, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOEXEC, ENOSYS, EPERM, EROFS, OK,
 };
 use minixrs_kernel_shared::execstack::EXEC_STACK_PROBE_PASS;
 use minixrs_kernel_shared::message::USER_VA_TOP;
-use minixrs_kernel_shared::rootfs::{ROOTFS_MOTD, ROOTFS_MOTD_PATH};
+use minixrs_kernel_shared::rootfs::{ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH};
 use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
 
 /// The boot loader primes `SP_EL0` before `eret`, so `_start` can dive straight
@@ -141,26 +141,34 @@ const _: () = assert!(UNMAPPED_VA != 0);
 const _: () = assert!(UNMAPPED_VA < USER_VA_TOP);
 const _: () = assert!(UNMAPPED_VA < USER_DEVICE_WINDOW_BASE);
 
-/// The boot-image modules `init` execs, in rotation — one per fork cycle.
+/// What `init` execs, in rotation — one per fork cycle.
 ///
 /// **`worker` must stay first.** It is slice 5.5's exec-stack probe, and the
 /// verdict is keyed on the *first* child's pid ([`main`]'s `probe_pid`), so
 /// reordering this array silently retires the `exec stack ok` marker while
 /// leaving every other marker in place.
 ///
-/// Alternating rather than switching outright is the whole point: `hello` is the
-/// slice-5.6 C milestone, but retiring `worker` to make room would take the
-/// exec-ABI proof down with it. Both traces land inside the `[ksys SYS_EXEC]`
-/// head carve-out (6 calls), so both are observable in a boot log.
-const EXEC_TARGETS: [&str; 2] = ["worker", "hello"];
+/// The two entries are now *different forms*, not just different programs.
+/// `worker` is a boot-image module name — slice 4.7's form, and the only thing
+/// keeping it live. [`ROOTFS_HELLO_PATH`] is an absolute path, so it goes through
+/// slice 5.9's whole chain: PM → VFS → MFS → the ramdisk, staged, granted, and
+/// read by the kernel through that grant. Since 5.9 dropped `hello` from the boot
+/// archive there is no other way to reach it, which is what makes the C markers
+/// *proof* of exec-from-FS rather than merely compatible with it.
+///
+/// Alternating rather than switching outright is still the point: retiring
+/// `worker` would take the exec-ABI proof down with it. Both traces land inside
+/// the `[ksys SYS_EXEC]` head carve-out (6 calls), so both are observable.
+const EXEC_TARGETS: [&str; 2] = ["worker", ROOTFS_HELLO_PATH];
 
-// Each name has to fit the `PM_EXEC` payload field, which is the same width as
-// the kernel's `SYS_EXEC` field — so a name that fits here forwards uncut.
+// Each target has to fit the `PM_EXEC` payload field, which is a whole path's
+// worth since slice 5.9 — a module name that fit the old 16-byte field still
+// fits. What PM caps at `EXEC_NAME_LEN` is a path's *basename*, not the path.
 const _: () = {
     let mut i = 0;
     while i < EXEC_TARGETS.len() {
-        assert!(!EXEC_TARGETS[i].is_empty(), "an empty name is EINVAL");
-        assert!(EXEC_TARGETS[i].len() <= EXEC_NAME_LEN);
+        assert!(!EXEC_TARGETS[i].is_empty(), "an empty target is EINVAL");
+        assert!(EXEC_TARGETS[i].len() < PM_EXEC_PATH_MAX);
         i += 1;
     }
 };
@@ -189,6 +197,11 @@ fn main() -> ! {
     // localizes to the `fs.*` markers instead of taking 5.4's, 5.5's, and 5.6's
     // with it. Do not reorder this prologue.
     fs_demo(vfs);
+    // The exec battery runs last in the prologue, the standing rule: it is the
+    // newest code here, so a hang inside it localizes to `exec.deny` instead of
+    // taking 5.4's, 5.5's, 5.6's and 5.8's markers with it. Every probe execs
+    // *init itself* and must fail — see [`exec_denials`].
+    exec_denials(pm, vfs);
 
     // One-shot: the exec-ABI verdict of the first child init forks (slice 5.5).
     //
@@ -220,10 +233,7 @@ fn main() -> ! {
                 // Child: replace this image with `target`. PM issues `SYS_EXEC`
                 // and the kernel resumes us at the new image's `_start`, so this
                 // SENDREC never returns on success.
-                let mut e = pm_msg(PM_EXEC);
-                let bytes = target.as_bytes();
-                e.payload[PM_EXEC_NAME_OFF..PM_EXEC_NAME_OFF + bytes.len()].copy_from_slice(bytes);
-                let _ = ipc_sendrec(pm, &mut e);
+                let _ = exec_request(pm, target.as_bytes());
                 // Unreachable on success; park defensively if exec ever failed.
                 loop {
                     core::hint::spin_loop()
@@ -530,6 +540,143 @@ fn open_denials(vfs: Endpoint) {
     if denied == OPEN_DENIAL_PROBES {
         let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=8\n");
     }
+}
+
+// ----- Slice 5.9: the exec-from-FS denial battery ---------------------------
+
+/// The `PM_EXEC` requests that must be refused, each valid but for one thing —
+/// **and every one of them is init exec'ing *itself***.
+///
+/// That is safe precisely because of the invariant the whole design rests on: a
+/// failed exec leaves the caller on its old image, untouched, because nothing is
+/// committed until `SYS_EXEC` reaches its point of no return. So this battery is
+/// not merely a set of probes, it **is** the rollback proof — if any one of them
+/// half-succeeded, init would be replaced mid-loop and every marker after this
+/// point would vanish along with the system.
+///
+///   - `no-such` — an absolute path with no such file. `ENOENT`, from MFS's
+///     directory scan, relayed by VFS and PM unflattened.
+///   - `is-dir` — `/etc`, a directory. `EISDIR` from VFS's `open::classify`,
+///     which the stager reuses; delete that arm and VFS would stage a directory's
+///     raw blocks and hand them to the loader as an ELF.
+///   - `relative` — `etc/motd`, no leading `/`. `EINVAL`: PM reads it as a
+///     *module* name (that is what the discriminator means), and no such module
+///     exists, so the kernel answers `ENOENT`... which is why this probe expects
+///     `ENOENT` rather than `EINVAL`. The distinction is the discriminator
+///     working, not failing.
+///   - `too-long` — a payload field with no NUL anywhere. `ENAMETOOLONG`, never a
+///     truncated path resolving to some other program.
+///   - `empty` — an all-NUL field. `EINVAL`; it names nothing.
+///   - `no-module` — a bare name that is not in the boot archive. `ENOENT`, from
+///     `module_by_name`, and the arm that proves the name form still exists.
+///   - **`not-elf`** — `/etc/motd`. It stages perfectly: the path resolves, VFS
+///     reads all 31 bytes, PM grants them to the kernel, and the *loader* refuses
+///     them. `ENOEXEC`. The strongest probe here by some distance — it drives the
+///     entire staging chain, the loader's rejection, and the rollback in one
+///     message, and it is the only thing that distinguishes `ENOEXEC` from the
+///     `ENOMEM` every loader failure used to fold into.
+///   - `stage-not-pm` — `VFS_EXEC_STAGE` sent by init *directly*. `EPERM`, from
+///     VFS's not-PM guard, and the only exercise of it anywhere.
+///
+/// Reported as a count on fd 1, through the write path under test, since init has
+/// no debug channel of its own.
+#[cfg_attr(test, allow(dead_code))]
+fn exec_denials(pm: Endpoint, vfs: Endpoint) {
+    let mut denied = 0usize;
+
+    for (name, target, want) in [
+        ("no-such", "/no-such-file", ENOENT),
+        ("is-dir", "/etc", EISDIR),
+        // A relative path is a *module* name by the leading-`/` rule, and no such
+        // module is packed — so the honest answer is `ENOENT` from the archive
+        // lookup, not `EINVAL`. Expecting the right one is the assertion.
+        ("relative", "etc/motd", ENOENT),
+        ("no-module", "nosuchmod", ENOENT),
+        ("not-elf", ROOTFS_MOTD_PATH, ENOEXEC),
+    ] {
+        if exec_request(pm, target.as_bytes()) == want {
+            denied += 1;
+        } else {
+            return report_exec_fail(vfs, name);
+        }
+    }
+
+    // A field with no NUL anywhere, and one that is entirely NUL. Built as raw
+    // byte fields so PM's own checks are what refuse them.
+    if exec_request(pm, &[b'a'; PM_EXEC_PATH_MAX]) == ENAMETOOLONG {
+        denied += 1;
+    } else {
+        return report_exec_fail(vfs, "too-long");
+    }
+    if exec_request(pm, b"") == EINVAL {
+        denied += 1;
+    } else {
+        return report_exec_fail(vfs, "empty");
+    }
+
+    // VFS's not-PM guard: init asking VFS to stage an image on its own account.
+    // Reaches VFS at all only because init's `ipc_to` includes it (the shared
+    // USER privilege), which is exactly the situation the guard exists for.
+    let mut m = Message {
+        m_source: 0,
+        m_type: VFS_EXEC_STAGE,
+        payload: [0u8; 96],
+    };
+    let p = ROOTFS_HELLO_PATH.as_bytes();
+    m.payload[VFS_EXEC_PATH_OFF..VFS_EXEC_PATH_OFF + p.len()].copy_from_slice(p);
+    let rc = if ipc_sendrec(vfs, &mut m) == OK {
+        m.m_type
+    } else {
+        OK
+    };
+    if rc == EPERM {
+        denied += 1;
+    } else {
+        return report_exec_fail(vfs, "stage-not-pm");
+    }
+
+    if denied == EXEC_DENIAL_PROBES {
+        let _ = vfs_write(vfs, STDOUT, b"minix.rs init: exec.deny ok n=8\n");
+    }
+}
+
+/// Probes [`exec_denials`] runs, named rather than counted inline — the
+/// `OPEN_DENIAL_PROBES` reason: adding one without counting it must make the
+/// marker *vanish*, which CI catches, rather than silently under-report, which it
+/// cannot. The `n=` in the marker is this number spelled out, because init has no
+/// way to format an integer.
+const EXEC_DENIAL_PROBES: usize = 8;
+
+/// Send one `PM_EXEC` with `target` written verbatim into the payload field, and
+/// return the reply `m_type`.
+///
+/// Verbatim rather than through a checked marshaller, because two of the probes
+/// are field-level malformations (no NUL, all NUL) that a marshaller would refuse
+/// before the wire — and a probe its own client rejects proves nothing about PM.
+/// The `min` is the only guard, and it cannot fire for anything this file sends.
+///
+/// **On success this never returns**, since the kernel resumes the caller at the
+/// new image. Every call here is expected to fail; that is the point.
+#[cfg_attr(test, allow(dead_code))]
+fn exec_request(pm: Endpoint, target: &[u8]) -> i32 {
+    let mut m = pm_msg(PM_EXEC);
+    let n = target.len().min(PM_EXEC_PATH_MAX);
+    m.payload[PM_EXEC_PATH_OFF..PM_EXEC_PATH_OFF + n].copy_from_slice(&target[..n]);
+    let trap_rc = ipc_sendrec(pm, &mut m);
+    if trap_rc != OK {
+        return trap_rc;
+    }
+    m.m_type
+}
+
+/// Report a failing `exec` probe by name, on fd 2.
+#[cfg_attr(test, allow(dead_code))]
+fn report_exec_fail(vfs: Endpoint, name: &str) {
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: exec.deny FAIL ");
+    n = append(&mut line, n, name.as_bytes());
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
 }
 
 /// Probes [`open_denials`] runs, named rather than counted inline — VFS's

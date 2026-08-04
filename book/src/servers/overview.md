@@ -48,7 +48,7 @@ take; it has to find a home outside that span.
 | Base | Value | Server / purpose |
 |------|-------|------------------|
 | `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC` |
-| `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` |
+| `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE` |
 | `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` (MFS) |
 | `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`) |
 | `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY) |
@@ -165,7 +165,7 @@ disposes of each — `SYS_ENDKSIG` to acknowledge a survivor, or `SYS_EXIT` to
 terminate. Handlers (catching, `sigaction`) are Phase 5; Phase 4's default action
 for a user process is termination.
 
-## VFS: the write and read paths
+## VFS: the write, read, and exec-staging paths
 
 **VFS** (`servers/vfs/`) turns a small integer into something you can read from or
 write to. Since slice 5.4 it does the writing for real — an ordinary user process
@@ -256,6 +256,43 @@ Two more properties, each with its own boot marker:
   return less than asked for, and a file read is short at EOF regardless. EOF is a
   read returning `0` — no file's size is cached anywhere along the path, so that
   is the single source of truth.
+
+### Staging an executable
+
+Slice 5.9 gave VFS one more request, and it is the only one that reads a *whole*
+file:
+
+```text
+PM ──VFS_EXEC_STAGE{path}──► VFS ──FS_LOOKUP──► MFS   → (ino, mode, size)
+                              │
+                              ├──FS_READ × N──► MFS   → bytes into EXEC_STAGE
+                              │
+                              └── direct grant over EXEC_STAGE (CPF_READ) ──► PM
+```
+
+PM hands that grant to `SYS_EXEC`, and the **kernel** reads the ELF through it —
+so the bytes pass through neither PM nor the kernel's own memory, and the kernel
+gains no filesystem (decision D6). Four things are worth stating:
+
+- **The path travels inline**, unlike `VFS_OPEN`'s pointer-and-length. The client
+  is PM, which already holds the path inline in the `PM_EXEC` it is serving, so
+  passing it by value costs no `SYS_COPY` — and it deletes the confused-deputy
+  question outright, because there is no source process for a caller to misname.
+- **Only PM may ask.** Any other `m_source` is `EPERM`, and init's denial battery
+  is the only thing that exercises that guard.
+- **A short stream is `EIO`, not a short stage.** Everywhere else in VFS a partial
+  transfer is a legitimate answer; here it is not, because an ELF cannot be loaded
+  in pieces by a loader with no filesystem.
+- **The staging buffer is a 256 KiB `.bss` static**, for MFS's block-buffer
+  reason: a server's stack is one page, so a local would fault into VM's SIGSEGV
+  arm, which prints nothing the forbidden-marker list catches. Unlike MFS's block
+  buffer it needs no capability token and no borrow discipline — **VFS never
+  dereferences the staged bytes**. MFS writes into them by safecopy and the kernel
+  reads them through the grant; VFS only ever needs the address.
+
+Nothing releases the grant afterwards and nothing needs to: each request re-grants
+the same buffer, which bumps the sequence and kills the previous id, and PM
+serialises exec so two staged images are never alive at once.
 
 VFS also remains the system's first *grant* client and first *console* client:
 its startup still direct-grants a read-only buffer to PM (slice 5.2) and drives

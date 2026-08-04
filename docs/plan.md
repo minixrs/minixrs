@@ -460,7 +460,7 @@ Aggregate scope (Phase 3 as a whole):
 Complete — 8 PR-sized slices (9 PRs), PRs #23–#31, merged 2026-06-14 →
 2026-07-18. Two scope decisions shaped the phase: **exec is real but
 boot-embedded** (no filesystem/musl until Phase 5, so `SYS_EXEC` loads ELF
-binaries packed into the boot-image archive; Phase 5 swaps the source to a VFS
+binaries packed into the boot-image archive; slice 5.9 added the second source, a VFS
 file with no PM/kernel rework), and **scheduling moved to a real user-space
 SCHED** by making the kernel scheduler *delegatable* rather than replacing it.
 Full slice history: [`docs/plans/phase-4-servers.md`](plans/phase-4-servers.md).
@@ -531,8 +531,8 @@ to Phase 7; TTY input/IRQs to Phase 6.
 - **5.6** musl fork (`minixrs/musl-minixrs` @ v1.2.6) + `src/minixrs` port + boot-embedded hello C program — **milestone A; ABI freeze** ✓ shipped (PR #47, merged 2026-07-26)
 - **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ✓ shipped (PR #48, merged 2026-07-27)
 - **P3c** (toolchain program, out-of-band): `kernel/build.rs` consumes `$MINIXRS_SDK` — `hello` builds from one `clang --target=aarch64-unknown-minixrs` call — **milestone M3a** ✓ shipped (PR #50, merged 2026-07-30)
-- **5.8** MFS server (read-only) + FS band + VFS mount/open/read ◀ ready (branch `feature/slice-5.8-mfs-server`, pending merge)
-- **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5 complete**
+- **5.8** MFS server (read-only) + FS band + VFS mount/open/read ✓ shipped (PR #51, merged 2026-08-02)
+- **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5 complete** ◀ ready (branch `feature/slice-5.9-exec-from-fs`, pending merge)
 - **5.10** stretch: MFS write path
 - **5.11** stretch: `/dev/null` + `/dev/zero`
 

@@ -75,6 +75,23 @@
 //! limit may not reach `write()`'s return value; `read()` is explicitly allowed to
 //! return less than asked for, and a file read is short at EOF regardless.
 //!
+//! ## Staging an executable (slice 5.9)
+//!
+//! ```text
+//! PM ──VFS_EXEC_STAGE{path}──► VFS ──FS_LOOKUP──► MFS   → (ino, mode, size)
+//!                               │
+//!                               ├──FS_READ × N──► MFS   → bytes into EXEC_STAGE
+//!                               │
+//!                               └── direct grant over EXEC_STAGE (CPF_READ) ──► PM
+//! ```
+//!
+//! [`do_exec_stage`] is the one request VFS serves that reads a *whole* file, and
+//! the one place a partial transfer is a failure rather than an answer: an ELF
+//! cannot be loaded in pieces by a loader with no filesystem. PM hands the
+//! resulting grant to `SYS_EXEC`, and the **kernel** reads the ELF through it —
+//! so the bytes never pass through PM either, and the kernel gains no filesystem
+//! (decision D6).
+//!
 //! ## What slice 5.8 took away
 //!
 //! Slice 5.7's `bdev_demo` / `bdev_denials` are **gone**. They existed because
@@ -100,29 +117,77 @@ minixrs_abi_note::brand!();
 mod fd;
 mod open;
 mod rw;
+mod stage;
+
+use core::cell::UnsafeCell;
 
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     BDEV_MINOR_RAMDISK, CDEV_GRANT_OFF, CDEV_LEN_OFF, CDEV_MAX_IO, CDEV_MINOR_CONSOLE,
     CDEV_MINOR_OFF, CDEV_OFFSET_OFF, CDEV_WRITE, FS_GRANT_OFF, FS_INO_OFF, FS_LEN_OFF, FS_LOOKUP,
-    FS_MODE_OFF, FS_PATH_MAX, FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER, FS_RQ_BASE,
-    FS_SUPER_BLOCK_SIZE_OFF, FS_SUPER_BLOCKS_OFF, FS_SUPER_MINOR_OFF, FS_SUPER_ROOT_OFF,
-    NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_CLOSE, VFS_OPEN, VFS_READ, VFS_WRITE,
+    FS_MAX_IO, FS_MODE_OFF, FS_PATH_MAX, FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER,
+    FS_RQ_BASE, FS_SIZE_OFF, FS_SUPER_BLOCK_SIZE_OFF, FS_SUPER_BLOCKS_OFF, FS_SUPER_MINOR_OFF,
+    FS_SUPER_ROOT_OFF, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_CLOSE,
+    VFS_EXEC_GRANT_OFF, VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_OPEN, VFS_READ, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{MFS_PROC_NR, PM_PROC_NR, TTY_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
 use minixrs_kernel_shared::error::{
-    EBADF, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, EROFS, OK,
+    EBADF, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, EROFS, OK,
 };
-use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE};
-use minixrs_kernel_shared::rootfs::ROOTFS_MOTD_PATH;
+use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE, GRANT_INVALID};
+use minixrs_kernel_shared::rootfs::{ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH};
 use minixrs_server_rt::{
     GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, sef_publish_to_ds, sef_retrieve_from_ds,
     sef_startup, sys_copy, wr_i32, wr_u64,
 };
 
 use fd::Fd;
+
+// ---------------------------------------------------------------------------
+// Slice 5.9: the exec staging buffer.
+// ---------------------------------------------------------------------------
+
+/// `UnsafeCell`-wrapped static staging buffer for [`do_exec_stage`].
+///
+/// **It cannot be a `main`-frame local.** A server's stack is exactly one page
+/// (`uspace::SERVER_STACK_BYTES`), so a 256 KiB frame would put the frame base
+/// far below the mapping and the first touch would fault into VM's SIGSEGV arm —
+/// which prints nothing `tests/qemu-boot.forbidden` catches. That is MFS's
+/// `BlockBuf` reasoning at a larger size, and the same shape:
+/// `#[repr(transparent)]` newtype with a hand-written `Sync`.
+///
+/// `.bss` costs nothing in the image — `elf.rs` allocates `p_memsz` zeroed frames
+/// and copies only `p_filesz` — so this buys 256 KiB of address space, not 256 KiB
+/// of ELF.
+///
+/// Unlike MFS's `Blocks`, there is **no capability token and no borrow
+/// discipline**, because there is nothing to discipline: VFS never dereferences
+/// these bytes. MFS writes into them by safecopy and the kernel reads them
+/// through the grant; VFS only ever needs the address — so [`stage_addr`] takes
+/// a raw pointer straight to an integer and this crate keeps its `unsafe` block
+/// count at zero.
+#[repr(transparent)]
+struct ExecStage(UnsafeCell<[u8; VFS_EXEC_MAX]>);
+
+// SAFETY: VFS is a single EL0 thread running a straight-line receive loop with
+// no interrupt handlers of its own, so there is never a second accessor. Nothing
+// in this crate reads or writes the bytes at all — the only use is taking the
+// address, which is why there is no `&mut` to serialize.
+unsafe impl Sync for ExecStage {}
+
+static EXEC_STAGE: ExecStage = ExecStage(UnsafeCell::new([0u8; VFS_EXEC_MAX]));
+
+/// The staging buffer's address, in the form the grant calls want it.
+///
+/// Produces no reference: the pointer is cast straight to an integer for
+/// `SYS_SETGRANT`, so there is no borrow to alias with anything. Everything that
+/// touches the bytes does so through the kernel's own mapping, during a call this
+/// server is blocked in.
+fn stage_addr() -> u64 {
+    EXEC_STAGE.0.get() as *mut u8 as usize as u64
+}
 
 /// Bytes VFS grants PM in the slice-5.2 demo.
 const GRANT_TEST_LEN: usize = 64;
@@ -229,9 +294,15 @@ fn main() -> ! {
     // next `open` retries — see [`ensure_mounted`].
     let mut mount: Option<Mount> = None;
 
+    // The grant over the currently staged executable, revoked when the next
+    // `VFS_EXEC_STAGE` replaces it (see [`do_exec_stage`]). A `main`-frame value
+    // like the pool itself, because it names a slot in that pool.
+    let mut staged: i32 = GRANT_INVALID;
+
     grant_test(&mut grants);
     tty_demo(&mut grants, tty);
     mount_root(&mut mount, mfs);
+    exec_stage_selftest(&mut grants, &mut mount, mfs);
     // The FS denial battery runs **last**, and the order is load-bearing: those
     // requests are deliberately malformed, so a peer that wedged on one would
     // take everything after it down. Behind the mount proof, such a wedge
@@ -258,6 +329,14 @@ fn main() -> ! {
             VFS_OPEN => do_open(caller_e, &msg, &mut mount, mfs),
             VFS_READ => do_read(caller_e, &msg, &mut grants, mfs),
             VFS_CLOSE => do_close(caller_e, &msg),
+            VFS_EXEC_STAGE => do_exec_stage(
+                caller_e,
+                &mut msg,
+                &mut grants,
+                &mut staged,
+                &mut mount,
+                mfs,
+            ),
             // Reply rather than drop (TTY's rule): VFS's clients are all inside a
             // SENDREC, and a dropped request blocks the caller forever. DS can
             // afford to drop one only because nothing SENDRECs it in anger.
@@ -488,7 +567,7 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
         return rc;
     }
 
-    let (ino, mode) = match fs_lookup(mfs, &path[..len]) {
+    let (ino, mode, _size) = match fs_lookup(mfs, &path[..len]) {
         Ok(found) => found,
         Err(e) => return e,
     };
@@ -572,6 +651,148 @@ fn do_read(
     n
 }
 
+/// Serve one `VFS_EXEC_STAGE`. Returns the reply `m_type`: the staged byte count
+/// (`> 0`), or a negative errno. On success the grant id is written to
+/// [`VFS_EXEC_GRANT_OFF`] of the *cleared* reply payload.
+///
+/// This is VFS's half of exec-from-FS (slice 5.9, decision D6). PM asks for a
+/// path; VFS reads the whole file into [`EXEC_STAGE`] and direct-grants it back,
+/// so PM can name that grant in `SYS_EXEC` and the kernel can read the ELF
+/// through it. **The bytes never pass through PM**, and the kernel gains no
+/// filesystem — which is the whole point of doing it this way rather than
+/// teaching `do_exec` to read a device.
+///
+/// The checks, in order — each is the first thing that can be wrong given the
+/// ones before it:
+///
+/// 1. **The caller is PM.** Nothing else has any business asking VFS to stage an
+///    image, and this is the one guard whose only exercise is a probe (init sends
+///    the request directly, from `exec_denials`). PM never exits, so its boot
+///    endpoint is stable — the same assumption RS already makes about `CLOCK`.
+/// 2. The path parses ([`stage::parse_path`]): absolute, terminated, non-empty.
+/// 3. Something is mounted (retried here, not cached — see [`ensure_mounted`]).
+/// 4. The path resolves, and [`open::classify`] refuses a directory. A `read` on
+///    one would answer `EISDIR` a step later; saying so here is the POSIX shape.
+/// 5. The size fits ([`stage::stage_len`]).
+///
+/// Then the read loop, and then the grant. **The grantee is the kernel-stamped
+/// `m_source`** — there is no payload field for it and there must never be one,
+/// the rule every grant-issuing site in this tree follows.
+///
+/// `staged` carries the previous request's grant id so it can be revoked first.
+/// That does two things at once: it frees the pool slot (or the eighth exec would
+/// answer `ENOMEM`), and it kills the old id, so a PM holding a stale one cannot
+/// re-read a buffer that now contains a different program.
+#[cfg_attr(test, allow(dead_code))]
+fn do_exec_stage(
+    caller_e: Endpoint,
+    msg: &mut Message,
+    grants: &mut GrantPool<GRANT_SLOTS>,
+    staged: &mut i32,
+    mount: &mut Option<Mount>,
+    mfs: Endpoint,
+) -> i32 {
+    if caller_e != boot_endpoint(PM_PROC_NR) {
+        return EPERM;
+    }
+    let path = match stage::parse_path(msg) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Err(e) = ensure_mounted(mount, mfs) {
+        return e;
+    }
+    // `path` borrows `msg`; everything below marshals into its own message, and
+    // the payload is not rewritten until the reply is built.
+    let (ino, mode, size) = match fs_lookup(mfs, path.as_bytes()) {
+        Ok(found) => found,
+        Err(e) => return e,
+    };
+    if let Err(e) = open::classify(mode) {
+        return e;
+    }
+    let len = match stage::stage_len(size) {
+        Ok(len) => len,
+        Err(e) => return e,
+    };
+
+    // Retire the previous stage before allocating anything for this one.
+    if *staged != GRANT_INVALID {
+        let _ = grants.revoke(*staged);
+        *staged = GRANT_INVALID;
+    }
+
+    if let Err(e) = read_whole(grants, mfs, ino as i32, len) {
+        return e;
+    }
+
+    let gid = match grants.grant_direct(caller_e, stage_addr(), len as u64, CPF_READ) {
+        Ok(gid) => gid,
+        // Verbatim: `ENOMEM` (VFS is out of grant slots) and a `SYS_SETGRANT`
+        // failure are different problems, and neither is PM's fault.
+        Err(e) => return e,
+    };
+    *staged = gid;
+
+    // The request's payload still holds the path, so the reply is built from a
+    // cleared one rather than written over it — a leftover path byte in a reply
+    // field is the kind of thing that reads as a valid grant id.
+    msg.payload = [0u8; 96];
+    wr_i32(msg, VFS_EXEC_GRANT_OFF, gid);
+    len as i32
+}
+
+/// Fill the first `len` bytes of [`EXEC_STAGE`] from inode `ino`, one `FS_MAX_IO`
+/// round at a time.
+///
+/// **A short stream is `EIO`, not a short stage.** Everywhere else in this file a
+/// partial transfer is a legitimate answer — `read()` may return less than asked
+/// for, and `write()` loops precisely so it does not have to. Here neither
+/// applies: an ELF cannot be loaded in pieces by a loader with no filesystem, so
+/// a file that stopped early is a file that cannot be run, and reporting the
+/// bytes moved would hand `do_exec` a truncated image to fail on with a worse
+/// errno.
+///
+/// The loop itself is [`rw::advance`], unchanged — its four rules are
+/// direction-agnostic, and "a peer reporting 0" is exactly the early end this has
+/// to catch. The grant is **fresh per round and covers exactly that round's
+/// bytes**, which is what lets `FS_READ` have no grant-offset field: the offset
+/// lives in the address VFS grants, not in the request.
+#[cfg_attr(test, allow(dead_code))]
+fn read_whole(
+    grants: &mut GrantPool<GRANT_SLOTS>,
+    mfs: Endpoint,
+    ino: i32,
+    len: usize,
+) -> Result<(), i32> {
+    let base = stage_addr();
+    let mut off = 0usize;
+    let moved = loop {
+        let want = (len - off).min(FS_MAX_IO);
+        // `checked_add` rather than `+`: servers ship with `overflow-checks =
+        // false`, so an offset arithmetic bug would wrap silently in the shipped
+        // binary while panicking under `cargo test`.
+        let addr = base.checked_add(off as u64).ok_or(EINVAL)?;
+        let gid = grants.grant_direct(mfs, addr, want as u64, CPF_WRITE)?;
+        let n = fs_read(mfs, ino, gid, want as i32, off as u64);
+        let _ = grants.revoke(gid);
+
+        match rw::advance(off, len, n) {
+            rw::Step::More(next) => off = next,
+            rw::Step::Done(rc) => break rc,
+        }
+    };
+    if moved < 0 {
+        // An error before any progress: relayed verbatim, so `EPERM` (a bad
+        // grant) and `EFAULT` (an unmapped buffer) stay distinguishable.
+        return Err(moved);
+    }
+    if moved as usize != len {
+        return Err(EIO);
+    }
+    Ok(())
+}
+
 /// Serve one `VFS_CLOSE`. Returns `OK` or `EBADF`.
 ///
 /// `rw::parse` reads the descriptor from the same offset `read` and `write` use,
@@ -618,13 +839,18 @@ fn fs_readsuper(mfs: Endpoint, minor: i32) -> Result<Mount, i32> {
 /// The path travels **inline**, NUL-padded into the request's fixed field — not
 /// through a grant. It is control plane rather than the data path grants were
 /// provisioned for, it costs MFS no staging buffer, and it means this request has
-/// no granter for anyone to spoof. The size in the reply is deliberately dropped:
-/// VFS caches no file's size (see [`Mount`]).
+/// no granter for anyone to spoof.
+///
+/// All three reply fields come back, but **nothing caches the size**: `do_open`
+/// destructures it away, and only [`do_exec_stage`] — which has to know how many
+/// bytes to stage before it starts — looks at it, for the length of one request.
+/// The invariant [`Mount`] states is unchanged: no file's size outlives the call
+/// that asked for it, so EOF stays "a read returned 0" with one source of truth.
 ///
 /// A path that fills the field with no room for the NUL is refused here rather
 /// than sent, so the wire never carries an unterminated one.
 #[cfg_attr(test, allow(dead_code))]
-fn fs_lookup(mfs: Endpoint, path: &[u8]) -> Result<(u32, i32), i32> {
+fn fs_lookup(mfs: Endpoint, path: &[u8]) -> Result<(u32, i32, i32), i32> {
     if path.is_empty() || path.len() >= FS_PATH_MAX {
         return Err(ENAMETOOLONG);
     }
@@ -648,7 +874,7 @@ fn fs_lookup(mfs: Endpoint, path: &[u8]) -> Result<(u32, i32), i32> {
         // and `EIO` would claim the device failed when the *server* did.
         return Err(EINVAL);
     };
-    Ok((ino, rd_i32(&m, FS_MODE_OFF)))
+    Ok((ino, rd_i32(&m, FS_MODE_OFF), rd_i32(&m, FS_SIZE_OFF)))
 }
 
 /// Issue one `FS_READ` and return the reply `m_type` — the byte count, or a
@@ -774,7 +1000,7 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
     // A real inode to aim the grant probes at, and the root's number for the
     // directory probe. A lookup failure here is reported once rather than as four
     // separate probe failures.
-    let Ok((motd_ino, _)) = fs_lookup(mfs, ROOTFS_MOTD_PATH.as_bytes()) else {
+    let Ok((motd_ino, _, _)) = fs_lookup(mfs, ROOTFS_MOTD_PATH.as_bytes()) else {
         return diag_fmt(format_args!("fs.deny FAIL setup lookup"));
     };
 
@@ -837,6 +1063,62 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
 /// without counting it is a marker that vanishes rather than one that silently
 /// under-reports.
 const FS_DENIAL_PROBES: usize = 10;
+
+/// Stage `/etc/pattern` at boot and report the byte count — the slice-5.9 proof
+/// that VFS can read a whole file into [`EXEC_STAGE`] in one go.
+///
+/// It runs the real [`read_whole`] over a real file, so it drives the
+/// multi-round loop (40 KiB is ten `FS_MAX_IO` rounds) and the single-indirect
+/// zone arm underneath it. What it deliberately does **not** do is grant
+/// anything: the grantee of a real stage is PM, and issuing one here would leave
+/// a live grant over a buffer the first real request is about to overwrite.
+///
+/// **`/etc/pattern`, not `/bin/hello`, and both halves matter.** Its size is a
+/// constant in *every* configuration — that is what slice 5.7 made it mandatory
+/// for — so `n=40960` is an assertable number rather than a run-variable one
+/// (`hello` is ~46 KB with the SDK, ~200 KB with in-tree musl, and ~15 KB in the
+/// sysroot-absent fallback, so a marker keyed on it would be vacuous in two
+/// configurations out of three: the slice-5.5/5.6 lesson). And it is ~5× cheaper
+/// to read, which is not a micro-optimization — VFS's whole prologue runs before
+/// it reaches its receive loop, so every client, init included, waits behind this.
+/// Under CI's TCG the 200 KB version cost enough wall clock to put `qemu-smoke`'s
+/// 45-second budget at risk.
+///
+/// Staging `hello` itself is not lost: the live `/bin/hello` exec does exactly
+/// that, every other fork cycle, and its `src=grant` trace plus the five C
+/// markers are the proof.
+///
+/// Best-effort throughout: a failure here must not stop VFS from serving.
+#[cfg_attr(test, allow(dead_code))]
+fn exec_stage_selftest(
+    grants: &mut GrantPool<GRANT_SLOTS>,
+    mount: &mut Option<Mount>,
+    mfs: Endpoint,
+) {
+    if ensure_mounted(mount, mfs).is_err() {
+        return diag_fmt(format_args!("exec.stage FAIL setup mount"));
+    }
+    let Ok((ino, mode, size)) = fs_lookup(mfs, ROOTFS_PATTERN_PATH.as_bytes()) else {
+        return diag_fmt(format_args!("exec.stage FAIL lookup"));
+    };
+    if open::classify(mode).is_err() {
+        return diag_fmt(format_args!("exec.stage FAIL not-a-file"));
+    }
+    let len = match stage::stage_len(size) {
+        Ok(len) => len,
+        Err(rc) => return diag_fmt(format_args!("exec.stage FAIL size rc={rc}")),
+    };
+    // The length is checked against the constant the image was built from, so
+    // this line is a *check* rather than a transcription — a stage that moved the
+    // wrong number of bytes cannot print it.
+    if len != ROOTFS_PATTERN_LEN {
+        return diag_fmt(format_args!("exec.stage FAIL size n={len}"));
+    }
+    match read_whole(grants, mfs, ino as i32, len) {
+        Ok(()) => diag_fmt(format_args!("exec.stage ok n={len}")),
+        Err(rc) => diag_fmt(format_args!("exec.stage FAIL read rc={rc}")),
+    }
+}
 
 /// Reply to a SENDREC caller: stamp `m_type`, zero `m_source` (the kernel
 /// overwrites it on delivery), and SEND the message back. A copy of TTY's, for

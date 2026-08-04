@@ -37,7 +37,7 @@ minix.rs booting on aarch64
 # init's fork/exec/wait cycle (head-carved kernel traces; slot 15 is the
 # fork-pool base, recycled every cycle; exec renames the child to "worker")
 [ksys SYS_FORK] parent=i nr=10 child_nr=15
-[ksys SYS_EXEC] target=15 name=worker entry=
+[ksys SYS_EXEC] target=15 name=worker src=name entry=
 [ksys SYS_EXIT] target=w nr=15 freed=
 
 # Stub D's designed SIGSEGV chain: page fault -> VM -> SYS_KILL sig=11 -> PM
@@ -257,7 +257,13 @@ minix.rs init: exec stack ok
 # 16 with stubs). A marker naming a slot passes in one config and is vacuous in
 # the other -- the slice-5.5 lesson, applied before it could bite. `entry=` is
 # kept so this matches do_exec's trace and not some other line.
-name=hello entry=
+#
+# `src=grant` is slice 5.9: `hello` is no longer in the boot archive at all, so
+# the only way to reach it is /bin/hello out of the MinixFS image, staged by VFS
+# and read by the kernel through PM's grant. `name=` and `src=` are adjacent on
+# purpose -- one substring proves program AND form together, which the C markers
+# below cannot do (they are byte-identical whichever way hello was loaded).
+name=hello src=grant entry=
 
 # The milestone itself: a C program compiled against a forked musl, exec'd out of
 # the boot archive, reaching serial through printf -> VFS -> TTY.
@@ -506,3 +512,52 @@ minix.rs init: fs.fd ok match=1
 # already-closed descriptor (-> EBADF, which is what makes the re-open above mean
 # something).
 minix.rs init: open.deny ok n=8
+
+# ---------------------------------------------------------------------------
+# Slice 5.9: exec-from-FS -- /bin/hello, out of the filesystem (milestone B).
+# ---------------------------------------------------------------------------
+
+# PM resolves VFS through DS rather than hard-coding boot_endpoint(VFS_PROC_NR)
+# -- the 5.3 contract, with the same non-deterministic-publish caveat (it works
+# because build.rs packs vfs before pm) and the same distinguishable
+# `vfs.ds FAIL ... fallback=` line. Resolved in `main`, never in `init_fresh`:
+# VFS's own prologue ipc_sends PM, so a SENDREC from PM's init would be a cycle.
+[diag pm] vfs.ds ok ep=
+
+# VFS reads a whole file into its staging buffer at boot, over the real read
+# path -- ten FS_MAX_IO rounds, so it drives the multi-round loop and the
+# single-indirect zone arm underneath it. A short stream is EIO, not a short
+# stage: an ELF cannot be loaded in pieces by a loader with no filesystem.
+#
+# /etc/pattern, NOT /bin/hello, and the count IS asserted because of it: 40 KiB
+# is constant in every configuration (that is what slice 5.7 made the file
+# mandatory for), while hello is ~46 KB with the SDK, ~200 KB with in-tree musl,
+# and ~15 KB in the sysroot-absent fallback -- a marker keyed on hello would be
+# vacuous in two configurations out of three (the 5.5/5.6 lesson). It is also
+# ~5x cheaper, which matters: VFS's whole prologue runs before its receive loop,
+# so every client waits behind this, and under CI's TCG the 200 KB version put
+# qemu-smoke's 45-second budget at risk. Staging hello itself is not lost -- the
+# live /bin/hello exec does exactly that, every other fork cycle.
+[diag vfs] exec.stage ok n=40960
+
+# Eight refusals, and every one of them is init exec'ing ITSELF -- which is safe
+# only because a failed exec leaves the caller on its old image, so this battery
+# IS the rollback proof. If any probe half-succeeded, init would be replaced
+# mid-loop and every marker after this point would vanish with the system.
+#
+# The probes: a path with no such file (-> ENOENT), /etc (-> EISDIR from the
+# stager's reuse of open::classify -- delete that arm and VFS stages a
+# directory's raw blocks as an ELF), a relative path (-> ENOENT: the leading-`/`
+# discriminator reads it as a MODULE name, and no such module is packed, so the
+# right answer proves the discriminator rather than a validator), a bare name
+# that is not in the archive (-> ENOENT, the arm that keeps the name form live),
+# **/etc/motd** (-> ENOEXEC: it stages perfectly -- path resolves, 31 bytes read,
+# granted to the kernel -- and the LOADER refuses it; the strongest probe here,
+# driving the whole chain plus the rejection plus the rollback in one message,
+# and the only thing that distinguishes ENOEXEC from the ENOMEM every loader
+# failure used to fold into), a payload field with no NUL (-> ENAMETOOLONG,
+# never a truncated path resolving to another program), an all-NUL field
+# (-> EINVAL), and VFS_EXEC_STAGE sent by init directly (-> EPERM, the only
+# exercise of VFS's not-PM guard anywhere). Reported on fd 1, through the write
+# path under test, since init has no debug channel.
+minix.rs init: exec.deny ok n=8

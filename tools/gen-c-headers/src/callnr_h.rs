@@ -98,6 +98,7 @@ fn bands() -> [Band; 9] {
                 ("VFS_OPEN", callnr::VFS_OPEN),
                 ("VFS_READ", callnr::VFS_READ),
                 ("VFS_CLOSE", callnr::VFS_CLOSE),
+                ("VFS_EXEC_STAGE", callnr::VFS_EXEC_STAGE),
             ],
         },
         // Base + members + count only, like BDEV and CDEV below: no payload
@@ -346,7 +347,8 @@ pub fn render() -> String {
     f.define_dec("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64);
     f.define_dec("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64);
     f.blank();
-    f.define_dec("PM_EXEC_NAME_OFF", callnr::PM_EXEC_NAME_OFF as i64);
+    f.define_dec("PM_EXEC_PATH_OFF", callnr::PM_EXEC_PATH_OFF as i64);
+    f.define_dec("PM_EXEC_PATH_MAX", callnr::PM_EXEC_PATH_MAX as i64);
     f.blank();
     f.define_dec("CDEV_MINOR_OFF", callnr::CDEV_MINOR_OFF as i64);
     f.define_dec("CDEV_GRANT_OFF", callnr::CDEV_GRANT_OFF as i64);
@@ -532,11 +534,12 @@ mod tests {
                 "{request} itself must be emitted"
             );
         }
-        let offsets: [(&str, i64); 10] = [
+        let offsets: [(&str, i64); 11] = [
             ("VFS_FD_OFF", callnr::VFS_FD_OFF as i64),
             ("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64),
             ("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64),
-            ("PM_EXEC_NAME_OFF", callnr::PM_EXEC_NAME_OFF as i64),
+            ("PM_EXEC_PATH_OFF", callnr::PM_EXEC_PATH_OFF as i64),
+            ("PM_EXEC_PATH_MAX", callnr::PM_EXEC_PATH_MAX as i64),
             ("CDEV_MINOR_OFF", callnr::CDEV_MINOR_OFF as i64),
             ("CDEV_GRANT_OFF", callnr::CDEV_GRANT_OFF as i64),
             ("CDEV_LEN_OFF", callnr::CDEV_LEN_OFF as i64),

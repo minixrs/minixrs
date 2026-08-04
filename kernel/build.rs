@@ -13,6 +13,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use minixrs_kernel_shared::callnr::VFS_EXEC_MAX;
+
 fn main() {
     // The kernel is bare-metal only. It used to collapse to a no-op `main` on
     // host targets so `cargo check --workspace` stayed green, at the cost of
@@ -299,10 +301,30 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // (The gate is written out at all three sites rather than factored into a
     // per-module helper on purpose: the `rootfs` blob below is NOT an ELF, and a
     // helper that branded every module would panic on it.)
+    //
+    // Note this is now the *only* pack-time check `hello` gets, and it no longer
+    // covers the copy that runs: slice 5.9 execs `/bin/hello` out of the
+    // filesystem, where the runtime `scan_brand` in `elf::load_into` is the sole
+    // gate. It stays because the two copies are the same bytes, so a regressed
+    // `crt1.c` brand block is still a *build* failure rather than a boot one.
     if let Err(e) = minixrs_kernel_shared::brand::scan_brand(&hello_bytes) {
         panic!("hello: missing/bad minixrs brand: {e:?}");
     }
-    modules.push((-1, "hello".to_string(), hello_bytes.clone())); // EXEC_ONLY_PROC_NR
+
+    // **`hello` is deliberately NOT packed as a boot-archive module** (slice 5.9).
+    // It was, from 5.6 until now, and keeping it would have made the C markers
+    // unable to distinguish a boot-archive exec from a filesystem one — the same
+    // bytes reach the console either way, which is the 5.5/5.6 "byte-identical
+    // markers" trap. With the module gone, `/bin/hello` in the image below is the
+    // only copy, so `minix.rs hello: Hello from C!` is now *proof* that the whole
+    // stage-and-grant chain worked. `worker` stays boot-embedded as the name-form
+    // regression, which is why `EXEC_ONLY_PROC_NR` is still in use.
+    assert!(
+        hello_bytes.len() <= VFS_EXEC_MAX,
+        "hello is {} bytes, past VFS's staging buffer ({VFS_EXEC_MAX}). \
+         Raise `callnr::VFS_EXEC_MAX` — it is the one constant that bounds this.",
+        hello_bytes.len(),
+    );
 
     // The root filesystem image (slice 5.7, decision D3): a MinixFS v3 image built
     // here and packed as a non-ELF blob, which the kernel copies into RAM frames
@@ -312,10 +334,11 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // `scan_brand` gate: it is not an ELF and has no `.note.minixrs.ident`.
     //
     // `hello_bytes` is reused rather than calling `build_hello` a second time.
-    // Building it twice would let the image and the `hello` module disagree in the
-    // musl-sysroot-absent configuration, where `build_hello` returns `None` and the
-    // fallback substitutes the `worker` ELF — the image would then hold whichever
-    // one the second call produced.
+    // Building it twice would let two copies disagree in the musl-sysroot-absent
+    // configuration, where `build_hello` returns `None` and the fallback
+    // substitutes the `worker` ELF — the image would then hold whichever one the
+    // second call produced. As of slice 5.9 the image is the *only* copy, so this
+    // is the one that runs.
     modules.push((
         -1,
         "rootfs".to_string(), // com::ROOTFS_MODULE_NAME

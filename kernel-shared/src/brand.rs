@@ -67,37 +67,65 @@ pub fn scan_brand(elf: &[u8]) -> Result<BrandInfo, BrandError> {
         let end = off.checked_add(filesz).ok_or(Malformed)?;
         let seg = elf.get(off..end).ok_or(Malformed)?;
 
-        let mut pos = 0usize;
-        while pos + 12 <= seg.len() {
-            let namesz = u32le(seg, pos).ok_or(Malformed)? as usize;
-            let descsz = u32le(seg, pos + 4).ok_or(Malformed)? as usize;
-            let ntype = u32le(seg, pos + 8).ok_or(Malformed)?;
-            let name_off = pos + 12;
-            let desc_off = name_off
-                .checked_add(namesz.next_multiple_of(4))
-                .ok_or(Malformed)?;
-            let next = desc_off
-                .checked_add(descsz.next_multiple_of(4))
-                .ok_or(Malformed)?;
-            if next > seg.len() {
-                break; // truncated tail; other PT_NOTE segments may still match
-            }
-            if &seg[name_off..name_off + namesz] == BRAND_OWNER
-                && ntype == NT_MINIXRS_IDENT
-                && descsz >= 8
-            {
-                let abi = u32le(seg, desc_off).ok_or(Malformed)?;
-                let flags = u32le(seg, desc_off + 4).ok_or(Malformed)?;
-                if abi != BRAND_ABI_VERSION {
-                    return Err(BrandError::UnsupportedAbi(abi));
-                }
-                return Ok(BrandInfo {
-                    abi_version: abi,
-                    flags,
-                });
-            }
-            pos = next;
+        match scan_note_segment(seg) {
+            // Not in *this* segment; another `PT_NOTE` may still carry it.
+            Err(BrandError::MissingBrand) => continue,
+            other => return other,
         }
+    }
+    Err(BrandError::MissingBrand)
+}
+
+/// Walk one `PT_NOTE` segment's bytes for the minixrs identity note.
+///
+/// Split out of [`scan_brand`] in slice 5.9 so the kernel can brand-check an
+/// image it is reading **chunked**, out of another address space through a grant,
+/// with no contiguous slice of the whole ELF to hand: the loader stages each note
+/// segment into a small stack buffer and calls this. `scan_brand` — which does
+/// have the whole file — keeps working by delegating, so the two can never
+/// disagree about what a brand is.
+///
+/// `Err(MissingBrand)` means "not in these bytes", which is why the caller loops
+/// rather than stopping; `Err(UnsupportedAbi)` means the note was found and
+/// rejected, and stops the search — a second, older note must not be able to
+/// launder a binary past an ABI the kernel does not speak.
+///
+/// A truncated final note ends the walk without an error: the segment may simply
+/// have been cut short (the loader caps how much it stages), and any earlier note
+/// in it was still read in full.
+pub fn scan_note_segment(seg: &[u8]) -> Result<BrandInfo, BrandError> {
+    use BrandError::Malformed;
+
+    let mut pos = 0usize;
+    while pos + 12 <= seg.len() {
+        let namesz = u32le(seg, pos).ok_or(Malformed)? as usize;
+        let descsz = u32le(seg, pos + 4).ok_or(Malformed)? as usize;
+        let ntype = u32le(seg, pos + 8).ok_or(Malformed)?;
+        let name_off = pos + 12;
+        let desc_off = name_off
+            .checked_add(namesz.next_multiple_of(4))
+            .ok_or(Malformed)?;
+        let next = desc_off
+            .checked_add(descsz.next_multiple_of(4))
+            .ok_or(Malformed)?;
+        if next > seg.len() {
+            break; // truncated tail; other PT_NOTE segments may still match
+        }
+        if &seg[name_off..name_off + namesz] == BRAND_OWNER
+            && ntype == NT_MINIXRS_IDENT
+            && descsz >= 8
+        {
+            let abi = u32le(seg, desc_off).ok_or(Malformed)?;
+            let flags = u32le(seg, desc_off + 4).ok_or(Malformed)?;
+            if abi != BRAND_ABI_VERSION {
+                return Err(BrandError::UnsupportedAbi(abi));
+            }
+            return Ok(BrandInfo {
+                abi_version: abi,
+                flags,
+            });
+        }
+        pos = next;
     }
     Err(BrandError::MissingBrand)
 }
@@ -215,5 +243,43 @@ mod tests {
     #[test]
     fn not_an_elf_is_malformed() {
         assert_eq!(scan_brand(b"MZ\x90\x00"), Err(BrandError::Malformed));
+    }
+
+    #[test]
+    fn the_segment_walk_is_what_scan_brand_delegates_to() {
+        // Slice 5.9's split: the kernel calls `scan_note_segment` directly, with
+        // a segment it staged out of another address space, so the two must agree
+        // on every answer. Whole-file and segment-only forms, side by side.
+        assert_eq!(scan_note_segment(&CANON), scan_brand(&synth_elf(4, &CANON)),);
+
+        let mut foreign = CANON;
+        foreign[12..20].copy_from_slice(b"foreign\0");
+        assert_eq!(
+            scan_note_segment(&foreign),
+            Err(BrandError::MissingBrand),
+            "not in these bytes -- the caller keeps looking"
+        );
+
+        let mut bad_abi = CANON;
+        bad_abi[20..24].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            scan_note_segment(&bad_abi),
+            Err(BrandError::UnsupportedAbi(2)),
+            "found and rejected -- the caller stops"
+        );
+    }
+
+    #[test]
+    fn a_segment_cut_short_of_the_brand_is_missing_not_malformed() {
+        // The loader stages only the first `MAX_NOTE_BYTES` of a note segment, so
+        // a brand past that point simply is not found. That must read as
+        // "missing" — a rejection with a name — rather than as a parse error.
+        let mut seg = [0u8; 12];
+        seg[0..4].copy_from_slice(&8u32.to_le_bytes()); // namesz
+        seg[4..8].copy_from_slice(&8u32.to_le_bytes()); // descsz
+        seg[8..12].copy_from_slice(&NT_MINIXRS_IDENT.to_le_bytes());
+        // The name and descriptor are past the end of what was staged.
+        assert_eq!(scan_note_segment(&seg), Err(BrandError::MissingBrand));
+        assert_eq!(scan_note_segment(&[]), Err(BrandError::MissingBrand));
     }
 }

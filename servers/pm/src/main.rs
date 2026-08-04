@@ -42,24 +42,30 @@
 minixrs_abi_note::brand!();
 
 mod mproc;
+mod path;
 
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    EXEC_NAME_LEN, PM_EXEC, PM_EXEC_NAME_OFF, PM_EXIT, PM_FORK, PM_GETPID, PM_GRANT_TEST, PM_WAIT,
-    PRIVCTL_SET_USER, SAFECOPY_FROM, SAFECOPY_TO, SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG,
-    SYS_EXEC, SYS_EXIT, SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VM_FORK,
+    EXEC_GRANT_OFF, EXEC_GRANTER_OFF, EXEC_LEN_OFF, EXEC_NAME_LEN, EXEC_SRC_GRANT, EXEC_SRC_NAME,
+    EXEC_SRC_OFF, FS_PATH_MAX, PM_EXEC, PM_EXEC_PATH_MAX, PM_EXEC_PATH_OFF, PM_EXIT, PM_FORK,
+    PM_GETPID, PM_GRANT_TEST, PM_WAIT, PRIVCTL_SET_USER, SAFECOPY_FROM, SAFECOPY_TO,
+    SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT, SYS_FORK,
+    SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VFS_EXEC_GRANT_OFF, VFS_EXEC_PATH_OFF,
+    VFS_EXEC_STAGE, VM_FORK,
 };
 use minixrs_kernel_shared::com::{
     INIT_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, NONE, SELF, endpoint_proc};
-use minixrs_kernel_shared::error::{EAGAIN, ECHILD, EFAULT, EINVAL, EPERM, ESRCH, OK};
+use minixrs_kernel_shared::error::{
+    EAGAIN, ECHILD, EFAULT, EINVAL, ENAMETOOLONG, EPERM, ESRCH, OK,
+};
 use minixrs_kernel_shared::grant::{CPF_READ, grant_id};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minixrs_server_rt::{
-    GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, rd_name, rd_u64, sef_publish_to_ds,
-    sef_startup, sys_copy, sys_safecopy, wr_i32,
+    GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, rd_u64, sef_publish_to_ds,
+    sef_retrieve_from_ds, sef_startup, sys_copy, sys_safecopy, wr_i32, wr_u64,
 };
 
 /// Priority band and quantum PM assigns a forked child via `SCHEDULING_START`.
@@ -126,6 +132,13 @@ fn main() -> ! {
     // through them: VM clones the child's regions, SCHED schedules it.
     let vm = boot_endpoint(VM_PROC_NR);
     let sched = boot_endpoint(SCHED_PROC_NR);
+    // VFS is resolved through DS rather than by boot endpoint (slice 5.9): it is
+    // the one peer PM talks to that is not part of the process machinery, and a
+    // lookup per `PM_EXEC` would be a round trip per exec for an endpoint that
+    // cannot change. Resolved here rather than in `pm_init` deliberately —
+    // `init_fresh` must not SENDREC VFS, because VFS's own prologue `ipc_send`s
+    // PM and the two would be a cycle on paper.
+    let vfs = vfs_endpoint();
 
     // PM's own grant pool (slice 5.2), used for the magic-grant probe. A
     // `main`-frame value that outlives the receive loop — `server-rt` keeps the
@@ -152,7 +165,7 @@ fn main() -> ! {
             PM_FORK => handle_fork(system, vm, sched, &mut msg),
             PM_EXIT => handle_exit(system, sched, &mut msg),
             PM_WAIT => handle_wait(&mut msg),
-            PM_EXEC => handle_exec(system, &mut msg),
+            PM_EXEC => handle_exec(system, vfs, &mut msg),
             PM_GRANT_TEST => handle_grant_test(own_e, &mut grants, &msg),
             // Unknown request: drop it.
             _ => {}
@@ -332,31 +345,75 @@ fn handle_wait(msg: &mut Message) {
     }
 }
 
-/// Handle `PM_EXEC`: replace the caller's program image with the boot-embedded
-/// module it names. The target comes from the payload
-/// ([`PM_EXEC_NAME_OFF`]`..+`[`EXEC_NAME_LEN`], NUL-padded) as of slice 5.6 —
-/// before that PM hardcoded `"worker"`. PM issues `SYS_EXEC` naming the caller
-/// (kernel-stamped `m_source`); the kernel resolves the name against the boot
-/// image, builds the new address space, and resumes the caller at the new entry
-/// point.
+/// Handle `PM_EXEC`: replace the caller's program image with what it names.
+///
+/// The target comes from the payload ([`PM_EXEC_PATH_OFF`]`..+`[`PM_EXEC_PATH_MAX`],
+/// NUL-padded), and **a leading `/` is the discriminator** ([`path::classify`]):
+///
+/// * **A path** — PM asks VFS to stage the file ([`vfs_exec_stage`]), then issues
+///   `SYS_EXEC` naming the grant VFS handed back. The kernel reads the ELF
+///   through that grant, so the bytes never pass through PM and the kernel gains
+///   no filesystem (slice 5.9, decision D6).
+/// * **A module name** — forwarded to `SYS_EXEC` as it has been since slice 4.7.
+///
+/// `argv[0]` is the path's **basename**, not the path, which is what leaves the
+/// kernel's `EXEC_NAME_LEN` field and the initial stack's geometry untouched.
 ///
 /// On success PM sends **no** reply — the caller does not return from this call,
 /// it restarts at the new image's `_start`. On failure the caller is untouched on
-/// its old image, so PM replies the errno: `EINVAL` for a malformed name, else
-/// whatever the kernel answered (`ENOENT` for an unknown module).
+/// its old image, so PM replies the errno and the caller carries on: `EINVAL` for
+/// a malformed target, `ENAMETOOLONG` for a field with no NUL, whatever VFS
+/// answered for a path that could not be staged, or whatever the kernel answered
+/// (`ENOENT` for an unknown module, `ENOEXEC` for bytes that are not an ELF).
+///
+/// **There is nothing to roll back.** Every failure happens before `SYS_EXEC`
+/// reaches its point of no return, which is why init's `exec_denials` battery can
+/// fire eight failing execs at itself and keep running — the battery *is* the
+/// rollback proof.
 #[cfg_attr(test, allow(dead_code))]
-fn handle_exec(system: Endpoint, msg: &mut Message) {
+fn handle_exec(system: Endpoint, vfs: Endpoint, msg: &mut Message) {
     let caller_e = msg.m_source;
-    // `name` borrows `msg`; `sys_exec` marshals into its own buffer and never
-    // touches it, so the borrow ends before `reply` needs `&mut msg`.
-    let rc = match rd_name(msg, PM_EXEC_NAME_OFF, EXEC_NAME_LEN) {
-        Some(name) => sys_exec(system, caller_e, name),
-        None => EINVAL,
+    // The target borrows `msg`, and so does the staged path; both marshallers
+    // below copy into their own message, so the borrow ends before `reply` needs
+    // `&mut msg`.
+    //
+    // The whole fixed-width field goes to `path::parse`, not `rd_name`'s
+    // NUL-trimmed `&str`: that helper cannot tell a field with no terminator
+    // from a full-width name, and those are `ENAMETOOLONG` and `EINVAL`.
+    let rc = match path::parse(&msg.payload[PM_EXEC_PATH_OFF..PM_EXEC_PATH_OFF + PM_EXEC_PATH_MAX])
+    {
+        Ok(path::Target::Module(name)) => sys_exec_name(system, caller_e, name),
+        Ok(path::Target::Path { path, argv0 }) => exec_from_fs(system, vfs, caller_e, path, argv0),
+        Err(e) => e,
     };
     if rc != OK {
         reply(caller_e, msg, rc);
     }
     // Success: the kernel already resumed the caller at the new image — no reply.
+}
+
+/// Stage `path` through VFS and exec the caller from the resulting grant.
+///
+/// Two round trips, and the split matters: VFS owns the filesystem and the
+/// staging buffer, the kernel owns the ELF. PM is the only process that sees both
+/// halves, and it sees neither the file's bytes nor the loader's decisions.
+///
+/// A staging failure is relayed **verbatim** — `ENOENT`, `EISDIR`, `ENOMEM` and
+/// `EIO` are four different things to tell a caller, and folding them would make
+/// "no such file" and "the file is too big" indistinguishable.
+#[cfg_attr(test, allow(dead_code))]
+fn exec_from_fs(
+    system: Endpoint,
+    vfs: Endpoint,
+    caller_e: Endpoint,
+    path: &str,
+    argv0: &str,
+) -> i32 {
+    let (size, gid) = match vfs_exec_stage(vfs, path) {
+        Ok(staged) => staged,
+        Err(rc) => return rc,
+    };
+    sys_exec_grant(system, caller_e, argv0, vfs, gid, size)
 }
 
 /// Handle `PM_GRANT_TEST` (slice 5.2): the live end-to-end exercise of the
@@ -704,29 +761,139 @@ fn sys_fork(system: Endpoint, parent_e: Endpoint, child_nr: i32) -> (i32, Endpoi
 }
 
 /// `SYS_EXEC` — ask the kernel to replace `target_e`'s image with the
-/// boot-embedded binary `name` (SENDREC to SYSTEM). Payload: target endpoint in
-/// `0..4`, the NUL-padded name in `4..4+EXEC_NAME_LEN`. Returns the kernel-call
-/// result; on `OK` the kernel has already resumed the target at the new entry.
+/// boot-embedded module `name` (SENDREC to SYSTEM). Payload: target endpoint in
+/// `0..4`, the NUL-padded name in `4..4+EXEC_NAME_LEN`, and
+/// [`EXEC_SRC_NAME`] in [`EXEC_SRC_OFF`]. Returns the kernel-call result; on `OK`
+/// the kernel has already resumed the target at the new entry.
+///
+/// The selector is written explicitly rather than left zero: a zeroed payload is
+/// deliberately *not* a valid form (slice 5.9), so a caller that forgot it gets
+/// `EINVAL` instead of whichever source happened to be the default.
 #[cfg_attr(test, allow(dead_code))]
-fn sys_exec(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
+fn sys_exec_name(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
     let mut m = Message {
         m_source: 0,
         m_type: SYS_EXEC,
         payload: [0u8; 96],
     };
     wr_i32(&mut m, 0, target_e);
-    // The name came out of a `PM_EXEC` payload field of exactly `EXEC_NAME_LEN`
-    // bytes (`rd_name` stops at the field's end), so it fits this one — the two
-    // widths are the same constant, which is why forwarding is a copy and never
-    // a truncation. Clamped anyway: `sys_exec` is also called with literals.
+    // The name came out of a `PM_EXEC` payload field, so it may be longer than
+    // this one — a path's basename is capped at `EXEC_NAME_LEN` by its caller,
+    // but a *module* name is written straight through. Clamped either way:
+    // `sys_exec_name` is also called with literals.
     let bytes = name.as_bytes();
     let n = bytes.len().min(EXEC_NAME_LEN);
     m.payload[4..4 + n].copy_from_slice(&bytes[..n]);
+    wr_i32(&mut m, EXEC_SRC_OFF, EXEC_SRC_NAME);
     let rc = ipc_sendrec(system, &mut m);
     if rc != OK {
         return rc;
     }
     m.m_type
+}
+
+/// `SYS_EXEC` — ask the kernel to replace `target_e`'s image with the bytes of
+/// the grant `gid`, issued by `granter` and `len` bytes long (SENDREC to SYSTEM).
+///
+/// Payload: target endpoint in `0..4`, `argv[0]` NUL-padded in
+/// `4..4+EXEC_NAME_LEN`, [`EXEC_SRC_GRANT`] in [`EXEC_SRC_OFF`], and the grant
+/// triple. The kernel re-validates the grant with the same `verify_grant` every
+/// safecopy uses — `who_to` must be **PM's own** stored endpoint — so this message
+/// cannot aim the loader at a grant PM was not given.
+///
+/// Returns the kernel-call result; on `OK` the kernel has already resumed the
+/// target at the new entry.
+#[cfg_attr(test, allow(dead_code))]
+fn sys_exec_grant(
+    system: Endpoint,
+    target_e: Endpoint,
+    argv0: &str,
+    granter: Endpoint,
+    gid: i32,
+    len: usize,
+) -> i32 {
+    let mut m = Message {
+        m_source: 0,
+        m_type: SYS_EXEC,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, 0, target_e);
+    // `path::classify` capped the basename at `EXEC_NAME_LEN` rather than
+    // truncating it, so this copy always fits. Clamped anyway, for the reason
+    // `sys_exec_name`'s is.
+    let bytes = argv0.as_bytes();
+    let n = bytes.len().min(EXEC_NAME_LEN);
+    m.payload[4..4 + n].copy_from_slice(&bytes[..n]);
+    wr_i32(&mut m, EXEC_SRC_OFF, EXEC_SRC_GRANT);
+    wr_i32(&mut m, EXEC_GRANTER_OFF, granter);
+    wr_i32(&mut m, EXEC_GRANT_OFF, gid);
+    wr_u64(&mut m, EXEC_LEN_OFF, len as u64);
+    let rc = ipc_sendrec(system, &mut m);
+    if rc != OK {
+        return rc;
+    }
+    m.m_type
+}
+
+/// `VFS_EXEC_STAGE` — ask VFS to read `path` into its staging buffer and grant it
+/// back. Returns `(byte count, grant id)`, or VFS's errno.
+///
+/// The path travels **inline**, NUL-padded into the request's fixed field, which
+/// is why PM needs no `SYS_COPY` here: it already holds the path inline in the
+/// `PM_EXEC` payload it is serving. A path too long for the field is refused
+/// before the wire.
+///
+/// Nothing releases the grant afterwards and nothing needs to: VFS re-grants the
+/// same buffer per request, which bumps the sequence and kills the previous id,
+/// and PM serialises exec so two staged images are never alive at once.
+#[cfg_attr(test, allow(dead_code))]
+fn vfs_exec_stage(vfs: Endpoint, path: &str) -> Result<(usize, i32), i32> {
+    let bytes = path.as_bytes();
+    if bytes.is_empty() || bytes.len() >= FS_PATH_MAX {
+        return Err(ENAMETOOLONG);
+    }
+    let mut m = Message {
+        m_source: 0,
+        m_type: VFS_EXEC_STAGE,
+        payload: [0u8; 96],
+    };
+    // The payload starts zeroed, so writing the bytes *is* NUL-padding it.
+    m.payload[VFS_EXEC_PATH_OFF..VFS_EXEC_PATH_OFF + bytes.len()].copy_from_slice(bytes);
+    let trap_rc = ipc_sendrec(vfs, &mut m);
+    if trap_rc != OK {
+        return Err(trap_rc);
+    }
+    // The reply `m_type` *is* the byte count, the band's rule since slice 5.4.
+    if m.m_type < 0 {
+        return Err(m.m_type);
+    }
+    Ok((m.m_type as usize, rd_i32(&m, VFS_EXEC_GRANT_OFF)))
+}
+
+/// Resolve VFS's endpoint through DS, falling back to its boot endpoint.
+///
+/// A copy of VFS's own `tty_endpoint` / `mfs_endpoint`, carrying the same
+/// contract: the lookup is the point — a client should not hard-code a peer's
+/// boot proc number — but DS publish-before-retrieve is **not** guaranteed by
+/// construction. It works because `kernel/build.rs` packs `vfs` before `pm`. A
+/// failed lookup falls back and emits a *distinguishable* line, so exec-from-FS
+/// still works while the required `vfs.ds ok` marker disappears and CI goes red on
+/// the ordering regression specifically.
+#[cfg_attr(test, allow(dead_code))]
+fn vfs_endpoint() -> Endpoint {
+    let mut key = [0u8; SYS_GETINFO_NAME_LEN];
+    key[0..3].copy_from_slice(b"vfs");
+    match sef_retrieve_from_ds(&key) {
+        Ok(ep) => {
+            diag_fmt(format_args!("vfs.ds ok ep={ep}"));
+            ep
+        }
+        Err(rc) => {
+            let ep = boot_endpoint(VFS_PROC_NR);
+            diag_fmt(format_args!("vfs.ds FAIL rc={rc} fallback={ep}"));
+            ep
+        }
+    }
 }
 
 /// `VM_FORK` — ask VM to clone `parent_e`'s region set into `child_e` (SENDREC
