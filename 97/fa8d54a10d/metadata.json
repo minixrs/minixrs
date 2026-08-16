@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "97fa8d54a10d",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.9-exec-from-fs",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "kernel/build.rs",
+    "kernel/src/arch/aarch64/userland.rs",
+    "kernel/src/boot_image/elf.rs",
+    "servers/vfs/src/main.rs",
+    "tests/qemu-boot.expected",
+    "userland/init/src/main.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/97/fa8d54a10d/0/metadata.json",
+      "transcript": "/97/fa8d54a10d/0/full.jsonl",
+      "compact_transcript": "/97/fa8d54a10d/0/transcript.jsonl",
+      "content_hash": "/97/fa8d54a10d/0/content_hash.txt",
+      "prompt": "/97/fa8d54a10d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 18,
+    "cache_creation_tokens": 153690,
+    "cache_read_tokens": 716062,
+    "output_tokens": 5839,
+    "api_call_count": 9
+  }
+}
