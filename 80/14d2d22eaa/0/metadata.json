@@ -1,0 +1,73 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "8014d2d22eaa",
+  "session_id": "29423d36-f517-4eb6-a19a-5c118d56a010",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-16T21:07:13.25703Z",
+  "branch": "feature/slice-5.9-exec-from-fs",
+  "checkpoints_count": 2,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "f897bb24fc4c",
+  "checkpoint_transcript_start": 97,
+  "transcript_lines_at_start": 97,
+  "compact_transcript_start": 22,
+  "token_usage": {
+    "input_tokens": 2,
+    "cache_creation_tokens": 1502,
+    "cache_read_tokens": 102897,
+    "output_tokens": 245,
+    "api_call_count": 1
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-review-2026-08-16T08:18:13.892995Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "03b10f9564c5",
+      "timestamp": "2026-08-16T08:18:13.892995Z",
+      "native": {
+        "command": "/review"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "prompt-skill-claude-code-review-2026-08-16T09:00:29.604191Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "fec38b0ccc4b",
+      "timestamp": "2026-08-16T09:00:29.604191Z",
+      "native": {
+        "command": "/review"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/review",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 2
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "8014d2d22eaa",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.9-exec-from-fs",
+  "checkpoints_count": 2,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/80/14d2d22eaa/0/metadata.json",
+      "transcript": "/80/14d2d22eaa/0/full.jsonl",
+      "compact_transcript": "/80/14d2d22eaa/0/transcript.jsonl",
+      "content_hash": "/80/14d2d22eaa/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2,
+    "cache_creation_tokens": 1502,
+    "cache_read_tokens": 102897,
+    "output_tokens": 245,
+    "api_call_count": 1
+  }
+}
