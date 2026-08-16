@@ -834,7 +834,7 @@ fn fs_readsuper(mfs: Endpoint, minor: i32) -> Result<Mount, i32> {
     })
 }
 
-/// Issue one `FS_LOOKUP` and return `(inode, mode)`.
+/// Issue one `FS_LOOKUP` and return `(inode, mode, size)`.
 ///
 /// The path travels **inline**, NUL-padded into the request's fixed field — not
 /// through a grant. It is control plane rather than the data path grants were
@@ -1140,8 +1140,14 @@ fn reply(target_e: Endpoint, msg: &mut Message, m_type: i32) {
 ///
 /// `ipc_send` blocks until PM's receive loop picks the message up, so the demo
 /// is self-synchronizing — no assumption is made about the two servers' SEF init
-/// ordering. There is no cycle: VFS's own init only SENDRECs DS, and PM never
-/// sends to VFS.
+/// ordering. There is no cycle, but the reason is narrower than it used to be:
+/// slice 5.9 made PM a *client* of VFS (`VFS_EXEC_STAGE`), so "PM never sends to
+/// VFS" is no longer true. What holds instead is that this send is confined to
+/// VFS's **prologue**, which runs before its receive loop and before PM can have
+/// served a `PM_EXEC` — and PM's own prologue only SENDRECs DS. The standing rule
+/// is therefore: nothing VFS does *inside its receive loop* may send to PM, or a
+/// PM blocked in `VFS_EXEC_STAGE` and a VFS blocked replying to PM would
+/// deadlock.
 ///
 /// The buffer's raw address rides along too, so PM can read the same bytes a
 /// second time with the ungranted `SYS_COPY` and compare.

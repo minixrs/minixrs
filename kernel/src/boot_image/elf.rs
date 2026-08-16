@@ -132,6 +132,16 @@ const PF_W: u32 = 2;
 /// header is one of the numbers a hostile image controls.
 const MAX_NOTE_BYTES: usize = 256;
 
+// `PageBudget::charge` counts a segment's pages with `kernel_shared`'s
+// `USER_PAGE_SIZE`, and `load_segment` then strides the *returned* count by this
+// crate's `mmu::PAGE_SIZE`. Before slice 5.9 the count was computed locally from
+// `PAGE_SIZE`, so the two could not disagree; now they can, and a divergence is
+// silent — a 16 KiB-granule port would charge `ceil(memsz / 4096)` pages and then
+// map that many 16 KiB pages, running four times past the segment's end into the
+// next one (or into `SERVER_STACK_VA`). Pin them together here, where both names
+// are in scope.
+const _: () = assert!(PAGE_SIZE as u64 == minixrs_kernel_shared::message::USER_PAGE_SIZE);
+
 /// Where an image's bytes are, for a loader that must read them a field at a
 /// time.
 ///
@@ -255,10 +265,7 @@ pub fn load_into(source: &ElfSource, aspace: &mut AddrSpace) -> Result<LoadedElf
     // (tooling/docs/abi-note.md). This is the single choke point under
     // `load_exec_image`, covering boot, exec, and — since slice 5.9 —
     // exec-from-FS, where `kernel/build.rs`'s pack-time assertion cannot reach.
-    match scan_brand_chunked(source, &eh) {
-        Ok(_) => {}
-        Err(e) => return Err(e),
-    }
+    scan_brand_chunked(source, &eh)?;
 
     let mut budget = PageBudget::new();
     let mut phdr_va = None;

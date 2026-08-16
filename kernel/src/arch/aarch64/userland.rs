@@ -508,15 +508,17 @@ pub(crate) unsafe fn load_exec_image(source: &ElfSource) -> Result<ExecImage, i3
             return Err(ENOMEM);
         }
     };
-    if aspace
-        .map_page(SERVER_STACK_VA, stack_frame.addr(), Prot::RW_DATA)
-        .is_err()
-    {
+    if let Err(e) = aspace.map_page(SERVER_STACK_VA, stack_frame.addr(), Prot::RW_DATA) {
         // `map_page` failed before linking the leaf, so free the orphan stack
         // frame explicitly; the leaf sweep below won't see it.
         free_frame(stack_frame);
         destroy_addrspace_with_leaves(aspace);
-        return Err(ENOMEM);
+        // Told apart for the reason the loader's errors are (see above). Since
+        // exec-from-FS the image is an *input*, so `AlreadyMapped` here means the
+        // file's own segments cover the stack VA — that is `ENOEXEC` ("this is
+        // not an image this kernel will run"), not `ENOMEM` ("the machine is out
+        // of frames"). Only a genuine allocator failure is the latter.
+        return Err(elf_errno(ElfError::Map(e)));
     }
 
     let ttbr0_pa = aspace.ttbr0_pa;

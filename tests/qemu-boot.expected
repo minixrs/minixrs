@@ -266,7 +266,8 @@ minix.rs init: exec stack ok
 name=hello src=grant entry=
 
 # The milestone itself: a C program compiled against a forked musl, exec'd out of
-# the boot archive, reaching serial through printf -> VFS -> TTY.
+# the MinixFS root (slice 5.9 dropped the boot-archive copy), reaching serial
+# through printf -> VFS -> TTY.
 #
 # Two toolchains can produce it, and this log cannot tell them apart. The SDK
 # flavor (P3c) is one `clang --target=aarch64-unknown-minixrs` call against

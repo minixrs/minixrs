@@ -559,11 +559,11 @@ fn open_denials(vfs: Endpoint) {
 ///   - `is-dir` — `/etc`, a directory. `EISDIR` from VFS's `open::classify`,
 ///     which the stager reuses; delete that arm and VFS would stage a directory's
 ///     raw blocks and hand them to the loader as an ELF.
-///   - `relative` — `etc/motd`, no leading `/`. `EINVAL`: PM reads it as a
-///     *module* name (that is what the discriminator means), and no such module
-///     exists, so the kernel answers `ENOENT`... which is why this probe expects
-///     `ENOENT` rather than `EINVAL`. The distinction is the discriminator
-///     working, not failing.
+///   - `relative` — `etc/motd`, no leading `/`. **`ENOENT`, not `EINVAL`**: PM
+///     reads it as a *module* name (that is what the discriminator means), and no
+///     such module exists, so the kernel answers `ENOENT`. Expecting that rather
+///     than a validator's `EINVAL` is the assertion — the distinction is the
+///     discriminator working, not failing.
 ///   - `too-long` — a payload field with no NUL anywhere. `ENAMETOOLONG`, never a
 ///     truncated path resolving to some other program.
 ///   - `empty` — an all-NUL field. `EINVAL`; it names nothing.

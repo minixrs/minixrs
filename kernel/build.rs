@@ -198,15 +198,17 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
         // that, each server has to reach its receive loop before its first client
         // does a `DS_RETRIEVE`, because publish-before-retrieve is not guaranteed
         // by construction — it holds only because the archive is packed in this
-        // order. The chain as of slice 5.8 is:
+        // order. The chain as of slice 5.9 is:
         //
-        //     ds  <  tty  <  memory  <  mfs  <  vfs
+        //     ds  <  tty  <  memory  <  mfs  <  vfs  <  pm
         //
-        // TTY and MEM before VFS/MFS (their clients), and **MEM before MFS**
-        // (MFS's `bdev.ds` lookup) and **MFS before VFS** (VFS's `fs.ds` lookup).
-        // Each of those two lookups has a `boot_endpoint` fallback and a
-        // distinguishable diag line, so a regression here turns CI red on the
-        // `bdev.ds ok` / `fs.ds ok` markers specifically rather than hanging.
+        // TTY and MEM before VFS/MFS (their clients), **MEM before MFS**
+        // (MFS's `bdev.ds` lookup), **MFS before VFS** (VFS's `fs.ds` lookup),
+        // and — since slice 5.9 made PM a client of VFS for `VFS_EXEC_STAGE` —
+        // **VFS before PM** (PM's `vfs.ds` lookup). Each of those three lookups
+        // has a `boot_endpoint` fallback and a distinguishable diag line, so a
+        // regression here turns CI red on the `bdev.ds ok` / `fs.ds ok` /
+        // `vfs.ds ok` markers specifically rather than hanging.
         ("minixrs-tty", workspace.join("drivers/tty"), 4), // TTY_PROC_NR
         ("minixrs-memory", workspace.join("drivers/memory"), 3), // MEM_PROC_NR
         ("minixrs-mfs", workspace.join("fs/mfs"), 6),      // MFS_PROC_NR
