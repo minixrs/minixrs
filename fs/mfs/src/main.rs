@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! minix.rs MFS — the MinixFS v3 file-system server, read-only (slice 5.8).
+//! minix.rs MFS — the MinixFS v3 file-system server (slice 5.8; writable as of
+//! slice 5.10a).
 //!
 //! The first *file system* in minix.rs, and the piece that makes a path resolve
 //! to bytes. It sits between VFS and a block driver:
@@ -67,13 +68,13 @@ use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF, BDEV_MINOR_RAMDISK,
-    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_LOOKUP, FS_READ, FS_READSUPER, GET_RAMDISK,
-    NR_BDEV_MSGS, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_LOOKUP, FS_READ, FS_READSUPER, FS_WRITE, GET_RAMDISK,
+    NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{MEM_PROC_NR, PM_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{
-    EINVAL, EIO, EISDIR, ENODEV, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, EROFS, OK,
+    EFBIG, EINVAL, EIO, EISDIR, ENODEV, ENOENT, ENOSPC, ENOSYS, ENOTDIR, ENXIO, EPERM, OK,
 };
 use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE, GRANT_INVALID};
 use minixrs_kernel_shared::rootfs::{
@@ -81,20 +82,20 @@ use minixrs_kernel_shared::rootfs::{
     ROOTFS_MOTD_PATH, ROOTFS_PATTERN_PATH, ROOTFS_TAIL_BLOCK, rootfs_pattern_byte,
 };
 use minixrs_mfs::MFS_BLOCK_SIZE;
-use minixrs_mfs::inode::{Inode, NR_DIRECT_ZONES, ROOT_INODE};
+use minixrs_mfs::inode::{INODE_SIZE, Inode, NR_DIRECT_ZONES, ROOT_INODE, SINGLE_INDIRECT_SLOT};
 use minixrs_mfs::layout::{Layout, layout};
 use minixrs_mfs::read::{
     ZoneLookup, inode_at, inode_location, zone_for_offset, zone_from_indirect,
 };
 use minixrs_mfs::superblock::{SUPER_OFFSET, SUPER_ON_DISK_LEN, Superblock};
-use minixrs_mfs::{proto, walk};
+use minixrs_mfs::{proto, walk, write};
 use minixrs_server_rt::{
     GrantPool, SefConfig, diag_fmt, sef_publish_to_ds, sef_retrieve_from_ds, sef_startup,
     sys_getinfo, sys_safecopy, wr_i32, wr_u64,
 };
 
-/// Simultaneously outstanding grants. Three are used — the block buffer's, and
-/// the two malformed ones the denial battery needs — and the pool costs `N * 32`
+/// Simultaneously outstanding grants. Four are used — the block buffer's, and the
+/// three malformed ones the denial battery needs — and the pool costs `N * 32`
 /// bytes of `main`'s one-page frame, so 8 is ample headroom at 256 bytes.
 const GRANT_SLOTS: usize = 8;
 
@@ -129,9 +130,15 @@ static BLOCK: BlockBuf = BlockBuf(UnsafeCell::new([0u8; MFS_BLOCK_SIZE]));
 struct Blocks {
     /// The block driver, resolved through DS at boot.
     mem: Endpoint,
-    /// Grant naming [`BLOCK`] with the driver as grantee, `CPF_WRITE`. Issued
-    /// once at boot: the buffer is a static, so its address never changes and
-    /// `GrantPool::ensure_registered` never re-fires.
+    /// Grant naming [`BLOCK`] with the driver as grantee, `CPF_READ | CPF_WRITE`.
+    /// Issued once at boot: the buffer is a static, so its address never changes
+    /// and `GrantPool::ensure_registered` never re-fires.
+    ///
+    /// **Both directions on one grant** (W5): the driver writes into this buffer
+    /// on a `BDEV_READ` and reads out of it on a `BDEV_WRITE`, and the grantee is
+    /// the same driver either way. A second grant would name the same bytes to
+    /// the same peer. The kernel checks the direction bit per call, so widening
+    /// the flags does not widen what any single call may do.
     ///
     /// [`GRANT_INVALID`] if that grant could not be issued, in which case every
     /// read fails the kernel's grant check and the server degrades to `ENODEV` —
@@ -191,6 +198,37 @@ impl Blocks {
             (*p).fill(0);
             &*p
         }
+    }
+
+    /// The block buffer, mutable — for the splice a partial write performs.
+    ///
+    /// `&mut self` for the reason [`Blocks::read`] takes it: this hands out the
+    /// only reference into the buffer, and the borrow checker is what keeps it
+    /// the only one.
+    fn buf_mut(&mut self) -> &mut [u8; MFS_BLOCK_SIZE] {
+        // SAFETY: as `read` — `&mut self` is held, so this is the only reference
+        // into the buffer for as long as the returned one lives.
+        unsafe { &mut *BLOCK.0.get() }
+    }
+
+    /// Store the buffer's current contents as block `block`.
+    ///
+    /// A short reply is [`EIO`] like a short read: this server cannot store a
+    /// fraction of a block, which is exactly why `BDEV_WRITE` refuses an
+    /// over-long request rather than clamping it.
+    fn write(&mut self, block: u64) -> Result<(), i32> {
+        let rc = bdev_request(
+            self.mem,
+            BDEV_WRITE,
+            BDEV_MINOR_RAMDISK,
+            self.gid,
+            MFS_BLOCK_SIZE as i32,
+            block,
+        );
+        if rc != MFS_BLOCK_SIZE as i32 {
+            return Err(EIO);
+        }
+        Ok(())
     }
 }
 
@@ -269,6 +307,7 @@ fn main() -> ! {
             FS_READSUPER => do_readsuper(&mut msg, &mut blocks, &mut mount),
             FS_LOOKUP => do_lookup(&mut msg, &mut blocks, &mount),
             FS_READ => do_read(&msg, caller_e, &mut blocks, &mount),
+            FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mount),
             // Reply rather than drop (TTY's rule): this server's clients are all
             // inside a SENDREC, and a dropped request blocks the caller forever.
             _ => ENOSYS,
@@ -418,6 +457,279 @@ fn do_read(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option
         return rc;
     }
     chunk.len as i32
+}
+
+/// Serve one `FS_WRITE`. Returns the reply `m_type`: the byte count written
+/// (`>= 0`), or a negative errno.
+///
+/// The payload is `FS_READ`'s, so [`proto::parse_read`] parses it — see W1 in the
+/// slice design. Same field for the granter, too: there is none, and there must
+/// never be one. This server holds `SYS_SAFECOPY`, so a caller-supplied granter
+/// would aim a privileged cross-address-space copy wherever the caller pointed.
+///
+/// **The step order is what makes one block buffer sufficient.** Each step
+/// finishes with the buffer's contents either consumed or flushed before the next
+/// begins; there is never a moment where two blocks are wanted at once, and the
+/// borrow checker enforces it because every [`Blocks`] method takes `&mut self`.
+///
+///   1. Read the inode. [`Inode`] is `Copy`, so the buffer is free again at the
+///      `let`.
+///   2. Clamp — this is where `EFBIG` is decided, before any device work.
+///   3. Resolve or allocate the zone. A freshly allocated zone is **zeroed and
+///      written before its number is stored anywhere** (W4): the bitmap bit goes
+///      first, so a failure between the two leaks a zone rather than sharing one.
+///   4. Read the target block unless the write covers it whole, splice the
+///      caller's bytes in through `SAFECOPY_FROM`, store the block.
+///   5. Write the inode back if it changed.
+#[cfg_attr(test, allow(dead_code))]
+fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
+    let Some(mount) = mount else {
+        return ENODEV;
+    };
+    let req = proto::parse_read(msg);
+    let Ok(ino) = u32::try_from(req.ino) else {
+        return EINVAL;
+    };
+
+    let mut node = match read_inode(blocks, mount, ino) {
+        Ok(node) => node,
+        Err(e) => return e,
+    };
+    if node.is_dir() {
+        return EISDIR;
+    }
+    if !node.is_reg() {
+        return EINVAL;
+    }
+
+    let chunk = match write::clamp_write(req.pos, req.len, mount.block_size) {
+        Ok(chunk) => chunk,
+        Err(e) => return e,
+    };
+    if chunk.len == 0 {
+        // A legal zero-length write, answered before the grant is touched, so a
+        // client polling with `len = 0` cannot use it to probe the granting path.
+        // TTY, VFS and the `memory` driver all apply the same rule.
+        return 0;
+    }
+
+    // Step 3. `dirty` records whether the inode changed at all — see step 5.
+    let (zone, mut dirty) = match place_zone(blocks, mount, &mut node, req.pos) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    // Step 4.
+    if chunk.len < mount.block_size {
+        // A partial write preserves the bytes around it, so the block has to be
+        // read before it is spliced. A full-block write skips this: every byte is
+        // about to be replaced.
+        if blocks.read(u64::from(zone)).is_err() {
+            return EIO;
+        }
+    }
+    let dst = blocks.buf_mut();
+    let Some(window) = chunk
+        .off_in_block
+        .checked_add(chunk.len)
+        .and_then(|end| dst.get_mut(chunk.off_in_block..end))
+    else {
+        // Unreachable: `clamp_write` guarantees a chunk lies inside one block. Say
+        // `EIO` rather than indexing, so a future clamp bug is an errno instead of
+        // a panic in a server nothing can restart.
+        return EIO;
+    };
+    let rc = sys_safecopy(
+        SAFECOPY_FROM,
+        granter,
+        req.gid,
+        0,
+        window.as_mut_ptr() as usize as u64,
+        chunk.len as u64,
+    );
+    if rc != OK {
+        // Verbatim: `EPERM` ("your grant does not authorize this") and `EFAULT`
+        // ("your buffer is not mapped") are different bugs on the caller's side.
+        return rc;
+    }
+    if let Err(e) = blocks.write(u64::from(zone)) {
+        return e;
+    }
+
+    // Step 5. The condition is "a zone was assigned **or** the size grew", not
+    // "the size grew": filling a hole in the middle of an existing file assigns
+    // `zone[i]` without moving `size` at all, and keying on size alone would drop
+    // that pointer while leaving its bitmap bit set — the bitmap and the inode
+    // disagreeing about a live zone, which is corruption rather than a leak.
+    let grown = match write::grow_size(node.size, req.pos, chunk.len) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if grown != node.size {
+        node.size = grown;
+        dirty = true;
+    }
+    if dirty && let Err(e) = write_inode(blocks, mount, ino, &node) {
+        return e;
+    }
+
+    chunk.len as i32
+}
+
+/// Resolve the zone backing byte `pos` of `node`, allocating it — and any
+/// indirect block it needs — if it is a hole.
+///
+/// Returns `(zone, inode changed)`. `node` is patched in place when a direct
+/// pointer or the indirect pointer is assigned; the caller writes it back.
+#[cfg_attr(test, allow(dead_code))]
+fn place_zone(
+    blocks: &mut Blocks,
+    mount: &Mount,
+    node: &mut Inode,
+    pos: u64,
+) -> Result<(u32, bool), i32> {
+    match write::zone_slot_for_offset(pos, mount.block_size) {
+        write::ZoneSlot::Direct(i) => {
+            let existing = *node.zone.get(i).ok_or(EIO)?;
+            if existing != 0 {
+                return if walk::zone_ok(existing, mount.blocks) {
+                    Ok((existing, false))
+                } else {
+                    Err(EIO)
+                };
+            }
+            let zone = alloc_zone(blocks, mount)?;
+            *node.zone.get_mut(i).ok_or(EIO)? = zone;
+            Ok((zone, true))
+        }
+        write::ZoneSlot::Indirect(slot) => {
+            let mut dirty = false;
+            let mut indirect = node.zone[SINGLE_INDIRECT_SLOT];
+            if indirect == 0 {
+                // The indirect block is allocated through the same path as a data
+                // zone, which is what makes it *zeroed*: every one of its 1024
+                // slots reads back as a hole rather than as whatever the previous
+                // owner left there, which this code would take for zone pointers.
+                indirect = alloc_zone(blocks, mount)?;
+                node.zone[SINGLE_INDIRECT_SLOT] = indirect;
+                dirty = true;
+            }
+            if !walk::zone_ok(indirect, mount.blocks) {
+                return Err(EIO);
+            }
+            // Read the pointer out and let the borrow die immediately: `u32` is
+            // `Copy`, so nothing points into the buffer when the next fetch
+            // replaces it. `resolve_zone` is split for exactly this reason.
+            let blk = blocks.read(u64::from(indirect))?;
+            let existing = zone_from_indirect(blk, slot).ok_or(EIO)?;
+            if existing != 0 {
+                return if walk::zone_ok(existing, mount.blocks) {
+                    Ok((existing, dirty))
+                } else {
+                    Err(EIO)
+                };
+            }
+            let zone = alloc_zone(blocks, mount)?;
+            // Re-read the indirect block (the allocation replaced the buffer),
+            // patch the slot, store it.
+            blocks.read(u64::from(indirect))?;
+            let buf = blocks.buf_mut();
+            let Some(cell) = slot
+                .checked_mul(4)
+                .and_then(|s| Some((s, s.checked_add(4)?)))
+                .and_then(|(s, e)| buf.get_mut(s..e))
+            else {
+                return Err(EIO);
+            };
+            cell.copy_from_slice(&zone.to_le_bytes());
+            blocks.write(u64::from(indirect))?;
+            Ok((zone, dirty))
+        }
+        // Unreachable: `clamp_write` already answered `EFBIG` for this offset.
+        // Kept so a future clamp change is an errno, not a wrong zone.
+        write::ZoneSlot::OutOfRange => Err(EFBIG),
+    }
+}
+
+/// Allocate one zone: find a clear bit in the zone bitmap, set it, and zero the
+/// zone it names.
+///
+/// **The bit is set before the zone is used**, so a failure part-way leaks a zone
+/// rather than handing the same one out twice. A leak is recoverable by a future
+/// `fsck`; a shared zone is silent corruption.
+///
+/// The scan is bounded by `layout.zmap_blocks` — every device-derived loop has a
+/// cap, because a corrupt superblock must not spin this server and, through it,
+/// VFS and init.
+#[cfg_attr(test, allow(dead_code))]
+fn alloc_zone(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
+    let bits_per_block = u32::try_from(mount.block_size.checked_mul(8).ok_or(EIO)?)
+        .ok()
+        .filter(|&b| b != 0)
+        .ok_or(EIO)?;
+    // The bitmap is based at `first_data_zone - 1` (MINIX's convention, recorded
+    // in `layout::zmap_bit`), so bit 1 is the first data zone. `checked_sub`
+    // rather than `-`: servers ship with `overflow-checks = false`, where an
+    // underflow wraps silently and would hand out a wild zone number.
+    let base = mount.layout.first_data_zone.checked_sub(1).ok_or(EIO)?;
+    let limit = mount.blocks.saturating_sub(base);
+
+    for i in 0..mount.layout.zmap_blocks {
+        let block = mount.layout.zmap_start.checked_add(i).ok_or(EIO)?;
+        let from = i.checked_mul(bits_per_block).ok_or(EIO)?;
+        if from >= limit {
+            break;
+        }
+        // The zone bitmap is deliberately over-sized (`layout.rs`'s module docs),
+        // so the tail of the last block describes zones that do not exist.
+        let in_block_limit = limit.saturating_sub(from).min(bits_per_block);
+        let buf = blocks.read(u64::from(block))?;
+        // Bit 0 of the whole bitmap is reserved: it names a zone below
+        // `first_data_zone` and is always marked in use.
+        let start = u32::from(i == 0);
+        let Some(bit) = write::bitmap_find_free(buf, start, in_block_limit) else {
+            continue;
+        };
+        let buf = blocks.buf_mut();
+        write::bitmap_set(buf, bit).ok_or(EIO)?;
+        blocks.write(u64::from(block))?;
+
+        let zone = base
+            .checked_add(from)
+            .and_then(|z| z.checked_add(bit))
+            .ok_or(EIO)?;
+        if !walk::zone_ok(zone, mount.blocks) {
+            return Err(EIO);
+        }
+        // W4: zero it before anyone can reach it. A fresh zone otherwise holds
+        // whatever the previous owner left — and for an indirect block, that
+        // would be read as zone pointers.
+        blocks.zeroed();
+        blocks.write(u64::from(zone))?;
+        return Ok(zone);
+    }
+    Err(ENOSPC)
+}
+
+/// Store `node` back into the inode table.
+///
+/// The read-modify-write half of [`read_inode`]: the inode is 64 bytes inside a
+/// 4 KiB block, so the block has to be fetched before the slot can be patched.
+///
+/// No `zone_ok` check on the block, unlike [`read_inode`]: every caller has
+/// already read this same inode through that function, so the block it names was
+/// checked there — and if it were not, the driver's own range check makes the
+/// fetch below `EIO` rather than a write to a block outside the device.
+#[cfg_attr(test, allow(dead_code))]
+fn write_inode(blocks: &mut Blocks, mount: &Mount, ino: u32, node: &Inode) -> Result<(), i32> {
+    let (block, slot) = inode_location(ino, &mount.layout, mount.block_size).ok_or(EINVAL)?;
+    blocks.read(u64::from(block))?;
+    let buf = blocks.buf_mut();
+    let start = slot.checked_mul(INODE_SIZE).ok_or(EIO)?;
+    let end = start.checked_add(INODE_SIZE).ok_or(EIO)?;
+    let cell = buf.get_mut(start..end).ok_or(EIO)?;
+    cell.copy_from_slice(&node.to_le_bytes());
+    blocks.write(u64::from(block))
 }
 
 // ---------------------------------------------------------------------------
@@ -644,8 +956,16 @@ fn mem_endpoint() -> Endpoint {
 /// degraded and still replying, the `memory` driver's `blocks = 0` precedent.
 #[cfg_attr(test, allow(dead_code))]
 fn device(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) -> Blocks {
-    // `CPF_WRITE`, because the driver copies *into* this buffer.
-    let gid = match grants.grant_direct(mem, Blocks::addr(), MFS_BLOCK_SIZE as u64, CPF_WRITE) {
+    // Both directions on one grant: `CPF_WRITE` because the driver copies *into*
+    // this buffer on a `BDEV_READ`, `CPF_READ` because it copies *out of* it on a
+    // `BDEV_WRITE`. The kernel checks the direction bit per call, so this is not a
+    // widening of what any single request may do — see the `gid` field's docs.
+    let gid = match grants.grant_direct(
+        mem,
+        Blocks::addr(),
+        MFS_BLOCK_SIZE as u64,
+        CPF_READ | CPF_WRITE,
+    ) {
         Ok(gid) => gid,
         Err(rc) => {
             diag_fmt(format_args!("mount FAIL grant rc={rc}"));
@@ -786,12 +1106,23 @@ struct Probe {
 ///     safe to pass around at all.
 ///   - `read-only` — a `CPF_READ`-only grant used as a copy *destination*: the
 ///     access mask in the write direction.
-///   - `write` — `BDEV_WRITE`, which must answer `EROFS`. Fold that arm into the
-///     driver's `_` case and this becomes `ENOSYS`, which is the whole reason the
-///     request has a number of its own.
-///   - `write-bad-minor` — a write to a device that does not exist. `ENXIO`, not
-///     `EROFS`: the driver validates before it refuses, so it never asserts
-///     read-onlyness about a device it does not have.
+///   - `wr-dir` — a `BDEV_WRITE` whose grant carries only `CPF_WRITE`. Every
+///     geometry check in the driver passes; what refuses it is the *kernel's*
+///     grant check on the copy direction, which is the guard that stops a client
+///     reading a device buffer back out through a write-shaped request. Until
+///     slice 5.10a this probe was `write`, expecting `EROFS` from the driver
+///     itself — when the write became real that expectation would have turned
+///     into a *successful store*, so the probe moved to something still denied
+///     rather than quietly retiring. It also aims at block 1, the one block
+///     `START_BLOCK = 2` leaves spare, so a regression in the guard is a wasted
+///     write rather than a destroyed superblock.
+///   - `wr-minor` — a write to a device that does not exist. `ENXIO`, and the
+///     point is the *order*: the driver validates the minor before it touches the
+///     grant, so a bad device is reported as one rather than as a grant failure.
+///     It rides `write_only` and block 1 for the same reason `wr-dir` does — the
+///     probe proves the same thing either way, and if the minor check ever
+///     regressed the kernel would still refuse the copy instead of storing a
+///     block.
 ///   - `unknown` — a request one past the band. `ENOSYS`, and **the reply itself
 ///     is the assertion**: a driver that dropped an unknown request would leave
 ///     this server blocked in its SENDREC forever.
@@ -809,9 +1140,14 @@ struct Probe {
 fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks) {
     let addr = Blocks::addr();
     let len = IMAGE_HDR_LEN as u64;
-    let (Ok(not_mine), Ok(read_only)) = (
+    // Three deliberately malformed grants. `write_only` is **not** `blocks.gid`:
+    // that one carries `CPF_READ | CPF_WRITE` as of slice 5.10a, so a `BDEV_WRITE`
+    // named on it would succeed and store the block buffer's contents onto the
+    // device. This one is missing exactly the bit the copy direction needs.
+    let (Ok(not_mine), Ok(read_only), Ok(write_only)) = (
         grants.grant_direct(boot_endpoint(PM_PROC_NR), addr, len, CPF_WRITE),
         grants.grant_direct(blocks.mem, addr, len, CPF_READ),
+        grants.grant_direct(blocks.mem, addr, len, CPF_WRITE),
     ) else {
         return diag_fmt(format_args!("bdev.deny FAIL setup"));
     };
@@ -874,21 +1210,21 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks) {
             want: EPERM,
         },
         Probe {
-            name: "write",
+            name: "wr-dir",
             m_type: BDEV_WRITE,
             minor: BDEV_MINOR_RAMDISK,
-            gid: good,
+            gid: write_only,
             len: n,
-            block: 0,
-            want: EROFS,
+            block: 1,
+            want: EPERM,
         },
         Probe {
-            name: "write-bad-minor",
+            name: "wr-minor",
             m_type: BDEV_WRITE,
             minor: 7,
-            gid: good,
+            gid: write_only,
             len: n,
-            block: 0,
+            block: 1,
             want: ENXIO,
         },
         Probe {
@@ -928,7 +1264,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks) {
     if denied == probes.len() + 1 {
         diag_fmt(format_args!("bdev.deny ok n={denied}"));
     }
-    for gid in [not_mine, read_only] {
+    for gid in [not_mine, read_only, write_only] {
         let _ = grants.revoke(gid);
     }
 }

@@ -35,20 +35,31 @@ use minixrs_kernel_shared::callnr::{
 };
 use minixrs_kernel_shared::error::{EINVAL, ENAMETOOLONG};
 
-/// A parsed [`FS_READ`](minixrs_kernel_shared::callnr::FS_READ) request.
+/// A parsed [`FS_READ`](minixrs_kernel_shared::callnr::FS_READ) **or**
+/// [`FS_WRITE`](minixrs_kernel_shared::callnr::FS_WRITE) request.
+///
+/// One struct for both, because the two payloads are the same fields in the same
+/// places — the same question asked in the other direction (slice 5.10a, W1).
+/// Nothing here says which direction it is: the request number does, and the
+/// server's dispatch is the only place that needs to know.
 ///
 /// Field-for-field the payload, with no interpretation applied — the checks live
-/// in [`crate::walk::clamp_read`] and in the server's inode lookup. There is
-/// deliberately **no granter field**: the server takes the granter from the
-/// kernel-stamped `m_source`, so this struct has no way to express one.
+/// in [`crate::walk::clamp_read`] / [`crate::write::clamp_write`] and in the
+/// server's inode lookup. There is deliberately **no granter field**: the server
+/// takes the granter from the kernel-stamped `m_source`, so this struct has no
+/// way to express one.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct ReadRequest {
-    /// The inode to read, as handed out by a previous `FS_LOOKUP`.
+    /// The inode to transfer, as handed out by a previous `FS_LOOKUP`.
     pub ino: i32,
-    /// Grant id over the destination buffer. Must carry `CPF_WRITE` and name this
-    /// server as grantee; the kernel checks both.
+    /// Grant id over the client's buffer, naming this server as grantee. The
+    /// access bit it must carry is the one the *direction* needs — `CPF_WRITE`
+    /// for an `FS_READ`, whose copy lands in the client's buffer, `CPF_READ` for
+    /// an `FS_WRITE`, whose copy is taken out of it. The kernel checks grantee
+    /// and access; no server re-implements either.
     pub gid: i32,
-    /// Bytes asked for. Clamped, not refused — see [`crate::walk::clamp_read`].
+    /// Bytes asked for. Clamped, not refused, in both directions — see
+    /// [`crate::walk::clamp_read`] and [`crate::write::clamp_write`].
     pub len: i32,
     /// Byte offset within the file.
     pub pos: u64,
@@ -80,7 +91,8 @@ pub fn parse_lookup(msg: &Message) -> Result<&str, i32> {
     core::str::from_utf8(&field[..end]).map_err(|_| EINVAL)
 }
 
-/// Read an `FS_READ` request out of a message payload.
+/// Read an `FS_READ` — or `FS_WRITE`, which is the same payload — request out of
+/// a message payload.
 ///
 /// Total: every field is a fixed-offset scalar read that cannot fail (an
 /// out-of-range offset reads as `0`), so a malformed request becomes an invalid
