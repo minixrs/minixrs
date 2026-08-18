@@ -201,10 +201,26 @@ mod tests {
 
     #[test]
     fn a_write_is_capped_at_one_transfer() {
-        // Asserts the cap's exact value, not `len <= cap` -- the latter passes
-        // even if the cap is removed entirely, and this is its only test.
+        // Pins the shipped configuration's transfer size, not the cap itself:
+        // `MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE == FS_MAX_IO` (lib.rs's `const _`), so
+        // at `pos = 0` this block size makes `to_block_end` and `FS_MAX_IO` the
+        // same number and this test cannot tell which clamp produced `c.len`. See
+        // `the_transfer_cap_binds_independently_of_the_block_end` for the cap's
+        // own test.
         let c = clamp_write(0, i32::MAX, BS).unwrap();
         assert_eq!(c.len, FS_MAX_IO);
+    }
+
+    #[test]
+    fn the_transfer_cap_binds_independently_of_the_block_end() {
+        // `MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE == FS_MAX_IO` (lib.rs's `const _`), so at
+        // `pos = 0` a 4 KiB block makes `to_block_end` and `FS_MAX_IO` the same number
+        // and neither clamp can be observed alone. Passing a larger block separates
+        // them: the cap is then strictly the smaller, so this fails if
+        // `.min(FS_MAX_IO)` is ever dropped from `clamp_write`.
+        let c = clamp_write(0, i32::MAX, 2 * FS_MAX_IO).unwrap();
+        assert_eq!(c.len, FS_MAX_IO);
+        assert_eq!(c.off_in_block, 0);
     }
 
     #[test]
