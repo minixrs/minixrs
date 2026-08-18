@@ -594,62 +594,64 @@ const fn scratch_chunk() -> [u8; SCRATCH_CHUNK] {
     b
 }
 
-/// Bytes read back per verification window.
-const SCRATCH_WINDOW: usize = 512;
-
-/// First byte the single-indirect region covers. Mirrors `minixrs-mfs`'s
-/// `NR_DIRECT_ZONES * MFS_BLOCK_SIZE`, spelled out locally because init does not
-/// depend on that crate — it is a plain user program, `minixrs-ipc` and
-/// `kernel-shared` only.
-const SEAM: usize = 7 * BDEV_BLOCK_SIZE;
-
-/// Where the read-back windows start.
+/// Bytes read back per verification read.
 ///
-/// All three are multiples of [`SCRATCH_WINDOW`] **and** lie inside a single 4 KiB
-/// block, so each window is one clamped transfer and the arithmetic in
-/// [`verify_window`] stays trivial. The middle one is the first byte the
-/// *indirect* block covers — the one zone the allocator had to create an indirect
-/// block for, and the only place that arm can hide. There is no separate count
-/// constant: `SCRATCH_WINDOWS_AT.len()` is the count, so the marker's `v=` cannot
-/// drift from the loop.
-const SCRATCH_WINDOWS_AT: [usize; 3] = [0, SEAM, ROOTFS_SCRATCH_LEN - SCRATCH_WINDOW];
+/// A divisor of the block, so every read lands inside one block and MFS's
+/// clamp-to-the-block-end never splits one — which is what makes the read count
+/// exactly [`ROOTFS_SCRATCH_LEN`] / this. The loop tolerates a short read anyway;
+/// this only keeps the message count predictable.
+const VERIFY_CHUNK: usize = 512;
 
-const _: () = assert!(SEAM < ROOTFS_SCRATCH_LEN);
-const _: () = assert!(SEAM.is_multiple_of(SCRATCH_WINDOW));
-const _: () = assert!((ROOTFS_SCRATCH_LEN - SCRATCH_WINDOW).is_multiple_of(SCRATCH_WINDOW));
-// Strictly ascending and non-overlapping: [`verify_window`] reaches each window by
-// winding the descriptor *forward*, so an out-of-order or overlapping entry would
-// make it wind past its own target and verify the wrong bytes.
-const _: () = assert!(SCRATCH_WINDOWS_AT[0] + SCRATCH_WINDOW <= SCRATCH_WINDOWS_AT[1]);
-const _: () = assert!(SCRATCH_WINDOWS_AT[1] + SCRATCH_WINDOW <= SCRATCH_WINDOWS_AT[2]);
+const _: () = assert!(VERIFY_CHUNK > 0);
+const _: () = assert!(BDEV_BLOCK_SIZE.is_multiple_of(VERIFY_CHUNK));
 // The marker's `n=` and `v=` are literals — init has no way to format an integer —
-// so these are what make a constant moving underneath them loud at compile time
+// so this is what makes the constant moving underneath them loud at compile time
 // rather than a line that quietly means something else. The `OPEN_DENIAL_PROBES`
-// reasoning, applied to a marker that carries two numbers.
+// reasoning, applied to a marker that carries the same number twice.
 const _: () = assert!(ROOTFS_SCRATCH_LEN == 32768);
-const _: () = assert!(SCRATCH_WINDOWS_AT.len() == 3);
+
+/// Why [`verify_file`] stopped short of [`ROOTFS_SCRATCH_LEN`] verified bytes.
+///
+/// Three distinct defects, kept distinct in the log: a transfer that failed or hit
+/// EOF early, bytes that came back wrong, and a file that is *longer* than it
+/// should be. Folding them into one spelling would make the marker's absence say
+/// only "something about the write path", which is the thing this whole demo
+/// exists not to do.
+#[cfg_attr(test, allow(dead_code))]
+enum VerifyFail {
+    /// A read returned `<= 0`, or more than it was asked for, at this offset.
+    Read(usize),
+    /// The byte at this offset did not match the generator.
+    Mismatch(usize),
+    /// The read past the last byte returned something other than a clean EOF.
+    NotEof,
+}
 
 /// Exercise the slice-5.10a write path, and report the result over the console.
 ///
 /// Writes [`ROOTFS_SCRATCH_LEN`] bytes to [`ROOTFS_SCRATCH_PATH`], which ships
 /// empty, so every zone the file ends up with was allocated at runtime. 32 KiB is
 /// eight blocks: seven direct zones and one indirect, so the file crosses the seam
-/// and the allocation of the *indirect block itself* is on this marker. That is the
-/// same reason `/etc/pattern` has the length it does, one layer up.
+/// at 28672 and the allocation of the *indirect block itself* is on this marker.
+/// That is the same reason `/etc/pattern` has the length it does, one layer up.
 ///
-/// Then it closes, re-opens, and reads back three windows. The re-open matters: it
+/// Then it closes, re-opens, and verifies **every byte**. The re-open matters: it
 /// forces a fresh `FS_LOOKUP`, so a size that never reached the inode shows up as a
 /// short read rather than being papered over by a descriptor that remembered it.
 /// Nothing caches a file size anywhere along this path, which is exactly what makes
 /// that test meaningful.
 ///
-/// Three windows rather than all 32 KiB: the returned write count already proves
-/// every byte was accepted, the seam is the only place the indirect arm can hide,
-/// and ~60 more round trips on a boot this slice already lengthens buy nothing.
+/// Verifying the whole file costs nothing over verifying samples of it: the reads
+/// are sequential and there is no `lseek`, so reaching *any* offset means reading
+/// every byte before it. Sampling would issue the same 64 messages and then throw
+/// most of the bytes away, leaving a defect confined to the middle blocks able to
+/// print `ok`. The seam is still crossed and still compared — it is simply one of
+/// 64 compared chunks now rather than a special case.
 ///
-/// Reported through fd 1 — the path under test — which is the standing rule here:
-/// init has no `SYS_DIAGCTL` (it is user-grade), so its proof and its report ride
-/// the same machinery, and a broken write cannot print a clean line about itself.
+/// The `ok` line goes to fd 1 and every `FAIL` to fd 2, both through VFS — the path
+/// under test, which is the standing rule here: init has no `SYS_DIAGCTL` (it is
+/// user-grade), so its proof and its report ride the same machinery, and a broken
+/// write cannot print a clean line about itself.
 ///
 /// Best-effort: init's job is to keep the system running, so a failure here is
 /// reported and stepped over, never fatal.
@@ -693,80 +695,94 @@ fn write_demo(vfs: Endpoint) {
     if fd < 0 {
         return report_line(vfs, b"minix.rs init: fs.write FAIL reopen");
     }
-    let mut pos = 0usize;
-    let mut verified = 0usize;
-    for start in SCRATCH_WINDOWS_AT {
-        if !verify_window(vfs, fd, start, &mut pos) {
-            let _ = vfs_close(vfs, fd);
-            return report_line(vfs, b"minix.rs init: fs.write FAIL verify");
-        }
-        verified += 1;
-    }
+    let verdict = verify_file(vfs, fd);
     let _ = vfs_close(vfs, fd);
 
-    if verified == SCRATCH_WINDOWS_AT.len() {
-        let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.write ok n=32768 v=3\n");
+    match verdict {
+        Ok(verified) if verified == ROOTFS_SCRATCH_LEN => {
+            let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.write ok n=32768 v=32768\n");
+        }
+        // `verify_file` cannot return a short `Ok` — its loop runs until the count
+        // is reached — but saying so with an arm rather than a comment means a
+        // future edit that makes it possible is reported instead of ignored.
+        Ok(verified) => report_at(vfs, b"verify-short", verified),
+        Err(VerifyFail::Read(at)) => report_at(vfs, b"read", at),
+        Err(VerifyFail::Mismatch(at)) => report_at(vfs, b"verify", at),
+        Err(VerifyFail::NotEof) => report_line(vfs, b"minix.rs init: fs.write FAIL eof"),
     }
 }
 
-/// Read [`SCRATCH_WINDOW`] bytes at `start` and check them against the generator.
+/// Read the whole file back and compare every byte against the generator.
 ///
-/// `pos` is the descriptor's position, threaded through because there is no
-/// `lseek`: the window is reached by reading forward and discarding, which is also
-/// a second exercise of the read path across the seam. The windows are visited in
-/// ascending order, so winding forward always suffices.
+/// Returns the number of verified bytes, which on success is exactly
+/// [`ROOTFS_SCRATCH_LEN`]. There is no `lseek`, so this walks forward from 0 — the
+/// same traversal a sampling check would have had to perform anyway, with the
+/// comparison kept instead of discarded.
 ///
-/// Both loops tolerate a short read, because MFS clamps every transfer to the end
-/// of a block and a read that spans a boundary legitimately returns less than it
-/// was asked for. `n <= 0` is a failure, not a retry: `0` is EOF, which at these
-/// offsets means the file is shorter than it should be — which is precisely what a
-/// size that never reached the inode looks like. A peer reporting *more* than it
-/// was asked for is a failure too, which is also what keeps the arithmetic below
-/// unable to run off the buffer.
+/// A short read is tolerated, because MFS clamps every transfer to the end of a
+/// block and a read spanning a boundary legitimately returns less than it was asked
+/// for. `n <= 0` is a failure, not a retry: `0` is EOF, and short of
+/// [`ROOTFS_SCRATCH_LEN`] that means the file is smaller than it should be — which
+/// is precisely what a size that never reached the inode looks like. A peer
+/// reporting *more* than it was asked for is a failure too, which is also what
+/// keeps the arithmetic below unable to run off the buffer.
+///
+/// The trailing read is what turns `size >= 32768` into `size == 32768`: an inode
+/// size set too large would otherwise pass unnoticed. `fs_demo`'s second read is
+/// the same idiom.
 #[cfg_attr(test, allow(dead_code))]
-fn verify_window(vfs: Endpoint, fd: i32, start: usize, pos: &mut usize) -> bool {
-    let mut buf = [0u8; SCRATCH_WINDOW];
+fn verify_file(vfs: Endpoint, fd: i32) -> Result<usize, VerifyFail> {
+    let mut buf = [0u8; VERIFY_CHUNK];
+    let mut pos = 0usize;
 
-    while *pos < start {
-        let want = SCRATCH_WINDOW.min(start - *pos);
+    while pos < ROOTFS_SCRATCH_LEN {
+        let want = VERIFY_CHUNK.min(ROOTFS_SCRATCH_LEN - pos);
         let n = vfs_read(vfs, fd, &mut buf[..want]);
         if n <= 0 || n as usize > want {
-            return false;
+            return Err(VerifyFail::Read(pos));
         }
-        match pos.checked_add(n as usize) {
-            Some(next) => *pos = next,
-            None => return false,
-        }
-    }
+        let got = n as usize;
 
-    let mut got = 0usize;
-    while got < SCRATCH_WINDOW {
-        let room = SCRATCH_WINDOW - got;
-        let n = vfs_read(vfs, fd, &mut buf[got..]);
-        if n <= 0 || n as usize > room {
-            return false;
+        let mut i = 0usize;
+        while i < got {
+            let Some(at) = pos.checked_add(i) else {
+                return Err(VerifyFail::Read(pos));
+            };
+            if buf[i] != rootfs_scratch_byte(at) {
+                return Err(VerifyFail::Mismatch(at));
+            }
+            i += 1;
         }
-        match got.checked_add(n as usize) {
-            Some(next) => got = next,
-            None => return false,
-        }
-    }
-    match pos.checked_add(SCRATCH_WINDOW) {
-        Some(next) => *pos = next,
-        None => return false,
-    }
 
-    let mut i = 0usize;
-    while i < SCRATCH_WINDOW {
-        let Some(at) = start.checked_add(i) else {
-            return false;
+        let Some(next) = pos.checked_add(got) else {
+            return Err(VerifyFail::Read(pos));
         };
-        if buf[i] != rootfs_scratch_byte(at) {
-            return false;
-        }
-        i += 1;
+        pos = next;
     }
-    true
+
+    // One more read, which must be a clean EOF: the file is exactly this long, not
+    // merely at least this long.
+    if vfs_read(vfs, fd, &mut buf[..1]) != 0 {
+        return Err(VerifyFail::NotEof);
+    }
+    Ok(pos)
+}
+
+/// Report a failing step of [`write_demo`] by name and byte offset, on fd 2.
+///
+/// The offset is what makes the line worth more than its absence: `read` at 28672
+/// is the indirect arm, `verify` at a multiple of 4096 is a whole lost block, and a
+/// mismatch anywhere else is a splice bug. Hand-assembled like every other line
+/// here — init has no formatting runtime.
+#[cfg_attr(test, allow(dead_code))]
+fn report_at(vfs: Endpoint, what: &[u8], at: usize) {
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: fs.write FAIL ");
+    n = append(&mut line, n, what);
+    n = append(&mut line, n, b" off=");
+    n = append_dec(&mut line, n, at as u64);
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
 }
 
 // ----- Slice 5.9: the exec-from-FS denial battery ---------------------------
@@ -1031,19 +1047,7 @@ fn report_exec_stack(vfs: Endpoint, status: i32) {
         n = append(&mut line, n, b"no-verdict\n");
     } else {
         n = append(&mut line, n, b"code=");
-        let mut digits = [0u8; 3];
-        let mut d = 0;
-        let mut v = code as u32;
-        loop {
-            digits[d] = b'0' + (v % 10) as u8;
-            v /= 10;
-            d += 1;
-            if v == 0 || d == digits.len() {
-                break;
-            }
-        }
-        digits[..d].reverse();
-        n = append(&mut line, n, &digits[..d]);
+        n = append_dec(&mut line, n, code as u64);
         n = append(&mut line, n, b"\n");
     }
     // fd 2, like init's other failure report and worker's own — failures go to
@@ -1065,6 +1069,28 @@ fn append(line: &mut [u8], mut n: usize, src: &[u8]) -> usize {
         }
     }
     n
+}
+
+/// Append `v` in decimal to `line[..n]`, and return the new length.
+///
+/// The other half of init's string formatting, and the reason a `FAIL` line can
+/// name an offset at all. 20 digits covers every `u64`, so nothing here can
+/// truncate a number into a different one — [`append`] drops the overflow if the
+/// destination is full, which is the same trade every report line already makes.
+#[cfg_attr(test, allow(dead_code))]
+fn append_dec(line: &mut [u8], n: usize, mut v: u64) -> usize {
+    let mut digits = [0u8; 20];
+    let mut d = 0;
+    loop {
+        digits[d] = b'0' + (v % 10) as u8;
+        v /= 10;
+        d += 1;
+        if v == 0 || d == digits.len() {
+            break;
+        }
+    }
+    digits[..d].reverse();
+    append(line, n, &digits[..d])
 }
 
 /// Read a native-endian `i32` out of a reply payload.
