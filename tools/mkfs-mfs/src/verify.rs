@@ -150,7 +150,8 @@ mod tests {
         ROOTFS_IMAGE_BYTES, ROOTFS_TAIL_BLOCK, build_image,
     };
     use crate::manifest::Manifest;
-    use minixrs_mfs::inode::{NR_DIRECT_ZONES, SINGLE_INDIRECT_SLOT};
+    use minixrs_kernel_shared::rootfs::ROOTFS_SCRATCH_LEN;
+    use minixrs_mfs::inode::{NR_DIRECT_ZONES, NR_TZONES, SINGLE_INDIRECT_SLOT};
 
     /// A file large enough to need the indirect block: nine blocks, two past the
     /// seven direct zones.
@@ -380,5 +381,38 @@ mod tests {
         // `kernel/build.rs` embeds this image in the kernel ELF, so two builds of
         // the same manifest must produce identical bytes.
         assert_eq!(sample(), sample());
+    }
+
+    #[test]
+    fn a_zero_length_file_is_regular_empty_and_costs_no_zones() {
+        // Slice 5.10a's write target ships empty, so growth-from-nothing is the
+        // ordinary path rather than a special case. Nothing in the image had zero
+        // length before, so this really is a new case for the writer.
+        let mut m = Manifest::new();
+        m.add("/etc/motd", b"hi\n".to_vec())
+            .add("/etc/scratch", Vec::new());
+        let img = build_image(&m).expect("image builds");
+
+        let (_, node) = lookup(&img, "/etc/scratch").expect("scratch resolves");
+        assert!(node.is_reg());
+        assert_eq!(node.size, 0);
+        assert_eq!(node.zone, [0u32; NR_TZONES]);
+        assert_eq!(read_file(&img, "/etc/scratch"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn the_image_leaves_room_for_the_scratch_file_to_grow() {
+        // The write allocates 8 data zones plus 1 indirect block at runtime. If a
+        // future image shrink made that impossible, init's first write would answer
+        // ENOSPC at boot rather than failing here.
+        let img = sample();
+        let l = image_layout(&img).expect("layout");
+        let free = (l.first_data_zone..ROOTFS_TAIL_BLOCK)
+            .filter(|z| zmap_bit_set(&img, *z) == Some(false))
+            .count();
+        assert!(
+            free > ROOTFS_SCRATCH_LEN / MFS_BLOCK_SIZE,
+            "only {free} free zones"
+        );
     }
 }

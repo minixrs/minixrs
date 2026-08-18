@@ -382,7 +382,7 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
     use minixrs_kernel_shared::rootfs::{
         ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
-        rootfs_pattern_byte,
+        ROOTFS_SCRATCH_PATH, rootfs_pattern_byte,
     };
     use minixrs_mkfs_mfs::Manifest;
 
@@ -392,7 +392,13 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
     manifest
         .add(ROOTFS_HELLO_PATH, hello_bytes.to_vec())
         .add(ROOTFS_MOTD_PATH, ROOTFS_MOTD.to_vec())
-        .add(ROOTFS_PATTERN_PATH, pattern);
+        .add(ROOTFS_PATTERN_PATH, pattern)
+        // Slice 5.10a's write target: shipped **empty** on purpose. Create does
+        // not exist until 5.10b, so the write path needs a file that is already
+        // here — and starting at zero makes growth-from-nothing the ordinary
+        // path, and keeps the read proofs (`/etc/motd`, `/etc/pattern`) out of
+        // reach of a probe that writes.
+        .add(ROOTFS_SCRATCH_PATH, Vec::new());
 
     minixrs_mkfs_mfs::build_image(&manifest)
         .unwrap_or_else(|e| panic!("building the root filesystem image: {e}"))
