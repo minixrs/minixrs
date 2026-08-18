@@ -339,4 +339,32 @@ mod tests {
         );
         assert_eq!(validate_geometry(u64::MAX), Err(EINVAL));
     }
+
+    #[test]
+    fn a_write_validates_exactly_like_a_read() {
+        // The payload and every geometry check are shared (W1's sibling on the BDEV
+        // band). The one field that differs is the grant's access bit, which the
+        // kernel checks in `verify_grant`, not this driver.
+        let m = request(BDEV_MINOR_RAMDISK, 5, BDEV_BLOCK_SIZE as i32, 3);
+        let req = parse_read(&m);
+        assert_eq!(
+            validate_read(req, 256),
+            Ok((3 * BDEV_BLOCK_SIZE as u64, BDEV_BLOCK_SIZE))
+        );
+    }
+
+    #[test]
+    fn an_over_long_write_is_refused_not_clamped() {
+        // Same rule as the read, and for the same reason: a client that cannot
+        // interpret a fraction of a block gains nothing from a short transfer, and
+        // EIO stays reserved for Phase 6's real media errors.
+        let m = request(BDEV_MINOR_RAMDISK, 5, BDEV_BLOCK_SIZE as i32 + 1, 0);
+        assert_eq!(validate_read(parse_read(&m), 256), Err(EINVAL));
+    }
+
+    #[test]
+    fn a_write_past_the_device_is_einval() {
+        let m = request(BDEV_MINOR_RAMDISK, 5, BDEV_BLOCK_SIZE as i32, 256);
+        assert_eq!(validate_read(parse_read(&m), 256), Err(EINVAL));
+    }
 }

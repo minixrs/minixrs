@@ -32,10 +32,12 @@
 //! filesystem cannot interpret half a block) and not `EIO` (which stays reserved
 //! for Phase 6's real media errors). See `bdev.rs`.
 //!
-//! **`BDEV_WRITE` answers `EROFS`, not `ENOSYS`.** `ENOSYS` is already the
-//! unknown-`m_type` answer, so reusing it would make "never heard of writes" and
-//! "knows about writes and refuses them" indistinguishable. Slice 5.10 changes one
-//! line inside that arm.
+//! **`BDEV_WRITE` stores, as of slice 5.10a.** It was defined and answering
+//! `EROFS` from slice 5.7 — deliberately not folded into the unknown-request
+//! `ENOSYS` arm, because "does not know about writes" and "knows and refuses" are
+//! different things to tell a client. That distinction is what made this a
+//! one-arm change: the geometry validation was already here, so 5.10a replaced a
+//! refusal with a `SAFECOPY_FROM` rather than adding a request.
 
 // Freestanding for the real (bare-metal) build, but a normal host binary under
 // `cargo test` so `bdev`'s logic gets host-runnable unit tests. The test harness
@@ -52,10 +54,10 @@ use minixrs_ipc::ipc_send;
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     BDEV_BLOCK_SIZE, BDEV_READ, BDEV_WRITE, GET_RAMDISK, GETINFO_RAMDISK_LEN_OFF,
-    GETINFO_RAMDISK_VA_OFF, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    GETINFO_RAMDISK_VA_OFF, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, SELF};
-use minixrs_kernel_shared::error::{ENOSYS, EROFS, OK};
+use minixrs_kernel_shared::error::{ENOSYS, OK};
 use minixrs_kernel_shared::rootfs::{
     HDR_BLOCKS_OFF, IMAGE_HDR_LEN, IMAGE_LABEL, IMAGE_LABEL_LEN, IMAGE_TAIL_LABEL,
 };
@@ -122,10 +124,11 @@ fn main() -> ! {
                 let rc = do_read(caller_e, &msg, va, blocks);
                 reply(caller_e, &mut msg, rc);
             }
-            // Defined and refused, rather than folded into the `_` arm below —
-            // that difference is the whole reason `BDEV_WRITE` has a number.
+            // A distinct number from the `_` arm below, not folded into `ENOSYS`
+            // — that difference is what let 5.7 answer `EROFS` and 5.10a turn it
+            // into a real store without a client-visible change of shape.
             BDEV_WRITE => {
-                let rc = do_write(&msg, blocks);
+                let rc = do_write(caller_e, &msg, va, blocks);
                 reply(caller_e, &mut msg, rc);
             }
             // Unlike DS, reply rather than drop — the caller is inside a SENDREC
@@ -285,31 +288,42 @@ fn do_read(caller_e: Endpoint, msg: &Message, va: u64, blocks: u64) -> i32 {
     n as i32
 }
 
-/// Refuse one `BDEV_WRITE`, but only after checking the request is one this device
-/// could have served. Returns the reply `m_type`: always negative.
+/// Serve one `BDEV_WRITE`. Returns the reply `m_type`: the byte count stored
+/// (`>= 0`), or a negative errno.
 ///
-/// **Validation precedes the refusal on purpose.** A write to minor 7 should hear
-/// `ENXIO` ("no such device"), not `EROFS` ("that device is read-only") — the
-/// latter asserts something about a device that does not exist, and it is the
-/// same check-order discipline `validate_read` documents: each check is the first
-/// thing that can be wrong given the ones before it.
+/// The mirror of [`do_read`], and deliberately built from the same parse and the
+/// same validation: a write to minor 7 hears `ENXIO` ("no such device") before
+/// anything else, the check-order discipline `validate_read` documents.
 ///
-/// It is also what makes the claim in this module's docs true. Slice 5.10 turns
-/// this into a real write by replacing the `EROFS` below with the store; if the
-/// validation were not already here, 5.10 would have to *add* it, and "one line
-/// inside one arm" would have been an overstatement.
+/// **The direction is the whole difference.** `SAFECOPY_FROM` pulls the client's
+/// bytes into the device; the grant must therefore carry `CPF_READ` where a read
+/// needs `CPF_WRITE`. The kernel enforces that in `verify_grant` — this driver
+/// does not check it and must not, because a driver that re-derived the grant
+/// rules would be a second place for them to drift.
 ///
-/// The payload and every check are shared with `BDEV_READ` — see `ReadRequest`,
-/// whose name is the only thing about it that is read-specific. The one field
-/// that will differ in 5.10 is the grant's access bit (`CPF_READ` rather than
-/// `CPF_WRITE`), which the kernel checks, not this driver.
+/// The grant offset is `0`, not a payload field: `BDEV_WRITE` deliberately has
+/// none, because every client grants a buffer whose block starts at its
+/// beginning.
 #[cfg_attr(test, allow(dead_code))]
-fn do_write(msg: &Message, blocks: u64) -> i32 {
+fn do_write(caller_e: Endpoint, msg: &Message, va: u64, blocks: u64) -> i32 {
     let req = bdev::parse_read(msg);
-    match bdev::validate_read(req, blocks) {
-        Ok(_) => EROFS,
-        Err(e) => e,
+    let (byte_off, n) = match bdev::validate_read(req, blocks) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if n == 0 {
+        // A legal zero-length write. No grant is used and nothing is copied, so a
+        // client polling with `len = 0` cannot use it to probe a grant.
+        return 0;
     }
+
+    let rc = sys_safecopy(SAFECOPY_FROM, caller_e, req.gid, 0, va + byte_off, n as u64);
+    if rc != OK {
+        // Verbatim: EPERM ("your grant does not authorize this") and EFAULT
+        // ("your buffer is not mapped") are different bugs on the client's side.
+        return rc;
+    }
+    n as i32
 }
 
 /// Reply to a SENDREC caller: stamp `m_type`, zero `m_source` (the kernel
