@@ -63,7 +63,7 @@ pub mod superblock;
 pub mod walk;
 pub mod write;
 
-use minixrs_kernel_shared::callnr::BDEV_BLOCK_SIZE;
+use minixrs_kernel_shared::callnr::{BDEV_BLOCK_SIZE, FS_MAX_IO};
 use minixrs_kernel_shared::uspace::SERVER_STACK_BYTES;
 
 /// The one block size minix.rs's MinixFS uses.
@@ -81,6 +81,18 @@ pub const MFS_BLOCK_SIZE: usize = 4096;
 // A block is a BDEV transfer unit is a page. If these ever disagreed, a `BDEV_READ`
 // would return a fraction of a block and every zone lookup would be off.
 const _: () = assert!(MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE);
+
+// One FS transfer must be able to cover a whole block, or a full-block write is
+// unreachable.
+//
+// `do_write` skips the read-before-splice exactly when its clamped chunk is a
+// whole block, and `Blocks::write` then flushes `MFS_BLOCK_SIZE` bytes. Were
+// `FS_MAX_IO` ever the smaller of the two, `write::clamp_write` could not produce
+// such a chunk, every write would become a read-modify-write, and — worse — the
+// skip branch would be dead code that nothing would notice had stopped being
+// exercised. This pins the chain the skip depends on rather than leaving it to the
+// two constants happening to be equal today.
+const _: () = assert!(FS_MAX_IO >= MFS_BLOCK_SIZE);
 
 // The tripwire that `uspace::SERVER_STACK_BYTES` exists for.
 //

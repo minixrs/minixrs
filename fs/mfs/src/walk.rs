@@ -222,6 +222,13 @@ pub fn clamp_read(size: i32, pos: u64, len: i32, bs: usize) -> Result<Chunk, i32
 /// `BDEV_READ` past the end of the device, which the driver would refuse anyway;
 /// checking here makes the refusal an `EIO` about the *filesystem* rather than an
 /// `EINVAL` about the device.
+///
+/// **The reader is deliberately looser than the writer**, and the asymmetry is a
+/// decision rather than an oversight: there is no lower bound here, so a corrupt
+/// inode naming a metadata zone reads a metadata block back as file data — wrong
+/// bytes, and nothing worse. The same pointer on the write path would store over
+/// the bitmaps or the inode table, so [`crate::write::write_zone_ok`] adds the
+/// `zone >= first_data_zone` bound that this one does not need.
 pub fn zone_ok(zone: u32, blocks: u32) -> bool {
     zone != 0 && zone < blocks
 }

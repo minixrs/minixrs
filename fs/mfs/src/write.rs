@@ -118,6 +118,27 @@ pub fn bitmap_find_free(block: &[u8], from_bit: u32, limit_bits: u32) -> Option<
     None
 }
 
+/// May zone `zone` be **written**?
+///
+/// [`crate::walk::zone_ok`]'s write-side twin, and deliberately stricter: it adds
+/// the lower bound the reader does without.
+///
+/// The reader can afford to be loose, because the worst a corrupt zone pointer
+/// costs it is the wrong bytes. A *write* to the same pointer destroys the
+/// filesystem it is pointed at: an inode whose `zone[i]` reads back as `3` would
+/// have `do_write` store a data block straight over the zone bitmap, and a
+/// `zone[SINGLE_INDIRECT_SLOT]` of `4` would have `place_zone` patch and store a
+/// block of the inode table. Neither number is reachable from [`bitmap_find_free`],
+/// which cannot return a zone below `first_data_zone` — but a zone number read off
+/// the device is whatever the device says, and there is no `fsck` here to undo it.
+///
+/// Hence: at or above `first_data_zone`, below `blocks`. Zone 0 is excluded by the
+/// lower bound rather than by a separate clause, because `first_data_zone` is
+/// always at least [`START_BLOCK`](crate::layout::START_BLOCK).
+pub fn write_zone_ok(zone: u32, first_data_zone: u32, blocks: u32) -> bool {
+    zone >= first_data_zone && zone < blocks
+}
+
 /// Mark `bit` allocated. `None` if it lies past the block, which is how a caller
 /// that mixed up its bitmap arithmetic finds out rather than by writing into the
 /// wrong byte.
@@ -311,6 +332,46 @@ mod tests {
     fn setting_a_bit_past_the_block_is_none_not_a_panic() {
         let mut b = [0u8; 8];
         assert_eq!(bitmap_set(&mut b, 64), None);
+    }
+
+    // ----- write_zone_ok ----------------------------------------------------
+
+    /// A plausible small image: metadata below zone 12, 256 blocks in total.
+    const FDZ: u32 = 12;
+    const BLOCKS: u32 = 256;
+
+    #[test]
+    fn a_metadata_zone_may_not_be_written() {
+        // The whole point of the lower bound. Zone 3 is inside the bitmaps and
+        // zone 4 inside the inode table on an image shaped like this one, and
+        // `walk::zone_ok` accepts both — a write there destroys the filesystem.
+        assert!(!write_zone_ok(3, FDZ, BLOCKS));
+        assert!(!write_zone_ok(4, FDZ, BLOCKS));
+        assert!(!write_zone_ok(FDZ - 1, FDZ, BLOCKS), "the boundary itself");
+        // ... and the reader really is looser, which is the asymmetry this
+        // function exists to state.
+        assert!(crate::walk::zone_ok(3, BLOCKS));
+    }
+
+    #[test]
+    fn the_first_data_zone_may_be_written() {
+        assert!(write_zone_ok(FDZ, FDZ, BLOCKS));
+    }
+
+    #[test]
+    fn the_last_zone_may_be_written_and_the_one_past_it_may_not() {
+        assert!(write_zone_ok(BLOCKS - 1, FDZ, BLOCKS));
+        assert!(!write_zone_ok(BLOCKS, FDZ, BLOCKS));
+        assert!(!write_zone_ok(u32::MAX, FDZ, BLOCKS));
+    }
+
+    #[test]
+    fn zone_zero_may_never_be_written() {
+        // Excluded by the lower bound rather than a clause of its own, because
+        // `first_data_zone >= START_BLOCK`. Checked with a degenerate
+        // `first_data_zone` too, so the property does not rest on that alone.
+        assert!(!write_zone_ok(0, FDZ, BLOCKS));
+        assert!(!write_zone_ok(0, 1, BLOCKS));
     }
 
     // ----- grow_size --------------------------------------------------------

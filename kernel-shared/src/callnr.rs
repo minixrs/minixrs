@@ -935,12 +935,18 @@ pub const BDEV_READ: i32 = BDEV_RQ_BASE;
 /// Client → block driver: write one block. Payload is [`BDEV_READ`]'s, with the
 /// grant carrying `CPF_READ` instead.
 ///
-/// **Answers `EROFS` as of slice 5.7**, not `ENOSYS`. `ENOSYS` is already the
-/// unknown-`m_type` answer, so reusing it would make "this driver has never heard
-/// of writes" and "this driver knows about writes and refuses them"
-/// indistinguishable to a client. Defining the request now also keeps the arm
-/// dispatched and probed, and — past the slice-5.6 ABI freeze — means slice 5.10
-/// changes one line inside one arm rather than adding a call number.
+/// **A real store as of slice 5.10a.** From slice 5.7 until then it was defined
+/// and answered `EROFS` — deliberately not folded into the unknown-`m_type`
+/// `ENOSYS` arm, because that would have made "this driver has never heard of
+/// writes" and "this driver knows about writes and refuses them" indistinguishable
+/// to a client. Defining the request that early is precisely what made turning it
+/// real a one-arm change inside the driver rather than a new call number past the
+/// slice-5.6 ABI freeze: the geometry validation, the dispatch arm and the denial
+/// probes were already there, and 5.10a replaced the refusal with a
+/// `SAFECOPY_FROM`.
+///
+/// A driver may of course still answer `EROFS` — a read-only medium is a real
+/// thing — but the `memory` ramdisk no longer does, and no client may assume it.
 pub const BDEV_WRITE: i32 = BDEV_RQ_BASE + 1;
 
 /// Number of block-device requests defined so far. Locks a driver's dispatch

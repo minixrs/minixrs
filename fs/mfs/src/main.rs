@@ -469,18 +469,48 @@ fn do_read(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option
 ///
 /// **The step order is what makes one block buffer sufficient.** Each step
 /// finishes with the buffer's contents either consumed or flushed before the next
-/// begins; there is never a moment where two blocks are wanted at once, and the
-/// borrow checker enforces it because every [`Blocks`] method takes `&mut self`.
+/// begins, so there is never a moment where two blocks are wanted at once.
 ///
 ///   1. Read the inode. [`Inode`] is `Copy`, so the buffer is free again at the
 ///      `let`.
-///   2. Clamp — this is where `EFBIG` is decided, before any device work.
+///   2. Clamp, and compute the resulting size. Both are pure, and this is where
+///      `EFBIG` is decided — before any device work, so a rejected request has
+///      allocated nothing.
 ///   3. Resolve or allocate the zone. A freshly allocated zone is **zeroed and
 ///      written before its number is stored anywhere** (W4): the bitmap bit goes
 ///      first, so a failure between the two leaks a zone rather than sharing one.
 ///   4. Read the target block unless the write covers it whole, splice the
 ///      caller's bytes in through `SAFECOPY_FROM`, store the block.
 ///   5. Write the inode back if it changed.
+///
+/// **What the [`Blocks`] token does and does not guarantee.** It guarantees
+/// *aliasing*: no block can be held across another's fetch, because every method
+/// takes `&mut self` and hands back a borrow tied to it, so the borrow checker
+/// rejects the attempt. It does **not** guarantee *identity* — [`Blocks::write`]
+/// flushes whatever is resident under the block number it is handed, so
+/// `buf_mut(); …; write(other)` would store one block's bytes as another and
+/// still compile. Every call site here is therefore responsible for having made
+/// the resident block the one it names, and the two that flush say which block
+/// they just filled: step 4 writes `zone`, which it either read at the top of the
+/// step or is about to overwrite whole.
+///
+/// **A failure mid-write leaks a zone, deliberately.** If the safecopy or the
+/// block store fails after step 3 allocated one, the bitmap bit stays set and the
+/// inode is never written back — so the zone is unreachable, and a retry
+/// *re-allocates* rather than reusing it. A client looping on a bad grant
+/// therefore leaks one or two zones per attempt against the image's ~250 data
+/// zones. The alternative was rolling the bit back on the error path, which is
+/// worse in the direction that matters: a rollback that itself fails, or races a
+/// concurrent allocation, hands the same zone out twice, and this filesystem has
+/// no `fsck` to notice. A leak is recoverable by a future one; a shared zone is
+/// silent corruption. Reclaiming leaks is left to that future `fsck`.
+///
+/// **`mtime` and `ctime` are not updated, on purpose.** There is no clock a
+/// user-space filesystem can read yet — MFS holds no `SYS_SETALARM` grant and
+/// there is no time server — so a written file keeps the timestamps
+/// `tools/mkfs-mfs` stamped into it. Inventing a value would be worse than an
+/// obviously stale one, and this becomes a real field to fill the moment a clock
+/// is reachable.
 #[cfg_attr(test, allow(dead_code))]
 fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
     let Some(mount) = mount else {
@@ -512,6 +542,14 @@ fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Optio
         // TTY, VFS and the `memory` driver all apply the same rule.
         return 0;
     }
+    // Computed here rather than at step 5, where it reads more naturally: it is a
+    // pure function of values already in hand, and evaluating it after a zone has
+    // been allocated and its bitmap bit written would leak that zone on an `EFBIG`
+    // this could have reported before touching the device at all.
+    let grown = match write::grow_size(node.size, req.pos, chunk.len) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
 
     // Step 3. `dirty` records whether the inode changed at all — see step 5.
     let (zone, mut dirty) = match place_zone(blocks, mount, &mut node, req.pos) {
@@ -519,13 +557,18 @@ fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Optio
         Err(e) => return e,
     };
 
-    // Step 4.
-    if chunk.len < mount.block_size {
+    // Step 4. The guard names `MFS_BLOCK_SIZE`, not `mount.block_size`, because
+    // it is `Blocks::write`'s flush length that has to be fully covered — the
+    // mount's block size is checked equal to it at mount time, but this is the
+    // constant the skip actually depends on, and `lib.rs`'s `const _` chain pins
+    // `FS_MAX_IO >= MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE` so a clamped chunk can
+    // reach it.
+    if chunk.len < MFS_BLOCK_SIZE {
         // A partial write preserves the bytes around it, so the block has to be
         // read before it is spliced. A full-block write skips this: every byte is
         // about to be replaced.
-        if blocks.read(u64::from(zone)).is_err() {
-            return EIO;
+        if let Err(e) = blocks.read(u64::from(zone)) {
+            return e;
         }
     }
     let dst = blocks.buf_mut();
@@ -561,10 +604,6 @@ fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Optio
     // `zone[i]` without moving `size` at all, and keying on size alone would drop
     // that pointer while leaving its bitmap bit set — the bitmap and the inode
     // disagreeing about a live zone, which is corruption rather than a leak.
-    let grown = match write::grow_size(node.size, req.pos, chunk.len) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
     if grown != node.size {
         node.size = grown;
         dirty = true;
@@ -592,7 +631,8 @@ fn place_zone(
         write::ZoneSlot::Direct(i) => {
             let existing = *node.zone.get(i).ok_or(EIO)?;
             if existing != 0 {
-                return if walk::zone_ok(existing, mount.blocks) {
+                return if write::write_zone_ok(existing, mount.layout.first_data_zone, mount.blocks)
+                {
                     Ok((existing, false))
                 } else {
                     Err(EIO)
@@ -614,7 +654,7 @@ fn place_zone(
                 node.zone[SINGLE_INDIRECT_SLOT] = indirect;
                 dirty = true;
             }
-            if !walk::zone_ok(indirect, mount.blocks) {
+            if !write::write_zone_ok(indirect, mount.layout.first_data_zone, mount.blocks) {
                 return Err(EIO);
             }
             // Read the pointer out and let the borrow die immediately: `u32` is
@@ -623,7 +663,8 @@ fn place_zone(
             let blk = blocks.read(u64::from(indirect))?;
             let existing = zone_from_indirect(blk, slot).ok_or(EIO)?;
             if existing != 0 {
-                return if walk::zone_ok(existing, mount.blocks) {
+                return if write::write_zone_ok(existing, mount.layout.first_data_zone, mount.blocks)
+                {
                     Ok((existing, dirty))
                 } else {
                     Err(EIO)
@@ -698,7 +739,7 @@ fn alloc_zone(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
             .checked_add(from)
             .and_then(|z| z.checked_add(bit))
             .ok_or(EIO)?;
-        if !walk::zone_ok(zone, mount.blocks) {
+        if !write::write_zone_ok(zone, mount.layout.first_data_zone, mount.blocks) {
             return Err(EIO);
         }
         // W4: zero it before anyone can reach it. A fresh zone otherwise holds
