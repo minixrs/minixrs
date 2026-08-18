@@ -115,6 +115,7 @@ fn bands() -> [Band; 9] {
                 ("FS_READSUPER", callnr::FS_READSUPER),
                 ("FS_LOOKUP", callnr::FS_LOOKUP),
                 ("FS_READ", callnr::FS_READ),
+                ("FS_WRITE", callnr::FS_WRITE),
             ],
         },
         // Base + members + count only, mirroring exactly what CDEV emits: no

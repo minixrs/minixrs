@@ -781,9 +781,29 @@ pub const FS_LOOKUP: i32 = FS_RQ_BASE + 1;
 /// this request at all.
 pub const FS_READ: i32 = FS_RQ_BASE + 2;
 
+/// VFS → FS server: write bytes into a file.
+///
+/// **Payload is [`FS_READ`]'s, field for field** — inode, grant id, byte count,
+/// position — because it is the same question in the other direction, and one
+/// wire codec and one clamp serve both. The reply `m_type` is the byte count
+/// written (`>= 0`), or a negative errno.
+///
+/// **A short write is normal here, not an error.** The FS server clamps every
+/// request to the end of the block containing `pos`, so one call moves at most
+/// [`FS_MAX_IO`] and usually less; VFS loops. That is [`CDEV_WRITE`]'s stance and
+/// deliberately *not* [`BDEV_READ`]'s refuse-or-nothing — BDEV refuses because
+/// its client is a filesystem that cannot interpret a fraction of a block, while
+/// this request's client is VFS, whose whole job is hiding staging from POSIX.
+///
+/// The grant must carry `CPF_READ` (where [`FS_READ`]'s carries `CPF_WRITE`). The
+/// kernel checks that in `verify_grant`; no server re-implements it. There is no
+/// granter field and no grant-offset field: the granter is the kernel-stamped
+/// `m_source`, and VFS issues a fresh grant over exactly the round's bytes.
+pub const FS_WRITE: i32 = FS_RQ_BASE + 3;
+
 /// Number of file-system requests defined so far. Locks an FS server's dispatch
 /// coverage the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_FS_MSGS: usize = 3;
+pub const NR_FS_MSGS: usize = 4;
 
 /// Offset of the block-device minor in an `FS_READSUPER` payload (i32).
 pub const FS_SUPER_MINOR_OFF: usize = 0;
@@ -1505,6 +1525,7 @@ mod tests {
             assert_ne!(r, FS_READSUPER);
             assert_ne!(r, FS_LOOKUP);
             assert_ne!(r, FS_READ);
+            assert_ne!(r, FS_WRITE);
             assert_ne!(r, BDEV_READ);
             assert_ne!(r, BDEV_WRITE);
             assert_ne!(r, CDEV_WRITE);
@@ -1564,6 +1585,7 @@ mod tests {
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
+                FS_WRITE,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1643,6 +1665,7 @@ mod tests {
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
+                FS_WRITE,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1699,6 +1722,7 @@ mod tests {
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
+                FS_WRITE,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1894,6 +1918,7 @@ mod tests {
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
+                FS_WRITE,
                 BDEV_READ,
                 BDEV_WRITE,
                 VM_PAGEFAULT,
@@ -1962,7 +1987,7 @@ mod tests {
     fn fs_msgs_contiguous_from_base() {
         // FS requests are contiguous from FS_RQ_BASE; NR_FS_MSGS locks an FS
         // server's dispatch coverage.
-        let msgs = [FS_READSUPER, FS_LOOKUP, FS_READ];
+        let msgs = [FS_READSUPER, FS_LOOKUP, FS_READ, FS_WRITE];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, FS_RQ_BASE + i as i32);
         }
@@ -1976,7 +2001,7 @@ mod tests {
         // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a server's m_type
         // dispatcher and the SEF classifier never collide. FS sits between VFS
         // and BDEV, which is what its two bounds assert.
-        for m in [FS_READSUPER, FS_LOOKUP, FS_READ] {
+        for m in [FS_READSUPER, FS_LOOKUP, FS_READ, FS_WRITE] {
             for other in [
                 PM_GETPID,
                 PM_FORK,
@@ -2088,6 +2113,32 @@ mod tests {
     }
 
     #[test]
+    fn fs_write_reuses_the_read_payload_offsets() {
+        // W1: the same four fields at the same offsets. Not a coincidence to be
+        // re-derived — the number `FS_LOOKUP` hands out is the number both
+        // `FS_READ` and `FS_WRITE` take back, and one clamp/parse serves both.
+        assert_eq!(FS_WRITE, FS_RQ_BASE + 3);
+        assert_eq!(FS_INO_OFF, 0);
+        assert_eq!(FS_GRANT_OFF, 4);
+        assert_eq!(FS_LEN_OFF, 8);
+        assert_eq!(FS_POS_OFF, 16);
+        // The four fields are ordered, non-overlapping, and fit the 96-byte payload.
+        let fields = [
+            (FS_INO_OFF, 4),
+            (FS_GRANT_OFF, 4),
+            (FS_LEN_OFF, 4),
+            (FS_POS_OFF, 8),
+        ];
+        assert_eq!(fields.len(), 4, "an FS_WRITE payload field was added");
+        let mut end = 0usize;
+        for (off, width) in fields {
+            assert!(off >= end);
+            end = off + width;
+        }
+        assert!(end <= 96);
+    }
+
+    #[test]
     fn the_fs_transfer_and_path_limits_fit_their_wire_fields() {
         // One FS_READ moves at most one block — the staging buffer a server on a
         // one-page stack can afford — and the reply `m_type` carries that count as
@@ -2161,6 +2212,7 @@ mod tests {
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
+                FS_WRITE,
                 CDEV_WRITE,
                 VM_PAGEFAULT,
                 VM_BRK,
@@ -2309,6 +2361,7 @@ mod tests {
             assert_ne!(m, FS_READSUPER);
             assert_ne!(m, FS_LOOKUP);
             assert_ne!(m, FS_READ);
+            assert_ne!(m, FS_WRITE);
             assert_ne!(m, BDEV_READ);
             assert_ne!(m, BDEV_WRITE);
             assert_ne!(m, CDEV_WRITE);

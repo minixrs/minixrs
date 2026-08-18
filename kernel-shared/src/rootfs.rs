@@ -121,6 +121,53 @@ const _: () = assert!(ROOTFS_PATTERN_LEN > 7 * BDEV_BLOCK_SIZE);
 const _: () = assert!(!ROOTFS_MOTD.is_empty());
 const _: () = assert!(ROOTFS_MOTD.len() <= BDEV_BLOCK_SIZE);
 
+/// A file the root image ships **empty**, for slice 5.10a's write proof to fill.
+///
+/// Create does not exist until 5.10b, so the write path needs a target that is
+/// already in the image. Zero-length rather than pre-sized: that makes
+/// growth-from-nothing the ordinary path rather than a special case, and it keeps
+/// `/etc/motd` and `/etc/pattern` — which are *read* proofs — untouched by a
+/// probe that writes.
+pub const ROOTFS_SCRATCH_PATH: &str = "/etc/scratch";
+
+/// Bytes init writes to [`ROOTFS_SCRATCH_PATH`]: 32 KiB, i.e. 8 blocks.
+///
+/// **Mandatory rather than round.** Seven direct zones cover 28 KiB, so this
+/// length is what puts the single-indirect *allocation* arm — and the allocation
+/// of the indirect block itself — on a boot marker. The last zone is indirect
+/// slot 0. Unlike [`ROOTFS_PATTERN_LEN`] this content is written at runtime, so
+/// the length is a claim init proves rather than something the image asserts.
+pub const ROOTFS_SCRATCH_LEN: usize = 32 * 1024;
+
+/// Period of [`rootfs_scratch_byte`]. Prime, and coprime with the 4096-byte
+/// block, so a lost, duplicated, or reordered block changes the bytes rather
+/// than landing on the same value again — [`rootfs_pattern_byte`]'s reasoning.
+///
+/// It is *also* what lets init hold a single source buffer: init's write chunk is
+/// a whole multiple of this, so every chunk's contents are identical and one
+/// `const`-generated static is correct for all of them.
+pub const ROOTFS_SCRATCH_PERIOD: usize = 251;
+
+/// Byte `i` of what init writes to [`ROOTFS_SCRATCH_PATH`].
+///
+/// Skewed by 7 off [`rootfs_pattern_byte`] so that reading the wrong file is a
+/// mismatch rather than a coincidence.
+pub const fn rootfs_scratch_byte(i: usize) -> u8 {
+    ((i + 7) % ROOTFS_SCRATCH_PERIOD) as u8
+}
+
+// The scratch file really does run past the direct zones, which is the whole
+// reason its length is what it is. Anything shorter would make the
+// single-indirect *allocation* arm unreachable without saying so.
+const _: () = assert!(ROOTFS_SCRATCH_LEN > 7 * BDEV_BLOCK_SIZE);
+// ...and it must stay inside the single-indirect span, which is what MFS's
+// writer covers: 7 direct zones plus one block of 4-byte pointers.
+const _: () = assert!(ROOTFS_SCRATCH_LEN <= (7 + BDEV_BLOCK_SIZE / 4) * BDEV_BLOCK_SIZE);
+// The image has room for it: 8 data zones plus 1 indirect block, against an
+// image whose other contents leave well over that free. A future image shrink
+// fails here rather than at boot with ENOSPC.
+const _: () = assert!(ROOTFS_SCRATCH_LEN / BDEV_BLOCK_SIZE + 1 < ROOTFS_IMAGE_BLOCKS as usize);
+
 /// Label at the start of the image. NUL-padded to [`IMAGE_LABEL_LEN`].
 pub const IMAGE_LABEL: [u8; IMAGE_LABEL_LEN] = *b"minix.rs rootfs\0";
 
@@ -269,6 +316,31 @@ mod tests {
         assert_ne!(
             rootfs_pattern_byte(indirect_off),
             rootfs_pattern_byte(indirect_off + 1)
+        );
+    }
+
+    #[test]
+    fn the_scratch_file_spans_the_direct_indirect_seam() {
+        // W9/W3: the write proof must cross 7 direct zones, or the single-indirect
+        // allocation arm has no boot marker. Same reasoning ROOTFS_PATTERN_LEN
+        // records for the read side.
+        assert_eq!(ROOTFS_SCRATCH_LEN, 32 * 1024);
+        assert_eq!(
+            ROOTFS_SCRATCH_LEN.min(7 * BDEV_BLOCK_SIZE),
+            7 * BDEV_BLOCK_SIZE
+        );
+    }
+
+    #[test]
+    fn the_scratch_generator_is_position_dependent_and_skewed_off_the_pattern() {
+        // Skewed by 7 so a cross-file mix-up is a mismatch, not a coincidence.
+        assert_ne!(rootfs_scratch_byte(0), rootfs_pattern_byte(0));
+        // Non-repeating across a block: 251 is prime and coprime with 4096.
+        assert_ne!(rootfs_scratch_byte(0), rootfs_scratch_byte(BDEV_BLOCK_SIZE));
+        // Periodic with period 251, which is what lets init hold one source buffer.
+        assert_eq!(
+            rootfs_scratch_byte(0),
+            rootfs_scratch_byte(ROOTFS_SCRATCH_PERIOD)
         );
     }
 
