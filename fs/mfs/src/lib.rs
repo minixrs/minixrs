@@ -61,6 +61,7 @@ pub mod proto;
 pub mod read;
 pub mod superblock;
 pub mod walk;
+pub mod write;
 
 use minixrs_kernel_shared::callnr::BDEV_BLOCK_SIZE;
 use minixrs_kernel_shared::uspace::SERVER_STACK_BYTES;
