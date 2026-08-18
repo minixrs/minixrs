@@ -49,18 +49,22 @@ minixrs_abi_note::brand!();
 use minixrs_ipc::ipc_sendrec;
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    CDEV_MAX_IO, FS_PATH_MAX, NR_VFS_MSGS, PM_EXEC, PM_EXEC_PATH_MAX, PM_EXEC_PATH_OFF, PM_FORK,
-    PM_WAIT, VFS_BUF_OFF, VFS_CLOSE, VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE, VFS_FD_OFF, VFS_LEN_OFF,
-    VFS_OPEN, VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE, VFS_WRITE,
+    BDEV_BLOCK_SIZE, CDEV_MAX_IO, FS_PATH_MAX, NR_VFS_MSGS, PM_EXEC, PM_EXEC_PATH_MAX,
+    PM_EXEC_PATH_OFF, PM_FORK, PM_WAIT, VFS_BUF_OFF, VFS_CLOSE, VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE,
+    VFS_FD_OFF, VFS_LEN_OFF, VFS_OPEN, VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE,
+    VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{
-    EBADF, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOEXEC, ENOSYS, EPERM, EROFS, OK,
+    EBADF, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOEXEC, ENOSYS, EPERM, OK,
 };
 use minixrs_kernel_shared::execstack::EXEC_STACK_PROBE_PASS;
 use minixrs_kernel_shared::message::USER_VA_TOP;
-use minixrs_kernel_shared::rootfs::{ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH};
+use minixrs_kernel_shared::rootfs::{
+    ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_SCRATCH_LEN, ROOTFS_SCRATCH_PATH,
+    ROOTFS_SCRATCH_PERIOD, rootfs_scratch_byte,
+};
 use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
 
 /// The boot loader primes `SP_EL0` before `eret`, so `_start` can dive straight
@@ -192,15 +196,19 @@ fn main() -> ! {
     let vfs = boot_endpoint(VFS_PROC_NR);
 
     announce(vfs);
-    // The read path runs after the write path, and the order is load-bearing in
-    // the usual direction: it is the newest code here, so a hang inside it
-    // localizes to the `fs.*` markers instead of taking 5.4's, 5.5's, and 5.6's
-    // with it. Do not reorder this prologue.
+    // The read path runs after the console write path, and the order is
+    // load-bearing in the usual direction: a hang inside it localizes to the
+    // `fs.*` markers instead of taking 5.4's, 5.5's and 5.6's with it. Do not
+    // reorder this prologue.
     fs_demo(vfs);
-    // The exec battery runs last in the prologue, the standing rule: it is the
-    // newest code here, so a hang inside it localizes to `exec.deny` instead of
-    // taking 5.4's, 5.5's, 5.6's and 5.8's markers with it. Every probe execs
-    // *init itself* and must fail — see [`exec_denials`].
+    // The filesystem write path runs after the read path it depends on — the
+    // same rule — so a hang inside it localizes to the `fs.write` marker instead
+    // of taking 5.4's, 5.5's, 5.6's and 5.8's with it. See [`write_demo`].
+    write_demo(vfs);
+    // The exec battery runs last in the prologue, the standing rule: a hang
+    // inside it localizes to `exec.deny` instead of taking 5.4's, 5.5's, 5.6's,
+    // 5.8's and 5.10a's markers with it. Every probe execs *init itself* and
+    // must fail — see [`exec_denials`].
     exec_denials(pm, vfs);
 
     // One-shot: the exec-ABI verdict of the first child init forks (slice 5.5).
@@ -474,11 +482,13 @@ fn fd_demo(vfs: Endpoint) {
 ///     unflattened — the read-path twin of the write path's `bad-buf`.
 ///   - `read-console` — `read()` on fd 1. `ENOSYS`, not `EBADF`: the descriptor is
 ///     perfectly good, and `CDEV_READ` is what does not exist until Phase 6.
-///   - `write-file` — `write()` on a descriptor opened on the read-only
-///     filesystem. `EROFS`, not `EBADF` — and that distinction is the whole reason
-///     `do_write` has a `File` arm rather than folding it into the unused case.
 ///   - `close-twice` — closing an already-closed descriptor. `EBADF`, which is
 ///     what makes the `fs.fd` re-open above mean something.
+///
+/// There used to be a `write-file` probe here, expecting `EROFS` from a `write()`
+/// on a file descriptor. Slice 5.10a made that write succeed, so the probe went
+/// from asserting a refusal to silently corrupting `/etc/motd` — see the comment
+/// at its old site. [`write_demo`] replaces it with a positive proof.
 ///
 /// Reported as a count on fd 2, so that descriptor stays exercised on the path
 /// that matters.
@@ -521,15 +531,19 @@ fn open_denials(vfs: Endpoint) {
         return report_open_fail(vfs, "read-console");
     }
 
-    // ...and a file descriptor cannot be written to, on a read-only filesystem.
+    // Slice 5.10a retired the probe that used to sit here: it wrote to a
+    // descriptor on `/etc/motd` expecting `EROFS`, and once the write path became
+    // real that call *succeeded*, overwriting the first bytes of the very file
+    // `fs.selfcheck` exists to verify. A probe whose expectation silently inverts
+    // is worse than no probe — so it is gone and the count moved, which is what
+    // makes the retirement a visible diff in `qemu-boot.expected` rather than a
+    // marker that quietly means something else. Writing to a file is now proved
+    // positively, by [`write_demo`].
+    //
+    // The open stays: `close-twice` below needs a live descriptor.
     let fd = vfs_open(vfs, ROOTFS_MOTD_PATH);
     if fd < 0 {
         return report_open_fail(vfs, "setup");
-    }
-    if vfs_write(vfs, fd, ROOTFS_MOTD_PATH.as_bytes()) == EROFS {
-        denied += 1;
-    } else {
-        return report_open_fail(vfs, "write-file");
     }
     if vfs_close(vfs, fd) == OK && vfs_close(vfs, fd) == EBADF {
         denied += 1;
@@ -538,8 +552,221 @@ fn open_denials(vfs: Endpoint) {
     }
 
     if denied == OPEN_DENIAL_PROBES {
-        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=8\n");
+        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=7\n");
     }
+}
+
+// ----- Slice 5.10a: the write path ------------------------------------------
+
+/// Bytes written per `write()` call.
+///
+/// A whole multiple of [`ROOTFS_SCRATCH_PERIOD`], which is what lets [`SCRATCH`]
+/// be a single buffer: every chunk starts at an offset congruent to 0, so the
+/// same bytes are correct for all of them.
+///
+/// Deliberately **not** a multiple of the 4096-byte block. Every chunk after the
+/// first therefore starts mid-block and crosses a block boundary, so partial-block
+/// splicing and MFS's clamp-to-the-block-end short write are exercised on the boot
+/// marker rather than only in unit tests.
+const SCRATCH_CHUNK: usize = 16 * ROOTFS_SCRATCH_PERIOD;
+
+const _: () = assert!(SCRATCH_CHUNK.is_multiple_of(ROOTFS_SCRATCH_PERIOD));
+// ...and deliberately NOT a whole block, so every chunk after the first starts
+// mid-block. `BDEV_BLOCK_SIZE`, not `CDEV_MAX_IO`: the block is what MFS clamps
+// to, and the two constants differ by 16x.
+const _: () = assert!(!SCRATCH_CHUNK.is_multiple_of(BDEV_BLOCK_SIZE));
+
+/// One chunk's worth of the scratch pattern, generated at compile time.
+///
+/// `.rodata`, not a mutable static: init writes these bytes and never modifies
+/// them, so the crate keeps zero `unsafe`. A stack buffer is out of the question —
+/// init's stack is one page, and a 4 KiB local would fault into VM's SIGSEGV arm,
+/// which prints nothing `tests/qemu-boot.forbidden` catches.
+static SCRATCH: [u8; SCRATCH_CHUNK] = scratch_chunk();
+
+const fn scratch_chunk() -> [u8; SCRATCH_CHUNK] {
+    let mut b = [0u8; SCRATCH_CHUNK];
+    let mut i = 0;
+    while i < SCRATCH_CHUNK {
+        b[i] = rootfs_scratch_byte(i);
+        i += 1;
+    }
+    b
+}
+
+/// Bytes read back per verification window.
+const SCRATCH_WINDOW: usize = 512;
+
+/// First byte the single-indirect region covers. Mirrors `minixrs-mfs`'s
+/// `NR_DIRECT_ZONES * MFS_BLOCK_SIZE`, spelled out locally because init does not
+/// depend on that crate — it is a plain user program, `minixrs-ipc` and
+/// `kernel-shared` only.
+const SEAM: usize = 7 * BDEV_BLOCK_SIZE;
+
+/// Where the read-back windows start.
+///
+/// All three are multiples of [`SCRATCH_WINDOW`] **and** lie inside a single 4 KiB
+/// block, so each window is one clamped transfer and the arithmetic in
+/// [`verify_window`] stays trivial. The middle one is the first byte the
+/// *indirect* block covers — the one zone the allocator had to create an indirect
+/// block for, and the only place that arm can hide. There is no separate count
+/// constant: `SCRATCH_WINDOWS_AT.len()` is the count, so the marker's `v=` cannot
+/// drift from the loop.
+const SCRATCH_WINDOWS_AT: [usize; 3] = [0, SEAM, ROOTFS_SCRATCH_LEN - SCRATCH_WINDOW];
+
+const _: () = assert!(SEAM < ROOTFS_SCRATCH_LEN);
+const _: () = assert!(SEAM.is_multiple_of(SCRATCH_WINDOW));
+const _: () = assert!((ROOTFS_SCRATCH_LEN - SCRATCH_WINDOW).is_multiple_of(SCRATCH_WINDOW));
+// Strictly ascending and non-overlapping: [`verify_window`] reaches each window by
+// winding the descriptor *forward*, so an out-of-order or overlapping entry would
+// make it wind past its own target and verify the wrong bytes.
+const _: () = assert!(SCRATCH_WINDOWS_AT[0] + SCRATCH_WINDOW <= SCRATCH_WINDOWS_AT[1]);
+const _: () = assert!(SCRATCH_WINDOWS_AT[1] + SCRATCH_WINDOW <= SCRATCH_WINDOWS_AT[2]);
+// The marker's `n=` and `v=` are literals — init has no way to format an integer —
+// so these are what make a constant moving underneath them loud at compile time
+// rather than a line that quietly means something else. The `OPEN_DENIAL_PROBES`
+// reasoning, applied to a marker that carries two numbers.
+const _: () = assert!(ROOTFS_SCRATCH_LEN == 32768);
+const _: () = assert!(SCRATCH_WINDOWS_AT.len() == 3);
+
+/// Exercise the slice-5.10a write path, and report the result over the console.
+///
+/// Writes [`ROOTFS_SCRATCH_LEN`] bytes to [`ROOTFS_SCRATCH_PATH`], which ships
+/// empty, so every zone the file ends up with was allocated at runtime. 32 KiB is
+/// eight blocks: seven direct zones and one indirect, so the file crosses the seam
+/// and the allocation of the *indirect block itself* is on this marker. That is the
+/// same reason `/etc/pattern` has the length it does, one layer up.
+///
+/// Then it closes, re-opens, and reads back three windows. The re-open matters: it
+/// forces a fresh `FS_LOOKUP`, so a size that never reached the inode shows up as a
+/// short read rather than being papered over by a descriptor that remembered it.
+/// Nothing caches a file size anywhere along this path, which is exactly what makes
+/// that test meaningful.
+///
+/// Three windows rather than all 32 KiB: the returned write count already proves
+/// every byte was accepted, the seam is the only place the indirect arm can hide,
+/// and ~60 more round trips on a boot this slice already lengthens buy nothing.
+///
+/// Reported through fd 1 — the path under test — which is the standing rule here:
+/// init has no `SYS_DIAGCTL` (it is user-grade), so its proof and its report ride
+/// the same machinery, and a broken write cannot print a clean line about itself.
+///
+/// Best-effort: init's job is to keep the system running, so a failure here is
+/// reported and stepped over, never fatal.
+#[cfg_attr(test, allow(dead_code))]
+fn write_demo(vfs: Endpoint) {
+    let fd = vfs_open(vfs, ROOTFS_SCRATCH_PATH);
+    if fd < 0 {
+        return report_line(vfs, b"minix.rs init: fs.write FAIL open");
+    }
+
+    let mut off = 0usize;
+    while off < ROOTFS_SCRATCH_LEN {
+        let want = SCRATCH_CHUNK.min(ROOTFS_SCRATCH_LEN - off);
+        // VFS absorbs short writes (slice 5.4), so anything but the full count is
+        // a failure here rather than something to retry.
+        let n = vfs_write(vfs, fd, &SCRATCH[..want]);
+        if n != want as i32 {
+            let _ = vfs_close(vfs, fd);
+            return report_line(vfs, b"minix.rs init: fs.write FAIL short");
+        }
+        let Some(next) = off.checked_add(want) else {
+            let _ = vfs_close(vfs, fd);
+            return report_line(vfs, b"minix.rs init: fs.write FAIL short");
+        };
+        off = next;
+    }
+    // The total, checked rather than merely accumulated: the loop's own invariant
+    // already implies it, and stating it anyway is what keeps `n=32768` in the
+    // marker a claim about bytes on the filesystem instead of about this loop.
+    if off != ROOTFS_SCRATCH_LEN {
+        let _ = vfs_close(vfs, fd);
+        return report_line(vfs, b"minix.rs init: fs.write FAIL total");
+    }
+    if vfs_close(vfs, fd) != OK {
+        return report_line(vfs, b"minix.rs init: fs.write FAIL close");
+    }
+
+    // Re-open: a fresh descriptor and a fresh lookup, so the size has to have
+    // reached the inode for these reads to return anything.
+    let fd = vfs_open(vfs, ROOTFS_SCRATCH_PATH);
+    if fd < 0 {
+        return report_line(vfs, b"minix.rs init: fs.write FAIL reopen");
+    }
+    let mut pos = 0usize;
+    let mut verified = 0usize;
+    for start in SCRATCH_WINDOWS_AT {
+        if !verify_window(vfs, fd, start, &mut pos) {
+            let _ = vfs_close(vfs, fd);
+            return report_line(vfs, b"minix.rs init: fs.write FAIL verify");
+        }
+        verified += 1;
+    }
+    let _ = vfs_close(vfs, fd);
+
+    if verified == SCRATCH_WINDOWS_AT.len() {
+        let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.write ok n=32768 v=3\n");
+    }
+}
+
+/// Read [`SCRATCH_WINDOW`] bytes at `start` and check them against the generator.
+///
+/// `pos` is the descriptor's position, threaded through because there is no
+/// `lseek`: the window is reached by reading forward and discarding, which is also
+/// a second exercise of the read path across the seam. The windows are visited in
+/// ascending order, so winding forward always suffices.
+///
+/// Both loops tolerate a short read, because MFS clamps every transfer to the end
+/// of a block and a read that spans a boundary legitimately returns less than it
+/// was asked for. `n <= 0` is a failure, not a retry: `0` is EOF, which at these
+/// offsets means the file is shorter than it should be — which is precisely what a
+/// size that never reached the inode looks like. A peer reporting *more* than it
+/// was asked for is a failure too, which is also what keeps the arithmetic below
+/// unable to run off the buffer.
+#[cfg_attr(test, allow(dead_code))]
+fn verify_window(vfs: Endpoint, fd: i32, start: usize, pos: &mut usize) -> bool {
+    let mut buf = [0u8; SCRATCH_WINDOW];
+
+    while *pos < start {
+        let want = SCRATCH_WINDOW.min(start - *pos);
+        let n = vfs_read(vfs, fd, &mut buf[..want]);
+        if n <= 0 || n as usize > want {
+            return false;
+        }
+        match pos.checked_add(n as usize) {
+            Some(next) => *pos = next,
+            None => return false,
+        }
+    }
+
+    let mut got = 0usize;
+    while got < SCRATCH_WINDOW {
+        let room = SCRATCH_WINDOW - got;
+        let n = vfs_read(vfs, fd, &mut buf[got..]);
+        if n <= 0 || n as usize > room {
+            return false;
+        }
+        match got.checked_add(n as usize) {
+            Some(next) => got = next,
+            None => return false,
+        }
+    }
+    match pos.checked_add(SCRATCH_WINDOW) {
+        Some(next) => *pos = next,
+        None => return false,
+    }
+
+    let mut i = 0usize;
+    while i < SCRATCH_WINDOW {
+        let Some(at) = start.checked_add(i) else {
+            return false;
+        };
+        if buf[i] != rootfs_scratch_byte(at) {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 // ----- Slice 5.9: the exec-from-FS denial battery ---------------------------
@@ -686,7 +913,7 @@ fn report_exec_fail(vfs: Endpoint, name: &str) {
 /// The `n=` in the marker line is this number spelled out as a literal, because
 /// init has no formatting machinery and the line is a `grep -aF` marker. The two
 /// move together; the const below is what makes forgetting the second half loud.
-const OPEN_DENIAL_PROBES: usize = 8;
+const OPEN_DENIAL_PROBES: usize = 7;
 
 /// Report a failing `open` probe by name, on fd 2.
 #[cfg_attr(test, allow(dead_code))]
