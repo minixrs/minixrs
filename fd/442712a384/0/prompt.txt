@@ -1,0 +1,192 @@
+Work on phase 5.10
+
+---
+
+Go ahead and write the document the normal superpowers directory.  This change will show the clear change in methodolgy that has been adopted since the start of the project.  Once you have it written I will review you design questions
+
+---
+
+1. open.deny yes retire. 2. 3 windows are fine. 3. correct point here.
+
+---
+
+subagent
+
+---
+
+<task-notification>
+<task-id>b8n1tmhhp</task-id>
+<summary>Monitor event: "Task 1 implementer report file appearing"</summary>
+<event>task-1-report.md appeared</event>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b8n1tmhhp</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/b1108c44-0022-4c2d-a370-6adf61ef7097/tasks/b8n1tmhhp.output</output-file>
+<status>completed</status>
+<summary>Monitor "Task 1 implementer report file appearing" stream ended</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ada22c1588c3ae943</task-id>
+<tool-use-id>toolu_01JZTXSUGJ7wJBTsTFPG2vuK</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/b1108c44-0022-4c2d-a370-6adf61ef7097/tasks/ada22c1588c3ae943.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 1 ABI diff" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Verdict 1: Spec Compliance — ✅
+
+The diff matches the brief closely, with two deviations, both of which I verified as correct judgment calls rather than defects.
+
+**What the brief required, and what's present:**
+- `FS_WRITE = FS_RQ_BASE + 3` (0x903), doc comment verbatim — `kernel-shared/src/callnr.rs:802`. Confirmed.
+- `NR_FS_MSGS` 3 → 4 — `kernel-shared/src/callnr.rs:~805`. Confirmed.
+- Payload offsets reused unchanged (`FS_INO_OFF`=0, `FS_GRANT_OFF`=4, `FS_LEN_OFF`=8, `FS_POS_OFF`=16) — no new offset constants defined, confirmed by grep; only `FS_WRITE` and `NR_FS_MSGS` added.
+- New test `fs_write_reuses_the_read_payload_offsets` — present verbatim, `callnr.rs:2118-2135`.
+- All FS-band enumerations extended with `FS_WRITE`. I independently grepped `FS_READ\b` and cross-checked against `FS_WRITE` occurrences: **9 sites**, matching the report's count (the brief said "eight," the report caught the discrepancy correctly — `fs_msgs_distinct_from_other_ranges`, uncounted by the brief, was the ninth).
+- Band-ordering guards (`callnr.rs:854-856`) — unchanged, and I confirmed they still hold symbolically (`FS_RQ_BASE + (NR_FS_MSGS-1) = 0x903 &lt; BDEV_RQ_BASE = 0xA00`) since they reference `NR_FS_MSGS` rather than a literal.
+- `rootfs.rs`: `ROOTFS_SCRATCH_PATH`, `ROOTFS_SCRATCH_LEN` (32768), `ROOTFS_SCRATCH_PERIOD` (251), `rootfs_scratch_byte`, three `const _` guards, two new tests — all present verbatim and I checked the arithmetic: `32768 &gt; 7*4096` (true, crosses the direct/indirect seam as intended), `32768 &lt;= (7+1024)*4096` (true), `32768/4096+1=9 &lt; ROOTFS_IMAGE_BLOCKS(256)` (true, confirmed the constant's value).
+- DCO sign-off and GPG signature confirmed via `git log --format='%(trailers:key=Signed-off-by)'` and `git show --show-signature` — both good.
+
+**Deviation 1 — `tools/gen-c-headers/src/callnr_h.rs` edited (not in brief's file list):** Justified. I confirmed the FS band's `members` vec there is hand-maintained (not derived from `callnr::ALL`), and that omitting the row would leave `FS_WRITE` out of the generated header while the brief's Step 5 clang check still passes vacuously. I also checked all 7 remaining task briefs in the same SDD folder — none touches `callnr_h.rs` — so there's no conflict with a later task, resolving the implementer's own flagged concern.
+
+**Deviation 2 — `ROOTFS_SCRATCH_PATH` not added to `every_image_path_is_absolute_and_distinct`:** Correct call. I checked Task 6's brief (`task-6-brief.md`), which is where `/etc/scratch` actually enters the mkfs image (`.add(ROOTFS_SCRATCH_PATH, Vec::new())`), and confirmed it does not touch this kernel-shared test either. The path genuinely isn't part of the image manifest as of Task 1, so including it in a test enumerating image paths would be premature.
+
+Nothing extra beyond these two well-reasoned additions; nothing required by the brief is missing.
+
+## Verdict 2: Task Quality — Approved
+
+**Critical:** none.
+**Important:** none.
+
+**Minor:**
+- `task-1-report.md:86-92` — Step 2 of the brief ("run tests to verify they fail") was not actually executed; the implementer wrote constants and tests together and reasoned failure "by inspection" (grep confirming the symbols didn't pre-exist). This is a process deviation from the brief's explicit red-green instruction. Low-risk here since the outcome (tests genuinely didn't exist before, then pass after) is not in doubt, but it's a gap against the letter of the TDD step and worth naming so it isn't normalized for future tasks where the red-run more plausibly catches something the implementer didn't anticipate.
+
+**No other issues found.** Constant-arithmetic style matches existing precedent (`rootfs_scratch_byte`'s `(i + 7) % PERIOD` mirrors the pre-existing `rootfs_pattern_byte`'s `i % 251`, both outside the `checked_add`-mandated directories). The ordering-comparison test (`ROOTFS_SCRATCH_LEN.min(...)`) correctly follows the repo's `assert_eq!(a.min(b), a)` idiom from CLAUDE.md rather than a bare `assert!(a &gt; b)`. `const _` guards contain no iterators and no formatted messages, consistent with the constraint on const-evaluator context. No new files were created, so the SPDX-header rule doesn't apply. `git status --short` and `git diff --stat 0f97264..6f47a4b` confirm the commit touches exactly the 3 files claimed, with the pre-existing `docs/plan.md`/`docs/plans/phase-5-musl-fs.md` modifications and untracked files being unrelated leftovers in the working tree, not part of this commit.</result>
+<usage><subagent_tokens>118739</subagent_tokens><tool_uses>22</tool_uses><duration_ms>128485</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a85bfb7e4e40e1d08</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/b1108c44-0022-4c2d-a370-6adf61ef7097/tasks/a85bfb7e4e40e1d08.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 2: BDEV_WRITE store" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Status: DONE
+
+**Commit SHA:** `127f91300590492edf1c521ce63fb9e1f76b1eef` (signed + DCO signed-off, verified)
+
+**Test summary:** `cargo test -p minixrs-memory` 17/17 pass; `cargo clippy --workspace --all-targets -- -D warnings` and the two kernel-target clippy invocations (default + `--no-default-features`) are all clean; boot log passes all 85 markers except exactly the expected one (`[diag mfs] bdev.deny ok n=10`, now `EPERM` instead of `EROFS`), confirmed via A/B against an unmodified baseline.
+
+**Concerns:**
+1. The brief was wrong about where `SAFECOPY_FROM` lives — it said `minixrs_server_rt`, but that crate exports no `SAFECOPY_*` constants at all; both `SAFECOPY_FROM`/`SAFECOPY_TO` live in `minixrs_kernel_shared::callnr` (which is also where the pre-existing `SAFECOPY_TO` import already came from). I imported from there instead; it's the only thing that compiles.
+2. I reworded one comment not explicitly scripted by the brief (the dispatch-arm comment above `BDEV_WRITE`, which said "Defined and refused" — stale after the change) for accuracy.
+3. On this machine, `timeout 25` (as the brief's Step 4 specifies) is too short to reach late-boot markers even on an unmodified baseline — confirmed by stashing my change and re-running. `timeout 45` gives a clean baseline pass and isolates exactly the one expected regression. This looks like local SDK-flavor build timing, not a defect.
+
+Full detail in `/Users/kevinbarnard/src/minixrs/.superpowers/sdd/2026-08-18-mfs-write-path/task-2-report.md`.</result>
+<usage><subagent_tokens>126406</subagent_tokens><tool_uses>42</tool_uses><duration_ms>365766</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a444903b31593792f</task-id>
+<tool-use-id>toolu_019HFji9FeRA5SjwP1z6uAcv</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/b1108c44-0022-4c2d-a370-6adf61ef7097/tasks/a444903b31593792f.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 2 BDEV_WRITE diff" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Commit is signed and signed-off, matches the diff exactly, and touches only the two files named in the brief. All checks confirmed against the actual repo state.
+
+## Verdict 1: Spec compliance — ✅
+
+Every required behavior from the brief is present and nothing extraneous was added beyond one justified documentation fix:
+
+- `do_write` now performs `sys_safecopy(SAFECOPY_FROM, caller_e, req.gid, 0, va + byte_off, n as u64)` instead of returning `EROFS` (`drivers/memory/src/main.rs:320`).
+- `do_read`'s `SAFECOPY_TO` call is untouched (`main.rs:282`) — direction bits are correct in both arms.
+- `caller_e` is the pre-dispatch-captured `msg.m_source` (`main.rs:121`), threaded into `do_write` with no new payload field — `ReadRequest`/`parse_read` in `bdev.rs` are unchanged.
+- `validate_read` still runs first, before any copy attempt (`main.rs:310-313`), preserving `ENXIO`-before-anything-else check-order discipline.
+- The zero-length early return is present and matches `do_read`'s (`main.rs:314-318`).
+- `SAFECOPY_FROM` is imported from `minixrs_kernel_shared::callnr` alongside the pre-existing `SAFECOPY_TO` import (`main.rs:57`) — verified against `kernel-shared/src/callnr.rs:122,125` (both constants defined there) and `server-rt/src/lib.rs:46-54` (its `pub use` list has no `SAFECOPY_*`, only the `sys_safecopy` function). The implementer's correction of the brief's wrong crate attribution is accurate and clearly documented in the report.
+- `EROFS` is gone from the import (`main.rs:60`); the only remaining occurrences in the file are inside prose doc comments, not identifiers — nothing else in the file references it.
+- The three brief-scripted tests were added verbatim to `bdev.rs`, and independently checked against `validate_read`/`grant_valid` semantics — all three assert correctly given the real check order (`grant_valid(5)` is true since `grant_valid` only rejects negative ids, so the first test's `Ok` expectation is valid).
+- Commit is `-s` signed-off and GPG-signed, single commit, touches only `drivers/memory/src/{main,bdev}.rs` as specified.
+
+## Verdict 2: Task quality — Approved
+
+**Findings:**
+
+- **Minor** — `main.rs:320`: `va + byte_off` uses plain `+`, not `checked_add`, which is literally what the brief's Step 3 code specified and mirrors the pre-existing `do_read` arm (`main.rs:282`) verbatim. This is provably safe here: `byte_off` is bounded by `device_bytes`, itself bounded by `validate_geometry`'s `len &lt;= RAMDISK_WINDOW_SIZE` (4 MiB) check in `bdev.rs:146`, and `va` (`RAMDISK_VA`) is a small fixed constant near `0x8000_0000` — nowhere close to wrapping `u64::MAX`. Since this exactly mirrors an already-shipped, already-reviewed pattern in `do_read` rather than introducing a new risk, and the implementer had no discretion to deviate from the brief's literal code without diverging from the specified diff, this is not a blocking finding — noting it for awareness rather than requiring a fix in this task.
+- **Minor** — The implementer made one unscripted edit: rewording the stale dispatch-arm comment at `main.rs:127-129`. The new text ("A distinct number from the `_` arm below, not folded into `ENOSYS` — that difference is what let 5.7 answer `EROFS` and 5.10a turn it into a real store without a client-visible change of shape.") is accurate and consistent with the rewritten module-doc paragraph. Leaving the old comment ("Defined and refused...") would have been actively wrong post-change, so fixing it was the right call; flagged transparently in the report as requested.
+- No critical or important findings. Report is honest and thorough, including flagging the brief's crate-attribution error with evidence, the 25s-vs-45s boot-timing discrepancy (explained as a local machine/SDK-flavor artifact, confirmed via a baseline A/B), and the one predicted marker regression (`[diag mfs] bdev.deny ok n=10` → `FAIL write rc=-1`/`EPERM`), which the brief explicitly said Task 4 would re-point.
+
+No corrections needed; nothing to flag back to the implementer.</result>
+<usage><subagent_tokens>111554</subagent_tokens><tool_uses>11</tool_uses><duration_ms>87596</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>aacd4a24a3de87299</task-id>
+<tool-use-id>toolu_01GmEK92theo6HxYZyGCDtWG</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/b1108c44-0022-4c2d-a370-6adf61ef7097/tasks/aacd4a24a3de87299.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3: MFS write policy lib" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task 3 complete.
+
+**Status:** DONE
+**Commit:** `07705fd7885d33ebf4fa12c4c3c84620e43d861a` — "feat(mfs): the pure write policy and zone allocator (slice 5.10a)" (signed, DCO signed-off)
+**Tests:** `cargo test -p minixrs-mfs` → 102 passed, 0 failed (26 new in `write::tests`); both clippy configs (`--all-targets` and `--features server --all-targets`) clean with `-D warnings`; red-run confirmed first (33 compile errors before implementation, as expected).
+
+**Concerns:** One doc-comment deviation — the brief's `[`SINGLE_INDIRECT_SLOT`]` intra-doc link wasn't in scope (brief's own `use` block doesn't import it), so I qualified it as `[`SINGLE_INDIRECT_SLOT`](crate::inode::SINGLE_INDIRECT_SLOT)` instead, verified clean via `cargo doc`. `cargo fmt` also rewrapped two lines from the brief's exact listing (cosmetic only). Full details in `task-3-report.md`.</result>
+<usage><subagent_tokens>122506</subagent_tokens><tool_uses>20</tool_uses><duration_ms>141585</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ad06f6931bc00ceb7</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/b1108c44-0022-4c2d-a370-6adf61ef7097/tasks/ad06f6931bc00ceb7.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 3 write policy lib" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Task 3 Review — `fs/mfs/src/write.rs` (the pure write policy and allocator)
+
+## Verdict 1: Spec compliance — ✅
+
+The implementer transcribed the brief's Step 1 (tests) and Step 3 (implementation) essentially verbatim, in the TDD order the brief specified: `write.rs` was created with only SPDX+docs+`use`+tests first, `cargo test -p minixrs-mfs` was run and confirmed red (33 compile errors) before any implementation was written, then the six functions were added. Only the two files named in the brief (`fs/mfs/src/write.rs`, `fs/mfs/src/lib.rs`) were touched — no scope creep, no unrelated pre-existing tree changes (`docs/plan.md`, `PRE6-RECOMMEND.md`) were staged. Commit `07705fd` carries a valid DCO `Signed-off-by:` and a good GPG signature, verified independently.
+
+The one disclosed deviation (`[SINGLE_INDIRECT_SLOT](crate::inode::SINGLE_INDIRECT_SLOT)` instead of an unresolvable bare intra-doc link) is doc-only, correctly reasoned (the brief's own `use` block, matching its "Interfaces" section, imports only `NR_DIRECT_ZONES`), and does not touch logic, tests, or the produced interface. All six required public items (`ZoneSlot`, `zone_slot_for_offset`, `clamp_write`, `bitmap_find_free`, `bitmap_set`, `grow_size`) are present with signatures matching the brief and correctly reuse `crate::walk::Chunk` rather than redefining it.
+
+## Verdict 2: Task quality — Approved
+
+I hand-verified the arithmetic against the brief's specific checklist rather than just checking tests exist:
+
+- **`zone_slot_for_offset`**: worked through offset 28671→`Direct(6)`, 28672→`Indirect(0)`, `SPAN_END-1`→`Indirect(1023)`, `SPAN_END`→`OutOfRange` using the actual constants (`NR_DIRECT_ZONES=7`, `ptrs_per_block(4096)=1024`, from `fs/mfs/src/inode.rs:17` and `fs/mfs/src/read.rs:47-49`) — all correct. `bs == 0` is guarded before any division (`fs/mfs/src/write.rs:100-102` in the diff).
+- **`clamp_write`**: order of checks is right (`len&lt;0 || bs==0` → `EINVAL` before touching `pos`; out-of-range `pos` → `EFBIG`; then clamp to `FS_MAX_IO` and block-end). Traced all nine brief test cases by hand against the code; all match, including the negative-length-before-anything-else ordering and the "no size consulted" property (confirmed against `clamp_read` in `walk.rs:186-215`, its documented twin).
+- **`bitmap_find_free` / `bitmap_set`**: bit order (`byte = bit/8`, `mask = 1 &lt;&lt; (bit%8)`) matches both `tools/mkfs-mfs/src/image.rs:453-456` (`Image::set_bit`) and its `verify.rs:139-142` (`bit_set`) exactly — checked all three side by side, as the brief demanded. Traced the `0xff` fast-skip: it only fires on a byte that is *entirely* set, so it can never skip past a free bit, and correctly respects `limit_bits` independent of block length (`the_limit_is_respected_even_when_the_block_is_longer` test genuinely exercises the boundary, not padding). `bitmap_set` returns `None` via `get_mut` rather than panicking or index-wrapping past the block.
+- **`grow_size`**: `EFBIG` via `checked_add` (not a wrap) for both `i32::MAX+1` and `u64::MAX`, `EIO` for negative `cur` checked first — all traced correctly.
+
+**Findings:**
+
+**Important** — `write.rs:246-251` (diff), test `a_write_is_capped_at_one_transfer`: the doc comment claims this is the FS_MAX_IO cap's "only test," but it does not actually isolate that clause. `MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE == FS_MAX_IO` is enforced by a `const _` assert in `fs/mfs/src/lib.rs:83`, so with `pos=0` (`off_in_block=0`), `to_block_end` always equals `FS_MAX_IO` in this crate. Deleting `.min(FS_MAX_IO as u64)` from `clamp_write` (line ~136 of the diff) leaves this test's assertion unchanged and still passing — it is exactly the "would pass with the code deleted" tautology the review brief asked me to hunt for beyond the one already caught. This is inherited verbatim from the brief and mirrors an identical, already-merged pattern in `clamp_read`'s own "over-long request" test in `walk.rs:452-460` (slice 5.8) — not a defect the implementer introduced, and not something they could fix without deviating from "transcribe verbatim." Worth surfacing to the plan owner; does not block this task.
+
+**Minor** — `write.rs` uses bare `-` in `to_block_end = bs - off_in_block` and `slot = index - NR_DIRECT_ZONES as u64`, rather than `checked_sub`, which the letter of CLAUDE.md's fs-crate offset/length rule calls for. Both are provably safe by construction (`off_in_block = pos % bs` is always `&lt; bs`; the second subtraction only runs after an `if index &lt; NR_DIRECT_ZONES { return }` guard), and identically-shaped code already exists unflagged in `walk.rs:205` / `read.rs:102` — this module was explicitly written as their twin, so it's established precedent rather than a new risk. Flagging for awareness, not blocking.
+
+**Minor** — `pub mod write;` landed after `pub mod walk;` (`fs/mfs/src/lib.rs:27`) rather than literally "beside `pub mod read;`" as the brief's Files section states. This preserves the crate's existing alphabetical module list (`dirent, inode, layout, proto, read, superblock, walk, write`) and is functionally inert — a defensible, disclosed judgment call, not a defect.
+
+**⚠️ Cannot verify from diff alone**: the report's claim that `cargo clippy -p minixrs-mfs --all-targets -- -D warnings` and the same with `--features server` are clean, and that `cargo fmt --all --check` is clean workspace-wide. Per instructions I did not re-run these; the code as written appears idiomatic and clippy-clean on inspection (no obvious lint triggers), and I have no reason to doubt the report, but I did not independently execute the commands.
+
+No Critical findings. Nothing here should block merge; the one Important finding is a pre-existing plan/design characteristic (also present in already-merged code) rather than an implementer defect.</result>
+<usage><subagent_tokens>129648</subagent_tokens><tool_uses>12</tool_uses><duration_ms>230204</duration_ms></usage>
+</task-notification>
