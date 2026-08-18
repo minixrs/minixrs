@@ -367,12 +367,18 @@ fn main() -> ! {
 ///    unmapped regardless (D5), which is what makes a bad pointer an errno here
 ///    instead of a fault in the caller.
 ///
+/// After that shared validation, the resolved descriptor decides where the bytes
+/// go: a console descriptor writes to TTY via [`write_all`], one grant covering
+/// the whole buffer with a payload `offset` that moves each round; a file
+/// descriptor writes to MFS via [`write_file`], a *fresh* grant each round
+/// instead, because the FS band has no grant-offset field.
+///
 /// Then the grant. `caller_e` is the **kernel-stamped `m_source`** — the one fact
 /// in this whole request a client cannot forge. VFS holds `SYS_PROC`, which is
 /// what makes a magic grant legal for it; taking the owner from the payload
-/// instead would let any VFS client aim TTY's privileged `SYS_SAFECOPY` at a
-/// third party's address space through VFS. There is no payload field for it, and
-/// there must never be one.
+/// instead would let any VFS client aim TTY's or MFS's privileged
+/// `SYS_SAFECOPY` at a third party's address space through VFS. There is no
+/// payload field for it, and there must never be one.
 #[cfg_attr(test, allow(dead_code))]
 fn do_write(
     caller_e: Endpoint,
@@ -967,11 +973,14 @@ fn write_file(
         let Some(addr) = buf.checked_add(off as u64) else {
             return if off > 0 { off as i32 } else { EINVAL };
         };
+        let Some(at) = pos.checked_add(off as u64) else {
+            return if off > 0 { off as i32 } else { EINVAL };
+        };
         let gid = match grants.grant_magic(mfs, caller_e, addr, (len - off) as u64, CPF_READ) {
             Ok(gid) => gid,
             Err(e) => return if off > 0 { off as i32 } else { e },
         };
-        let n = fs_write(mfs, ino as i32, gid, (len - off) as i32, pos + off as u64);
+        let n = fs_write(mfs, ino as i32, gid, (len - off) as i32, at);
         let _ = grants.revoke(gid);
         match rw::advance(off, len, n) {
             rw::Step::More(next) => off = next,
