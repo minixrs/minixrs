@@ -128,13 +128,13 @@ use minixrs_kernel_shared::callnr::{
     CDEV_MINOR_OFF, CDEV_OFFSET_OFF, CDEV_WRITE, FS_GRANT_OFF, FS_INO_OFF, FS_LEN_OFF, FS_LOOKUP,
     FS_MAX_IO, FS_MODE_OFF, FS_PATH_MAX, FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER,
     FS_RQ_BASE, FS_SIZE_OFF, FS_SUPER_BLOCK_SIZE_OFF, FS_SUPER_BLOCKS_OFF, FS_SUPER_MINOR_OFF,
-    FS_SUPER_ROOT_OFF, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_CLOSE,
+    FS_SUPER_ROOT_OFF, FS_WRITE, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_CLOSE,
     VFS_EXEC_GRANT_OFF, VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_OPEN, VFS_READ, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{MFS_PROC_NR, PM_PROC_NR, TTY_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
 use minixrs_kernel_shared::error::{
-    EBADF, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, EROFS, OK,
+    EBADF, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, OK,
 };
 use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE, GRANT_INVALID};
 use minixrs_kernel_shared::rootfs::{ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH};
@@ -325,7 +325,7 @@ fn main() -> ! {
         // `msg.m_source` on the way out.
         let caller_e = msg.m_source;
         let rc = match msg.m_type {
-            VFS_WRITE => do_write(caller_e, &msg, &mut grants, tty),
+            VFS_WRITE => do_write(caller_e, &msg, &mut grants, tty, mfs),
             VFS_OPEN => do_open(caller_e, &msg, &mut mount, mfs),
             VFS_READ => do_read(caller_e, &msg, &mut grants, mfs),
             VFS_CLOSE => do_close(caller_e, &msg),
@@ -379,22 +379,19 @@ fn do_write(
     msg: &Message,
     grants: &mut GrantPool<GRANT_SLOTS>,
     tty: Endpoint,
+    mfs: Endpoint,
 ) -> i32 {
     let req = rw::parse(msg);
 
-    let minor = match fd::resolve(endpoint_proc(caller_e).get(), req.fd) {
-        Ok(Fd::CharDev { minor }) => minor,
-        // **Defined and refused**, rather than folded into the `Unused` case
-        // below: `EROFS` says "this descriptor names a file and the filesystem is
-        // read-only", which is a different thing to tell a caller than `EBADF`.
-        // That distinction is the whole reason this arm exists, and slice 5.10
-        // replaces this one line with the write path — the `BDEV_WRITE` precedent
-        // exactly.
-        Ok(Fd::File { .. }) => return EROFS,
+    let target = match fd::resolve(endpoint_proc(caller_e).get(), req.fd) {
+        Ok(Fd::CharDev { minor }) => Fd::CharDev { minor },
+        // Slice 5.10a: this arm was `EROFS` from 5.8, defined and refused rather
+        // than folded into `Unused` precisely so the write path would land in one
+        // place. It now writes.
+        Ok(Fd::File { ino, pos }) => Fd::File { ino, pos },
         // `resolve` maps a closed descriptor to `EBADF` itself, so this arm is
         // unreachable. It exists so a future `Fd` variant shows up as a compile
-        // error to be routed, not a silent fallthrough — which is precisely how
-        // the arm above got written.
+        // error to be routed, not a silent fallthrough.
         Ok(Fd::Unused) => return EBADF,
         Err(e) => return e,
     };
@@ -409,17 +406,30 @@ fn do_write(
         return 0;
     }
 
-    // The single-copy hop: the grant names the *caller's* memory, so the kernel
-    // moves the bytes from the caller straight into the driver.
-    let gid = match grants.grant_magic(tty, caller_e, req.buf, len as u64, CPF_READ) {
-        Ok(gid) => gid,
-        // Verbatim: `ENOMEM` (VFS is out of grant slots) and a `SYS_SETGRANT`
-        // failure are different problems, and neither is the client's fault.
-        Err(e) => return e,
-    };
-    let written = write_all(tty, minor, gid, len);
-    let _ = grants.revoke(gid);
-    written
+    match target {
+        Fd::CharDev { minor } => {
+            // The single-copy hop: the grant names the *caller's* memory, so the
+            // kernel moves the bytes from the caller straight into the driver.
+            let gid = match grants.grant_magic(tty, caller_e, req.buf, len as u64, CPF_READ) {
+                Ok(gid) => gid,
+                Err(e) => return e,
+            };
+            let written = write_all(tty, minor, gid, len);
+            let _ = grants.revoke(gid);
+            written
+        }
+        Fd::File { ino, pos } => {
+            let written = write_file(mfs, grants, caller_e, ino, req.buf, len, pos);
+            if written > 0 {
+                // Only on real progress: advancing on an error would silently
+                // move the descriptor past bytes nobody wrote. The `do_read`
+                // shape.
+                fd::advance(endpoint_proc(caller_e).get(), req.fd, written as u64);
+            }
+            written
+        }
+        Fd::Unused => EBADF,
+    }
 }
 
 /// Drive `CDEV_WRITE` until `len` bytes are out, and report the total.
@@ -900,6 +910,74 @@ fn fs_read(mfs: Endpoint, ino: i32, gid: i32, len: i32, pos: u64) -> i32 {
         return trap_rc;
     }
     m.m_type
+}
+
+/// Issue one `FS_WRITE` and return the reply `m_type` — the byte count written,
+/// or a negative errno.
+///
+/// [`fs_read`]'s twin, field for field, because the payload is the same one (W1).
+/// No granter goes in the payload — MFS takes it from the kernel-stamped
+/// `m_source` — and no grant *offset*: the grant covers exactly this round's
+/// bytes, which is why [`write_file`] re-grants each time round.
+#[cfg_attr(test, allow(dead_code))]
+fn fs_write(mfs: Endpoint, ino: i32, gid: i32, len: i32, pos: u64) -> i32 {
+    let mut m = Message {
+        m_source: 0,
+        m_type: FS_WRITE,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, FS_INO_OFF, ino);
+    wr_i32(&mut m, FS_GRANT_OFF, gid);
+    wr_i32(&mut m, FS_LEN_OFF, len);
+    wr_u64(&mut m, FS_POS_OFF, pos);
+    let trap_rc = ipc_sendrec(mfs, &mut m);
+    if trap_rc != OK {
+        return trap_rc;
+    }
+    m.m_type
+}
+
+/// Drive `FS_WRITE` until `len` bytes are stored, and report the total.
+///
+/// The file-backed sibling of [`write_all`], and the same division of labour:
+/// every decision about when to stop and what to report lives in [`rw::advance`],
+/// which is where its four rules are documented and unit-tested. VFS loops for
+/// `write` and does not loop for `read` because POSIX allows a short `read()` and
+/// forbids an unexplained short `write()`.
+///
+/// **A fresh grant per round** (W6), unlike [`write_all`], which grants once and
+/// advances a payload `offset`. `CDEV_WRITE` has an offset field and `FS_WRITE`
+/// deliberately does not, so the grant is what moves. Each grant is revoked
+/// before the next is issued, or a long write would exhaust the pool.
+///
+/// `len > 0` on entry, so at least one request always goes out and `len - off` is
+/// never zero.
+#[cfg_attr(test, allow(dead_code))]
+fn write_file(
+    mfs: Endpoint,
+    grants: &mut GrantPool<GRANT_SLOTS>,
+    caller_e: Endpoint,
+    ino: u32,
+    buf: u64,
+    len: usize,
+    pos: u64,
+) -> i32 {
+    let mut off = 0usize;
+    loop {
+        let Some(addr) = buf.checked_add(off as u64) else {
+            return if off > 0 { off as i32 } else { EINVAL };
+        };
+        let gid = match grants.grant_magic(mfs, caller_e, addr, (len - off) as u64, CPF_READ) {
+            Ok(gid) => gid,
+            Err(e) => return if off > 0 { off as i32 } else { e },
+        };
+        let n = fs_write(mfs, ino as i32, gid, (len - off) as i32, pos + off as u64);
+        let _ = grants.revoke(gid);
+        match rw::advance(off, len, n) {
+            rw::Step::More(next) => off = next,
+            rw::Step::Done(rc) => return rc,
+        }
+    }
 }
 
 /// Send a raw `FS_LOOKUP` whose path field is written verbatim, for the probes
