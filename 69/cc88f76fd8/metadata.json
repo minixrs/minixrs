@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "69cc88f76fd8",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.10a-mfs-write-path",
+  "checkpoints_count": 14,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "CLAUDE.md",
+    "book/src/drivers/overview.md",
+    "book/src/servers/overview.md",
+    "docs/plan.md",
+    "docs/plans/phase-5-musl-fs.md",
+    "docs/superpowers/plans/2026-08-18-mfs-write-path.md",
+    "docs/superpowers/specs/2026-08-18-mfs-write-path-design.md",
+    "drivers/memory/src/bdev.rs",
+    "kernel-shared/src/callnr.rs",
+    "kernel-shared/src/rootfs.rs",
+    "kernel-shared/src/uspace.rs",
+    "servers/vfs/src/main.rs",
+    "tests/qemu-boot.expected",
+    "tests/qemu-boot.forbidden"
+  ],
+  "sessions": [
+    {
+      "metadata": "/69/cc88f76fd8/0/metadata.json",
+      "transcript": "/69/cc88f76fd8/0/full.jsonl",
+      "compact_transcript": "/69/cc88f76fd8/0/transcript.jsonl",
+      "content_hash": "/69/cc88f76fd8/0/content_hash.txt",
+      "prompt": "/69/cc88f76fd8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 368,
+    "cache_creation_tokens": 962912,
+    "cache_read_tokens": 60418876,
+    "output_tokens": 232977,
+    "api_call_count": 184
+  }
+}
