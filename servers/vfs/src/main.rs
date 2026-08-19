@@ -468,8 +468,9 @@ fn write_all(tty: Endpoint, minor: i32, gid: i32, len: usize) -> i32 {
 ///
 /// Deliberately **not** a per-open cache of anything: it holds geometry, not
 /// state, and no file's size lives here or anywhere else in VFS. EOF is a read
-/// returning `0`, one source of truth — which is also exactly what slice 5.10's
-/// writes would have invalidated in a cached size.
+/// returning `0`, one source of truth — which is exactly what slice 5.10a's
+/// writes would have invalidated in a cached size, and did not, because there is
+/// none to invalidate.
 #[derive(Copy, Clone)]
 struct Mount {
     root: i32,

@@ -276,7 +276,13 @@ requests are defined:
 | block | `16..24` (u64) | which block of the device |
 
 `BDEV_READ` fills the client's buffer (so the grant needs `CPF_WRITE`, and the
-driver pushes with `SAFECOPY_TO`). `BDEV_WRITE` is defined and answers `EROFS`.
+driver pushes with `SAFECOPY_TO`). `BDEV_WRITE`, real since slice 5.10a, is the
+same request read backwards: it pulls the client's bytes into the device with
+`SAFECOPY_FROM`, so the grant has to carry `CPF_READ` instead. One parse and one
+validation serve both — the payload is identical, and only the dispatch arm knows
+which way the bytes go. The driver never checks the access bit itself, and must
+not: the kernel's `verify_grant` does, and a driver that re-derived the grant
+rules would be a second place for them to drift.
 
 Most of that table repeats CDEV's rules — no granter field, and the reply `m_type`
 *is* the byte count. Three things are deliberately different:
@@ -291,11 +297,13 @@ its client — MFS reads it from the superblock's `s_zones` — so asking past t
 is a caller bug. `EIO` stays reserved for Phase 6's real media errors, where the
 request was well-formed and the *device* failed.
 
-**`BDEV_WRITE` answers `EROFS`, not `ENOSYS`.** `ENOSYS` is already the
-unknown-`m_type` answer, so reusing it would make "this driver has never heard of
-writes" and "this driver knows about writes and refuses them" indistinguishable to
-a client. Keeping the arm dispatched also keeps it probed, and slice 5.10 changes
-one line inside it.
+**`BDEV_WRITE` was numbered three slices before it worked.** From 5.7 to 5.10a
+the arm answered `EROFS` rather than `ENOSYS`, because `ENOSYS` is already the
+unknown-`m_type` answer and reusing it would have made "this driver has never
+heard of writes" and "this driver knows about writes and refuses them"
+indistinguishable to a client. Keeping the arm dispatched also kept it probed —
+and the prediction held exactly: making the ramdisk writable changed one line
+inside it, the direction handed to `sys_safecopy`.
 
 ### Where the blocks come from
 

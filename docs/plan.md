@@ -532,8 +532,9 @@ to Phase 7; TTY input/IRQs to Phase 6.
 - **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ✓ shipped (PR #48, merged 2026-07-27)
 - **P3c** (toolchain program, out-of-band): `kernel/build.rs` consumes `$MINIXRS_SDK` — `hello` builds from one `clang --target=aarch64-unknown-minixrs` call — **milestone M3a** ✓ shipped (PR #50, merged 2026-07-30)
 - **5.8** MFS server (read-only) + FS band + VFS mount/open/read ✓ shipped (PR #51, merged 2026-08-02)
-- **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5 complete** ◀ ready (branch `feature/slice-5.9-exec-from-fs`, pending merge)
-- **5.10** stretch: MFS write path
+- **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5 complete** ✓ shipped (PR #52, merged 2026-08-04)
+- **5.10a** stretch: MFS write path — `BDEV_WRITE` + `FS_WRITE` + `VFS_WRITE` to files ◀ ready (branch `feature/slice-5.10a-mfs-write-path`, pending merge)
+- **5.10b** stretch: MFS create/truncate + `VFS_OPEN` flags (`O_CREAT`/`O_TRUNC`) ◀ next
 - **5.11** stretch: `/dev/null` + `/dev/zero`
 
 Aggregate scope:

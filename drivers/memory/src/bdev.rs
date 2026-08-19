@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `BDEV_READ` request parsing and validation — the driver's pure logic.
+//! BDEV request parsing and validation — the driver's pure logic.
+//!
+//! Direction-agnostic since slice 5.10a: `BDEV_READ` and `BDEV_WRITE` carry the
+//! same four fields in the same places, so one parse and one validation serve
+//! both and only `main.rs`'s dispatch knows which way the bytes go.
 //!
 //! Everything here is a total function over a [`Message`] or a scalar, so it
 //! carries the crate's unit tests. The IPC round-trip and the kernel calls live in
@@ -43,8 +47,12 @@ use minixrs_server_rt::{rd_i32, rd_u64};
 pub struct ReadRequest {
     /// Device minor. Only [`BDEV_MINOR_RAMDISK`] exists today.
     pub minor: i32,
-    /// Grant id naming the client's destination buffer. Must carry `CPF_WRITE`
-    /// and name this driver as grantee — both checked by the kernel, not here.
+    /// Grant id naming the client's buffer. The access bit it must carry is the
+    /// one the *direction* needs — `CPF_WRITE` for a `BDEV_READ`, whose copy
+    /// lands in the client's buffer, `CPF_READ` for a `BDEV_WRITE`, whose copy is
+    /// taken out of it. The kernel checks grantee and access; this driver
+    /// re-implements neither, or the grant rules would have a second place to
+    /// drift.
     pub gid: i32,
     /// Bytes the client asked for. Must not exceed [`BDEV_MAX_IO`].
     pub len: i32,

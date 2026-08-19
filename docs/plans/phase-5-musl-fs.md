@@ -1297,7 +1297,7 @@ Two results worth keeping, because both contradict what the slice plan predicted
   branch was exercised the recommended way instead: break the key, and separately
   drop the peer, which produced `fs.ds FAIL rc=-3 fallback=6` for VFS's lookup.
 
-### Slice 5.9: exec-from-FS — **milestone B, Phase 5 complete** ◀ ready (branch `feature/slice-5.9-exec-from-fs`, pending merge)
+### Slice 5.9: exec-from-FS — **milestone B, Phase 5 complete** ✓ shipped (PR #52, merged 2026-08-04)
 
 **Goal:** D6 + D12 — `PM_EXEC("/bin/hello")` end-to-end from the MFS root.
 
@@ -1394,12 +1394,82 @@ from the filesystem with `argv[0] = "hello"`.
 
 ### Slice 5.10 (stretch): MFS write path
 
-**Scope:** `BDEV_WRITE` consumer side; MFS write/create/truncate (+ the
-write-side FS requests); `VFS_WRITE` to real fds routes to MFS (fd>2), and
-`VFS_OPEN` grows `O_CREAT`-lite. The RAM-backed image makes writes durable
-for the boot's lifetime (D3).
+The five-line sketch this section used to carry covered four separable
+things, so 5.10 is **split into 5.10a and 5.10b** the way 5.9 was split into
+5.9a/5.9b. The full design — nine numbered decisions, the per-component
+breakdown, the error taxonomy, and the mutation/boot-matrix plan — lives in
+[`docs/superpowers/specs/2026-08-18-mfs-write-path-design.md`](../superpowers/specs/2026-08-18-mfs-write-path-design.md)
+and is not duplicated here.
 
-**Proof:** init writes a file, reads it back, echoes it to fd 1.
+#### Slice 5.10a: the write path ◀ ready (branch `feature/slice-5.10a-mfs-write-path`, pending merge)
+
+**Scope:** `BDEV_WRITE` becomes a real store in `drivers/memory`; one new FS
+request, `FS_WRITE` (`FS_READ`'s payload verbatim, and a short write is
+normal — `CDEV_WRITE`'s stance, not BDEV's); MFS gains a zone allocator
+covering direct **and** single-indirect zones, symmetric with the read path;
+`VFS_WRITE` on an `Fd::File` stops answering `EROFS` and loops to MFS. A new
+zero-length `/etc/scratch` enters the root image, because create does not
+exist yet and the target must already be there. The RAM-backed image makes
+writes durable for the boot's lifetime (D3).
+
+**Proof:** init writes 32 KiB to `/etc/scratch` in 4016-byte chunks —
+deliberately not a multiple of the 4096-byte block, so partial-block splicing
+and boundary-crossing short writes are on the marker — then re-opens and reads
+**every byte** back, comparing each against the generator. Reported through
+fd 1, the path under test: `fs.write ok n=32768 v=32768`.
+
+The plan said three 512-byte windows and `v=3`; the task-7 review widened it,
+and the widening is the point rather than thoroughness for its own sake. There
+is no `lseek`, so reaching any offset already read every byte before it — the
+windowed version issued the same messages and then discarded most of the
+comparisons, leaving offsets 4096..28671 read but never checked. A mutation
+corrupting one byte in the second direct zone prints `ok` under the windows and
+`fs.write FAIL verify off=4096` under the full compare.
+
+**The landmine it must defuse:** `open_denials`' eighth probe writes into a
+descriptor on `/etc/motd` expecting `EROFS`. After 5.10a that write *succeeds*
+and overwrites the first bytes of the file `fs.selfcheck` exists to verify —
+active corruption of a read proof, not merely a silently retired probe. The
+probe is retired and the marker becomes `open.deny ok n=7`, so the change is a
+visible diff rather than a count that quietly means something else. The 5.8
+`VFS_WRITE + 1` lesson, second occurrence.
+
+**Three results from the verification pass worth keeping, because two of them
+contradict what this plan predicted:**
+
+- **The boot-time budget had to double.** Measured the repo's way — `grep -abo`
+  the last required marker, divide by `wc -c` — on the **musl** flavour at a
+  fixed 120 s: `hello: errno ok` sits at **27.98%** of the log at the merge base
+  and **56.20%** with the slice, so the boot roughly doubled (~34 s → ~67 s wall
+  locally). That cut the safety factor over local from 3.6x to 1.8x, which is
+  inside the plausible range for how much slower the shared `ubuntu-24.04-arm`
+  TCG runner is, so `qemu-smoke` went 120 s → **240 s**. Note `git stash` does
+  not produce the "before" once the work is committed on a branch — detach to
+  the merge base, stash only the doc edits, and build before the timed run.
+
+- **The `dirty` half of the inode write-back condition has no boot probe.**
+  Dropping it (keying the write-back on `grown != node.size` alone) moved **no
+  marker at all**. init writes strictly sequentially, so every zone assignment
+  also grows the size; the case the condition exists for — filling a hole in the
+  middle of an existing file, which assigns `zone[i]` without moving `size` — is
+  unreachable until there is an `lseek` or a truncate. The invariant is correct
+  and stays; it is *unproven*, not covered, and 5.10b should probe it.
+
+- **The `memory` driver's copy direction is guarded twice, independently.**
+  Inverting it (`SAFECOPY_TO` for `SAFECOPY_FROM` in the driver's `do_write`)
+  moved `fs.write FAIL read off=0` *and* `bdev.deny FAIL wr-dir rc=32` — the
+  denial battery's write-direction probe catches it without any of the write
+  path being involved.
+
+#### Slice 5.10b: create and truncate ◀ next
+
+**Scope:** `FS_CREATE` + `FS_TRUNC`, an inode allocator (5.10a's `bitmap_*`
+helpers are already general), directory-entry insertion into a free
+`ino == 0` slot with directory growth when none is free, and a flags field in
+the `VFS_OPEN` payload for `O_CREAT` / `O_TRUNC`.
+
+**Proof:** init creates a file that is not in the image, writes it, reads it
+back, and echoes it to fd 1.
 
 ### Slice 5.11 (stretch): `/dev/null` + `/dev/zero`
 

@@ -49,7 +49,7 @@ take; it has to find a home outside that span.
 |------|-------|------------------|
 | `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC` |
 | `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE` |
-| `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` (MFS) |
+| `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` (MFS) |
 | `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`) |
 | `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK` |
@@ -201,7 +201,9 @@ Three properties hold that path together:
   that, so VFS re-sends with `offset` advanced until the buffer is out and reports
   the total. One grant covers the whole buffer — only the offset moves. An error
   after partial progress reports the *progress*, since those bytes really did go
-  out.
+  out. The file-backed route slice 5.10a added loops on the same rules but grants
+  *afresh* each round, because the FS band deliberately has no grant-offset field:
+  there, the grant is what moves.
 - **Every request gets a reply**, including an unknown one (`ENOSYS`). VFS's
   clients are all inside a SENDREC, so a dropped message blocks the caller forever.
 
@@ -305,12 +307,15 @@ knowing nothing about block devices.
 
 ## MFS: the file system
 
-**MFS** (`fs/mfs/`) is the first file system in minix.rs, read-only as of slice
-5.8. It sits between VFS and a block driver, and it is the piece that makes a path
-resolve to bytes: VFS asks `FS_LOOKUP` for an inode and `FS_READ` for its
-contents, and MFS answers by fetching blocks from the `memory` ramdisk over BDEV
-and decoding them with the `minixrs-mfs` format library (`superblock`, `inode`,
-`layout`, `dirent`, `read`) that slice 5.7 already shipped and host-tested.
+**MFS** (`fs/mfs/`) is the first file system in minix.rs — read-only as of slice
+5.8, writable as of 5.10a. It sits between VFS and a block driver, and it is the
+piece that makes a path resolve to bytes: VFS asks `FS_LOOKUP` for an inode,
+`FS_READ` for its contents and `FS_WRITE` to replace them, and MFS answers by
+moving blocks to and from the `memory` ramdisk over BDEV, decoding them with the
+`minixrs-mfs` format library (`superblock`, `inode`, `layout`, `dirent`, `read`,
+and 5.10a's `write`) that slice 5.7 began and host-tested. The image lives in RAM,
+so a write survives until the machine stops — long enough to be read back and
+proved, not long enough to be persistence.
 
 The crate is split unusually hard. Its `[[bin]]` carries
 `required-features = ["server"]` so the format library stays a one-dependency
@@ -344,6 +349,54 @@ beneath it is an implementation detail. A failed `SYS_SAFECOPY` against VFS's
 grant is relayed **verbatim**, because `EPERM` ("your grant does not authorize
 this") and `EFAULT` ("your buffer is not mapped") are different bugs on the
 caller's side.
+
+### The write path
+
+`FS_WRITE` (slice 5.10a) is `FS_READ`'s payload field for field — inode, grant,
+length, position — because it is the same question asked in the other direction,
+and one wire codec and one clamp serve both. The reply `m_type` is the byte count
+stored. Nothing in the payload says which direction it is; the request number
+does, and the dispatch arm is the only place that needs to know. The grant is the
+one thing that must differ, and it differs by direction: an `FS_READ`'s carries
+`CPF_WRITE` because the copy lands in the client's buffer, an `FS_WRITE`'s carries
+`CPF_READ` because the copy is taken out of it. Neither server checks that — the
+kernel's `verify_grant` does, and no server re-implements it.
+
+**A short write is normal here, not an error.** MFS clamps every request to the
+end of the block containing `pos`, so one call moves at most a block and usually
+less. That is `CDEV_WRITE`'s stance and deliberately not `BDEV_READ`'s
+refuse-or-nothing, and the two are consistent once you ask who the client is: BDEV
+refuses because its client is a filesystem, which cannot interpret a fraction of a
+block, while this request's client is VFS, whose whole job is hiding staging from
+POSIX. So VFS loops, one fresh grant per round.
+
+Writing where no zone exists means allocating one, and **the order is the part
+worth remembering: the bitmap bit is made durable before the zone number is stored
+anywhere** — an inode's `zone[i]`, an indirect block's slot, either. A failure
+between the two therefore leaks a zone rather than letting two files share one,
+and the asymmetry is the whole argument: a leak is unreachable space some future
+`fsck` can reclaim, while a shared zone is silent corruption on a filesystem that
+has no `fsck` to notice it. The alternative — rolling the bit back on the error
+path — is worse in exactly the direction that matters, because a rollback that
+itself fails hands the same zone out twice. A freshly allocated zone is also
+*zeroed* before anything can reach it, which is what makes a new **indirect** block
+safe to read: all 1024 of its slots come back as holes rather than as whatever the
+previous owner left there, which this code would read as zone pointers.
+
+The write path checks zone numbers against a **lower bound the read path
+deliberately lacks** (`write_zone_ok`, requiring `zone >= first_data_zone`). The
+reader can afford to be loose, because the worst a corrupt pointer costs it is the
+wrong bytes. A *write* to the same pointer destroys what it is aimed at: an inode
+whose `zone[i]` reads back as `3` would have MFS store a data block straight over
+the zone bitmap, and an indirect pointer of `4` would have it patch and store a
+block of the inode table. Nothing the allocator hands out can be that low — but a
+zone number read off the device is whatever the device says.
+
+One field is deliberately left alone: `mtime` and `ctime` are not updated, because
+there is no clock a user-space filesystem can read yet. A written file keeps the
+timestamps `tools/mkfs-mfs` stamped into it, on the grounds that an obviously
+stale timestamp is better than an invented one — and this becomes a real field to
+fill the moment a clock is reachable.
 
 ## init: PID 1
 

@@ -55,8 +55,8 @@
 //! copies the boot archive's `rootfs` blob into freshly allocated frames and maps
 //! them `Prot::RW_DATA`. So none of the `prot.device` machinery is involved —
 //! these frames take the normal `free_frame` path in every leaf sweep. RW rather
-//! than RO because slice 5.10's write path is then a body change in the driver
-//! rather than a re-mapping in the kernel.
+//! than RO so that slice 5.10a's write path was a body change in the driver
+//! rather than a re-mapping in the kernel — which is exactly how it landed.
 //!
 //! These constants are deliberately **not** emitted into the generated C headers:
 //! no Phase 5 C touches them (musl's `write()` goes to VFS, not to a driver's

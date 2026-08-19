@@ -426,18 +426,29 @@ minix.rs hello: iov ok match=1
 # filesystem), a negative length (-> EINVAL, which unchecked would widen into a
 # ~16 EiB u64), a grant issued to PM (-> EPERM, the kernel's `who_to` check), a
 # CPF_READ-only grant used as a copy DESTINATION (-> EPERM: the access mask in the
-# WRITE direction, which slice 5.3 never exercised), BDEV_WRITE (-> EROFS, not
-# ENOSYS -- that distinction is the whole reason the request has a number),
-# BDEV_WRITE to minor 7 (-> ENXIO, not EROFS: the driver validates before it
-# refuses, so it never asserts read-onlyness about a device it does not have --
-# and without this probe that arm could be reduced back to a bare EROFS with no
-# marker moving), a request one past the band (-> ENOSYS, and the reply itself is
-# the assertion: a dropped unknown would block MFS in its SENDREC forever and take
-# every later marker with it), and SYS_GETINFO(GET_RAMDISK) issued by MFS
-# (-> EPERM, the gate that keeps a VA mapped into one address space from being
-# handed to another -- and MFS is a stronger caller for it than VFS was, being the
-# one server that would otherwise have a use for such a VA). A missing check makes
-# its probe succeed and turns this into `bdev.deny FAIL <name>`.
+# WRITE direction, which slice 5.3 never exercised), a BDEV_WRITE whose grant
+# carries only CPF_WRITE (-> EPERM from the KERNEL's grant-direction check, not
+# from the driver: every geometry check passes and what refuses it is
+# `verify_grant`, the guard that stops a client reading a device buffer back out
+# through a write-shaped request), a BDEV_WRITE to minor 7 (-> ENXIO: the driver
+# validates the device before it touches the grant, so a bad minor is reported as
+# one rather than as a grant failure), a request one past the band (-> ENOSYS, and
+# the reply itself is the assertion: a dropped unknown would block MFS in its
+# SENDREC forever and take every later marker with it), and a
+# SYS_GETINFO(GET_RAMDISK) issued by MFS (-> EPERM, the gate that keeps a VA
+# mapped into one address space from being handed to another -- and MFS is a
+# stronger caller for it than VFS was, being the one server that would otherwise
+# have a use for such a VA). A missing check makes its probe succeed and turns
+# this into `bdev.deny FAIL <name>`.
+#
+# The two BDEV_WRITE probes are slice 5.10a's re-pointing, and the count is
+# unchanged because they replaced rather than joined. Both used to expect EROFS
+# from the driver, which the real write path turns into a successful STORE -- and
+# both rode the shared block-buffer grant at block 0, which holds the image header
+# and the superblock, a grant this slice widened to CPF_READ | CPF_WRITE. So they
+# now aim at block 1 (the one block START_BLOCK = 2 leaves spare) and are refused
+# for reasons that outlive read-onlyness: a regression in either guard wastes a
+# write rather than destroying the filesystem under it.
 [diag mfs] bdev.deny ok n=10
 
 # ---------------------------------------------------------------------------
@@ -499,7 +510,7 @@ minix.rs init: fs.read ok match=1
 # at all, and this is the only exercise of VFS_CLOSE anywhere.
 minix.rs init: fs.fd ok match=1
 
-# Eight refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
+# Seven refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
 # a path with no such file (-> ENOENT), `/etc` (-> EISDIR from open::classify --
 # delete that arm and open succeeds, handing back a descriptor every later read
 # would have to refuse), a path filling the FS band's inline field
@@ -507,12 +518,17 @@ minix.rs init: fs.fd ok match=1
 # which unchecked would widen into a ~16 EiB u64 on the SYS_COPY), an unmapped
 # path buffer (-> EFAULT from the kernel's page-table walk inside VFS's SYS_COPY),
 # read() on fd 1 (-> ENOSYS, not EBADF: the descriptor is fine and CDEV_READ is
-# what does not exist until Phase 6), write() on a file descriptor (-> EROFS, not
-# EBADF -- the whole reason do_write has a File arm rather than folding it into
-# the unused case, and slice 5.10's one-line landing site), and closing an
-# already-closed descriptor (-> EBADF, which is what makes the re-open above mean
-# something).
-minix.rs init: open.deny ok n=8
+# what does not exist until Phase 6), and closing an already-closed descriptor
+# (-> EBADF, which is what makes the re-open above mean something).
+#
+# It was eight until slice 5.10a, and the count moved on purpose. The retired
+# probe was write() on a file descriptor, asserting `EROFS` -- which the write
+# path turned into a *successful overwrite of /etc/motd*, silently, while every
+# other marker stayed green. That is the 5.8 `VFS_WRITE + 1` lesson a second
+# time: a denial probe must be written so that a growing capability makes it
+# FAIL loudly, never pass vacuously, and the count moving is what makes its
+# retirement a visible diff rather than a deletion nobody reviews.
+minix.rs init: open.deny ok n=7
 
 # ---------------------------------------------------------------------------
 # Slice 5.9: exec-from-FS -- /bin/hello, out of the filesystem (milestone B).
@@ -562,3 +578,33 @@ minix.rs init: open.deny ok n=8
 # exercise of VFS's not-PM guard anywhere). Reported on fd 1, through the write
 # path under test, since init has no debug channel.
 minix.rs init: exec.deny ok n=8
+
+# ---------------------------------------------------------------------------
+# Slice 5.10a: the MinixFS write path -- allocation, splicing, and write-back.
+# ---------------------------------------------------------------------------
+
+# The write path, end to end, from an ordinary user process. init writes 32 KiB
+# to /etc/scratch -- which ships EMPTY, so every zone the file ends up with was
+# allocated at runtime, the zone bitmap included -- then closes, re-opens, and
+# reads the whole file back, comparing every byte against the generator.
+#
+# 32 KiB is eight blocks: seven direct zones and one indirect, so the file
+# crosses the seam at 28672 and the allocation of the *indirect block itself* is
+# on this marker. Same reason /etc/pattern has the length it does, one layer up.
+#
+# `n=` is the total the write path reported and `v=` the bytes that read back
+# correct: the two fail independently, since a write that moved every byte and
+# mis-reported the count would still verify, and a count that was right about
+# bytes which never reached the inode would still read back short. `v=` is the
+# WHOLE file rather than sampled windows, and that is not thoroughness for its
+# own sake -- there is no lseek, so reaching any offset means reading every byte
+# before it, and sampling would issue the same messages and then throw most of
+# the comparisons away, leaving a defect confined to the middle direct zones
+# (offsets 4096..28671) able to print `ok`. Both numbers are literals in init,
+# which has no way to format an integer, so a `const _` assert ties them to
+# ROOTFS_SCRATCH_LEN and a constant moving underneath them is a compile error.
+#
+# The re-open is load-bearing: it forces a fresh FS_LOOKUP, so a size that never
+# reached the inode shows up as a short read instead of being papered over by a
+# descriptor that remembered it. Nothing on this path caches a file size.
+minix.rs init: fs.write ok n=32768 v=32768

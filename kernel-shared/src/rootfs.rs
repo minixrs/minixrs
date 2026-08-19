@@ -346,7 +346,12 @@ mod tests {
 
     #[test]
     fn every_image_path_is_absolute_and_distinct() {
-        let paths = [ROOTFS_HELLO_PATH, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_PATH];
+        let paths = [
+            ROOTFS_HELLO_PATH,
+            ROOTFS_MOTD_PATH,
+            ROOTFS_PATTERN_PATH,
+            ROOTFS_SCRATCH_PATH,
+        ];
         for p in paths {
             assert!(p.starts_with('/'), "{p} is not absolute");
             assert!(!p.ends_with('/'), "{p} names a directory");

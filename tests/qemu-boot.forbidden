@@ -29,3 +29,9 @@ minix.rs hello: errno FAIL
 # Slice 5.6: the two-iovec fwrite returned a short count. Distinct from the
 # marker vanishing (hello never ran): this means it ran and writev mis-counted.
 minix.rs hello: iov FAIL
+# Slice 5.10a: the write path ran and disagreed with itself. Distinct from the
+# marker simply going missing (init never got that far): this spelling means the
+# write, the re-open, or the read-back executed and produced the wrong answer --
+# and the failing spellings carry a byte offset, so `verify off=` at a multiple
+# of 4096 is a whole lost block while `read off=28672` is the indirect arm.
+minix.rs init: fs.write FAIL

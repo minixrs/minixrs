@@ -550,10 +550,13 @@ pub const VFS_WRITE: i32 = VFS_RQ_BASE;
 /// `EINVAL` for a relative or empty path, `EMFILE` when the caller's descriptor
 /// row is full, `ENODEV` when no filesystem is mounted.
 ///
-/// **There is deliberately no `flags` field.** Everything is read-only until
-/// slice 5.10, so an `O_WRONLY` a client could pass and VFS would have to refuse
-/// is worse than no field at all — and adding one later is an ABI bump this
-/// request is already numbered for. The lowest free descriptor is returned, which
+/// **There is deliberately no `flags` field.** Every descriptor this request
+/// hands out is readable and writable alike — slice 5.10a made writes real
+/// without needing one, because the file it writes to is already in the image —
+/// so a flag a client could pass and VFS would have to refuse is worse than no
+/// field at all. One arrives with slice 5.10b, which needs `O_CREAT` / `O_TRUNC`
+/// to name a file that does not exist yet; that is an ABI bump this request is
+/// already numbered for. The lowest free descriptor is returned, which
 /// is POSIX's rule and what makes the `fs.fd` boot probe (open, open, close both,
 /// re-open) mean anything.
 pub const VFS_OPEN: i32 = VFS_RQ_BASE + 1;
@@ -1808,8 +1811,9 @@ mod tests {
         // payload-supplied source would let any client read any process's memory
         // through VFS.
         //
-        // There is also no `flags` field until slice 5.10 — everything is
-        // read-only, and an `O_WRONLY` a client could pass and VFS would have to
+        // There is also no `flags` field until slice 5.10b, which needs
+        // `O_CREAT` / `O_TRUNC`. Through 5.10a every descriptor is readable and
+        // writable alike, and a flag a client could pass and VFS would have to
         // refuse is worse than no field. The length assertion below is what makes
         // adding either a visible change rather than a quiet one.
         let fields = [("path", VFS_PATH_OFF, 8), ("path_len", VFS_PATH_LEN_OFF, 4)];
