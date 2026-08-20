@@ -5,7 +5,6 @@
   "branch": "feature/slice-5.10a-mfs-write-path",
   "checkpoints_count": 2,
   "files_touched": [
-    "PRE6-RECOMMEND.md",
     "kernel-shared/src/rootfs.rs",
     "kernel/build.rs",
     "tools/mkfs-mfs/src/verify.rs"
@@ -23,14 +22,14 @@
       "transcript": "/e5/3dfaa5bdfd/1/full.jsonl",
       "compact_transcript": "/e5/3dfaa5bdfd/1/transcript.jsonl",
       "content_hash": "/e5/3dfaa5bdfd/1/content_hash.txt",
-      "prompt": "/e5/3dfaa5bdfd/1/prompt.txt"
+      "prompt": ""
     }
   ],
   "token_usage": {
-    "input_tokens": 64,
-    "cache_creation_tokens": 258845,
-    "cache_read_tokens": 3863991,
-    "output_tokens": 18033,
-    "api_call_count": 34
+    "input_tokens": 2,
+    "cache_creation_tokens": 1141,
+    "cache_read_tokens": 146403,
+    "output_tokens": 297,
+    "api_call_count": 1
   }
 }
