@@ -9,6 +9,7 @@
 //! trip below exercises the reader the server will use, not a second reader
 //! written to agree with the writer.
 
+use crate::image::ROOTFS_TAIL_BLOCK;
 use minixrs_mfs::MFS_BLOCK_SIZE;
 use minixrs_mfs::dirent::iter_block;
 use minixrs_mfs::inode::{Inode, ROOT_INODE};
@@ -136,6 +137,30 @@ pub fn zmap_bit_set(img: &[u8], zone: u32) -> Option<bool> {
     bit_set(img, l.zmap_start, zmap_bit(zone, l.first_data_zone)?)
 }
 
+/// How many data zones the built image leaves unallocated.
+///
+/// Counts the zone bitmap over `[first_data_zone, ROOTFS_TAIL_BLOCK)` — the tail
+/// block carries `mkfs`'s label and is allocated by construction, so it is
+/// excluded rather than counted and subtracted.
+///
+/// This exists for one caller: `kernel/build.rs`, which needs to know that the
+/// image it *just built* leaves room for `/etc/scratch` to grow at runtime. That
+/// cannot be settled by a unit test on a fixture, because the image's largest
+/// file is `/bin/hello`, whose size is a property of the toolchain flavour
+/// (~200 KB with in-tree musl, ~47 KB with the SDK, ~15 KB in the
+/// sysroot-absent fallback) and is not knowable here.
+pub fn free_zones(img: &[u8]) -> Option<usize> {
+    let l = image_layout(img)?;
+    let mut free = 0;
+    for z in l.first_data_zone..ROOTFS_TAIL_BLOCK {
+        if bit_set(img, l.zmap_start, zmap_bit(z, l.first_data_zone)?)? {
+            continue;
+        }
+        free += 1;
+    }
+    Some(free)
+}
+
 fn bit_set(img: &[u8], start: u32, bit: u32) -> Option<bool> {
     let byte = (start as usize).checked_mul(MFS_BLOCK_SIZE)? + (bit as usize) / 8;
     Some(img.get(byte)? & (1 << (bit % 8)) != 0)
@@ -147,10 +172,10 @@ mod tests {
     use crate::image::{
         HDR_BLOCK_SIZE_OFF, HDR_BLOCKS_OFF, HDR_LABEL_OFF, HDR_MFS_MAGIC_OFF, IMAGE_HDR_LEN,
         IMAGE_LABEL, IMAGE_LABEL_LEN, IMAGE_TAIL_LABEL, MkfsError, ROOTFS_IMAGE_BLOCKS,
-        ROOTFS_IMAGE_BYTES, ROOTFS_TAIL_BLOCK, build_image,
+        ROOTFS_IMAGE_BYTES, build_image,
     };
     use crate::manifest::Manifest;
-    use minixrs_kernel_shared::rootfs::ROOTFS_SCRATCH_LEN;
+    use minixrs_kernel_shared::rootfs::{ROOTFS_SCRATCH_GROWTH_ZONES, ROOTFS_SCRATCH_LEN};
     use minixrs_mfs::inode::{NR_DIRECT_ZONES, NR_TZONES, SINGLE_INDIRECT_SLOT};
 
     /// A file large enough to need the indirect block: nine blocks, two past the
@@ -401,18 +426,54 @@ mod tests {
     }
 
     #[test]
-    fn the_image_leaves_room_for_the_scratch_file_to_grow() {
-        // The write allocates 8 data zones plus 1 indirect block at runtime. If a
-        // future image shrink made that impossible, init's first write would answer
-        // ENOSPC at boot rather than failing here.
+    fn free_zones_counts_what_the_manifest_did_not_take() {
+        // Anchored against the bitmap rather than against a number: `sample()` is a
+        // fixture, and a test that hard-coded its free count would have to be edited
+        // every time the fixture changed, which is how such a test stops meaning
+        // anything.
         let img = sample();
         let l = image_layout(&img).expect("layout");
-        let free = (l.first_data_zone..ROOTFS_TAIL_BLOCK)
+        let counted = (l.first_data_zone..ROOTFS_TAIL_BLOCK)
             .filter(|z| zmap_bit_set(&img, *z) == Some(false))
             .count();
-        assert!(
-            free > ROOTFS_SCRATCH_LEN / MFS_BLOCK_SIZE,
-            "only {free} free zones"
+        assert_eq!(free_zones(&img), Some(counted));
+    }
+
+    #[test]
+    fn free_zones_falls_as_the_manifest_grows_and_reaches_zero() {
+        // The point of `free_zones` is `kernel/build.rs`'s headroom check, and a
+        // check is only worth having if it can fail. So: fill the image to the brim
+        // and confirm the count really reaches zero. Without this the whole
+        // mechanism could report a constant and nothing would notice.
+        //
+        // The baseline holds the file's *directory*, which costs a zone of its own,
+        // so that cost is not mistaken for content below.
+        let mut base = Manifest::new();
+        base.add("/etc/fill", Vec::new());
+        let empty = free_zones(&build_image(&base).expect("empty image builds")).expect("layout");
+        assert!(empty > 7, "an empty manifest must leave zones free");
+
+        // One file of exactly the free capacity. Past seven zones it needs an
+        // indirect block, which is itself a zone, so the largest *file* that fits is
+        // one block short of the free count.
+        let bytes = (empty - 1) * MFS_BLOCK_SIZE;
+        let mut m = Manifest::new();
+        m.add("/etc/fill", vec![0x5A; bytes]);
+        let img = build_image(&m).expect("a full image still builds");
+        assert_eq!(
+            free_zones(&img),
+            Some(0),
+            "filling the image must drive the count to zero"
         );
+    }
+
+    #[test]
+    fn the_scratch_growth_reserve_is_the_blocks_plus_one_indirect() {
+        // What `kernel/build.rs` reserves. Eight data zones for 32 KiB, plus the one
+        // indirect block holding the eighth zone's pointer — the seventh is the last
+        // direct slot. Spelled out here because build.rs's check is only as good as
+        // this number, and it is not otherwise verified anywhere.
+        assert_eq!(ROOTFS_SCRATCH_LEN.div_ceil(MFS_BLOCK_SIZE), 8);
+        assert_eq!(ROOTFS_SCRATCH_GROWTH_ZONES, 9);
     }
 }

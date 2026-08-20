@@ -382,7 +382,7 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
     use minixrs_kernel_shared::rootfs::{
         ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
-        ROOTFS_SCRATCH_PATH, rootfs_pattern_byte,
+        ROOTFS_SCRATCH_GROWTH_ZONES, ROOTFS_SCRATCH_PATH, rootfs_pattern_byte,
     };
     use minixrs_mkfs_mfs::Manifest;
 
@@ -400,8 +400,27 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
         // reach of a probe that writes.
         .add(ROOTFS_SCRATCH_PATH, Vec::new());
 
-    minixrs_mkfs_mfs::build_image(&manifest)
-        .unwrap_or_else(|e| panic!("building the root filesystem image: {e}"))
+    let img = minixrs_mkfs_mfs::build_image(&manifest)
+        .unwrap_or_else(|e| panic!("building the root filesystem image: {e}"));
+
+    // The scratch file ships empty, so every zone it ends up with is allocated by
+    // MFS at *runtime*. Checked here, against the bytes just built, because it
+    // cannot be settled anywhere else: the image's largest file is `/bin/hello`,
+    // whose size is a property of the toolchain flavour (~200 KB with in-tree
+    // musl, ~47 KB with the SDK, ~15 KB in the sysroot-absent fallback), so a unit
+    // test over a fixture manifest would be measuring something that is not this
+    // image. Without it, contents growing past the headroom is `ENOSPC` on the
+    // first write and surfaces only as `fs.write FAIL short` in a QEMU boot.
+    let free = minixrs_mkfs_mfs::verify::free_zones(&img)
+        .expect("the image just built decodes its own layout");
+    assert!(
+        free >= ROOTFS_SCRATCH_GROWTH_ZONES,
+        "the root image leaves {free} free zones, but {ROOTFS_SCRATCH_PATH} needs \
+         {ROOTFS_SCRATCH_GROWTH_ZONES} to grow at runtime. Its contents have outgrown \
+         ROOTFS_IMAGE_BLOCKS -- raise that constant, or shrink what the image ships."
+    );
+
+    img
 }
 
 /// Locate a usable minix.rs SDK (`$MINIXRS_SDK`), or `None`.

@@ -163,10 +163,24 @@ const _: () = assert!(ROOTFS_SCRATCH_LEN > 7 * BDEV_BLOCK_SIZE);
 // ...and it must stay inside the single-indirect span, which is what MFS's
 // writer covers: 7 direct zones plus one block of 4-byte pointers.
 const _: () = assert!(ROOTFS_SCRATCH_LEN <= (7 + BDEV_BLOCK_SIZE / 4) * BDEV_BLOCK_SIZE);
-// The image has room for it: 8 data zones plus 1 indirect block, against an
-// image whose other contents leave well over that free. A future image shrink
-// fails here rather than at boot with ENOSPC.
-const _: () = assert!(ROOTFS_SCRATCH_LEN / BDEV_BLOCK_SIZE + 1 < ROOTFS_IMAGE_BLOCKS as usize);
+/// Zones the write proof allocates at **runtime**: one per block of
+/// [`ROOTFS_SCRATCH_LEN`], plus the single indirect block holding the pointer to
+/// the eighth.
+///
+/// Named rather than open-coded because three places need the same number and
+/// must not drift — this module's headroom guard below, `kernel/build.rs`'s check
+/// that the *built* image really leaves that many zones free, and the test that
+/// proves that check is not vacuous. The image ships `/etc/scratch` empty, so
+/// every one of these zones is allocated by MFS while the kernel is running;
+/// running out is `ENOSPC` at boot, which is why the count is checked against a
+/// real image rather than reasoned about.
+pub const ROOTFS_SCRATCH_GROWTH_ZONES: usize = ROOTFS_SCRATCH_LEN.div_ceil(BDEV_BLOCK_SIZE) + 1;
+
+// The image is at least large enough in principle. This is a *necessary*
+// condition only — it says nothing about what the image's other contents leave
+// free, which depends on the `hello` flavour and so cannot be known here. The
+// sufficient check is `kernel/build.rs`'s, against the bytes it just built.
+const _: () = assert!(ROOTFS_SCRATCH_GROWTH_ZONES < ROOTFS_IMAGE_BLOCKS as usize);
 
 /// Label at the start of the image. NUL-padded to [`IMAGE_LABEL_LEN`].
 pub const IMAGE_LABEL: [u8; IMAGE_LABEL_LEN] = *b"minix.rs rootfs\0";
@@ -325,9 +339,14 @@ mod tests {
         // allocation arm has no boot marker. Same reasoning ROOTFS_PATTERN_LEN
         // records for the read side.
         assert_eq!(ROOTFS_SCRATCH_LEN, 32 * 1024);
+        // Strictly past the seam, not merely up to it: at exactly 7 * BDEV_BLOCK_SIZE
+        // the file still fits the direct zones and the arm this test exists to keep
+        // on a boot marker becomes unreachable. `.min(seam + 1)` is the house idiom
+        // for an ordering assertion (there is no `assert_gt!`), and it is the whole
+        // point here — a `.min(seam)` form would hold at the failing length.
         assert_eq!(
-            ROOTFS_SCRATCH_LEN.min(7 * BDEV_BLOCK_SIZE),
-            7 * BDEV_BLOCK_SIZE
+            ROOTFS_SCRATCH_LEN.min(7 * BDEV_BLOCK_SIZE + 1),
+            7 * BDEV_BLOCK_SIZE + 1
         );
     }
 
