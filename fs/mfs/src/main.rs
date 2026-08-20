@@ -494,16 +494,38 @@ fn do_read(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option
 /// they just filled: step 4 writes `zone`, which it either read at the top of the
 /// step or is about to overwrite whole.
 ///
-/// **A failure mid-write leaks a zone, deliberately.** If the safecopy or the
-/// block store fails after step 3 allocated one, the bitmap bit stays set and the
-/// inode is never written back — so the zone is unreachable, and a retry
-/// *re-allocates* rather than reusing it. A client looping on a bad grant
-/// therefore leaks one or two zones per attempt against the image's ~250 data
-/// zones. The alternative was rolling the bit back on the error path, which is
-/// worse in the direction that matters: a rollback that itself fails, or races a
-/// concurrent allocation, hands the same zone out twice, and this filesystem has
-/// no `fsck` to notice. A leak is recoverable by a future one; a shared zone is
-/// silent corruption. Reclaiming leaks is left to that future `fsck`.
+/// **A failure mid-write leaks a zone, and this is a reachable denial of service
+/// — an accepted limitation, not a benign one.** Step 3 allocates before step 4
+/// copies, so a safecopy that fails leaves the bitmap bit set with the inode
+/// never written back. The copy is *client-controlled*: `rw::validate` in VFS
+/// range-checks the caller's buffer but cannot check that it is mapped (the
+/// kernel's page-table walk is the gate — D5), so `write(fd, unmapped_va, 4096)`
+/// reaches here with a well-formed magic grant and fails at the copy. Looping it
+/// exhausts the image's free zones — **185 in the musl flavour**, so 93–185 calls
+/// — and every later write, legitimate ones included, answers `ENOSPC` for the
+/// rest of the boot. Nothing in the shipped boot reaches it (init writes a good
+/// buffer; `worker` and `hello` write no files), which is why it is deferred
+/// rather than fixed here.
+///
+/// **Whoever fixes this must not simply clear the bit on the error path.** The
+/// three outcomes differ, and only two leak:
+///
+///   * *Direct slot, new zone* — the bit is durable, `node.zone[i]` is not.
+///     Orphaned; a retry allocates again. **Leaks, 1 zone per attempt.**
+///   * *Indirect slot, indirect block already existed* — the bit is durable and
+///     so is the indirect block that points at the zone. A retry finds
+///     `existing != 0` and reuses it. **Does not leak**, and clearing the bit
+///     here would hand out a zone the indirect block still names: two files
+///     sharing one, which is the corruption this ordering exists to prevent.
+///   * *Indirect slot, indirect block also new* — two bits durable, nothing
+///     durable referencing either. **Leaks, 2 zones per attempt.**
+///
+/// The cheaper fix is not a rollback at all: stage the caller's bytes into a
+/// second buffer *before* step 3, so no client-controlled failure can occur after
+/// an allocation. That costs one page of `.bss` — the one-page limit in this
+/// server is the *stack*, not `.bss` — and buys a one-line invariant in place of
+/// the table above. Deferred to slice 5.10b, which reworks this path for
+/// `O_CREAT` regardless.
 ///
 /// **`mtime` and `ctime` are not updated, on purpose.** There is no clock a
 /// user-space filesystem can read yet — MFS holds no `SYS_SETALARM` grant and
@@ -697,7 +719,9 @@ fn place_zone(
 ///
 /// **The bit is set before the zone is used**, so a failure part-way leaks a zone
 /// rather than handing the same one out twice. A leak is recoverable by a future
-/// `fsck`; a shared zone is silent corruption.
+/// `fsck`; a shared zone is silent corruption. See [`do_write`] for why that leak
+/// is a *reachable* denial of service rather than a benign one, and for the case
+/// in which clearing the bit again would be the corruption this avoids.
 ///
 /// The scan is bounded by `layout.zmap_blocks` — every device-derived loop has a
 /// cap, because a corrupt superblock must not spin this server and, through it,

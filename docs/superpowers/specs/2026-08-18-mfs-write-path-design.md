@@ -464,14 +464,28 @@ machine.
 
 **Free-space accounting is unproven at runtime.** Nothing today reads the zone
 bitmap's occupancy, so a mkfs bug that marked the whole device in use would
-surface as `ENOSPC` on init's first write rather than at build time. `verify.rs`
-gains a free-zone count assertion, which is cheap and turns that into a build
-failure.
+surface as `ENOSPC` on init's first write rather than at build time. A free-zone
+count assertion turns that into a build failure.
+
+> **Revised 2026-08-20, review of PR #53.** The assertion as first written lived
+> in `verify.rs` and measured a *fixture* manifest, not the shipped image — which
+> cannot be measured host-side, since the image's largest file is `/bin/hello`
+> and its size is a property of the toolchain flavour. It now lives in
+> `build_rootfs`, against the bytes just built, via `verify::free_zones`. The
+> real margin is **185 free zones against a reserve of 9**.
 
 **A partial failure leaks zones.** Invariant 5 makes the leak the *safe*
-direction, but there is no `fsck` and no free-on-error unwind. Accepted for a
-RAM-backed image whose lifetime is one boot; recorded here so 5.10b's create path
-does not assume otherwise.
+direction, but there is no `fsck` and no free-on-error unwind.
+
+> **Revised 2026-08-20, review of PR #53.** "Accepted for a RAM-backed image
+> whose lifetime is one boot" understated this: the exhaustion happens *within*
+> one boot and is **client-reachable**. VFS range-checks a caller's buffer but
+> cannot check that it is mapped (D5 — the page-table walk is the gate), so a
+> write through an unmapped-but-in-range VA fails *after* the zone is
+> bitmap-marked, and 93–185 such calls exhaust the image. Nothing in the shipped
+> boot reaches it, so it stays accepted for 5.10a and is deferred to 5.10b with
+> the fix and the one dangerous-to-unwind case recorded in `do_write`'s docstring
+> and in the phase tracker.
 
 **The 4 KiB server stack.** No new stack buffer is introduced anywhere — MFS's
 block buffer stays static, init's source is a `.rodata` static, and init's verify
@@ -522,3 +536,9 @@ allocator (`bitmap_find_free`/`bitmap_set` are already general), directory-entry
 insertion into a free `ino == 0` slot with directory growth when none is free,
 `FS_TRUNC`, and a flags field in the `VFS_OPEN` payload for `O_CREAT` / `O_TRUNC`
 / `O_APPEND`. `EROFS` returns to VFS then, if at all, only for a full filesystem.
+
+Added 2026-08-20 from PR #53's review, both deferred rather than dropped: the
+**mid-write zone leak** (Risk 2 above — a second staging buffer filled before
+the allocation, plus an init probe that writes through a bad buffer and confirms
+the free count held), and a probe for the **`dirty` half of the inode
+write-back condition**, which `FS_TRUNC` is what finally makes reachable.

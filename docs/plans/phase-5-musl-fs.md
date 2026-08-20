@@ -1461,12 +1461,38 @@ contradict what this plan predicted:**
   denial battery's write-direction probe catches it without any of the write
   path being involved.
 
+- **The mid-write zone leak is a reachable denial of service, accepted and
+  deferred to 5.10b** (review of PR #53). `do_write` allocates at step 3 and
+  copies at step 4, and the copy is client-controlled: VFS's `rw::validate`
+  range-checks the caller's buffer but cannot check that it is *mapped* — the
+  kernel's page-table walk is the gate, per D5 — so `write(fd, unmapped_va,
+  4096)` arrives with a well-formed magic grant and fails after the zone is
+  bitmap-marked. Looping it exhausts the image's **185 free zones** (measured,
+  musl flavour) in 93–185 calls, after which every write including a legitimate
+  one answers `ENOSPC` for the rest of the boot. Nothing in the shipped boot
+  reaches it, which is why it was not fixed under review. Two things the fixer
+  needs and should not have to re-derive, both recorded in `do_write`'s
+  docstring: **clearing the bit on the error path is wrong in one of the three
+  cases** (indirect slot with a pre-existing indirect block — the block on disk
+  still names the zone, so freeing the bit hands it out twice, the exact
+  corruption the ordering exists to prevent), and the cheap fix is not a
+  rollback at all but a second staging buffer filled *before* the allocation, so
+  that no client-controlled failure can occur after one. That costs a page of
+  `.bss`; the one-page limit in MFS is the *stack*, not `.bss`.
+
 #### Slice 5.10b: create and truncate ◀ next
 
 **Scope:** `FS_CREATE` + `FS_TRUNC`, an inode allocator (5.10a's `bitmap_*`
 helpers are already general), directory-entry insertion into a free
 `ino == 0` slot with directory growth when none is free, and a flags field in
 the `VFS_OPEN` payload for `O_CREAT` / `O_TRUNC`.
+
+Also carries two items 5.10a deferred into it: the **mid-write zone leak**
+above (a second staging buffer, plus an init probe that writes through a bad
+buffer and confirms the free-zone count held), and a probe for the **`dirty`
+half of the inode write-back condition**, which `FS_TRUNC` finally makes
+reachable — a truncate followed by a write into the hole assigns a zone without
+moving `size`, which is precisely the case nothing could reach in 5.10a.
 
 **Proof:** init creates a file that is not in the image, writes it, reads it
 back, and echoes it to fd 1.
