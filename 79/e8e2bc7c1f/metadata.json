@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "79e8e2bc7c1f",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.10a-mfs-write-path",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "fs/mfs/src/main.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/79/e8e2bc7c1f/0/metadata.json",
+      "transcript": "/79/e8e2bc7c1f/0/full.jsonl",
+      "compact_transcript": "/79/e8e2bc7c1f/0/transcript.jsonl",
+      "content_hash": "/79/e8e2bc7c1f/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 378,
+    "cache_creation_tokens": 966989,
+    "cache_read_tokens": 63014570,
+    "output_tokens": 236085,
+    "api_call_count": 189
+  }
+}
