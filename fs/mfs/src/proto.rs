@@ -163,6 +163,18 @@ fn wr_i32(m: &mut Message, off: usize, v: i32) {
     }
 }
 
+/// Read the inode number out of an `FS_TRUNC` request.
+///
+/// One field. It shares [`FS_INO_OFF`] with `FS_LOOKUP`'s reply and `FS_READ`'s
+/// request for the reason that constant's docs give: it is one field, and the
+/// number `FS_LOOKUP` hands out is the number every later request takes back.
+///
+/// Its own function rather than `parse_read(msg).ino`, so that a request whose
+/// other three fields are meaningless cannot be read as though they were not.
+pub fn parse_trunc(msg: &Message) -> i32 {
+    rd_i32(msg, FS_INO_OFF)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +321,17 @@ mod tests {
         reply_lookup(&mut m, 5, I_REGULAR, 0);
         assert_eq!(rd_i32(&m, FS_SIZE_OFF), 0);
         assert!(m.payload[12..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn parse_trunc_reads_the_inode_and_ignores_everything_else() {
+        let mut m = empty();
+        wr_i32(&mut m, FS_INO_OFF, 7);
+        wr_i32(&mut m, FS_GRANT_OFF, 0x1234);
+        wr_i32(&mut m, FS_LEN_OFF, 512);
+        assert_eq!(parse_trunc(&m), 7);
+        // A zeroed payload reads as inode 0, which the server refuses as EINVAL.
+        assert_eq!(parse_trunc(&empty()), 0);
     }
 
     #[test]

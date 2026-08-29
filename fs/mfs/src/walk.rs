@@ -30,7 +30,7 @@
 //! corrupt inode — which is exactly why it needs unit tests instead.
 
 use minixrs_kernel_shared::callnr::FS_MAX_IO;
-use minixrs_kernel_shared::error::{EINVAL, EIO, ENAMETOOLONG};
+use minixrs_kernel_shared::error::{EINVAL, EIO, EISDIR, ENAMETOOLONG};
 
 use crate::MFS_BLOCK_SIZE;
 use crate::dirent::{NAME_MAX, iter_block};
@@ -233,11 +233,53 @@ pub fn zone_ok(zone: u32, blocks: u32) -> bool {
     zone != 0 && zone < blocks
 }
 
+/// Split an absolute path into its parent directory and its final component.
+///
+/// `/etc/new` splits into `("/etc", "new")`, and `/new` into `("/", "new")` — the
+/// parent is `"/"` rather than `""`, so it resolves through the ordinary walk.
+///
+/// The create path is the only caller, and it applies [`parse_path`] first, so
+/// the length rules there are already enforced. What is left is what a *create*
+/// needs on top of a lookup:
+///
+///   * `"/"` is `EISDIR`. It names the root directory, and a create whose target
+///     is a directory gets the same errno `FS_TRUNC` and `VFS_OPEN` use for one.
+///   * An empty final component (a trailing slash) is `EINVAL` — it names
+///     nothing. So are `.` and `..`, which every directory already carries: a
+///     create there would insert a duplicate of an entry that exists.
+///   * A final component past [`crate::dirent::NAME_MAX`] is `ENAMETOOLONG`; it
+///     could not be written into a directory entry at all.
+pub fn split_basename(path: &str) -> Result<(&str, &str), i32> {
+    if path == "/" {
+        return Err(EISDIR);
+    }
+    let cut = path.rfind('/').ok_or(EINVAL)?;
+    // `checked_add`, not `+`: this crate ships with `overflow-checks = false`.
+    let name = path
+        .get(cut.checked_add(1).ok_or(EINVAL)?..)
+        .ok_or(EINVAL)?;
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(EINVAL);
+    }
+    if name.len() > NAME_MAX {
+        return Err(ENAMETOOLONG);
+    }
+    let parent = if cut == 0 {
+        "/"
+    } else {
+        path.get(..cut).ok_or(EINVAL)?
+    };
+    Ok((parent, name))
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use crate::dirent::DirEntry;
     use crate::inode::ROOT_INODE;
+    use std::format;
 
     const BS: usize = MFS_BLOCK_SIZE;
 
@@ -519,5 +561,54 @@ mod tests {
         assert!(!zone_ok(u32::MAX, 256));
         // A device with no blocks admits nothing.
         assert!(!zone_ok(1, 0));
+    }
+
+    // ----- split_basename ----------------------------------------------------
+
+    #[test]
+    fn a_path_splits_into_its_parent_and_its_final_component() {
+        assert_eq!(split_basename("/etc/new"), Ok(("/etc", "new")));
+        assert_eq!(split_basename("/full/new"), Ok(("/full", "new")));
+    }
+
+    #[test]
+    fn a_top_level_name_has_the_root_as_its_parent() {
+        // The `cut == 0` case: the parent is "/", not "".
+        assert_eq!(split_basename("/new"), Ok(("/", "new")));
+    }
+
+    #[test]
+    fn the_root_itself_is_eisdir() {
+        // It names a directory, and a create whose target is a directory gets the
+        // same errno `FS_TRUNC` and `VFS_OPEN` use for one.
+        assert_eq!(split_basename("/"), Err(EISDIR));
+    }
+
+    #[test]
+    fn a_trailing_slash_or_a_dot_component_is_einval() {
+        // An empty final component names nothing; `.` and `..` are entries every
+        // directory already carries, so creating them would insert a duplicate.
+        for p in ["/etc/", "/etc/.", "/etc/..", "/."] {
+            assert_eq!(split_basename(p), Err(EINVAL), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn a_relative_path_has_no_separator_and_is_einval() {
+        // Unreachable through `parse_path`, which refuses it first -- but a
+        // second caller must not be able to reach a `rfind` that returns `None`.
+        assert_eq!(split_basename("etc"), Err(EINVAL));
+        assert_eq!(split_basename(""), Err(EINVAL));
+    }
+
+    #[test]
+    fn a_final_component_past_the_name_field_is_enametoolong() {
+        // It could not be written into a directory entry. Exactly NAME_MAX is
+        // fine, because the name field is NUL-padded rather than terminated.
+        let long = "x".repeat(NAME_MAX + 1);
+        assert_eq!(split_basename(&format!("/etc/{long}")), Err(ENAMETOOLONG));
+        let ok = "x".repeat(NAME_MAX);
+        let path = format!("/etc/{ok}");
+        assert_eq!(split_basename(&path), Ok(("/etc", ok.as_str())));
     }
 }
