@@ -77,13 +77,13 @@ use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF, BDEV_MINOR_RAMDISK,
-    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_LOOKUP, FS_READ, FS_READSUPER, FS_WRITE, GET_RAMDISK,
-    NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_CREATE, FS_LOOKUP, FS_READ, FS_READSUPER, FS_WRITE,
+    GET_RAMDISK, NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{MEM_PROC_NR, PM_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{
-    EFBIG, EINVAL, EIO, EISDIR, ENODEV, ENOENT, ENOSPC, ENOSYS, ENOTDIR, ENXIO, EPERM, OK,
+    EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENODEV, ENOENT, ENOSPC, ENOSYS, ENOTDIR, ENXIO, EPERM, OK,
 };
 use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE, GRANT_INVALID};
 use minixrs_kernel_shared::rootfs::{
@@ -91,7 +91,10 @@ use minixrs_kernel_shared::rootfs::{
     ROOTFS_MOTD_PATH, ROOTFS_PATTERN_PATH, ROOTFS_TAIL_BLOCK, rootfs_pattern_byte,
 };
 use minixrs_mfs::MFS_BLOCK_SIZE;
-use minixrs_mfs::inode::{INODE_SIZE, Inode, NR_DIRECT_ZONES, ROOT_INODE, SINGLE_INDIRECT_SLOT};
+use minixrs_mfs::dirent::{DIRENT_SIZE, DirEntry};
+use minixrs_mfs::inode::{
+    I_REGULAR, INODE_SIZE, Inode, NR_DIRECT_ZONES, ROOT_INODE, SINGLE_INDIRECT_SLOT,
+};
 use minixrs_mfs::layout::{Layout, layout};
 use minixrs_mfs::read::{
     ZoneLookup, inode_at, inode_location, zone_for_offset, zone_from_indirect,
@@ -107,6 +110,15 @@ use minixrs_server_rt::{
 /// three malformed ones the denial battery needs — and the pool costs `N * 32`
 /// bytes of `main`'s one-page frame, so 8 is ample headroom at 256 bytes.
 const GRANT_SLOTS: usize = 8;
+
+/// Mode a newly created file gets: a regular file, `rw-r--r--`.
+///
+/// A constant rather than a payload field, because there is no uid, no gid and no
+/// permission check anywhere in the tree — a mode on the wire would be a value
+/// nothing reads, and a field with one legal value is worse than no field. It
+/// becomes a real field the moment a permission model exists, and `open(2)`'s
+/// `mode_t` argument is dropped by VFS until then.
+const NEW_FILE_MODE: u16 = I_REGULAR | 0o644;
 
 // ---------------------------------------------------------------------------
 // The block buffer, and the capability that reaches it.
@@ -322,6 +334,13 @@ struct Mount {
     root: u32,
     block_size: usize,
     blocks: u32,
+    /// Inodes the superblock says exist, i.e. the largest legal inode number.
+    ///
+    /// **Not derivable from `layout`**, whose `inode_blocks` is rounded up to
+    /// whole blocks: using the rounded count as the allocator's limit would hand
+    /// out inode numbers past the superblock's own `ninodes`, which no reader
+    /// would then be able to address.
+    ninodes: u32,
     layout: Layout,
 }
 
@@ -389,6 +408,7 @@ fn main() -> ! {
             FS_LOOKUP => do_lookup(&mut msg, &mut blocks, &mount),
             FS_READ => do_read(&msg, caller_e, &mut blocks, &mount),
             FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mut stage, &mount),
+            FS_CREATE => do_create(&mut msg, &mut blocks, &mount),
             // Reply rather than drop (TTY's rule): this server's clients are all
             // inside a SENDREC, and a dropped request blocks the caller forever.
             _ => ENOSYS,
@@ -713,6 +733,161 @@ fn do_write(
     chunk.len as i32
 }
 
+/// Serve one `FS_CREATE`: make a regular file and return it like a lookup.
+///
+/// The payload and the reply are [`FS_LOOKUP`]'s, field for field, so
+/// [`proto::parse_lookup`] and [`proto::reply_lookup`] serve both — which is what
+/// lets VFS classify either answer through one function.
+#[cfg_attr(test, allow(dead_code))]
+fn do_create(msg: &mut Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
+    let Some(mount) = mount else {
+        return ENODEV;
+    };
+    // The path borrows `*msg`; the result is `Copy`, so that borrow is over
+    // before the reply is written back into the same message.
+    let created = match proto::parse_lookup(msg).and_then(walk::parse_path) {
+        Ok(path) => create(blocks, mount, path),
+        Err(e) => Err(e),
+    };
+    match created {
+        Ok((ino, node)) => {
+            proto::reply_lookup(msg, ino, node.mode, node.size);
+            OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Create `path`, and return the new `(inode number, inode)`.
+///
+/// **The inode is allocated and written back before the directory entry names
+/// it.** That is the mirror of the zone rule, for the mirror reason: a failure
+/// between the two orphans an inode — a leak, which a future `fsck` reclaims —
+/// where the other order would leave a directory entry naming an inode that was
+/// never written, so the name would resolve to whatever the inode table happened
+/// to hold. Leak over corruption, in both directions.
+#[cfg_attr(test, allow(dead_code))]
+fn create(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode), i32> {
+    let (parent_path, name) = walk::split_basename(path)?;
+    let (parent_ino, parent) = lookup(blocks, mount, parent_path)?;
+    if !parent.is_dir() {
+        return Err(ENOTDIR);
+    }
+
+    let free = find_free_slot(blocks, mount, &parent, name)?;
+
+    let ino = alloc_inode(blocks, mount)?;
+    let node = Inode {
+        mode: NEW_FILE_MODE,
+        nlinks: 1,
+        ..Inode::EMPTY
+    };
+    // Timestamps stay 0: there is no clock a user-space filesystem can read yet,
+    // and inventing a value would be worse than an obviously absent one. The
+    // rule `do_write` already states for `mtime`.
+    write_inode(blocks, mount, ino, &node)?;
+
+    // `DirEntry::new` rejects an empty name, one past the field, and one holding
+    // a NUL or a `/` — the last of which is what keeps a component from being
+    // able to *contain* a path. `split_basename` has already refused all four, so
+    // this is defence in depth rather than the gate.
+    let entry = DirEntry::new(ino, name.as_bytes()).ok_or(EINVAL)?;
+    insert_entry(blocks, mount, parent_ino, parent, free, &entry)?;
+    Ok((ino, node))
+}
+
+/// Scan **every** block of `dir` for `name`, remembering the first free slot.
+///
+/// Returns that slot as `(the byte offset of its block, its index within the
+/// block)`, or `None` when the directory has no free slot at all.
+///
+/// `EEXIST` as soon as the name is found — and the scan does not stop at the
+/// first free slot, which is the point: a name living in a *later* block than the
+/// first free slot would otherwise get a duplicate entry inserted ahead of it,
+/// and the reader stops at the first match, so the original would be shadowed
+/// silently.
+///
+/// Bounded by [`walk::dir_size`] like [`find_component`], and for the same
+/// reason: a corrupt inode claiming `size = i32::MAX` would otherwise spin this
+/// server, and through it VFS and init.
+#[cfg_attr(test, allow(dead_code))]
+fn find_free_slot(
+    blocks: &mut Blocks,
+    mount: &Mount,
+    dir: &Inode,
+    name: &str,
+) -> Result<Option<(u64, usize)>, i32> {
+    let size = walk::dir_size(dir.size)?;
+    let mut free: Option<(u64, usize)> = None;
+    let mut off = 0usize;
+    while let Some(want) = walk::next_dir_chunk(off, size, mount.block_size) {
+        // The block's borrow ends at this `match`: `DirentSlot` is `Copy`, so
+        // nothing points into the buffer when the next fetch replaces it.
+        let blk = fetch(blocks, mount, dir, off as u64)?;
+        match write::dirent_slot(blk.get(..want).ok_or(EIO)?, name) {
+            write::DirentSlot::Occupied(_) => return Err(EEXIST),
+            write::DirentSlot::Free(i) if free.is_none() => free = Some((off as u64, i)),
+            _ => {}
+        }
+        off = off.checked_add(want).ok_or(EIO)?;
+    }
+    Ok(free)
+}
+
+/// Write `entry` into `parent`, in a free slot or appended at the end.
+///
+/// **The append path allocates through [`place_zone`]** — a directory grows
+/// through exactly the allocator a file does, which is why growth needs no second
+/// code path and why its bitmap ordering is the one already proved. `/full` in the
+/// boot image exists so that one create at boot takes this path.
+///
+/// The directory block is always read before it is spliced: one 64-byte entry is
+/// written into it, so it is never covered whole — the case `do_write`'s
+/// full-block skip exists for cannot arise here.
+#[cfg_attr(test, allow(dead_code))]
+fn insert_entry(
+    blocks: &mut Blocks,
+    mount: &Mount,
+    parent_ino: u32,
+    mut parent: Inode,
+    free: Option<(u64, usize)>,
+    entry: &DirEntry,
+) -> Result<(), i32> {
+    let (pos, off_in_block) = match free {
+        // A free slot: `pos` names its block, and the index gives the offset
+        // inside it.
+        Some((pos, slot)) => (pos, slot.checked_mul(DIRENT_SIZE).ok_or(EIO)?),
+        // An append: the offset is already entry-aligned, so it lands wherever
+        // the directory currently ends.
+        None => {
+            let pos = write::dir_append_offset(parent.size)?;
+            (pos, (pos % mount.block_size as u64) as usize)
+        }
+    };
+
+    let (zone, mut dirty) = place_zone(blocks, mount, &mut parent, pos)?;
+    blocks.read(u64::from(zone))?;
+    let buf = blocks.buf_mut();
+    let end = off_in_block.checked_add(DIRENT_SIZE).ok_or(EIO)?;
+    let cell = buf.get_mut(off_in_block..end).ok_or(EIO)?;
+    cell.copy_from_slice(&entry.to_le_bytes());
+    blocks.write(u64::from(zone))?;
+
+    if free.is_none() {
+        let grown = write::grow_size(parent.size, pos, DIRENT_SIZE)?;
+        if grown != parent.size {
+            parent.size = grown;
+            dirty = true;
+        }
+    }
+    // The same condition `do_write` uses, for the same reason: a zone may have
+    // been assigned without the size moving.
+    if dirty {
+        write_inode(blocks, mount, parent_ino, &parent)?;
+    }
+    Ok(())
+}
+
 /// Resolve the zone backing byte `pos` of `node`, allocating it — and any
 /// indirect block it needs — if it is a hole.
 ///
@@ -852,6 +1027,63 @@ fn alloc_zone(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
     Err(ENOSPC)
 }
 
+/// Allocate one inode: find a clear bit in the inode bitmap and set it.
+///
+/// [`alloc_zone`]'s twin, and the same ordering rule: **the bit is set before
+/// anything names the inode**, so a failure part-way leaks an inode rather than
+/// handing the same one out twice. A leak is recoverable by a future `fsck`; a
+/// shared inode is silent corruption.
+///
+/// Bit *i* names inode *i* ([`minixrs_mfs::layout::imap_bit`] is the identity
+/// map) and bit 0 is reserved because inode 0 does not exist — which is what
+/// makes `0` a usable "free slot" marker in a directory entry.
+///
+/// Two bounds, and both are needed. The scan is capped at `layout.imap_blocks`,
+/// because every device-derived loop here has a cap. And the *bit* limit is
+/// `mount.ninodes + 1`, from the superblock: the bitmap is rounded up to whole
+/// blocks, so its tail describes inodes past the real count, exactly as the zone
+/// bitmap's does.
+///
+/// Unlike [`alloc_zone`] this does **not** touch the object it allocates. The
+/// caller writes the new inode back before anything names it, which is the
+/// create path's half of the ordering rule.
+#[cfg_attr(test, allow(dead_code))]
+fn alloc_inode(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
+    let bits_per_block = u32::try_from(mount.block_size.checked_mul(8).ok_or(EIO)?)
+        .ok()
+        .filter(|&b| b != 0)
+        .ok_or(EIO)?;
+    // Bit `i` names inode `i`, so the limit is one past the last inode number.
+    let limit = mount.ninodes.checked_add(1).ok_or(EIO)?;
+
+    for i in 0..mount.layout.imap_blocks {
+        let block = mount.layout.imap_start.checked_add(i).ok_or(EIO)?;
+        let from = i.checked_mul(bits_per_block).ok_or(EIO)?;
+        if from >= limit {
+            break;
+        }
+        let in_block_limit = limit.saturating_sub(from).min(bits_per_block);
+        let buf = blocks.read(u64::from(block))?;
+        // Bit 0 of the whole bitmap is reserved: there is no inode 0.
+        let start = u32::from(i == 0);
+        let Some(bit) = write::bitmap_find_free(buf, start, in_block_limit) else {
+            continue;
+        };
+        let buf = blocks.buf_mut();
+        write::bitmap_set(buf, bit).ok_or(EIO)?;
+        blocks.write(u64::from(block))?;
+
+        let ino = from.checked_add(bit).ok_or(EIO)?;
+        if ino == 0 || ino > mount.ninodes {
+            // Unreachable given the limits above; `EIO` rather than a wild inode
+            // number, so a future bitmap-arithmetic bug is an errno.
+            return Err(EIO);
+        }
+        return Ok(ino);
+    }
+    Err(ENOSPC)
+}
+
 /// Store `node` back into the inode table.
 ///
 /// The read-modify-write half of [`read_inode`]: the inode is 64 bytes inside a
@@ -897,6 +1129,7 @@ fn read_super(blocks: &mut Blocks) -> Result<Mount, i32> {
         root: ROOT_INODE,
         block_size: MFS_BLOCK_SIZE,
         blocks: sb.zones,
+        ninodes: sb.ninodes,
         layout: layout(sb.ninodes, sb.zones, MFS_BLOCK_SIZE),
     })
 }
