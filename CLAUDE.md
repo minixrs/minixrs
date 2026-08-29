@@ -47,29 +47,34 @@ cargo kernel-aarch64
 # the kernel's first byte: `timeout 8` yields a log with NO kernel output at all
 # (check-boot-log.sh then fails all markers).
 #
-# HOW LONG: **120 s** for anything you mean to verify against the marker files --
-# the same budget qemu-smoke uses was raised to 240 s in 5.10a, and the number is
-# NOT a constant, it tracks how far into the boot the LAST required marker sits.
-# It was 25 s through slice 5.8, and it is stale advice the moment a slice makes
-# the boot longer. Measured on the musl flavour (`MINIXRS_SDK=/nonexistent`, the
-# one CI builds) at a fixed 120 s, `hello: errno ok` -- the last required marker
-# -- sits at ~28% of the log before slice 5.10a and ~56% after it. Re-measure
-# rather than trusting this paragraph: `grep -abo <marker> log | head -1` divided
-# by `wc -c log`, and raise the budget when the fraction climbs. The two things
-# that move it most are the `hello` flavour (~46 KB with the SDK vs ~200 KB with
-# in-tree musl, all of it read through MFS and VFS) and whether the demo stubs
-# are on -- `--no-default-features` reaches the same markers several times
-# faster, because stub C's kernel-call flood dominates a default boot.
+# HOW LONG: **300 s** for anything you mean to verify against the marker files
+# (qemu-smoke itself uses 600 s as of 5.10b). The number is NOT a constant, it
+# tracks how far into the boot the LAST required marker sits. It was 25 s through
+# slice 5.8 and 120 s through 5.10a, and it is stale advice the moment a slice
+# makes the boot longer. Measured on the musl flavour (`MINIXRS_SDK=/nonexistent`,
+# the one CI builds), `hello: errno ok` -- the last required marker -- sits at
+# 26.90% of a 240 s log before slice 5.10b and 61.61% after it, i.e. ~148 s in.
+# Re-measure rather than trusting this paragraph: `grep -abo <marker> log | head -1`
+# divided by `wc -c log`, and raise the budget when the fraction climbs. The two
+# things that move it most are the `hello` flavour (~47 KB with the SDK vs ~200 KB
+# with in-tree musl, all of it read through MFS and VFS) and whether the demo stubs
+# are on -- `--no-default-features` reaches the same markers **dramatically**
+# faster, because stub C's kernel-call flood dominates a default boot: 5.10b
+# measured the `fs.*` markers landing at ~0.14% of a 60 s stub-free log, so
+# `timeout 30` is ample there. That is the configuration to iterate and
+# mutation-test in; just remember `check-boot-log.sh` reports FAIL on the stub
+# A-D markers there by design, so judge a stub-free run by grepping the specific
+# marker rather than by the script's overall verdict.
 #
 # QEMU under TCG also advances *guest* time slower than wall-clock, so a
 # `timeout N` run reaches far fewer than N x 100 ticks. For time-based features
 # (alarms, quantum/scheduling) read uptime-stamped traces (e.g. `[alarm ... at=N]`)
 # as the real clock, and run long enough to observe several periods.
-timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # Clean, stub-free boot for debugging (servers + init/worker only, no demo
 # stubs A-D): add --no-default-features to disable the `boot-stubs` feature.
-timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
+timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
 
 # Inspect a built user ELF's segments (macOS ships no `readelf`; the pinned
 # toolchain ships llvm-readobj, and --elf-output-style=GNU matches readelf's
@@ -186,22 +191,25 @@ feeds the LCOV report to SonarQube Cloud (org `minixrs`, project `minixrs_minixr
   **The moved-aside-sysroot row needs `MINIXRS_SDK=/nonexistent` as well**: on a machine that
   has a usable SDK the flavor selector never reaches the sysroot, so moving it aside alone
   re-runs the SDK row and tests nothing (5.10a nearly recorded that as a passing fourth row)
-- `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner: boots the kernel for 240 s wall clock
+- `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner: boots the kernel for 600 s wall clock
   via the cargo runner (asserting exit 124, the timeout status a healthy run must produce), then
   `tools/check-boot-log.sh` greps the serial log (`grep -aF`) against `tests/qemu-boot.expected` /
   `tests/qemu-boot.forbidden`. Keep expectations timing-robust — first occurrences only, never
   counts (CI TCG is slower than local). **Blocking** as of phase-5-prep chunk 7
 - **A slice can break the boot-timing budget, and "it passes locally" is not the check.** The
-  budget was 45 s until slice 5.9 and 120 s until 5.10a; **both raises had the same cause and the
-  same evidence**, and the number will move again. 5.9: `hello` stopped being a memcpy out of the
+  budget was 45 s until slice 5.9, 120 s until 5.10a, and 240 s until 5.10b; **every raise has had
+  the same cause and the same evidence**, and the number will move again. 5.9: `hello` stopped being a memcpy out of the
   boot archive and became ~200 KB read off the ramdisk through MFS and VFS, one `FS_MAX_IO` round
   at a time. 5.10a: init writes 32 KiB to `/etc/scratch` and reads every byte back, ~130 more
-  device round trips plus the zone-allocation and inode write-back traffic under them. Measure a
+  device round trips plus the zone-allocation and inode write-back traffic under them. 5.10b: init's
+  leak battery issues 256 doomed writes before one good one, each a grant plus a BDEV round trip.
+  Measure a
   marker's *position as a fraction of a fixed-timeout log* (`grep -abo` the marker, divide by
   `wc -c`) on the **musl** flavour — the one CI builds — and compare it against the same number at
   the merge base. 5.9 moved the last C marker from ~27% to ~71% of a 45 s run; 5.10a moved it from
   **27.98% to 56.20% of a 120 s run**, i.e. the boot roughly *doubled*, which cut the safety factor
-  over local from 3.6x to 1.8x and is why the budget went to 240 s. CI's TCG is slower than local,
+  over local from 3.6x to 1.8x and is why the budget went to 240 s; 5.10b moved it again, **26.90% to
+  61.61% of a 240 s run**, a 2.29x jump leaving a 1.62x factor, and the budget went to 600 s. CI's TCG is slower than local,
   so raise with real headroom rather than trimming to what passes here — think in the *ratio*, not
   the wall-clock seconds, which are a property of the dev machine. Two mechanical notes: `git
   stash` does **not** give you the "before" once the slice is committed on a branch — detach to
@@ -315,7 +323,7 @@ See `docs/architecture.md` for the full system design. Key concepts:
 - Feature-toggle debugging: when a `--no-default-features` build doesn't actually drop a feature, suspect cargo **feature unification** — diagnose with `cargo tree -p <crate> --no-default-features -e features -i <shared-crate>` (inverted tree shows *who* still activates it) or `cargo tree -p <crate> -f "{p} {f}"` (feature set per crate)
 - `kernel-shared` carries **zero `unsafe`** — keep it that way (geiger measures per-package). Byte-level ABI helpers there (e.g. `GrantEntry::from_ne_bytes`) decode field-by-field, and tests tie the codec to the real layout via `offset_of!` rather than reading the struct's memory image
 - `kernel-shared` is unconditionally `no_std` (no `cfg_attr(not(test))`), but a `#[cfg(test)]` module may declare `extern crate std;` locally when fixed-size arrays are impractical — libtest links std anyway. `brand.rs`'s synthetic-ELF `Vec` tests are the precedent; `message.rs`'s older tests predate it and stick to arrays
-- `cargo test -p minixrs-kernel` does not run — the crate is bare-metal only (see above) and in-QEMU test infra is not yet built, so **there is no `#[cfg(test)]` code under `kernel/src/`**. Host-runnable logic belongs in `kernel-shared`: chunk 7 moved `user_va_ok` + `USER_VA_TOP` there (`kernel-shared/src/message.rs`) precisely because its 5 tests had never executed while the module was cfg-gated. Put new pure predicates over shared ABI types there — the crate doc carries a narrow carve-out for exactly that — and keep raw-pointer/hardware behaviour (e.g. `copy_msg_from_user`) in the kernel. QEMU is the primary verification for kernel code (`timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release` — see the Build section on why that number tracks the boot's length rather than being a constant; CI smoke-boots it in the blocking `qemu-smoke` job)
+- `cargo test -p minixrs-kernel` does not run — the crate is bare-metal only (see above) and in-QEMU test infra is not yet built, so **there is no `#[cfg(test)]` code under `kernel/src/`**. Host-runnable logic belongs in `kernel-shared`: chunk 7 moved `user_va_ok` + `USER_VA_TOP` there (`kernel-shared/src/message.rs`) precisely because its 5 tests had never executed while the module was cfg-gated. Put new pure predicates over shared ABI types there — the crate doc carries a narrow carve-out for exactly that — and keep raw-pointer/hardware behaviour (e.g. `copy_msg_from_user`) in the kernel. QEMU is the primary verification for kernel code (`timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release` — see the Build section on why that number tracks the boot's length rather than being a constant; CI smoke-boots it in the blocking `qemu-smoke` job)
 - `no_std` library crates that host-test via `#![cfg_attr(not(test), no_std)]` get linted in their std test-config too (`clippy --all-targets`): a const-only `assert!(A > B)` trips `assertions_on_constants` (use a module-level `const _: () = assert!(…)` like `callnr.rs`), and a bare `loop {}` in a function present under `test` trips `empty_loop` (use `loop { core::hint::spin_loop() }`; the `#[cfg(not(test))]` panic handler's `loop {}` is exempt because it's absent under test). Inside a `const _: () = { … }` block the const evaluator has no iterators (`for`, `.iter()`, `.windows()` are all unavailable — use `while` + slice indexing + `<[T]>::len()`) and `assert!` takes a **literal** message only (`assert_eq!` and `assert!(c, "{x}")` are both rejected). In a `#[test]` fn the reverse holds: iterate freely, but use `assert_eq!` rather than a bare `assert!(CONST op CONST)`, which trips the same `assertions_on_constants` — and for an *ordering* comparison, where there is no `assert_eq!` form, write `assert_eq!(a.min(b), a)` (slice 5.3 needed this in `uspace.rs`, `callnr.rs`, and `vm/region.rs`); or restructure into a loop over a `[(name, value, width)]` array so the operands stop being compile-time constants. A `const _: () = assert!(…)` may not reference a `static` (constants cannot refer to statics) — name the capacity as a `const` first and assert on that, the `vm/region.rs` `MAX_CLIENTS` shape. And a `chunks_exact(N)` with a *const* `N` trips `chunks_exact_to_as_chunks`: use `as_chunks::<N>().0.iter()`, which also drops the trailing partial chunk rather than silently half-decoding it. Two more the pinned nightly enforces, both found in 5.10a: `free >= X + 1` trips `int_plus_one` (write `free > X`), and `N % M == 0` trips `manual_is_multiple_of` (write `N.is_multiple_of(M)`) — the latter fires **inside `const _: () = assert!(…)`** too, where `is_multiple_of` is const-callable, so a const guard is not an escape from it
 - The blocking `clippy --workspace` gate runs `-D warnings`: a doc-comment line starting with `+ ` (or `- `/`* `) parses as a markdown bullet and trips `doc_lazy_continuation` on the following lines — reword so continuation lines don't begin with a list marker
 - User-space servers build as freestanding `#![no_std]`/`#![no_main]` ELFs linked with their own `user.ld` (page-aligned PT_LOADs, base `0x10_0000`; kernel sets `sp_el0` so `_start` needs no stack setup). Since M1 the kernel's `build.rs` builds them for the **custom target `tools/targets/aarch64-unknown-minixrs.json`** (the pinned nightly's `aarch64-unknown-none` spec + `"os": "minixrs"`; regenerate on nightly bumps with `rustc -Zunstable-options --print target-spec-json --target aarch64-unknown-none` and re-apply the `"os"` line) via `-Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem`, all into **one shared** nested `CARGO_TARGET_DIR` (`target/minixrs-user` — separate from the outer `target/` root, so nested cargo can't deadlock on the kernel build's lock, but shared across the 9 crates so build-std compiles core/alloc once, not 9×). The `-T<user.ld>` link arg comes from **each crate's own `build.rs`**, cfg-gated on `target_os = "minixrs"` (host `check`/`clippy` stay linker-flag-free); `kernel/build.rs` injects no rustflags and scrubs inherited ones. `boot_image/elf.rs` is the minimal ET_EXEC/AArch64 loader (PT_LOAD → `alloc_frame` + HHDM copy + map; BSS via zeroed frames). The workspace `[workspace.lints.rust] unexpected_cfgs` check-cfg shim in the root `Cargo.toml` is what keeps host clippy green on the `"minixrs"` cfg — delete it at M5 when the real rustc target exists. `-Zjson-target-spec` must be passed **explicitly** at that call site even if your builds work without it: a *global* `~/.cargo/config.toml` carrying `[unstable] json-target-spec = true` (RustRover needs one for `.json` specs) silently satisfies the gate on your machine while CI, which has no such file, fails the nested build. Same class of trap for any unstable cargo flag — reproduce a suspected config-masking failure with `CARGO_UNSTABLE_<FLAG>=false cargo …`, which overrides the config the way a bare CI runner does
@@ -547,6 +555,21 @@ reached its final gate with the mdBook still asserting `BDEV_WRITE` answers `ERO
 is path-filtered to `book/**`, so a slice that forgets the book ships a Pages site contradicting
 its own code, silently and indefinitely.
 
+A third habit, from 5.10b, and the sharpest one: **the dominant defect class in a subagent-driven
+slice is a doc comment or test that was true when written and was falsified by a LATER TASK IN THE
+SAME BRANCH.** Five instances in one slice — a `Blocks::zeroed` comment saying mkfs writes no
+sparse files (task 2 added them), a `next_dir_chunk` comment saying its second iteration is
+unreachable at boot (task 8's probe reaches it), two copies of an indirect-slot count that was
+simply miscomputed, and worst, `callnr.rs`'s `vfs_open_payload_offsets_are_ordered_and_disjoint`
+— whose `assert_eq!(fields.len(), 2, "a VFS_OPEN payload field was added")` and accompanying
+"there is no `flags` field until 5.10b" comment were left untouched **by the task that added the
+flags field**, disarming the very tripwire written to catch it. Each task sees one crate and no
+task re-reads its neighbours' prose, so nobody catches these. Make it a whole-branch step: grep
+the touched crates for every `unreachable`, `nothing reaches this`, `there is no X yet`, and
+`until slice N` claim, and for every `assert_eq!(fields.len(), N)` or similar count-the-fields
+tripwire, and check each against what the branch actually added. **A tripwire the adding branch
+does not grow is worse than none**, because it reads as coverage.
+
 `docs/plan.md` and the `docs/plans/*` files track slice/chunk status with three markers: `◀ next` (unstarted), `◀ ready (branch ..., pending merge)` (implemented but unmerged), `✓ shipped (PR #N, merged YYYY-MM-DD)` (merged). Flip the previous slice forward and slide `◀ next` ahead as part of each slice's PR — in **both** plan.md's summary line and the corresponding `docs/plans/` detail file. When opening a new slice PR, also reconcile any older `◀ ready` markers against `git log` — stale "pending merge" labels on already-merged PRs accumulate otherwise.
 
-Mutation tests (the 5.1/5.2/5.3 standard: apply, observe the named marker move, revert) run against an **uncommitted** working tree, so never revert one with `git checkout <file>` — copy the files to the scratchpad first and restore from there, then `diff -q` each back and `grep -rn MUTATION` to prove nothing leaked into the PR. A mutation that fails to **compile** is indistinguishable from one that worked: `kernel/build.rs` panics on the nested server build, the log holds no kernel output at all, and `check-boot-log.sh` reports every marker MISSING. Before recording any observation, `grep -a 'error\[E' <log>` or confirm unrelated markers still PASS (slice 5.4 nearly recorded a false result this way). Not every mutation moves its predicted marker, either: reordering the MXBI packing does **not** reliably break a DS lookup, because publish-before-retrieve is scheduler-dependent and often still resolves — to exercise a DS *fallback* branch, remove the peer entirely or break the key (slice 5.7 got that observation from the drop-the-server mutation instead, and slice 5.8 reconfirmed both halves: the `memory`/`mfs` swap moved nothing, while breaking MFS's `"memory"` DS key gave `bdev.ds FAIL rc=-3 fallback=3`). A guard's mutation moves the marker of the **probe that exists for that guard**, not a marker on a healthy path — a healthy path never trips it. Slice 5.8's plan predicted that deleting MFS's `!node.is_dir()` guard would break `fs.selfcheck`; resolving `/etc/motd` only ever walks real directories, so what actually moved was `fs.deny FAIL not-dir`. Relatedly, never copy a **count** into a marker from a plan — recompute it from the constant (5.8's plan said `n=30` for a 31-byte `ROOTFS_MOTD`). The scratchpad snapshot must cover the files a slice **adds**, not just the ones it edits: `git checkout -- <untracked file>` does not restore, it *errors* — and behind a `|| true` it leaves the mutation in the tree (slice 5.9 did exactly this to a new `servers/pm/src/path.rs`). Snapshot every file you will mutate before the first run, and let the final `grep -rn MUTATION` sweep — never the restore command's exit status — be what proves the tree clean.
+Mutation tests (the 5.1/5.2/5.3 standard: apply, observe the named marker move, revert) run against an **uncommitted** working tree, so never revert one with `git checkout <file>` — copy the files to the scratchpad first and restore from there, then `diff -q` each back and `grep -rn MUTATION` to prove nothing leaked into the PR. A mutation that fails to **compile** is indistinguishable from one that worked: `kernel/build.rs` panics on the nested server build, the log holds no kernel output at all, and `check-boot-log.sh` reports every marker MISSING. Before recording any observation, `grep -a 'error\[E' <log>` or confirm unrelated markers still PASS (slice 5.4 nearly recorded a false result this way). Iterate and mutation-test in the **stub-free** config: 5.10b measured the `fs.*` markers at ~0.14% of a 60 s `--no-default-features` log, so `timeout 30` sufficed for nine boots that would each have cost 240 s otherwise — judge such a run by grepping the specific marker, since `check-boot-log.sh` FAILs the stub A-D markers there by design. Not every mutation moves its predicted marker, either: reordering the MXBI packing does **not** reliably break a DS lookup, because publish-before-retrieve is scheduler-dependent and often still resolves — to exercise a DS *fallback* branch, remove the peer entirely or break the key (slice 5.7 got that observation from the drop-the-server mutation instead, and slice 5.8 reconfirmed both halves: the `memory`/`mfs` swap moved nothing, while breaking MFS's `"memory"` DS key gave `bdev.ds FAIL rc=-3 fallback=3`). Some correct invariants have **no** mutation that moves anything, and the honest record says so rather than omitting the row: 5.10b found two orderings (truncate's free-after-write-back, create's dirent-after-`write_inode`) whose violation needs a failure *between* two steps, where the only available failure is `EIO` from a fixed RAM ramdisk whose block numbers are bounds-checked before they leave MFS — no probe can induce one. A third, `bitmap_clear` off by one, moved no marker either but **is** caught by host unit tests, which is a different situation worth distinguishing: before recording a row as uncovered, run `cargo test` under the mutation too, not just a boot. A guard's mutation moves the marker of the **probe that exists for that guard**, not a marker on a healthy path — a healthy path never trips it. Slice 5.8's plan predicted that deleting MFS's `!node.is_dir()` guard would break `fs.selfcheck`; resolving `/etc/motd` only ever walks real directories, so what actually moved was `fs.deny FAIL not-dir`. Relatedly, never copy a **count** into a marker from a plan — recompute it from the constant (5.8's plan said `n=30` for a 31-byte `ROOTFS_MOTD`). The scratchpad snapshot must cover the files a slice **adds**, not just the ones it edits: `git checkout -- <untracked file>` does not restore, it *errors* — and behind a `|| true` it leaves the mutation in the tree (slice 5.9 did exactly this to a new `servers/pm/src/path.rs`). Snapshot every file you will mutate before the first run, and let the final `grep -rn MUTATION` sweep — never the restore command's exit status — be what proves the tree clean.
