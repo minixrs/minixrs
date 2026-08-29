@@ -15,13 +15,13 @@
 //!
 //! Slice 5.7 built everything under it — the compile-time MinixFS image, the
 //! ramdisk driver, and the whole `minixrs-mfs` format library. This binary is the
-//! glue: SEF startup, the FS-band receive loop, one block buffer, and the grants
-//! at either end of it. **Every line with a decision in it is in the library**
-//! (`proto.rs`, `walk.rs`), because this file is behind
+//! glue: SEF startup, the FS-band receive loop, two `.bss` buffers, and the
+//! grants at either end of them. **Every line with a decision in it is in the
+//! library** (`proto.rs`, `walk.rs`), because this file is behind
 //! `required-features = ["server"]` and therefore compiled by no CI job except the
 //! QEMU boot smoke test — see the note in `Cargo.toml`.
 //!
-//! ## Four things worth knowing
+//! ## Five things worth knowing
 //!
 //! **The block buffer is a `.bss` static, not a `main`-frame local.** A boot
 //! server's stack is exactly one page and a block is exactly one page, so a local
@@ -39,6 +39,15 @@
 //! rather than remove, and it is a class of bug this repo has shipped before
 //! (slice 5.3's `free_frame` / `is_usable_pa`). Every intermediate the walk needs
 //! is a small `Copy` value: an `Inode`, a `u32` inode number, a `u32` zone.
+//!
+//! **There are two buffers and two capabilities, not one grown wider (slice
+//! 5.10b).** [`Blocks`] fetches and flushes device blocks; [`Stage`] holds one
+//! `FS_WRITE` round's client bytes, staged out of the caller's grant *before*
+//! [`do_write`] allocates anything, so a client-controlled failure can no longer
+//! happen after an allocation. They stay separate rather than sharing one buffer
+//! under two names: `Stage` has exactly one caller and one purpose, so folding it
+//! into `Blocks` would only make `Blocks`'s single-writer discipline harder to see
+//! for no reduction in `.bss`.
 //!
 //! **Two error-relay rules, which read as contradictory and are not.** A failed
 //! `BDEV_READ` becomes `EIO`: this server's client addressed a *file*, and the
@@ -118,6 +127,77 @@ struct BlockBuf(UnsafeCell<[u8; MFS_BLOCK_SIZE]>);
 unsafe impl Sync for BlockBuf {}
 
 static BLOCK: BlockBuf = BlockBuf(UnsafeCell::new([0u8; MFS_BLOCK_SIZE]));
+
+/// `UnsafeCell`-wrapped staging buffer for one `FS_WRITE` round's client bytes.
+/// See [`Stage`], and [`BlockBuf`] for why it is a static.
+#[repr(transparent)]
+struct StageBuf(UnsafeCell<[u8; MFS_BLOCK_SIZE]>);
+
+// SAFETY: as `BlockBuf` — MFS is a single EL0 thread running a straight-line
+// receive loop with no interrupt handlers of its own, so there is never a second
+// accessor. Every path to the bytes goes through `Stage`, which is created
+// exactly once in `main` and whose `&mut self` method is what serializes access
+// within that thread.
+unsafe impl Sync for StageBuf {}
+
+static STAGE: StageBuf = StageBuf(UnsafeCell::new([0u8; MFS_BLOCK_SIZE]));
+
+/// The capability to stage a client's bytes — one instance, created once in
+/// [`main`], and the whole of slice 5.10b's leak fix.
+///
+/// It exists so that the client-controlled copy happens **before** the zone
+/// allocation rather than after it, which turns "a failed write leaks a zone per
+/// attempt, and clearing the bit again would be worse" into a one-line invariant:
+/// *no client-controlled failure occurs after an allocation.*
+///
+/// It is **single-purpose** — it holds one round's client bytes and nothing else.
+/// Truncate does not borrow it (its indirect scan is bounded by the file's own
+/// size instead), so this buffer never has to be reasoned about as shared state,
+/// and [`Blocks`]'s borrow discipline is untouched.
+///
+/// A grant is not needed: MFS is the *grantee* of this copy, so the destination
+/// is an ordinary address in its own address space.
+struct Stage;
+
+impl Stage {
+    /// Copy `len` bytes out of the client's grant into the staging buffer, and
+    /// hand back exactly what landed.
+    ///
+    /// `&mut self` for [`Blocks::read`]'s reason: this hands out the only
+    /// reference into the buffer, and the borrow checker is what keeps it the
+    /// only one.
+    ///
+    /// `granter` is the **kernel-stamped `m_source`**. There is no payload field
+    /// for it and there must never be one: this server holds `SYS_SAFECOPY`, so a
+    /// caller-supplied granter would aim a privileged cross-address-space copy
+    /// wherever the caller pointed.
+    fn fill(&mut self, granter: Endpoint, gid: i32, len: usize) -> Result<&[u8], i32> {
+        if len > MFS_BLOCK_SIZE {
+            // Unreachable: `clamp_write` caps a chunk at one block. `EIO` rather
+            // than a truncated copy, so a future clamp bug is an errno instead of
+            // a short write nobody notices.
+            return Err(EIO);
+        }
+        let rc = sys_safecopy(
+            SAFECOPY_FROM,
+            granter,
+            gid,
+            0,
+            STAGE.0.get() as usize as u64,
+            len as u64,
+        );
+        if rc != OK {
+            // Verbatim: `EPERM` ("your grant does not authorize this") and
+            // `EFAULT` ("your buffer is not mapped") are different bugs on the
+            // caller's side.
+            return Err(rc);
+        }
+        // SAFETY: `&mut self` is held, so this is the only reference into the
+        // buffer for as long as the returned one lives, and the copy above — the
+        // only thing that writes these bytes — has completed.
+        unsafe { (*STAGE.0.get()).get(..len).ok_or(EIO) }
+    }
+}
 
 /// The capability to fetch a block — one instance, created once in [`main`].
 ///
@@ -275,6 +355,7 @@ fn main() -> ! {
     // the rule `server-rt` keeps `GrantPool` a value rather than a static for.
     let mut grants: GrantPool<GRANT_SLOTS> = GrantPool::new();
     let mut blocks = device(&mut grants, mem_endpoint());
+    let mut stage = Stage;
     let mut mount = mount_root(&mut blocks);
 
     if let Some(m) = mount {
@@ -307,7 +388,7 @@ fn main() -> ! {
             FS_READSUPER => do_readsuper(&mut msg, &mut blocks, &mut mount),
             FS_LOOKUP => do_lookup(&mut msg, &mut blocks, &mount),
             FS_READ => do_read(&msg, caller_e, &mut blocks, &mount),
-            FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mount),
+            FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mut stage, &mount),
             // Reply rather than drop (TTY's rule): this server's clients are all
             // inside a SENDREC, and a dropped request blocks the caller forever.
             _ => ENOSYS,
@@ -476,12 +557,15 @@ fn do_read(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option
 ///   2. Clamp, and compute the resulting size. Both are pure, and this is where
 ///      `EFBIG` is decided — before any device work, so a rejected request has
 ///      allocated nothing.
-///   3. Resolve or allocate the zone. A freshly allocated zone is **zeroed and
+///   3. Stage the caller's bytes into [`Stage`], out of its grant. This is the one
+///      step a client can make fail, and it now runs before anything is
+///      allocated.
+///   4. Resolve or allocate the zone. A freshly allocated zone is **zeroed and
 ///      written before its number is stored anywhere** (W4): the bitmap bit goes
 ///      first, so a failure between the two leaks a zone rather than sharing one.
-///   4. Read the target block unless the write covers it whole, splice the
-///      caller's bytes in through `SAFECOPY_FROM`, store the block.
-///   5. Write the inode back if it changed.
+///   5. Read the target block unless the write covers it whole, splice the staged
+///      bytes in, store the block.
+///   6. Write the inode back if it changed.
 ///
 /// **What the [`Blocks`] token does and does not guarantee.** It guarantees
 /// *aliasing*: no block can be held across another's fetch, because every method
@@ -491,41 +575,31 @@ fn do_read(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option
 /// `buf_mut(); …; write(other)` would store one block's bytes as another and
 /// still compile. Every call site here is therefore responsible for having made
 /// the resident block the one it names, and the two that flush say which block
-/// they just filled: step 4 writes `zone`, which it either read at the top of the
+/// they just filled: step 5 writes `zone`, which it either read at the top of the
 /// step or is about to overwrite whole.
 ///
-/// **A failure mid-write leaks a zone, and this is a reachable denial of service
-/// — an accepted limitation, not a benign one.** Step 3 allocates before step 4
-/// copies, so a safecopy that fails leaves the bitmap bit set with the inode
-/// never written back. The copy is *client-controlled*: `rw::validate` in VFS
-/// range-checks the caller's buffer but cannot check that it is mapped (the
-/// kernel's page-table walk is the gate — D5), so `write(fd, unmapped_va, 4096)`
-/// reaches here with a well-formed magic grant and fails at the copy. Looping it
-/// exhausts the image's free zones — **185 in the musl flavour**, so 93–185 calls
-/// — and every later write, legitimate ones included, answers `ENOSPC` for the
-/// rest of the boot. Nothing in the shipped boot reaches it (init writes a good
-/// buffer; `worker` and `hello` write no files), which is why it is deferred
-/// rather than fixed here.
+/// **No client-controlled failure occurs after an allocation** (slice 5.10b).
+/// That is what step 3 buys, and it is the whole of the fix for the leak slice
+/// 5.10a shipped and documented: the copy out of the client's grant is the one
+/// step here a caller can make fail — `write(fd, unmapped_va, len)` reaches this
+/// server with a well-formed magic grant and faults on the kernel's page-table
+/// walk — so doing it *before* the zone is allocated means a failed write
+/// allocates nothing at all.
 ///
-/// **Whoever fixes this must not simply clear the bit on the error path.** The
-/// three outcomes differ, and only two leak:
+/// The fix is deliberately **not** a rollback. Clearing the bitmap bit on the
+/// error path is wrong in one of the three cases: an indirect slot whose indirect
+/// block already existed does not leak, because the block on disk still names the
+/// zone, so freeing the bit there would hand out a zone two files share — the
+/// corruption the allocation ordering exists to prevent. Staging first removes
+/// the question rather than answering it three times.
 ///
-///   * *Direct slot, new zone* — the bit is durable, `node.zone[i]` is not.
-///     Orphaned; a retry allocates again. **Leaks, 1 zone per attempt.**
-///   * *Indirect slot, indirect block already existed* — the bit is durable and
-///     so is the indirect block that points at the zone. A retry finds
-///     `existing != 0` and reuses it. **Does not leak**, and clearing the bit
-///     here would hand out a zone the indirect block still names: two files
-///     sharing one, which is the corruption this ordering exists to prevent.
-///   * *Indirect slot, indirect block also new* — two bits durable, nothing
-///     durable referencing either. **Leaks, 2 zones per attempt.**
+/// `init`'s `fs.leak` boot marker is the proof: 256 failing writes, then one that
+/// must succeed. Before this change the failures leaked more zones than the image
+/// has free and the final write answered `ENOSPC`.
 ///
-/// The cheaper fix is not a rollback at all: stage the caller's bytes into a
-/// second buffer *before* step 3, so no client-controlled failure can occur after
-/// an allocation. That costs one page of `.bss` — the one-page limit in this
-/// server is the *stack*, not `.bss` — and buys a one-line invariant in place of
-/// the table above. Deferred to slice 5.10b, which reworks this path for
-/// `O_CREAT` regardless.
+/// The device I/O *after* the allocation can still fail with `EIO` and still
+/// leaks a zone. That class is unchanged and unreachable by a client: it needs
+/// the ramdisk itself to fail.
 ///
 /// **`mtime` and `ctime` are not updated, on purpose.** There is no clock a
 /// user-space filesystem can read yet — MFS holds no `SYS_SETALARM` grant and
@@ -534,7 +608,13 @@ fn do_read(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option
 /// obviously stale one, and this becomes a real field to fill the moment a clock
 /// is reachable.
 #[cfg_attr(test, allow(dead_code))]
-fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
+fn do_write(
+    msg: &Message,
+    granter: Endpoint,
+    blocks: &mut Blocks,
+    stage: &mut Stage,
+    mount: &Option<Mount>,
+) -> i32 {
     let Some(mount) = mount else {
         return ENODEV;
     };
@@ -573,18 +653,24 @@ fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Optio
         Err(e) => return e,
     };
 
-    // Step 3. `dirty` records whether the inode changed at all — see step 5.
+    // Step 3 (new in slice 5.10b). The client's bytes are staged **before**
+    // anything is allocated, which is what makes the invariant below true: no
+    // client-controlled failure occurs after an allocation. See [`Stage`].
+    let staged = match stage.fill(granter, req.gid, chunk.len) {
+        Ok(bytes) => bytes,
+        Err(e) => return e,
+    };
+
+    // Step 4. The only allocation, and nothing after it can now fail on the
+    // client's account. `dirty` records whether the inode changed at all — see
+    // step 6.
     let (zone, mut dirty) = match place_zone(blocks, mount, &mut node, req.pos) {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    // Step 4. The guard names `MFS_BLOCK_SIZE`, not `mount.block_size`, because
-    // it is `Blocks::write`'s flush length that has to be fully covered — the
-    // mount's block size is checked equal to it at mount time, but this is the
-    // constant the skip actually depends on, and `lib.rs`'s `const _` chain pins
-    // `FS_MAX_IO >= MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE` so a clamped chunk can
-    // reach it.
+    // Step 5. The guard names `MFS_BLOCK_SIZE`, not `mount.block_size`, because
+    // it is `Blocks::write`'s flush length that has to be fully covered.
     if chunk.len < MFS_BLOCK_SIZE {
         // A partial write preserves the bytes around it, so the block has to be
         // read before it is spliced. A full-block write skips this: every byte is
@@ -604,24 +690,14 @@ fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Optio
         // a panic in a server nothing can restart.
         return EIO;
     };
-    let rc = sys_safecopy(
-        SAFECOPY_FROM,
-        granter,
-        req.gid,
-        0,
-        window.as_mut_ptr() as usize as u64,
-        chunk.len as u64,
-    );
-    if rc != OK {
-        // Verbatim: `EPERM` ("your grant does not authorize this") and `EFAULT`
-        // ("your buffer is not mapped") are different bugs on the caller's side.
-        return rc;
-    }
+    // Equal lengths by construction: the window is `chunk.len` wide and `fill`
+    // returned exactly `chunk.len` bytes.
+    window.copy_from_slice(staged);
     if let Err(e) = blocks.write(u64::from(zone)) {
         return e;
     }
 
-    // Step 5. The condition is "a zone was assigned **or** the size grew", not
+    // Step 6. The condition is "a zone was assigned **or** the size grew", not
     // "the size grew": filling a hole in the middle of an existing file assigns
     // `zone[i]` without moving `size` at all, and keying on size alone would drop
     // that pointer while leaving its bitmap bit set — the bitmap and the inode
