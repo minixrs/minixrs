@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "5e62d7d6a437",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.10b-mfs-create-truncate",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/5e/62d7d6a437/0/metadata.json",
+      "transcript": "/5e/62d7d6a437/0/full.jsonl",
+      "compact_transcript": "/5e/62d7d6a437/0/transcript.jsonl",
+      "content_hash": "/5e/62d7d6a437/0/content_hash.txt",
+      "prompt": "/5e/62d7d6a437/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 30,
+    "cache_creation_tokens": 21713,
+    "cache_read_tokens": 4929311,
+    "output_tokens": 11579,
+    "api_call_count": 15
+  }
+}
