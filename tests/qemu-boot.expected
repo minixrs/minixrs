@@ -480,7 +480,7 @@ minix.rs hello: iov ok match=1
 # dropped unknown would block VFS in its SENDREC forever). None is reachable from
 # init's open/read -- VFS refuses most of them before the wire -- which is exactly
 # why they are sent from VFS's own prologue.
-[diag vfs] fs.deny ok n=10
+[diag vfs] fs.deny ok n=14
 
 # ---------------------------------------------------------------------------
 # THE MILESTONE. A file's contents, read out of a MinixFS image by an ordinary

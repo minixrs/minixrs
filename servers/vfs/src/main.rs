@@ -125,19 +125,21 @@ use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     BDEV_MINOR_RAMDISK, CDEV_GRANT_OFF, CDEV_LEN_OFF, CDEV_MAX_IO, CDEV_MINOR_CONSOLE,
-    CDEV_MINOR_OFF, CDEV_OFFSET_OFF, CDEV_WRITE, FS_GRANT_OFF, FS_INO_OFF, FS_LEN_OFF, FS_LOOKUP,
-    FS_MAX_IO, FS_MODE_OFF, FS_PATH_MAX, FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER,
+    CDEV_MINOR_OFF, CDEV_OFFSET_OFF, CDEV_WRITE, FS_CREATE, FS_GRANT_OFF, FS_INO_OFF, FS_LEN_OFF,
+    FS_LOOKUP, FS_MAX_IO, FS_MODE_OFF, FS_PATH_MAX, FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER,
     FS_RQ_BASE, FS_SIZE_OFF, FS_SUPER_BLOCK_SIZE_OFF, FS_SUPER_BLOCKS_OFF, FS_SUPER_MINOR_OFF,
-    FS_SUPER_ROOT_OFF, FS_WRITE, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_CLOSE,
-    VFS_EXEC_GRANT_OFF, VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_OPEN, VFS_READ, VFS_WRITE,
+    FS_SUPER_ROOT_OFF, FS_TRUNC, FS_WRITE, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN,
+    VFS_CLOSE, VFS_EXEC_GRANT_OFF, VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_OPEN, VFS_READ, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{MFS_PROC_NR, PM_PROC_NR, TTY_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
 use minixrs_kernel_shared::error::{
-    EBADF, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, OK,
+    EBADF, EEXIST, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, OK,
 };
 use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE, GRANT_INVALID};
-use minixrs_kernel_shared::rootfs::{ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH};
+use minixrs_kernel_shared::rootfs::{
+    ROOTFS_DENY_PATH, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
+};
 use minixrs_server_rt::{
     GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, sef_publish_to_ds, sef_retrieve_from_ds,
     sef_startup, sys_copy, wr_i32, wr_u64,
@@ -545,25 +547,37 @@ fn mount_root(mount: &mut Option<Mount>, mfs: Endpoint) {
 ///
 /// 1. The path's length and buffer are sane ([`open::validate`]). Length first,
 ///    so a malformed request never reaches the copy.
-/// 2. Something is mounted (retried here, not cached — see [`ensure_mounted`]).
-/// 3. The path bytes copy in. **This is the first live consumer of decision D4's
+/// 2. The flags are sane ([`open::validate_flags`]).
+/// 3. Something is mounted (retried here, not cached — see [`ensure_mounted`]).
+/// 4. The path bytes copy in. **This is the first live consumer of decision D4's
 ///    "`SYS_COPY` for small control-plane reads" sentence**, and the
 ///    confused-deputy rule in its sharpest form: `SYS_COPY` has *no per-target
 ///    authorization at all* — the caller's `k_call_mask` bit is the whole check —
 ///    so a payload-supplied source process would let any client read any process's
 ///    memory through VFS. The source is `caller_e`, the kernel-stamped `m_source`,
 ///    and there is no payload field for it.
-/// 4. MFS resolves the path, and [`open::classify`] turns the mode into either a
-///    descriptor entry or an errno.
-/// 5. The entry lands at the caller's lowest free descriptor.
+/// 5. MFS resolves the path — a hit optionally through [`open::classify`], a miss
+///    with `O_CREAT` through [`fs_create`] instead — and the mode becomes either a
+///    descriptor entry or an errno. `O_TRUNC` on an existing hit then runs
+///    [`fs_trunc`] before the descriptor is installed.
+/// 6. The entry lands at the caller's lowest free descriptor.
 ///
 /// The path buffer is a **local**, not a static: it is 64 bytes, it is written
 /// into by the kernel's copy, and it must not be shared between requests.
+///
+/// **`Fd::File` gains no flags.** The access mode is ignored, `O_CREAT` and
+/// `O_TRUNC` are consumed here at open time by definition, and every other bit is
+/// refused by [`open::validate_flags`] — so there is nothing left for a
+/// descriptor to remember.
 #[cfg_attr(test, allow(dead_code))]
 fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: Endpoint) -> i32 {
     let req = open::parse(msg);
     let len = match open::validate(req.len, req.path) {
         Ok(len) => len,
+        Err(e) => return e,
+    };
+    let flags = match open::validate_flags(req.flags) {
+        Ok(flags) => flags,
         Err(e) => return e,
     };
     if let Err(e) = ensure_mounted(mount, mfs) {
@@ -584,21 +598,48 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
         return rc;
     }
 
-    let (ino, mode, _size) = match fs_lookup(mfs, &path[..len]) {
-        Ok(found) => found,
+    // `O_CREAT` is reached only when the lookup says `ENOENT`, so a create that
+    // races nothing still hears `EEXIST` from MFS if the file appeared in
+    // between — the strict answer, which is also what `O_EXCL` will need.
+    let (ino, mode, created) = match fs_lookup(mfs, &path[..len]) {
+        Ok((ino, mode, _size)) => (ino, mode, false),
+        Err(e) if e == ENOENT && flags.create => match fs_create(mfs, &path[..len]) {
+            Ok((ino, mode, _size)) => (ino, mode, true),
+            Err(e) => return e,
+        },
         Err(e) => return e,
     };
-    match open::classify(mode) {
+
+    // `classify` runs **before** `FS_TRUNC` is sent, which is what keeps
+    // `O_TRUNC` on a directory from ever reaching MFS — where MFS's own `EISDIR`
+    // guard would be the only thing between a probe and a freed directory.
+    let entry = match open::classify(mode) {
+        Ok(entry) => entry,
+        Err(e) => return e,
+    };
+
+    // `O_CREAT | O_TRUNC` on a missing file takes the create arm and stops there:
+    // a freshly created file is already empty, so truncating it would be a second
+    // round trip to reach the state it is in. And the truncate happens **before**
+    // the descriptor exists, so a failure leaves no descriptor onto a
+    // half-truncated file.
+    if flags.truncate && !created {
+        let rc = fs_trunc(mfs, ino as i32);
+        if rc != OK {
+            return rc;
+        }
+    }
+
+    match entry {
         // `classify` decides the *kind* of descriptor; the inode is filled in
         // here, because this is the layer that knows it.
-        Ok(Fd::File { .. }) => {
+        Fd::File { .. } => {
             fd::alloc(endpoint_proc(caller_e).get(), Fd::File { ino, pos: 0 }).unwrap_or_else(|e| e)
         }
         // No other variant is reachable — `classify` returns only `File` or an
         // error — but routing it explicitly means a future device-node arm is a
         // compile error to handle rather than a silent `EINVAL`.
-        Ok(_) => EINVAL,
-        Err(e) => e,
+        _ => EINVAL,
     }
 }
 
@@ -851,7 +892,13 @@ fn fs_readsuper(mfs: Endpoint, minor: i32) -> Result<Mount, i32> {
     })
 }
 
-/// Issue one `FS_LOOKUP` and return `(inode, mode, size)`.
+/// Issue one path-shaped FS request — `FS_LOOKUP` or `FS_CREATE` — and return
+/// `(inode, mode, size)`.
+///
+/// **One marshaller for both**, because the payloads and the replies are
+/// identical field for field (slice 5.10b, C2). Sharing it is the point rather
+/// than a saving: a create's answer is classified through exactly the same
+/// `open::classify` a lookup's is, so the two cannot drift apart.
 ///
 /// The path travels **inline**, NUL-padded into the request's fixed field — not
 /// through a grant. It is control plane rather than the data path grants were
@@ -867,13 +914,13 @@ fn fs_readsuper(mfs: Endpoint, minor: i32) -> Result<Mount, i32> {
 /// A path that fills the field with no room for the NUL is refused here rather
 /// than sent, so the wire never carries an unterminated one.
 #[cfg_attr(test, allow(dead_code))]
-fn fs_lookup(mfs: Endpoint, path: &[u8]) -> Result<(u32, i32, i32), i32> {
+fn fs_path_request(mfs: Endpoint, m_type: i32, path: &[u8]) -> Result<(u32, i32, i32), i32> {
     if path.is_empty() || path.len() >= FS_PATH_MAX {
         return Err(ENAMETOOLONG);
     }
     let mut m = Message {
         m_source: 0,
-        m_type: FS_LOOKUP,
+        m_type,
         payload: [0u8; 96],
     };
     // The payload starts zeroed, so writing the bytes *is* NUL-padding it.
@@ -892,6 +939,38 @@ fn fs_lookup(mfs: Endpoint, path: &[u8]) -> Result<(u32, i32, i32), i32> {
         return Err(EINVAL);
     };
     Ok((ino, rd_i32(&m, FS_MODE_OFF), rd_i32(&m, FS_SIZE_OFF)))
+}
+
+/// Resolve a path to `(inode, mode, size)`.
+#[cfg_attr(test, allow(dead_code))]
+fn fs_lookup(mfs: Endpoint, path: &[u8]) -> Result<(u32, i32, i32), i32> {
+    fs_path_request(mfs, FS_LOOKUP, path)
+}
+
+/// Create a regular file and return it exactly as a lookup would.
+#[cfg_attr(test, allow(dead_code))]
+fn fs_create(mfs: Endpoint, path: &[u8]) -> Result<(u32, i32, i32), i32> {
+    fs_path_request(mfs, FS_CREATE, path)
+}
+
+/// Issue one `FS_TRUNC` and return the reply `m_type` — `OK`, or a negative
+/// errno.
+///
+/// No grant and no length: `O_TRUNC` is the only client and it always truncates
+/// to zero, so there is nothing else to carry.
+#[cfg_attr(test, allow(dead_code))]
+fn fs_trunc(mfs: Endpoint, ino: i32) -> i32 {
+    let mut m = Message {
+        m_source: 0,
+        m_type: FS_TRUNC,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, FS_INO_OFF, ino);
+    let trap_rc = ipc_sendrec(mfs, &mut m);
+    if trap_rc != OK {
+        return trap_rc;
+    }
+    m.m_type
 }
 
 /// Issue one `FS_READ` and return the reply `m_type` — the byte count, or a
@@ -1139,6 +1218,52 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
         diag_fmt(format_args!("fs.deny FAIL unknown rc={rc}"));
     }
 
+    // Slice 5.10b: `FS_CREATE` on an existing name is `EEXIST` — **and the target
+    // is unchanged afterwards**, which is the half that matters. A dropped
+    // `EEXIST` would insert a second entry shadowing the first, silently, with
+    // every other marker still green; re-resolving the name and comparing the
+    // inode number is what makes the refusal mean "nothing changed" rather than
+    // merely "an error came back". `/etc/deny` exists for this and is read by
+    // nothing else.
+    match (
+        fs_lookup(mfs, ROOTFS_DENY_PATH.as_bytes()),
+        fs_create(mfs, ROOTFS_DENY_PATH.as_bytes()),
+        fs_lookup(mfs, ROOTFS_DENY_PATH.as_bytes()),
+    ) {
+        (Ok((before, _, _)), Err(EEXIST), Ok((after, _, _))) if before == after => denied += 1,
+        _ => diag_fmt(format_args!("fs.deny FAIL create-exists")),
+    }
+
+    // A parent that is a file, not a directory. Delete MFS's `is_dir` gate and
+    // this would splice a directory entry into `/etc/motd`'s data block.
+    match fs_create(mfs, b"/etc/motd/x") {
+        Err(rc) if rc == ENOTDIR => denied += 1,
+        other => diag_fmt(format_args!(
+            "fs.deny FAIL create-not-dir rc={}",
+            match other {
+                Ok(_) => OK,
+                Err(rc) => rc,
+            }
+        )),
+    }
+
+    // `FS_TRUNC` on a directory, aimed at `/etc`. An accidental success frees
+    // that directory's zones and every later `/etc` marker dies — destructive,
+    // but *loud*, which is the property this convention asks for. And `EINVAL`
+    // for inode 0, which does not exist.
+    let etc = fs_lookup(mfs, b"/etc").map(|(ino, _, _)| ino as i32);
+    let Ok(etc) = etc else {
+        return diag_fmt(format_args!("fs.deny FAIL setup etc"));
+    };
+    for (name, ino, want) in [("trunc-dir", etc, EISDIR), ("trunc-ino0", 0, EINVAL)] {
+        let rc = fs_trunc(mfs, ino);
+        if rc == want {
+            denied += 1;
+        } else {
+            diag_fmt(format_args!("fs.deny FAIL {name} rc={rc}"));
+        }
+    }
+
     if denied == FS_DENIAL_PROBES {
         diag_fmt(format_args!("fs.deny ok n={denied}"));
     }
@@ -1150,7 +1275,15 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
 /// Probes [`fs_denials`] runs. Named rather than counted inline so adding one
 /// without counting it is a marker that vanishes rather than one that silently
 /// under-reports.
-const FS_DENIAL_PROBES: usize = 10;
+///
+///   - `create-exists` — `FS_CREATE` on `/etc/deny`, which already exists.
+///     `EEXIST`, and the file's inode is unchanged afterwards.
+///   - `create-not-dir` — `FS_CREATE` naming `/etc/motd/x`, a file as an
+///     intermediate component. `ENOTDIR`.
+///   - `trunc-dir` — `FS_TRUNC` aimed at `/etc`, a directory. `EISDIR`.
+///   - `trunc-ino0` — `FS_TRUNC` aimed at inode 0, which does not exist.
+///     `EINVAL`.
+const FS_DENIAL_PROBES: usize = 14;
 
 /// Stage `/etc/pattern` at boot and report the byte count — the slice-5.9 proof
 /// that VFS can read a whole file into [`EXEC_STAGE`] in one go.
