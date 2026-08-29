@@ -1,0 +1,398 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "c31a07ba4cdc",
+  "session_id": "76546612-6807-4160-80ee-2f57c79353aa",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-29T19:10:37.833966Z",
+  "branch": "feature/slice-5.10b-mfs-create-truncate",
+  "checkpoints_count": 26,
+  "save_step_count": 26,
+  "files_touched": [
+    "kernel-shared/src/rootfs.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "9d04a85e11f9",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 400,
+    "cache_creation_tokens": 1115061,
+    "cache_read_tokens": 39206958,
+    "output_tokens": 331445,
+    "api_call_count": 200
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01ALwtuLtr7qSesi61CrjYCs",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "9d04a85e11f9",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 39,
+        "end": 40,
+        "entry_ids": [
+          "324dcdfa-7d80-42e3-9dd8-4e655940bb44"
+        ],
+        "tool_use_id": "toolu_01ALwtuLtr7qSesi61CrjYCs"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01ALwtuLtr7qSesi61CrjYCs"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01CQ8uWSu6P2b5G9FvHfQq5E",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:writing-plans"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "9d04a85e11f9",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 321,
+        "end": 322,
+        "entry_ids": [
+          "49da77ac-6edd-43a9-a96d-2fdc2399d453"
+        ],
+        "tool_use_id": "toolu_01CQ8uWSu6P2b5G9FvHfQq5E"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01CQ8uWSu6P2b5G9FvHfQq5E"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:writing-plans",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01CRirrvRvkDfGFJNqYHy2xD",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:subagent-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "9d04a85e11f9",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 641,
+        "end": 642,
+        "entry_ids": [
+          "6a5383f9-0aed-4b87-8de3-ace966cfcf61"
+        ],
+        "tool_use_id": "toolu_01CRirrvRvkDfGFJNqYHy2xD"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01CRirrvRvkDfGFJNqYHy2xD"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:subagent-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 26
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-29T19:10:37.63894Z",
+    "agent_lines": 136,
+    "agent_removed": 5,
+    "human_added": 0,
+    "human_modified": 2,
+    "human_removed": 0,
+    "total_committed": 138,
+    "total_lines_changed": 143,
+    "agent_percentage": 98.6013986013986,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 549,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "PRE6-RECOMMEND.md": 275,
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 7,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 8,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 9,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 10,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 11,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 12,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 13,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 14,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 15,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 16,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 17,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 18,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 19,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 20,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 21,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 22,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 23,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 24,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 25,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 26,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    }
+  ]
+}
