@@ -77,8 +77,8 @@ use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF, BDEV_MINOR_RAMDISK,
-    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_CREATE, FS_LOOKUP, FS_READ, FS_READSUPER, FS_WRITE,
-    GET_RAMDISK, NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_CREATE, FS_LOOKUP, FS_READ, FS_READSUPER, FS_TRUNC,
+    FS_WRITE, GET_RAMDISK, NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{MEM_PROC_NR, PM_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -93,9 +93,9 @@ use minixrs_kernel_shared::rootfs::{
 use minixrs_mfs::MFS_BLOCK_SIZE;
 use minixrs_mfs::dirent::{DIRENT_SIZE, DirEntry};
 use minixrs_mfs::inode::{
-    I_REGULAR, INODE_SIZE, Inode, NR_DIRECT_ZONES, ROOT_INODE, SINGLE_INDIRECT_SLOT,
+    I_REGULAR, INODE_SIZE, Inode, NR_DIRECT_ZONES, NR_TZONES, ROOT_INODE, SINGLE_INDIRECT_SLOT,
 };
-use minixrs_mfs::layout::{Layout, layout};
+use minixrs_mfs::layout::{Layout, layout, zmap_bit};
 use minixrs_mfs::read::{
     ZoneLookup, inode_at, inode_location, zone_for_offset, zone_from_indirect,
 };
@@ -409,6 +409,7 @@ fn main() -> ! {
             FS_READ => do_read(&msg, caller_e, &mut blocks, &mount),
             FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mut stage, &mount),
             FS_CREATE => do_create(&mut msg, &mut blocks, &mount),
+            FS_TRUNC => do_trunc(&msg, &mut blocks, &mount),
             // Reply rather than drop (TTY's rule): this server's clients are all
             // inside a SENDREC, and a dropped request blocks the caller forever.
             _ => ENOSYS,
@@ -758,6 +759,68 @@ fn do_create(msg: &mut Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i
     }
 }
 
+/// Serve one `FS_TRUNC`: discard a regular file's contents. Returns `OK` or a
+/// negative errno.
+///
+/// **The zeroed inode is written back first, then the bitmap bits are cleared.**
+/// That is the inverse of the allocator's ordering, for the same reason read the
+/// other way: once the inode names no zones, a failure while freeing can only
+/// leak. If the bits went first, a failure before the inode reached the device
+/// would leave a live inode pointing at zones the allocator is free to hand out
+/// — two files sharing a zone, the exact corruption `alloc_zone`'s ordering
+/// exists to prevent.
+///
+/// **That ordering has no boot probe, and saying so is the point.** Reversing it
+/// moves no marker, because it needs a failure *between* the two steps and
+/// nothing a client can send induces one. It is a correct invariant guarding a
+/// case this slice cannot reach — the slice-5.10a lesson about the `dirty`
+/// condition, applied to a new rule rather than repeated by omission.
+///
+/// `EISDIR` for a directory and `EINVAL` for any other non-regular inode: the
+/// same guards, with the same wording, [`do_write`] applies. An inode number that
+/// is not addressable at all — zero included — is `EINVAL` from
+/// [`read_inode`]'s own split.
+#[cfg_attr(test, allow(dead_code))]
+fn do_trunc(msg: &Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
+    let Some(mount) = mount else {
+        return ENODEV;
+    };
+    let Ok(ino) = u32::try_from(proto::parse_trunc(msg)) else {
+        return EINVAL;
+    };
+
+    let mut node = match read_inode(blocks, mount, ino) {
+        Ok(node) => node,
+        Err(e) => return e,
+    };
+    if node.is_dir() {
+        return EISDIR;
+    }
+    if !node.is_reg() {
+        return EINVAL;
+    }
+
+    // Everything the free below needs, captured as `Copy` scalars: nothing is
+    // held across a block fetch.
+    let zones = node.zone;
+    let size = node.size;
+
+    node.zone = [0u32; NR_TZONES];
+    node.size = 0;
+    if let Err(e) = write_inode(blocks, mount, ino, &node) {
+        return e;
+    }
+
+    if let Err(e) = free_zones_of(blocks, mount, &zones, size) {
+        // The inode is already durable and names nothing, so the file really is
+        // empty; what failed is the reclaim. Report it — the caller's `open` must
+        // not hand back a descriptor as though nothing went wrong — but the
+        // filesystem is consistent, merely short some zones.
+        return e;
+    }
+    OK
+}
+
 /// Create `path`, and return the new `(inode number, inode)`.
 ///
 /// **The inode is allocated and written back before the directory entry names
@@ -1082,6 +1145,87 @@ fn alloc_inode(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
         return Ok(ino);
     }
     Err(ENOSPC)
+}
+
+/// Clear one zone's bitmap bit — [`alloc_zone`]'s twin.
+///
+/// The zone is range-checked with the **write-side** predicate first
+/// ([`write::write_zone_ok`]), not the reader's looser one: a corrupt pointer
+/// below `first_data_zone` names a metadata block, and clearing its bit would
+/// mark part of the filesystem's own bookkeeping available for a file to be
+/// allocated over.
+///
+/// The scan bound is the same one [`alloc_zone`] uses, from the other end: the
+/// bit's own block index must lie inside `layout.zmap_blocks`.
+#[cfg_attr(test, allow(dead_code))]
+fn free_zone(blocks: &mut Blocks, mount: &Mount, zone: u32) -> Result<(), i32> {
+    if !write::write_zone_ok(zone, mount.layout.first_data_zone, mount.blocks) {
+        return Err(EIO);
+    }
+    let bit = zmap_bit(zone, mount.layout.first_data_zone).ok_or(EIO)?;
+    let bits_per_block = u32::try_from(mount.block_size.checked_mul(8).ok_or(EIO)?)
+        .ok()
+        .filter(|&b| b != 0)
+        .ok_or(EIO)?;
+    let index = bit / bits_per_block;
+    if index >= mount.layout.zmap_blocks {
+        return Err(EIO);
+    }
+    let block = mount.layout.zmap_start.checked_add(index).ok_or(EIO)?;
+    blocks.read(u64::from(block))?;
+    let buf = blocks.buf_mut();
+    write::bitmap_clear(buf, bit % bits_per_block).ok_or(EIO)?;
+    blocks.write(u64::from(block))
+}
+
+/// Free the zones a truncated inode used to name.
+///
+/// Called **after** the zeroed inode has reached the device, so nothing
+/// references these zones any more and a failure here can only leak.
+///
+/// Two bounds worth naming. The indirect block's slots are visited only as far as
+/// the file's recorded size reached ([`write::indirect_slots_used`]) — a 32 KiB
+/// file examines two, not the block's 1024. Zones past that size are **not**
+/// freed: that is a leak, and it is the correct trade against holding a 4 KiB
+/// indirect block across the bitmap's own read-modify-write, which a single block
+/// buffer cannot do. For the same reason each slot costs a re-read of the
+/// indirect block: freeing a zone evicts it.
+///
+/// The indirect block's own zone is freed **last**, after the zones it names, so
+/// a failure part-way leaves those pointers still readable rather than orphaning
+/// them.
+#[cfg_attr(test, allow(dead_code))]
+fn free_zones_of(
+    blocks: &mut Blocks,
+    mount: &Mount,
+    zones: &[u32; NR_TZONES],
+    size: i32,
+) -> Result<(), i32> {
+    for i in 0..NR_DIRECT_ZONES {
+        let z = *zones.get(i).ok_or(EIO)?;
+        if z != 0 {
+            free_zone(blocks, mount, z)?;
+        }
+    }
+
+    let indirect = *zones.get(SINGLE_INDIRECT_SLOT).ok_or(EIO)?;
+    if indirect == 0 {
+        return Ok(());
+    }
+    if !write::write_zone_ok(indirect, mount.layout.first_data_zone, mount.blocks) {
+        return Err(EIO);
+    }
+
+    for slot in 0..write::indirect_slots_used(size, mount.block_size)? {
+        // Re-read each time: `free_zone` below replaces the buffer's contents.
+        // `u32` is `Copy`, so nothing points into it when that happens.
+        let blk = blocks.read(u64::from(indirect))?;
+        let z = zone_from_indirect(blk, slot).ok_or(EIO)?;
+        if z != 0 {
+            free_zone(blocks, mount, z)?;
+        }
+    }
+    free_zone(blocks, mount, indirect)
 }
 
 /// Store `node` back into the inode table.
