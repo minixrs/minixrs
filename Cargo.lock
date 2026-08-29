@@ -90,6 +90,7 @@ dependencies = [
  "arrayvec",
  "cc",
  "minixrs-kernel-shared",
+ "minixrs-mfs",
  "minixrs-mkfs-mfs",
 ]
 

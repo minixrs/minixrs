@@ -161,6 +161,25 @@ pub fn free_zones(img: &[u8]) -> Option<usize> {
     Some(free)
 }
 
+/// Free inodes in `img` — [`free_zones`]'s twin.
+///
+/// This exists for one caller: `kernel/build.rs`, which needs to know that the
+/// image it *just built* leaves room for the files init creates at boot. Like
+/// `free_zones` it cannot be settled by a unit test on a fixture, because the
+/// image's contents depend on the toolchain flavour.
+pub fn free_inodes(img: &[u8]) -> Option<usize> {
+    let l = image_layout(img)?;
+    let sb = superblock(img)?;
+    let mut free = 0;
+    for ino in 1..=sb.ninodes {
+        if bit_set(img, l.imap_start, imap_bit(ino))? {
+            continue;
+        }
+        free += 1;
+    }
+    Some(free)
+}
+
 fn bit_set(img: &[u8], start: u32, bit: u32) -> Option<bool> {
     let byte = (start as usize).checked_mul(MFS_BLOCK_SIZE)? + (bit as usize) / 8;
     Some(img.get(byte)? & (1 << (bit % 8)) != 0)

@@ -381,24 +381,40 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 /// edited together and the proof keeps passing while the content silently changed.
 fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
     use minixrs_kernel_shared::rootfs::{
-        ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
-        ROOTFS_SCRATCH_GROWTH_ZONES, ROOTFS_SCRATCH_PATH, rootfs_pattern_byte,
+        ROOTFS_DENY_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES, ROOTFS_HELLO_PATH,
+        ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN,
+        ROOTFS_PATTERN_PATH, ROOTFS_RUNTIME_INODES, ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_PATH,
+        rootfs_holey_byte, rootfs_pattern_byte,
     };
     use minixrs_mkfs_mfs::Manifest;
 
     let pattern: Vec<u8> = (0..ROOTFS_PATTERN_LEN).map(rootfs_pattern_byte).collect();
+    let holey: Vec<u8> = (0..ROOTFS_HOLEY_LEN).map(rootfs_holey_byte).collect();
 
     let mut manifest = Manifest::new();
     manifest
         .add(ROOTFS_HELLO_PATH, hello_bytes.to_vec())
         .add(ROOTFS_MOTD_PATH, ROOTFS_MOTD.to_vec())
         .add(ROOTFS_PATTERN_PATH, pattern)
-        // Slice 5.10a's write target: shipped **empty** on purpose. Create does
-        // not exist until 5.10b, so the write path needs a file that is already
-        // here — and starting at zero makes growth-from-nothing the ordinary
-        // path, and keeps the read proofs (`/etc/motd`, `/etc/pattern`) out of
-        // reach of a probe that writes.
-        .add(ROOTFS_SCRATCH_PATH, Vec::new());
+        .add(ROOTFS_SCRATCH_PATH, Vec::new())
+        // Slice 5.10b. `/etc/holey` is sparse: its first block is a hole, so a
+        // write at position 0 assigns a zone without moving the file's size --
+        // the only way to reach the `dirty` half of MFS's write-back condition,
+        // since with no `lseek` every write runs forward and extends the file.
+        .add_sparse(ROOTFS_HOLEY_PATH, holey, minixrs_mfs::MFS_BLOCK_SIZE)
+        // The `EEXIST` probe's target, read by nothing else.
+        .add(ROOTFS_DENY_PATH, Vec::new());
+
+    // `/full` ships exactly enough zero-length files that its single directory
+    // block is full, so the one create init makes in it *must* allocate a second
+    // directory zone. Without it, directory growth is an arm no QEMU boot
+    // executes -- the failure mode `/etc/pattern` and the device-teardown
+    // selftest exist to prevent. Names are formatted here rather than named in
+    // `kernel-shared` because nothing at run time resolves them; only the count
+    // is shared, and `rootfs.rs` const-asserts the arithmetic.
+    for i in 0..ROOTFS_FULL_ENTRIES {
+        manifest.add(format!("{ROOTFS_FULL_DIR}/f{i:02}"), Vec::new());
+    }
 
     let img = minixrs_mkfs_mfs::build_image(&manifest)
         .unwrap_or_else(|e| panic!("building the root filesystem image: {e}"));
@@ -414,10 +430,18 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
     let free = minixrs_mkfs_mfs::verify::free_zones(&img)
         .expect("the image just built decodes its own layout");
     assert!(
-        free >= ROOTFS_SCRATCH_GROWTH_ZONES,
-        "the root image leaves {free} free zones, but {ROOTFS_SCRATCH_PATH} needs \
-         {ROOTFS_SCRATCH_GROWTH_ZONES} to grow at runtime. Its contents have outgrown \
+        free >= ROOTFS_RUNTIME_ZONES,
+        "the root image leaves {free} free zones, but the boot-time probes need \
+         {ROOTFS_RUNTIME_ZONES} to grow at runtime. Its contents have outgrown \
          ROOTFS_IMAGE_BLOCKS -- raise that constant, or shrink what the image ships."
+    );
+
+    let free = minixrs_mkfs_mfs::verify::free_inodes(&img)
+        .expect("the image just built decodes its own layout");
+    assert!(
+        free >= ROOTFS_RUNTIME_INODES,
+        "the root image leaves {free} free inodes, but the boot-time probes create \
+         {ROOTFS_RUNTIME_INODES} files. Raise ROOTFS_NINODES."
     );
 
     img

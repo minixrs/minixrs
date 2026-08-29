@@ -15,8 +15,21 @@ use crate::image::MkfsError;
 pub struct Entry {
     /// Absolute path, exactly `/<dir>/<name>`.
     pub path: String,
-    /// File contents, verbatim.
+    /// File contents, verbatim — the **whole** file, hole included.
     pub bytes: Vec<u8>,
+    /// Leading bytes to leave **unallocated**: a hole.
+    ///
+    /// `0` for every ordinary file. When non-zero it must be a whole multiple of
+    /// the block size and the corresponding prefix of `bytes` must already be
+    /// zero — the image would otherwise claim content it does not store. Both are
+    /// checked when the image is built, not here, so a caller assembling a
+    /// manifest hears about every problem at once.
+    ///
+    /// **One variant with one caller**, and deliberately so: it exists for
+    /// `/etc/holey`, whose whole job is making a zone assignment that does not
+    /// move the file's size reachable. A general sparse-file description would be
+    /// code with no second user.
+    pub hole: usize,
 }
 
 /// The files to write, in the order they were added. Directories are implied by
@@ -38,6 +51,22 @@ impl Manifest {
         self.entries.push(Entry {
             path: path.into(),
             bytes: bytes.into(),
+            hole: 0,
+        });
+        self
+    }
+
+    /// Add a file with a leading hole. See [`Entry::hole`].
+    pub fn add_sparse(
+        &mut self,
+        path: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+        hole: usize,
+    ) -> &mut Self {
+        self.entries.push(Entry {
+            path: path.into(),
+            bytes: bytes.into(),
+            hole,
         });
         self
     }

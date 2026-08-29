@@ -144,24 +144,25 @@ mod tests {
         assert_eq!(bitmap_blocks(8193, 4096), 1);
     }
 
-    /// The geometry of the slice-5.7 root image, computed by hand:
+    /// The geometry of the slice-5.10b root image (128 inodes, since `/full`'s
+    /// 62-entry directory alone costs that many), computed by hand:
     ///
-    /// * imap: `1 + 64 = 65` bits → 1 block, at 2
+    /// * imap: `1 + 128 = 129` bits → 1 block, at 2
     /// * zmap: `1 + 256 = 257` bits → 1 block, at 3
-    /// * inodes: `64 / (4096/64) = 1` block, at 4
-    /// * first data zone: 5
+    /// * inodes: `128 / (4096/64) = 2` blocks, at 4
+    /// * first data zone: 6
     #[test]
     fn the_rootfs_geometry_matches_the_hand_computation() {
         assert_eq!(
-            layout(64, 256, BS),
+            layout(128, 256, BS),
             Layout {
                 imap_start: 2,
                 imap_blocks: 1,
                 zmap_start: 3,
                 zmap_blocks: 1,
                 inode_start: 4,
-                inode_blocks: 1,
-                first_data_zone: 5,
+                inode_blocks: 2,
+                first_data_zone: 6,
             }
         );
     }

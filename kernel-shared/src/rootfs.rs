@@ -47,9 +47,14 @@ use crate::uspace::RAMDISK_WINDOW_SIZE;
 /// constant (`MkfsError::TooBig`), with a one-constant fix.
 pub const ROOTFS_IMAGE_BLOCKS: u32 = 256;
 
-/// Inodes in the root filesystem image. 64 is exactly one inode-table block, and
-/// far more than the handful of files slices 5.7–5.9 put in the image.
-pub const ROOTFS_NINODES: u32 = 64;
+/// Inodes in the root filesystem image.
+///
+/// **128, i.e. two inode-table blocks.** 64 was one block and ample through
+/// slice 5.9; slice 5.10b's `/full` directory (see [`ROOTFS_FULL_ENTRIES`]) costs
+/// 62 inodes on its own. Raising it shifts `first_data_zone` by one block, which
+/// moves every zone number in the image — the layout unit tests and mkfs's
+/// fixtures move with it.
+pub const ROOTFS_NINODES: u32 = 128;
 
 /// Size of the root filesystem image in bytes.
 pub const ROOTFS_IMAGE_BYTES: usize = ROOTFS_IMAGE_BLOCKS as usize * BDEV_BLOCK_SIZE;
@@ -181,6 +186,133 @@ pub const ROOTFS_SCRATCH_GROWTH_ZONES: usize = ROOTFS_SCRATCH_LEN.div_ceil(BDEV_
 // free, which depends on the `hello` flavour and so cannot be known here. The
 // sufficient check is `kernel/build.rs`'s, against the bytes it just built.
 const _: () = assert!(ROOTFS_SCRATCH_GROWTH_ZONES < ROOTFS_IMAGE_BLOCKS as usize);
+
+/// Bytes per MinixFS v3 directory entry.
+///
+/// Duplicated from `minixrs_mfs::dirent::DIRENT_SIZE` — `fs/mfs` depends on this
+/// crate, so the dependency cannot run the other way. `tools/mkfs-mfs` depends on
+/// both and carries the test that pins them equal.
+pub const ROOTFS_DIRENT_SIZE: usize = 64;
+
+/// A **sparse** file the image ships, for the write-back proof.
+///
+/// Its first block is a hole and its second holds a pattern, so a write at
+/// position 0 assigns `zone[0]` while `size` does not move. That is the only way
+/// to reach the second half of MFS's write-back condition — "a zone was assigned
+/// **or** the size grew" — because with no `lseek` every write runs forward from
+/// a descriptor's position and therefore always extends the file. Slice 5.10a
+/// left that half unproven and predicted `FS_TRUNC` would reach it; it does not,
+/// and this file is the correction.
+pub const ROOTFS_HOLEY_PATH: &str = "/etc/holey";
+
+/// Length of [`ROOTFS_HOLEY_PATH`]: two blocks, the first of them a hole.
+pub const ROOTFS_HOLEY_LEN: usize = 2 * BDEV_BLOCK_SIZE;
+
+/// Byte `i` of [`ROOTFS_HOLEY_PATH`]'s **shipped** contents.
+///
+/// Zero throughout the hole — which is what a hole reads as, so the image is
+/// self-consistent — and a position-dependent pattern after it. Skewed off
+/// [`rootfs_scratch_byte`] and [`rootfs_pattern_byte`] so that reading the wrong
+/// file is a mismatch rather than a coincidence.
+pub const fn rootfs_holey_byte(i: usize) -> u8 {
+    if i < BDEV_BLOCK_SIZE {
+        0
+    } else {
+        ((i + 23) % ROOTFS_SCRATCH_PERIOD) as u8
+    }
+}
+
+/// What init writes at position 0 of [`ROOTFS_HOLEY_PATH`], filling the hole.
+pub const ROOTFS_HOLEY_TEXT: &[u8] = b"minix.rs holey: filled at zero\n";
+
+/// A file the image ships **empty**, as the `EEXIST` probe's target.
+///
+/// Read by nothing else, so a probe that accidentally *succeeded* in creating a
+/// second entry for this name would corrupt no proof but its own. It exists
+/// because the probe re-resolves the name afterwards and compares inode numbers:
+/// a dropped `EEXIST` would insert a duplicate entry shadowing the first,
+/// silently, with every other marker still green.
+pub const ROOTFS_DENY_PATH: &str = "/etc/deny";
+
+/// A directory whose single block is **exactly full**, so that the first create
+/// in it must allocate a second directory zone.
+pub const ROOTFS_FULL_DIR: &str = "/full";
+
+/// Files [`ROOTFS_FULL_DIR`] ships, all zero-length.
+///
+/// `.` and `..` plus these must be exactly one block of entries — the `const _`
+/// below is what enforces it — so directory growth is on a boot marker rather
+/// than being an arm no QEMU boot executes. They cost 62 inodes and no zones.
+pub const ROOTFS_FULL_ENTRIES: usize = 62;
+
+/// The create that must grow [`ROOTFS_FULL_DIR`].
+pub const ROOTFS_FULL_NEW_PATH: &str = "/full/new";
+
+/// What init writes to [`ROOTFS_FULL_NEW_PATH`].
+pub const ROOTFS_DIRGROW_TEXT: &[u8] = b"minix.rs dirgrow by init\n";
+
+/// A file that is **not** in the image, which init creates at boot.
+pub const ROOTFS_CREATE_PATH: &str = "/etc/new";
+
+/// What init writes to [`ROOTFS_CREATE_PATH`].
+pub const ROOTFS_CREATE_TEXT: &[u8] = b"minix.rs created by init\n";
+
+/// A file init creates to prove that a *failing* write allocates nothing.
+pub const ROOTFS_LEAK_PATH: &str = "/etc/leak";
+
+/// What init writes to [`ROOTFS_LEAK_PATH`] once the failing writes are done.
+pub const ROOTFS_LEAK_TEXT: &[u8] = b"minix.rs leak: nothing lost\n";
+
+/// Failing writes the leak probe issues before its one good write.
+///
+/// **[`ROOTFS_IMAGE_BLOCKS`], which is greater than any possible free-zone count
+/// in the image**, so the probe is config-independent *by construction* rather
+/// than by measurement — no number here differs between the musl, SDK and
+/// sysroot-absent `hello` flavours, which is the slice-5.5/5.6 trap. Before the
+/// staging fix each failure leaked one zone, so this many of them would exhaust
+/// the image and the probe's final good write would answer `ENOSPC`.
+pub const ROOTFS_LEAK_PROBES: usize = ROOTFS_IMAGE_BLOCKS as usize;
+
+/// Zones the boot-time probes allocate at **runtime**, in total.
+///
+/// `/etc/scratch`'s eight data blocks and its indirect block
+/// ([`ROOTFS_SCRATCH_GROWTH_ZONES`]), plus one each for `/etc/new`,
+/// `/full/new`, `/etc/holey`'s filled hole and `/etc/leak`'s one good write, plus
+/// one for `/full`'s second directory block. Checked against the *built* image by
+/// `kernel/build.rs`, for the reason that check already carries: the image's
+/// largest file is `/bin/hello`, whose size is a property of the toolchain
+/// flavour, so no unit test over a fixture measures this image.
+pub const ROOTFS_RUNTIME_ZONES: usize = ROOTFS_SCRATCH_GROWTH_ZONES + 5;
+
+/// Inodes the boot-time probes allocate at runtime: `/etc/new`, `/full/new` and
+/// `/etc/leak`.
+pub const ROOTFS_RUNTIME_INODES: usize = 3;
+
+// C10: `.` + `..` + the filler files must be exactly one block of entries. One
+// short and the create finds a free slot; one over and mkfs has already grown the
+// directory, so the arm this exists for stays unreachable either way.
+const _: () = assert!(2 + ROOTFS_FULL_ENTRIES == BDEV_BLOCK_SIZE / ROOTFS_DIRENT_SIZE);
+
+// The sparse file's hole is exactly its first block, and its tail is real.
+const _: () = assert!(ROOTFS_HOLEY_LEN == 2 * BDEV_BLOCK_SIZE);
+// ...and what init writes into the hole fits inside it, so the write assigns
+// `zone[0]` and touches nothing else.
+const _: () = assert!(!ROOTFS_HOLEY_TEXT.is_empty());
+const _: () = assert!(ROOTFS_HOLEY_TEXT.len() < BDEV_BLOCK_SIZE);
+
+// Each of the three created files fits one FS transfer, so its proof is one
+// round trip and its marker's byte count is a literal.
+const _: () = assert!(ROOTFS_CREATE_TEXT.len() <= BDEV_BLOCK_SIZE);
+const _: () = assert!(ROOTFS_DIRGROW_TEXT.len() <= BDEV_BLOCK_SIZE);
+const _: () = assert!(ROOTFS_LEAK_TEXT.len() <= BDEV_BLOCK_SIZE);
+
+// The leak probe must out-number any free-zone count the image can have.
+const _: () = assert!(ROOTFS_LEAK_PROBES >= ROOTFS_IMAGE_BLOCKS as usize);
+
+// Necessary conditions only — the sufficient checks are `kernel/build.rs`'s,
+// against the bytes it just built.
+const _: () = assert!(ROOTFS_RUNTIME_ZONES < ROOTFS_IMAGE_BLOCKS as usize);
+const _: () = assert!(ROOTFS_RUNTIME_INODES < ROOTFS_NINODES as usize);
 
 /// Label at the start of the image. NUL-padded to [`IMAGE_LABEL_LEN`].
 pub const IMAGE_LABEL: [u8; IMAGE_LABEL_LEN] = *b"minix.rs rootfs\0";
