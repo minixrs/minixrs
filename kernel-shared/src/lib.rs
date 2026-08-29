@@ -19,6 +19,7 @@ pub mod endpoint;
 pub mod error;
 pub mod execimage;
 pub mod execstack;
+pub mod fcntl;
 pub mod grant;
 pub mod ipc_const;
 pub mod message;
