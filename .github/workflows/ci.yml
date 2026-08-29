@@ -233,12 +233,12 @@ jobs:
     # counts) — shared-runner TCG timing is the flake risk.
     #
     # This ceiling has to clear the boot step *plus* the build, and the boot step
-    # now always burns its full timeout (240 s as of slice 5.10a, up from 120 s —
+    # now always burns its full timeout (600 s as of slice 5.10b, up from 240 s —
     # a healthy run is the one that reaches it). On a cold rust-cache the runner
     # still builds the kernel and nine user crates with -Zbuild-std before the
-    # first byte. 30 → 40 leaves that headroom: whoever raises the boot timeout
+    # first byte. 40 → 50 leaves that headroom: whoever raises the boot timeout
     # again should raise this in the same edit.
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       # submodules: external/musl is the musl fork (slice 5.6). Without it
       # kernel/build.rs falls back to packing `worker` as `hello` and the C
@@ -283,7 +283,7 @@ jobs:
         run: tools/build-musl.sh
       - name: Build kernel
         run: cargo kernel-aarch64
-      - name: Boot in QEMU (240 s wall clock)
+      - name: Boot in QEMU (600 s wall clock)
         env:
           QEMU_EFI_AARCH64: /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
         run: |
@@ -293,10 +293,11 @@ jobs:
           # than letting the log checker report a confusing missing-marker
           # error. The checker step below is the verdict on log content.
           status=0
-          # 45 s until slice 5.9, 120 s until slice 5.10a. Both raises were the
-          # same story: a slice made the boot genuinely longer, and the budget
-          # was raised with real headroom rather than trimmed to whatever passes
-          # locally. The job's own `timeout-minutes` still bounds it.
+          # 45 s until slice 5.9, 120 s until slice 5.10a, 240 s until slice
+          # 5.10b. Every raise was the same story: a slice made the boot
+          # genuinely longer, and the budget was raised with real headroom
+          # rather than trimmed to whatever passes locally. The job's own
+          # `timeout-minutes` still bounds it.
           #
           # 5.9 (45 -> 120): `hello` stopped being a memcpy out of the boot
           # archive and became ~200 KB read off the ramdisk through MFS and VFS,
@@ -311,12 +312,21 @@ jobs:
           # 56.20% of the log, i.e. the boot roughly DOUBLED (~34 s -> ~67 s wall
           # on the dev machine). At 120 s that left a safety factor of only 1.78x
           # over local, which is inside the plausible range for how much slower
-          # this shared arm64 runner's TCG is. 240 s restores the pre-slice 3.56x.
+          # this shared arm64 runner's TCG is. 240 s restored the pre-slice 3.56x.
+          #
+          # 5.10b (240 -> 600): the leak-fix regression probe issues 256 extra
+          # failing FS_WRITEs (each one a doomed grant + BDEV round trip) plus
+          # one good one, all before the last required marker. Measured the same
+          # way, at a fixed 240 s, on the same dev machine: the last marker
+          # (`hello: errno ok`) moved from 22.32% to 57.61% of the log — a 2.58x
+          # jump, comparable in kind to the 5.9 and 5.10a raises. That left a
+          # safety factor of only 1.74x at 240 s (below the 1.78x that forced the
+          # previous raise), so 600 s restores it to ~4.3x.
           #
           # If you change this, re-measure the fraction rather than reasoning
           # from the wall-clock number above: it is a ratio against a local run,
           # not a CI timing.
-          timeout 240 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+          timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
             > qemu.log 2>&1 || status=$?
           echo "qemu run finished with status $status (124 = timeout, expected)"
           if [ "$status" -ne 124 ]; then
