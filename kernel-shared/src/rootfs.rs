@@ -128,9 +128,10 @@ const _: () = assert!(ROOTFS_MOTD.len() <= BDEV_BLOCK_SIZE);
 
 /// A file the root image ships **empty**, for slice 5.10a's write proof to fill.
 ///
-/// Create does not exist until 5.10b, so the write path needs a target that is
-/// already in the image. Zero-length rather than pre-sized: that makes
-/// growth-from-nothing the ordinary path rather than a special case, and it keeps
+/// Create did not exist when this file was chosen in 5.10a, so the write path
+/// needed a target that was already in the image. Zero-length rather than
+/// pre-sized: that makes growth-from-nothing the ordinary path rather than a
+/// special case, and it keeps
 /// `/etc/motd` and `/etc/pattern` — which are *read* proofs — untouched by a
 /// probe that writes.
 pub const ROOTFS_SCRATCH_PATH: &str = "/etc/scratch";
