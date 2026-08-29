@@ -49,9 +49,9 @@
 //! ## The read path, and its two copies
 //!
 //! ```text
-//! user ──VFS_OPEN{path,len}───► VFS ──SYS_COPY──────────► (the path, into VFS)
-//!                                │
-//!                                └──FS_LOOKUP{path}─────► MFS  → (ino, mode)
+//! user ──VFS_OPEN{path,len,flags}───► VFS ──SYS_COPY──────────► (the path, into VFS)
+//!                                     │
+//!                                     └──FS_LOOKUP{path}─────► MFS  → (ino, mode)
 //!
 //! user ──VFS_READ{fd,buf,len}──► VFS ──FS_READ{ino,gid,len,pos}──► MFS
 //!                                 │                                 │

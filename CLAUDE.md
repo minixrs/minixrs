@@ -457,6 +457,59 @@ See `docs/architecture.md` for the full system design. Key concepts:
   loudly, not pass vacuously** — spell unknown-request probes band-relative, and never aim a
   "must be refused" probe at a file or block whose accidental write would destroy something.
 
+- **`FS_CREATE`/`FS_TRUNC` and the flags field `VFS_OPEN` gained (slice 5.10b):**
+  `FS_CREATE = FS_RQ_BASE + 4`, `FS_TRUNC = FS_RQ_BASE + 5` (`NR_FS_MSGS` 4→6). `FS_CREATE`
+  **reuses `FS_LOOKUP`'s wire codec verbatim, request and reply alike** — same question, with the
+  file brought into existence first — so it still has no granter field and no grant-offset field.
+  `VFS_OPEN` gained `VFS_FLAGS_OFF` (an i32, `fcntl`'s values) without moving `NR_VFS_MSGS`: a new
+  *field* on an existing request, not a new request. `O_CREAT` on a lookup miss dispatches to
+  `FS_CREATE`; `O_TRUNC` on a lookup hit dispatches to `FS_TRUNC`; `O_CREAT | O_TRUNC` on a miss
+  takes the create arm and stops, because a fresh file is already empty — so the truncate, when it
+  runs at all, runs before the descriptor is installed, and a failure never leaves a descriptor
+  onto a half-truncated file.
+- **The staging-buffer invariant, and why it is not a rollback (5.10b, continued).** `do_write`'s
+  create path now copies the client's bytes into a second 4 KiB `.bss` buffer *before anything is
+  allocated*, so no client-controlled failure can occur after an allocation. Clearing the bitmap
+  bit on that error path would have been actively *wrong* for an indirect slot whose indirect block
+  already existed on disk — the block still names the zone, so freeing the bit hands one zone to
+  two files, corruption rather than the leak. This is the fix for the reachable denial of service
+  5.10a named and deferred.
+- **`find_free_slot` must let `Occupied` beat `Free` across *every* block of a directory, not just
+  within one (5.10b, continued).** Scanning block-by-block and returning the first free slot found
+  is backwards: a name that already exists in a later block gets shadowed by a duplicate insert
+  into an earlier block's free slot — silently, no error, no marker. The fix scans every block for
+  the name first and only then reuses a free slot.
+- **Two orderings this slice cannot prove, named rather than omitted (5.10b, continued).** The
+  mutation matrix confirmed both are unreachable by anything this system can induce: reversing
+  `do_trunc`'s free-before-write-back order moves no marker, and inserting the dirent before
+  `write_inode` in `create` moves no marker either — both need a failure *between* two steps that
+  nothing here can trigger. This is the 5.10a `dirty`-condition lesson applied to two new rules
+  rather than repeated by omission. Contrast `bitmap_clear`'s off-by-one, which also moves no boot
+  marker but *is* caught by two host tests in `fs/mfs/src/write.rs` — a real proof, just not at the
+  boot-log layer.
+- **`/full` and `/etc/holey` exist because two arms are otherwise unreachable in *both* boot
+  configurations (5.10b, continued).** `/` holds 4 entries and `/etc` 5, against 64 slots per
+  block, so without a directory that is exactly full no create would ever grow a directory; and
+  with no `lseek`, init writes strictly forward, so only a pre-existing hole below EOF reaches the
+  "zone assigned but size unchanged" half of 5.10a's write-back condition. `/etc/holey` is what
+  finally proves that invariant.
+- **A denial probe's flag must be spelled relative to `O_KNOWN`, not as a literal (5.10b,
+  continued).** `fcntl::O_UNKNOWN_BIT` is *derived* from `O_KNOWN`, so a flag becoming real makes
+  the probe fail loudly instead of passing vacuously — the same lesson as spelling unknown-request
+  probes band-relative.
+- **The boot budget moved a third time: 240 s → 600 s (5.10b, continued).** Measured the same way
+  as before — the last required marker's byte position as a fraction of a fixed-timeout log, on
+  the musl flavour, against the merge base: 26.90% → 61.61%, a 2.29× jump, leaving a 1.62× safety
+  factor at the old budget (below the 1.78× that forced the previous raise). The 256-probe leak
+  battery (each a doomed grant plus a BDEV round trip) is the dominant cost. One methodology note
+  worth keeping: `MINIXRS_SDK` does **not** persist across separate shell invocations, so a
+  measurement that sets it in one command and boots in another silently measures the SDK flavour —
+  check the embedded `hello` size (~200 KB musl, ~47 KB SDK, ~15 KB fallback) rather than trusting
+  the build warning.
+- Also worth a line: the image went to **128 inodes**, `mkfs-mfs` learned **sparse files**
+  (`Manifest::add_sparse`), and `kernel/build.rs` now asserts free-inode headroom against the
+  **built** image beside the existing free-zone assert.
+
 ## Documentation
 
 Canonical docs are an **mdBook in `book/`** (content under `book/src/`, TOC in
