@@ -84,10 +84,4 @@ mod tests {
             assert_eq!(flag & !O_KNOWN, 0, "flag {flag:o} is outside O_KNOWN");
         }
     }
-
-    #[test]
-    fn the_unknown_probe_bit_is_rejected_by_the_known_mask() {
-        // What `open::validate_flags` will test it with.
-        assert_ne!(O_UNKNOWN_BIT & !O_KNOWN, 0);
-    }
 }

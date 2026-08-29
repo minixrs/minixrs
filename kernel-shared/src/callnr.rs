@@ -1866,13 +1866,17 @@ mod tests {
         // payload-supplied source would let any client read any process's memory
         // through VFS.
         //
-        // There is also no `flags` field until slice 5.10b, which needs
-        // `O_CREAT` / `O_TRUNC`. Through 5.10a every descriptor is readable and
-        // writable alike, and a flag a client could pass and VFS would have to
-        // refuse is worse than no field. The length assertion below is what makes
-        // adding either a visible change rather than a quiet one.
-        let fields = [("path", VFS_PATH_OFF, 8), ("path_len", VFS_PATH_LEN_OFF, 4)];
-        assert_eq!(fields.len(), 2, "a VFS_OPEN payload field was added");
+        // Slice 5.10b added `flags` in [`VFS_FLAGS_OFF`]`..+4` (i32,
+        // `crate::fcntl`'s bits) for `O_CREAT` / `O_TRUNC`. Through 5.10a every
+        // descriptor was readable and writable alike; the length assertion
+        // below is what makes adding a fourth field a visible change rather
+        // than a quiet one.
+        let fields = [
+            ("path", VFS_PATH_OFF, 8),
+            ("path_len", VFS_PATH_LEN_OFF, 4),
+            ("flags", VFS_FLAGS_OFF, 4),
+        ];
+        assert_eq!(fields.len(), 3, "a VFS_OPEN payload field was added");
         assert_eq!(VFS_PATH_OFF, 0, "the first field must start the payload");
         assert_ordered_and_disjoint(&fields);
 

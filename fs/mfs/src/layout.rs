@@ -113,6 +113,11 @@ pub fn imap_bit(ino: u32) -> u32 {
 /// is *not* a data zone and is always marked in use. `None` for a zone below that
 /// base — such a zone is metadata and has no bitmap bit at all.
 pub fn zmap_bit(zone: u32, first_data_zone: u32) -> Option<u32> {
+    // `first_data_zone - 1` cannot underflow: every caller's `Mount.layout` is
+    // *derived* by `layout()` above, never decoded from an on-disk superblock,
+    // and `layout()` computes `first_data_zone = inode_start + inode_blocks >=
+    // START_BLOCK = 2`. `Superblock::validate` does not itself check this — the
+    // guarantee lives in `layout()`'s construction, not in a runtime bound here.
     zone.checked_sub(first_data_zone - 1)
 }
 

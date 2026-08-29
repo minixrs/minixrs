@@ -261,7 +261,7 @@ pub fn dir_append_offset(size: i32) -> Result<u64, i32> {
 /// How many single-indirect slots a file of `size` bytes reaches.
 ///
 /// `0` for a file inside the direct zones. **This is what bounds truncate's slot
-/// scan** (C8): a 32 KiB file examines two slots rather than the block's 1024.
+/// scan** (C8): a 32 KiB file examines one slot rather than the block's 1024.
 /// Capped at [`ptrs_per_block`] anyway, because every device-derived loop in this
 /// crate carries a cap and a corrupt size must not walk past the block.
 ///

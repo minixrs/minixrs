@@ -961,8 +961,8 @@ fn create_demo(vfs: Endpoint) {
 ///
 /// `/full` ships 62 empty files, so with `.` and `..` its block holds 64 used
 /// slots and this create *must* allocate a second directory zone. That arm is
-/// otherwise unreachable in both boot configurations — `/` holds 4 entries and
-/// `/etc` 6, against 64 slots — and an arm no QEMU boot executes is what the
+/// otherwise unreachable in both boot configurations — `/` holds 5 entries and
+/// `/etc` 7, against 64 slots — and an arm no QEMU boot executes is what the
 /// `/etc/pattern` mandate and the device-teardown selftest exist to prevent.
 ///
 /// The proof that growth *worked* is the read-back: the entry lands in the new
@@ -1325,6 +1325,10 @@ fn report_exec_fail(vfs: Endpoint, name: &str) {
 /// init has no formatting machinery and the line is a `grep -aF` marker. The two
 /// move together; the const below is what makes forgetting the second half loud.
 const OPEN_DENIAL_PROBES: usize = 11;
+// The `n=11` literal in `open_denials`' marker line, pinned the same way
+// `fs.create`'s `n=25` is pinned against `ROOTFS_CREATE_TEXT.len()`: init cannot
+// format an integer, so nothing else ties the printed digit to this constant.
+const _: () = assert!(OPEN_DENIAL_PROBES == 11);
 
 /// Report a failing `open` probe by name, on fd 2.
 #[cfg_attr(test, allow(dead_code))]

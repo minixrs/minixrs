@@ -135,10 +135,12 @@ pub fn dir_size(size: i32) -> Result<usize, i32> {
 /// It lives here rather than in the server's `find_component` for the reason
 /// `rw::advance` lives in VFS's library: `main.rs` is behind
 /// `required-features = ["server"]`, so clippy, miri and llvm-cov never compile
-/// it, and this is the only arithmetic in that loop. It is also **unreachable at
-/// boot** — `tools/mkfs-mfs` never builds a directory past one block, so the
-/// second iteration has no image to run against and unit tests are the only thing
-/// that will ever exercise it.
+/// it, and this is the only arithmetic in that loop. It was **unreachable at
+/// boot through slice 5.10a** — `tools/mkfs-mfs` never built a directory past
+/// one block, so the second iteration had no image to run against and unit
+/// tests were the only thing that exercised it. As of the `fs.dirgrow` probe
+/// that is no longer true: `/full` grows to a second block at runtime, and the
+/// re-open walks both.
 ///
 /// Three answers, in the order they can arise:
 ///

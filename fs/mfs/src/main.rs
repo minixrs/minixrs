@@ -278,9 +278,11 @@ impl Blocks {
     /// the block buffer rather than carrying a second zero page is the whole
     /// reason this is a method — there is no spare page to carry.
     ///
-    /// `tools/mkfs-mfs` writes no sparse files, so nothing in the boot image
-    /// reaches this. But a hole is a legal image, and answering one with stale
-    /// bytes from the previous block would be silent corruption.
+    /// `/etc/holey` (`tools/mkfs-mfs`'s `Manifest::add_sparse`) ships a hole in
+    /// the boot image as of slice 5.10b, and the `fs.hole` boot probe reads
+    /// through it every boot — so this is no longer a hypothetical path. A hole
+    /// is a legal image regardless, and answering one with stale bytes from the
+    /// previous block would be silent corruption.
     fn zeroed(&mut self) -> &[u8; MFS_BLOCK_SIZE] {
         // SAFETY: as `read` above — `&mut self` is held, so this is the only
         // reference into the buffer, and the `&mut` the fill borrows dies at the
@@ -829,6 +831,27 @@ fn do_trunc(msg: &Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
 /// where the other order would leave a directory entry naming an inode that was
 /// never written, so the name would resolve to whatever the inode table happened
 /// to hold. Leak over corruption, in both directions.
+///
+/// **That ordering has no boot probe either, the same [`do_trunc`] callout
+/// applies here:** a mutation matrix that moved the dirent-write ahead of
+/// `write_inode` was checked against the boot markers and moved none of them,
+/// because nothing a client can send fails a call in between. Correct, and
+/// unproven by anything this branch runs.
+///
+/// **`create` does not get [`do_write`]'s "no client-controlled failure after
+/// an allocation" invariant.** `alloc_inode` and `write_inode` both precede
+/// `insert_entry`, and inside `insert_entry` both `place_zone` and
+/// `write::dir_append_offset` can still answer `ENOSPC` — e.g. the directory's
+/// own growth needs a zone that is not there. Each such failure leaks the one
+/// inode `alloc_inode` already claimed; freeing it back would instead risk the
+/// corruption the ordering above exists to avoid, so this is the same
+/// leak-over-corruption trade, just reached one step later than `do_trunc`'s.
+/// The image holds 128 inodes, so roughly that many repetitions against an
+/// already-full filesystem exhaust the inode table — after which no file can
+/// ever be created again, where freeing zones would otherwise have let the
+/// filesystem recover. That prerequisite (an already-full image) makes this
+/// far weaker than the denial of service slice 5.10a's write path fixed, so it
+/// is deliberately left unaddressed here rather than folded into this slice.
 #[cfg_attr(test, allow(dead_code))]
 fn create(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode), i32> {
     let (parent_path, name) = walk::split_basename(path)?;
@@ -986,6 +1009,11 @@ fn place_zone(
                 // zone, which is what makes it *zeroed*: every one of its 1024
                 // slots reads back as a hole rather than as whatever the previous
                 // owner left there, which this code would take for zone pointers.
+                // If the *data* zone below then answers `ENOSPC`, this indirect
+                // block is leaked: it never reaches `node.zone` on disk (the
+                // caller's `write_inode` never runs), yet its bitmap bit stays
+                // set. Bounded to running out of zones, and the leak-over-
+                // corruption rule this whole module follows.
                 indirect = alloc_zone(blocks, mount)?;
                 node.zone[SINGLE_INDIRECT_SLOT] = indirect;
                 dirty = true;
@@ -1185,7 +1213,7 @@ fn free_zone(blocks: &mut Blocks, mount: &Mount, zone: u32) -> Result<(), i32> {
 ///
 /// Two bounds worth naming. The indirect block's slots are visited only as far as
 /// the file's recorded size reached ([`write::indirect_slots_used`]) — a 32 KiB
-/// file examines two, not the block's 1024. Zones past that size are **not**
+/// file examines one, not the block's 1024. Zones past that size are **not**
 /// freed: that is a leak, and it is the correct trade against holding a 4 KiB
 /// indirect block across the bitmap's own read-modify-write, which a single block
 /// buffer cannot do. For the same reason each slot costs a re-read of the

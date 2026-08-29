@@ -488,7 +488,7 @@ See `docs/architecture.md` for the full system design. Key concepts:
   marker but *is* caught by two host tests in `fs/mfs/src/write.rs` — a real proof, just not at the
   boot-log layer.
 - **`/full` and `/etc/holey` exist because two arms are otherwise unreachable in *both* boot
-  configurations (5.10b, continued).** `/` holds 4 entries and `/etc` 5, against 64 slots per
+  configurations (5.10b, continued).** `/` holds 5 entries and `/etc` 7, against 64 slots per
   block, so without a directory that is exactly full no create would ever grow a directory; and
   with no `lseek`, init writes strictly forward, so only a pre-existing hole below EOF reaches the
   "zone assigned but size unchanged" half of 5.10a's write-back condition. `/etc/holey` is what

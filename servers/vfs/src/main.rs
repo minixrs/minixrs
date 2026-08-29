@@ -1252,16 +1252,23 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
     // but *loud*, which is the property this convention asks for. And `EINVAL`
     // for inode 0, which does not exist.
     let etc = fs_lookup(mfs, b"/etc").map(|(ino, _, _)| ino as i32);
-    let Ok(etc) = etc else {
-        return diag_fmt(format_args!("fs.deny FAIL setup etc"));
-    };
-    for (name, ino, want) in [("trunc-dir", etc, EISDIR), ("trunc-ino0", 0, EINVAL)] {
-        let rc = fs_trunc(mfs, ino);
-        if rc == want {
-            denied += 1;
-        } else {
-            diag_fmt(format_args!("fs.deny FAIL {name} rc={rc}"));
+    // A plain early `return` here (the shape the setup-lookup failure above
+    // uses) would skip the revoke loop below and leak `good`/`not_mine`/
+    // `read_only` — those three grants already exist by this point, unlike the
+    // earlier setup steps that return before any grant is created. So this one
+    // falls through instead.
+    match etc {
+        Ok(etc) => {
+            for (name, ino, want) in [("trunc-dir", etc, EISDIR), ("trunc-ino0", 0, EINVAL)] {
+                let rc = fs_trunc(mfs, ino);
+                if rc == want {
+                    denied += 1;
+                } else {
+                    diag_fmt(format_args!("fs.deny FAIL {name} rc={rc}"));
+                }
+            }
         }
+        Err(_) => diag_fmt(format_args!("fs.deny FAIL setup etc")),
     }
 
     if denied == FS_DENIAL_PROBES {
