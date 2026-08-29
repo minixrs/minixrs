@@ -466,8 +466,8 @@ minix.rs hello: iov ok match=1
 # statements, and a broken FS band shows up here while MFS's stays green.
 [diag vfs] fs.mount ok root=1 bs=4096 blocks=256
 
-# Ten refusals from the FS band, each well-formed but for one thing: a path that
-# does not exist (-> ENOENT), `/etc/motd/x` naming a FILE as an intermediate
+# Fourteen refusals from the FS band, each well-formed but for one thing: a path
+# that does not exist (-> ENOENT), `/etc/motd/x` naming a FILE as an intermediate
 # component (-> ENOTDIR, the `is_dir` gate without which MFS would read a file's
 # bytes as directory entries), a relative path (-> EINVAL: there is no working
 # directory on minix.rs), a path field with no NUL anywhere (-> ENAMETOOLONG,
@@ -480,6 +480,15 @@ minix.rs hello: iov ok match=1
 # dropped unknown would block VFS in its SENDREC forever). None is reachable from
 # init's open/read -- VFS refuses most of them before the wire -- which is exactly
 # why they are sent from VFS's own prologue.
+#
+# Slice 5.10b adds four more: `FS_CREATE` on a name that already exists
+# (-> EEXIST) with the target re-resolved afterwards to prove nothing changed --
+# a dropped EEXIST would silently shadow the original entry with a second one,
+# and the errno alone would not catch that; `FS_CREATE` under a parent that is a
+# FILE, not a directory (-> ENOTDIR, the same `is_dir` gate on the create path);
+# `FS_TRUNC` on a directory (-> EISDIR -- an accidental success would free that
+# directory's zones and take every later `/etc` marker down with it); and
+# `FS_TRUNC` on inode 0 (-> EINVAL).
 [diag vfs] fs.deny ok n=14
 
 # ---------------------------------------------------------------------------
