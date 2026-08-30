@@ -264,17 +264,21 @@ feeds the LCOV report to SonarQube Cloud (org `minixrs`, project `minixrs_minixr
   lands before *or* after `Signed-off-by:` depending on timing — both orderings are in the history
   and neither is wrong. Verify with `git log -1 --format='%(trailers:key=Signed-off-by)'` before
   pushing, especially after a `git commit --amend` that omitted `-s`
-- PRs land by **rebase merge** by default (regular merge only where rebasing is wrong for the
-  series; never squash). Rebase replays each commit under a new SHA, keeping the message — so the
-  `Signed-off-by:` trailer survives and every commit reaching `main` is an authored, signed-off
-  one. The original **GPG signature cannot survive** (it covers the old commit object); what signs
-  the replayed commit depends on where the rebase happens — a local `git rebase` + push re-signs
-  with your key (`commit.gpgsign`), while GitHub's own rebase-merge button signs with its web-flow
-  key or not at all. This repo's existing merge commits carry Kevin's key, i.e. they were made
-  locally rather than through the button; keep it that way and the signing story does not change
-- Where a regular merge is used, its merge commit has **no** sign-off; that is expected and not
-  worth fixing, and `tools/check-dco.sh` skips merge commits for exactly that reason. Only
-  authored commits need one
+- PRs land by **regular merge commit** (never squash; rebase merge only for a solo series where a
+  linear history is specifically wanted). A merge preserves every commit object byte-for-byte, so
+  both the `Signed-off-by:` trailer **and** the author's GPG signature reach `main` intact — the
+  signature being the half a rebase cannot carry, since replayed commits are new objects re-signed
+  by whoever ran the rebase (your key locally, GitHub's web-flow key through the button). On a
+  public repo expecting outside contributions that is a false attestation rather than a cosmetic
+  loss, which is why the earlier rebase-by-default rule was reversed on 2026-08-30. Merging through
+  **GitHub's merge button is fine** here precisely because it touches only the merge commit and
+  never rewrites the authored commits beneath it — so there is no reason to push to `main` locally
+- History note: PRs up to **#48** landed as merge commits, **#49–#53** under the brief
+  rebase-by-default rule (2026-07-28 `1132e62` … 2026-08-30), and everything after as merge commits
+  again. So `main` reads as merge bubbles, then one linear run, then merge bubbles again — three
+  deliberate stretches rather than a broken history
+- A merge commit has **no** sign-off; that is expected and not worth fixing, and
+  `tools/check-dco.sh` skips merge commits for exactly that reason. Only authored commits need one
 - This is **enforced, not just documented**: the blocking `dco` CI gate runs `tools/check-dco.sh`
   over every non-merge commit a PR adds. Run it locally before pushing — bare `tools/check-dco.sh`
   defaults to `<merge-base with origin/main>..HEAD`. It matches the sign-off's **email** against the
