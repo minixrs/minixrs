@@ -1,0 +1,15 @@
+<task-notification>
+<task-id>b764xury5</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/76546612-6807-4160-80ee-2f57c79353aa/tasks/b764xury5.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for CI to finish and report" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+Where are we documenting rebase over merge commit?  I think my original reasoning for this may not be the best as it requires a local push to main.  This would also remove the signature of another contributor which is less desirable as well.
+
+---
+
+Yes do both
