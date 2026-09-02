@@ -56,8 +56,3 @@ minixrs-kernel-shared = { path = "../kernel-shared" }
 # whenever a build-dependency changes — so neither this crate nor `fs/mfs` needs a
 # `rerun-if-changed` entry.
 minixrs-mkfs-mfs = { path = "../tools/mkfs-mfs" }
-# Slice 5.10b: `build_rootfs` names `MFS_BLOCK_SIZE` directly (the block size a
-# hole is measured in), rather than duplicating the literal or reaching for
-# `kernel-shared`'s `BDEV_BLOCK_SIZE` twin -- `fs/mfs`'s own `lib.rs` const-
-# asserts the two equal, so this is the more direct of the two names to use here.
-minixrs-mfs = { path = "../fs/mfs" }

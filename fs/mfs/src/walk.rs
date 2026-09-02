@@ -404,8 +404,9 @@ mod tests {
 
     #[test]
     fn a_one_block_directory_is_one_round() {
-        // The only shape any image `mkfs-mfs` builds actually has: one block, and
-        // then the scan is over.
+        // The shape every directory `mkfs-mfs` builds starts in: one block, and
+        // then the scan is over. `/full` leaves it at runtime; see the multi-block
+        // test below.
         assert_eq!(next_dir_chunk(0, 128, BS), Some(128));
         assert_eq!(next_dir_chunk(128, 128, BS), None);
         // An empty directory is no rounds at all.
@@ -414,11 +415,12 @@ mod tests {
 
     #[test]
     fn driving_next_dir_chunk_over_a_three_block_directory_converges_on_the_size() {
-        // The arm no image reaches — `mkfs-mfs` never builds a directory past one
-        // block — so this is the only thing that will ever run it. Each round is a
-        // whole block and the third lands exactly on `size`, which is the case a
-        // `<=`/`<` slip in the termination test would turn into a fourth round
-        // scanning bytes that are not there.
+        // A boot reaches the second iteration as of slice 5.10b — `/full` grows to
+        // a second block at runtime and the `fs.dirgrow` probe walks it — but not
+        // the third, and not this exact-landing case. Each round is a whole block
+        // and the third lands exactly on `size`, which is what a `<=`/`<` slip in
+        // the termination test would turn into a fourth round scanning bytes that
+        // are not there.
         let size = BS * 3;
         let mut off = 0usize;
         let mut rounds = 0;

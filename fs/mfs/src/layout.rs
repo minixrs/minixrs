@@ -113,12 +113,19 @@ pub fn imap_bit(ino: u32) -> u32 {
 /// is *not* a data zone and is always marked in use. `None` for a zone below that
 /// base — such a zone is metadata and has no bitmap bit at all.
 pub fn zmap_bit(zone: u32, first_data_zone: u32) -> Option<u32> {
-    // `first_data_zone - 1` cannot underflow: every caller's `Mount.layout` is
-    // *derived* by `layout()` above, never decoded from an on-disk superblock,
-    // and `layout()` computes `first_data_zone = inode_start + inode_blocks >=
-    // START_BLOCK = 2`. `Superblock::validate` does not itself check this — the
-    // guarantee lives in `layout()`'s construction, not in a runtime bound here.
-    zone.checked_sub(first_data_zone - 1)
+    // Both subtractions are checked, and the base one is not decoration: this
+    // crate ships with `overflow-checks = false`, where `first_data_zone - 1`
+    // wraps to `u32::MAX` in the server and panics under `cargo test` — the
+    // two-profile divergence the workspace rule exists to eliminate. `free_zone`
+    // is a caller as of slice 5.10b, and a wrapped base there would clear a
+    // bitmap bit chosen at random.
+    //
+    // It is unreachable today — every caller's `Mount.layout` is *derived* by
+    // `layout()` above, never decoded from an on-disk superblock, and `layout()`
+    // computes `first_data_zone = inode_start + inode_blocks >= START_BLOCK = 2`
+    // — but `Superblock::validate` does not itself check that, so the guarantee
+    // lives in one constructor rather than in the type.
+    zone.checked_sub(first_data_zone.checked_sub(1)?)
 }
 
 #[cfg(test)]

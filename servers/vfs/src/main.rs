@@ -138,7 +138,7 @@ use minixrs_kernel_shared::error::{
 };
 use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE, GRANT_INVALID};
 use minixrs_kernel_shared::rootfs::{
-    ROOTFS_DENY_PATH, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
+    ROOTFS_DENY_DIR, ROOTFS_DENY_PATH, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
 };
 use minixrs_server_rt::{
     GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, sef_publish_to_ds, sef_retrieve_from_ds,
@@ -558,9 +558,11 @@ fn mount_root(mount: &mut Option<Mount>, mfs: Endpoint) {
 ///    and there is no payload field for it.
 /// 5. MFS resolves the path — a hit optionally through [`open::classify`], a miss
 ///    with `O_CREAT` through [`fs_create`] instead — and the mode becomes either a
-///    descriptor entry or an errno. `O_TRUNC` on an existing hit then runs
-///    [`fs_trunc`] before the descriptor is installed.
+///    descriptor entry or an errno.
 /// 6. The entry lands at the caller's lowest free descriptor.
+/// 7. `O_TRUNC` on an existing hit runs [`fs_trunc`] **last**, with the descriptor
+///    already allocated and handed back if it fails. An `EMFILE` must not come
+///    back with the file already emptied.
 ///
 /// The path buffer is a **local**, not a static: it is 64 bytes, it is written
 /// into by the kernel's copy, and it must not be shared between requests.
@@ -618,29 +620,43 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
         Err(e) => return e,
     };
 
+    // **The descriptor is allocated before `FS_TRUNC` runs.** A full table is
+    // `EMFILE`, and a caller that hears its `open` failed has no reason to
+    // believe anything changed — so emptying the file first and *then* refusing
+    // the descriptor would destroy its contents behind a failure. Linux orders it
+    // this way for the same reason.
+    let proc_nr = endpoint_proc(caller_e).get();
+    let fd = match entry {
+        // `classify` decides the *kind* of descriptor; the inode is filled in
+        // here, because this is the layer that knows it.
+        Fd::File { .. } => match fd::alloc(proc_nr, Fd::File { ino, pos: 0 }) {
+            Ok(fd) => fd,
+            Err(e) => return e,
+        },
+        // No other variant is reachable — `classify` returns only `File` or an
+        // error — but routing it explicitly means a future device-node arm is a
+        // compile error to handle rather than a silent `EINVAL`.
+        _ => return EINVAL,
+    };
+
     // `O_CREAT | O_TRUNC` on a missing file takes the create arm and stops there:
     // a freshly created file is already empty, so truncating it would be a second
-    // round trip to reach the state it is in. And the truncate happens **before**
-    // the descriptor exists, so a failure leaves no descriptor onto a
-    // half-truncated file.
+    // round trip to reach the state it is in.
+    //
+    // The converse of the ordering above still holds: a truncate that fails hands
+    // the descriptor back before returning, so the caller is never left holding
+    // one onto a half-truncated file. `close` cannot fail on a descriptor
+    // allocated three lines up, and its errno would say nothing about why the
+    // open did.
     if flags.truncate && !created {
         let rc = fs_trunc(mfs, ino as i32);
         if rc != OK {
+            let _ = fd::close(proc_nr, fd);
             return rc;
         }
     }
 
-    match entry {
-        // `classify` decides the *kind* of descriptor; the inode is filled in
-        // here, because this is the layer that knows it.
-        Fd::File { .. } => {
-            fd::alloc(endpoint_proc(caller_e).get(), Fd::File { ino, pos: 0 }).unwrap_or_else(|e| e)
-        }
-        // No other variant is reachable — `classify` returns only `File` or an
-        // error — but routing it explicitly means a future device-node arm is a
-        // compile error to handle rather than a silent `EINVAL`.
-        _ => EINVAL,
-    }
+    fd
 }
 
 /// Serve one `VFS_READ`. Returns the reply `m_type`: bytes read (`>= 0`, `0` is
@@ -1223,8 +1239,8 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
     // `EEXIST` would insert a second entry shadowing the first, silently, with
     // every other marker still green; re-resolving the name and comparing the
     // inode number is what makes the refusal mean "nothing changed" rather than
-    // merely "an error came back". `/etc/deny` exists for this and is read by
-    // nothing else.
+    // merely "an error came back". `ROOTFS_DENY_PATH` exists for this and is read
+    // by nothing else.
     match (
         fs_lookup(mfs, ROOTFS_DENY_PATH.as_bytes()),
         fs_create(mfs, ROOTFS_DENY_PATH.as_bytes()),
@@ -1247,19 +1263,22 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
         )),
     }
 
-    // `FS_TRUNC` on a directory, aimed at `/etc`. An accidental success frees
-    // that directory's zones and every later `/etc` marker dies — destructive,
-    // but *loud*, which is the property this convention asks for. And `EINVAL`
-    // for inode 0, which does not exist.
-    let etc = fs_lookup(mfs, b"/etc").map(|(ino, _, _)| ino as i32);
+    // `FS_TRUNC` on a directory, aimed at `ROOTFS_DENY_DIR`. It has to be a real
+    // directory — that is the guard under test — but not a load-bearing one: an
+    // accidental success frees the zones of a directory whose only occupant is
+    // `ROOTFS_DENY_PATH`, the probe above's own target, so the blast radius is
+    // this battery and nothing else. Aimed at `/etc` it would take five proofs
+    // down at once and the log would not say which guard broke. And `EINVAL` for
+    // inode 0, which does not exist.
+    let dir = fs_lookup(mfs, ROOTFS_DENY_DIR.as_bytes()).map(|(ino, _, _)| ino as i32);
     // A plain early `return` here (the shape the setup-lookup failure above
     // uses) would skip the revoke loop below and leak `good`/`not_mine`/
     // `read_only` — those three grants already exist by this point, unlike the
     // earlier setup steps that return before any grant is created. So this one
     // falls through instead.
-    match etc {
-        Ok(etc) => {
-            for (name, ino, want) in [("trunc-dir", etc, EISDIR), ("trunc-ino0", 0, EINVAL)] {
+    match dir {
+        Ok(dir) => {
+            for (name, ino, want) in [("trunc-dir", dir, EISDIR), ("trunc-ino0", 0, EINVAL)] {
                 let rc = fs_trunc(mfs, ino);
                 if rc == want {
                     denied += 1;
@@ -1268,7 +1287,7 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
                 }
             }
         }
-        Err(_) => diag_fmt(format_args!("fs.deny FAIL setup etc")),
+        Err(_) => diag_fmt(format_args!("fs.deny FAIL setup deny-dir")),
     }
 
     if denied == FS_DENIAL_PROBES {
@@ -1283,11 +1302,12 @@ fn fs_denials(grants: &mut GrantPool<GRANT_SLOTS>, mfs: Endpoint, mount: Option<
 /// without counting it is a marker that vanishes rather than one that silently
 /// under-reports.
 ///
-///   - `create-exists` — `FS_CREATE` on `/etc/deny`, which already exists.
+///   - `create-exists` — `FS_CREATE` on [`ROOTFS_DENY_PATH`], which already exists.
 ///     `EEXIST`, and the file's inode is unchanged afterwards.
 ///   - `create-not-dir` — `FS_CREATE` naming `/etc/motd/x`, a file as an
 ///     intermediate component. `ENOTDIR`.
-///   - `trunc-dir` — `FS_TRUNC` aimed at `/etc`, a directory. `EISDIR`.
+///   - `trunc-dir` — `FS_TRUNC` aimed at [`ROOTFS_DENY_DIR`], a directory.
+///     `EISDIR`.
 ///   - `trunc-ino0` — `FS_TRUNC` aimed at inode 0, which does not exist.
 ///     `EINVAL`.
 const FS_DENIAL_PROBES: usize = 14;

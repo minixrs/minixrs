@@ -209,6 +209,17 @@ pub const ROOTFS_HOLEY_PATH: &str = "/etc/holey";
 /// Length of [`ROOTFS_HOLEY_PATH`]: two blocks, the first of them a hole.
 pub const ROOTFS_HOLEY_LEN: usize = 2 * BDEV_BLOCK_SIZE;
 
+/// Leading bytes of [`ROOTFS_HOLEY_PATH`] the image leaves **unallocated**.
+///
+/// Exactly one filesystem block, which is what makes init's write at position 0
+/// assign `zone[0]` and touch nothing else. It is named here rather than reached
+/// for as `minixrs_mfs::MFS_BLOCK_SIZE` so that the file's length and the shape
+/// of its hole are defined together, in the one place that owns everything else
+/// about this file — and so `kernel/build.rs` needs no direct dependency on
+/// `fs/mfs` to describe it. `fs/mfs`'s own `lib.rs` const-asserts
+/// `MFS_BLOCK_SIZE == BDEV_BLOCK_SIZE`, so the two names cannot drift.
+pub const ROOTFS_HOLEY_HOLE: usize = BDEV_BLOCK_SIZE;
+
 /// Byte `i` of [`ROOTFS_HOLEY_PATH`]'s **shipped** contents.
 ///
 /// Zero throughout the hole — which is what a hole reads as, so the image is
@@ -226,6 +237,21 @@ pub const fn rootfs_holey_byte(i: usize) -> u8 {
 /// What init writes at position 0 of [`ROOTFS_HOLEY_PATH`], filling the hole.
 pub const ROOTFS_HOLEY_TEXT: &[u8] = b"minix.rs holey: filled at zero\n";
 
+/// The directory the **destructive** denial probes aim at.
+///
+/// It holds [`ROOTFS_DENY_PATH`] and nothing else, which is its entire purpose.
+/// `FS_TRUNC` on a directory must be refused, and the only way to probe that
+/// refusal is to aim a real truncate at a real directory — so it is aimed here,
+/// where an accidental success frees the zones of a directory whose sole
+/// occupant is the other denial probe's target. Aimed at `/etc` (which is what
+/// slice 5.10b first did) the same accident would take `/etc/motd`,
+/// `/etc/pattern`, `/etc/scratch`, `/etc/holey` and this file with it, and the
+/// boot log would say nothing about *which* guard had regressed.
+///
+/// The rule it exists to satisfy: never aim a "must be refused" probe at
+/// something whose accidental write would destroy a proof other than its own.
+pub const ROOTFS_DENY_DIR: &str = "/deny";
+
 /// A file the image ships **empty**, as the `EEXIST` probe's target.
 ///
 /// Read by nothing else, so a probe that accidentally *succeeded* in creating a
@@ -233,7 +259,10 @@ pub const ROOTFS_HOLEY_TEXT: &[u8] = b"minix.rs holey: filled at zero\n";
 /// because the probe re-resolves the name afterwards and compares inode numbers:
 /// a dropped `EEXIST` would insert a duplicate entry shadowing the first,
 /// silently, with every other marker still green.
-pub const ROOTFS_DENY_PATH: &str = "/etc/deny";
+///
+/// It lives in [`ROOTFS_DENY_DIR`] rather than in `/etc` so that the truncate
+/// probe next to it has the same containment.
+pub const ROOTFS_DENY_PATH: &str = "/deny/file";
 
 /// A directory whose single block is **exactly full**, so that the first create
 /// in it must allocate a second directory zone.
@@ -295,7 +324,7 @@ pub const ROOTFS_RUNTIME_INODES: usize = 3;
 const _: () = assert!(2 + ROOTFS_FULL_ENTRIES == BDEV_BLOCK_SIZE / ROOTFS_DIRENT_SIZE);
 
 // The sparse file's hole is exactly its first block, and its tail is real.
-const _: () = assert!(ROOTFS_HOLEY_LEN == 2 * BDEV_BLOCK_SIZE);
+const _: () = assert!(ROOTFS_HOLEY_LEN == 2 * ROOTFS_HOLEY_HOLE);
 // ...and what init writes into the hole fits inside it, so the write assigns
 // `zone[0]` and touches nothing else.
 const _: () = assert!(!ROOTFS_HOLEY_TEXT.is_empty());
@@ -307,8 +336,14 @@ const _: () = assert!(ROOTFS_CREATE_TEXT.len() <= BDEV_BLOCK_SIZE);
 const _: () = assert!(ROOTFS_DIRGROW_TEXT.len() <= BDEV_BLOCK_SIZE);
 const _: () = assert!(ROOTFS_LEAK_TEXT.len() <= BDEV_BLOCK_SIZE);
 
-// The leak probe must out-number any free-zone count the image can have.
-const _: () = assert!(ROOTFS_LEAK_PROBES >= ROOTFS_IMAGE_BLOCKS as usize);
+// The leak probe must out-number the image's free-zone count, or a pre-fix build
+// would finish the battery with zones to spare and the probe would prove nothing.
+// **That cannot be asserted here**: nothing in this file knows how many zones the
+// image leaves free — it depends on `/bin/hello`, whose size is a property of the
+// toolchain flavour. `kernel/build.rs` checks it against the bytes it just built,
+// beside the two headroom asserts. An `assert!(ROOTFS_LEAK_PROBES >=
+// ROOTFS_IMAGE_BLOCKS)` here would restate the definition above and hold whether
+// the image left 1 free zone or 250.
 
 // Necessary conditions only — the sufficient checks are `kernel/build.rs`'s,
 // against the bytes it just built.

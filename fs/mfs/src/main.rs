@@ -93,7 +93,8 @@ use minixrs_kernel_shared::rootfs::{
 use minixrs_mfs::MFS_BLOCK_SIZE;
 use minixrs_mfs::dirent::{DIRENT_SIZE, DirEntry};
 use minixrs_mfs::inode::{
-    I_REGULAR, INODE_SIZE, Inode, NR_DIRECT_ZONES, NR_TZONES, ROOT_INODE, SINGLE_INDIRECT_SLOT,
+    DOUBLE_INDIRECT_SLOT, I_REGULAR, INODE_SIZE, Inode, NR_DIRECT_ZONES, NR_TZONES, ROOT_INODE,
+    SINGLE_INDIRECT_SLOT,
 };
 use minixrs_mfs::layout::{Layout, layout, zmap_bit};
 use minixrs_mfs::read::{
@@ -169,7 +170,20 @@ static STAGE: StageBuf = StageBuf(UnsafeCell::new([0u8; MFS_BLOCK_SIZE]));
 ///
 /// A grant is not needed: MFS is the *grantee* of this copy, so the destination
 /// is an ordinary address in its own address space.
-struct Stage;
+///
+/// **The private field is load-bearing**, exactly as [`Blocks`]'s two are. A unit
+/// struct would make `let mut s2 = Stage;` a second, independent `&mut` path to
+/// [`STAGE`] — one word, no arguments, no diagnostic — and a live `&[u8]` from
+/// the first would then alias a buffer the kernel writes into. With the field,
+/// that slip is a compile error and the only way in is [`stage`].
+struct Stage(());
+
+/// Take the one [`Stage`] token. Called exactly once, from [`main`] — the
+/// no-argument twin of [`device`].
+#[cfg_attr(test, allow(dead_code))]
+fn stage() -> Stage {
+    Stage(())
+}
 
 impl Stage {
     /// Copy `len` bytes out of the client's grant into the staging buffer, and
@@ -376,7 +390,7 @@ fn main() -> ! {
     // the rule `server-rt` keeps `GrantPool` a value rather than a static for.
     let mut grants: GrantPool<GRANT_SLOTS> = GrantPool::new();
     let mut blocks = device(&mut grants, mem_endpoint());
-    let mut stage = Stage;
+    let mut stage = stage();
     let mut mount = mount_root(&mut blocks);
 
     if let Some(m) = mount {
@@ -802,6 +816,18 @@ fn do_trunc(msg: &Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
         return EINVAL;
     }
 
+    // `free_zones_of` reclaims the 7 direct slots and the single-indirect chain
+    // — the whole of what this filesystem can *write*. Slots 8 and 9 (double and
+    // triple indirect) are decoded off the device by `Inode::from_le_bytes` all
+    // the same, and zeroing the array below would drop such a pointer while its
+    // bitmap bit stayed set: a zone nothing can ever reclaim, reported as
+    // success. `EIO`, the answer every other unreachable state in this module
+    // gives, so the day a double-indirect writer exists this is a loud errno
+    // rather than a silent leak.
+    if node.zone[DOUBLE_INDIRECT_SLOT..].iter().any(|&z| z != 0) {
+        return EIO;
+    }
+
     // Everything the free below needs, captured as `Copy` scalars: nothing is
     // held across a block fetch.
     let zones = node.zone;
@@ -838,20 +864,21 @@ fn do_trunc(msg: &Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
 /// because nothing a client can send fails a call in between. Correct, and
 /// unproven by anything this branch runs.
 ///
-/// **`create` does not get [`do_write`]'s "no client-controlled failure after
-/// an allocation" invariant.** `alloc_inode` and `write_inode` both precede
-/// `insert_entry`, and inside `insert_entry` both `place_zone` and
-/// `write::dir_append_offset` can still answer `ENOSPC` — e.g. the directory's
-/// own growth needs a zone that is not there. Each such failure leaks the one
-/// inode `alloc_inode` already claimed; freeing it back would instead risk the
-/// corruption the ordering above exists to avoid, so this is the same
-/// leak-over-corruption trade, just reached one step later than `do_trunc`'s.
-/// The image holds 128 inodes, so roughly that many repetitions against an
-/// already-full filesystem exhaust the inode table — after which no file can
-/// ever be created again, where freeing zones would otherwise have let the
-/// filesystem recover. That prerequisite (an already-full image) makes this
-/// far weaker than the denial of service slice 5.10a's write path fixed, so it
-/// is deliberately left unaddressed here rather than folded into this slice.
+/// **`create` gets [`do_write`]'s "no client-controlled failure after an
+/// allocation" invariant too, and [`reserve_slot`] is what buys it.** The
+/// directory's slot — including the zone its growth may need, which is the only
+/// `ENOSPC` a client can provoke here — is placed *before* `alloc_inode` claims
+/// anything. A reservation that fails has allocated nothing, so the caller hears
+/// a clean `ENOSPC`; one that succeeds leaves the directory one legitimately
+/// grown block larger, which is not a leak at all because the parent inode names
+/// that zone. After `alloc_inode` the only remaining failure is `EIO` from the
+/// device — plus a [`DirEntry::new`] that `split_basename` has already made
+/// unreachable.
+///
+/// Without that ordering this path would be the 5.10a denial of service one step
+/// later: each `ENOSPC` from directory growth burns one of the image's 128
+/// inodes for good, and — unlike a leaked zone, which `do_trunc` can hand back —
+/// no amount of truncating recovers an orphaned inode.
 #[cfg_attr(test, allow(dead_code))]
 fn create(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode), i32> {
     let (parent_path, name) = walk::split_basename(path)?;
@@ -861,6 +888,11 @@ fn create(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode)
     }
 
     let free = find_free_slot(blocks, mount, &parent, name)?;
+
+    // Everything that can allocate, and everything a client can make fail, runs
+    // here — before `alloc_inode` claims an inode that a later failure could
+    // orphan.
+    let slot = reserve_slot(blocks, mount, parent_ino, parent, free)?;
 
     let ino = alloc_inode(blocks, mount)?;
     let node = Inode {
@@ -876,9 +908,10 @@ fn create(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode)
     // `DirEntry::new` rejects an empty name, one past the field, and one holding
     // a NUL or a `/` — the last of which is what keeps a component from being
     // able to *contain* a path. `split_basename` has already refused all four, so
-    // this is defence in depth rather than the gate.
+    // this is defence in depth rather than the gate, and that is what lets it sit
+    // after `alloc_inode` without weakening the invariant above: it cannot fail.
     let entry = DirEntry::new(ino, name.as_bytes()).ok_or(EINVAL)?;
-    insert_entry(blocks, mount, parent_ino, parent, free, &entry)?;
+    store_entry(blocks, slot, &entry)?;
     Ok((ino, node))
 }
 
@@ -920,25 +953,45 @@ fn find_free_slot(
     Ok(free)
 }
 
-/// Write `entry` into `parent`, in a free slot or appended at the end.
+/// Where a directory entry is about to be written: a zone, and a byte offset
+/// inside it.
 ///
-/// **The append path allocates through [`place_zone`]** — a directory grows
-/// through exactly the allocator a file does, which is why growth needs no second
-/// code path and why its bitmap ordering is the one already proved. `/full` in the
-/// boot image exists so that one create at boot takes this path.
-///
-/// The directory block is always read before it is spliced: one 64-byte entry is
-/// written into it, so it is never covered whole — the case `do_write`'s
-/// full-block skip exists for cannot arise here.
+/// `Copy` scalars only, and deliberately so. It is handed across `alloc_inode`
+/// and `write_inode`, each of which replaces the block buffer — so a slot that
+/// borrowed from [`Blocks`] would be a borrow-check error, which is the whole
+/// point of that capability.
+#[derive(Clone, Copy)]
 #[cfg_attr(test, allow(dead_code))]
-fn insert_entry(
+struct DirSlot {
+    zone: u32,
+    off_in_block: usize,
+}
+
+/// Reserve a slot in `parent` for one entry, growing the directory if it has to.
+///
+/// **This is the whole of [`create`]'s allocation risk, hoisted ahead of the
+/// inode.** The append path allocates through [`place_zone`] — a directory grows
+/// through exactly the allocator a file does, which is why growth needs no second
+/// code path and why its bitmap ordering is the one already proved — and
+/// [`write::dir_append_offset`] is the other call here that can refuse. Running
+/// both before `alloc_inode` is what makes a full filesystem answer a clean
+/// `ENOSPC` instead of orphaning an inode per attempt. `/full` in the boot image
+/// exists so that one create at boot takes this path.
+///
+/// **The parent inode reaches the device before the entry does**, which is the
+/// reverse of the pre-5.10b order and is what makes a failure in between benign:
+/// [`alloc_zone`] zeroes the zone it hands out, so the reserved slot reads back
+/// as a free one. The directory is a block larger and holds one more empty slot —
+/// which the next create reuses — rather than holding an entry the recorded size
+/// does not cover.
+#[cfg_attr(test, allow(dead_code))]
+fn reserve_slot(
     blocks: &mut Blocks,
     mount: &Mount,
     parent_ino: u32,
     mut parent: Inode,
     free: Option<(u64, usize)>,
-    entry: &DirEntry,
-) -> Result<(), i32> {
+) -> Result<DirSlot, i32> {
     let (pos, off_in_block) = match free {
         // A free slot: `pos` names its block, and the index gives the offset
         // inside it.
@@ -952,12 +1005,6 @@ fn insert_entry(
     };
 
     let (zone, mut dirty) = place_zone(blocks, mount, &mut parent, pos)?;
-    blocks.read(u64::from(zone))?;
-    let buf = blocks.buf_mut();
-    let end = off_in_block.checked_add(DIRENT_SIZE).ok_or(EIO)?;
-    let cell = buf.get_mut(off_in_block..end).ok_or(EIO)?;
-    cell.copy_from_slice(&entry.to_le_bytes());
-    blocks.write(u64::from(zone))?;
 
     if free.is_none() {
         let grown = write::grow_size(parent.size, pos, DIRENT_SIZE)?;
@@ -971,7 +1018,26 @@ fn insert_entry(
     if dirty {
         write_inode(blocks, mount, parent_ino, &parent)?;
     }
-    Ok(())
+    Ok(DirSlot { zone, off_in_block })
+}
+
+/// Splice `entry` into the slot [`reserve_slot`] set aside.
+///
+/// The directory block is always read before it is spliced: one 64-byte entry is
+/// written into it, so it is never covered whole — the case `do_write`'s
+/// full-block skip exists for cannot arise here.
+///
+/// Nothing is allocated and nothing a client controls can fail: the only errors
+/// are `EIO` from the device, and the bounds checks that turn a future
+/// slot-arithmetic bug into an errno rather than a write into the wrong bytes.
+#[cfg_attr(test, allow(dead_code))]
+fn store_entry(blocks: &mut Blocks, slot: DirSlot, entry: &DirEntry) -> Result<(), i32> {
+    blocks.read(u64::from(slot.zone))?;
+    let buf = blocks.buf_mut();
+    let end = slot.off_in_block.checked_add(DIRENT_SIZE).ok_or(EIO)?;
+    let cell = buf.get_mut(slot.off_in_block..end).ok_or(EIO)?;
+    cell.copy_from_slice(&entry.to_le_bytes());
+    blocks.write(u64::from(slot.zone))
 }
 
 /// Resolve the zone backing byte `pos` of `node`, allocating it — and any
@@ -1061,9 +1127,10 @@ fn place_zone(
 ///
 /// **The bit is set before the zone is used**, so a failure part-way leaks a zone
 /// rather than handing the same one out twice. A leak is recoverable by a future
-/// `fsck`; a shared zone is silent corruption. See [`do_write`] for why that leak
-/// is a *reachable* denial of service rather than a benign one, and for the case
-/// in which clearing the bit again would be the corruption this avoids.
+/// `fsck`; a shared zone is silent corruption. See [`do_write`] for the case in
+/// which clearing the bit again would be exactly that corruption — and for the
+/// staging discipline that keeps the leak *unreachable* rather than merely
+/// preferable, which [`reserve_slot`] is the create path's half of.
 ///
 /// The scan is bounded by `layout.zmap_blocks` — every device-derived loop has a
 /// cap, because a corrupt superblock must not spin this server and, through it,
@@ -1183,11 +1250,29 @@ fn alloc_inode(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
 /// mark part of the filesystem's own bookkeeping available for a file to be
 /// allocated over.
 ///
+/// **And the device's last zone is refused, which `write_zone_ok` permits.**
+/// `mkfs-mfs` writes the image's tail label there ([`ROOTFS_TAIL_BLOCK`]) and
+/// reserves it by marking its bitmap bit in use; `verify.rs` counts free zones
+/// over `[first_data_zone, ROOTFS_TAIL_BLOCK)` for the same reason. Nothing but
+/// this function can ever clear that bit, so refusing here is what makes the
+/// reservation structural rather than merely initial — without it an inode
+/// naming that zone would hand it back to [`alloc_zone`], whose own limit is
+/// `mount.blocks`, and the first write through it would overwrite the label
+/// [`tail_probe`] and the `memory` driver's init check both exist to verify.
+///
 /// The scan bound is the same one [`alloc_zone`] uses, from the other end: the
 /// bit's own block index must lie inside `layout.zmap_blocks`.
 #[cfg_attr(test, allow(dead_code))]
 fn free_zone(blocks: &mut Blocks, mount: &Mount, zone: u32) -> Result<(), i32> {
     if !write::write_zone_ok(zone, mount.layout.first_data_zone, mount.blocks) {
+        return Err(EIO);
+    }
+    // Spelled against the mounted device rather than as the constant, so a
+    // differently sized image reserves *its* tail rather than block 255. For the
+    // root filesystem `mount.blocks` is `ROOTFS_IMAGE_BLOCKS`, so the zone
+    // refused here is exactly the `ROOTFS_TAIL_BLOCK` that `tail_probe` reads —
+    // that equality is a property of the image, not something checked here.
+    if zone >= mount.blocks.saturating_sub(1) {
         return Err(EIO);
     }
     let bit = zmap_bit(zone, mount.layout.first_data_zone).ok_or(EIO)?;
@@ -1261,10 +1346,13 @@ fn free_zones_of(
 /// The read-modify-write half of [`read_inode`]: the inode is 64 bytes inside a
 /// 4 KiB block, so the block has to be fetched before the slot can be patched.
 ///
-/// No `zone_ok` check on the block, unlike [`read_inode`]: every caller has
-/// already read this same inode through that function, so the block it names was
-/// checked there — and if it were not, the driver's own range check makes the
-/// fetch below `EIO` rather than a write to a block outside the device.
+/// No `zone_ok` check on the block, unlike [`read_inode`], and the reason is
+/// **not** that every caller has already read the inode: [`create`] writes one
+/// straight out of [`alloc_inode`], which no [`read_inode`] ever touched. What
+/// bounds the write is [`inode_location`], which answers `None` — hence `EINVAL`
+/// — for any `ino` outside the table, and [`alloc_inode`]'s own `ino > ninodes`
+/// refusal upstream of it. Below that, the driver's range check makes the fetch
+/// `EIO` rather than a write to a block outside the device.
 #[cfg_attr(test, allow(dead_code))]
 fn write_inode(blocks: &mut Blocks, mount: &Mount, ino: u32, node: &Inode) -> Result<(), i32> {
     let (block, slot) = inode_location(ino, &mount.layout, mount.block_size).ok_or(EINVAL)?;

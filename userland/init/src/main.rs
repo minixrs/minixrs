@@ -913,6 +913,27 @@ fn create_write_verify(
     Ok(())
 }
 
+/// [`report_at`]'s sibling for a step that failed with an errno rather than at an
+/// offset.
+///
+/// The two must stay distinguishable in the log. Folding a negative result into
+/// `report_at` with `n.max(0)` prints `off=0` for `EIO`, `EBADF` and `EINVAL`
+/// alike — one line for three different bugs, in the same shape a report of a
+/// real byte offset takes. The magnitude is printed after a literal `-` because
+/// init cannot format a signed integer.
+#[cfg_attr(test, allow(dead_code))]
+fn report_rc(vfs: Endpoint, marker: &[u8], what: &[u8], rc: i32) {
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: ");
+    n = append(&mut line, n, marker);
+    n = append(&mut line, n, b" FAIL ");
+    n = append(&mut line, n, what);
+    n = append(&mut line, n, b" rc=-");
+    n = append_dec(&mut line, n, u64::from(rc.unsigned_abs()));
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
+}
+
 /// Report a failing step of a create-shaped probe by marker and step name, fd 2.
 #[cfg_attr(test, allow(dead_code))]
 fn report_step(vfs: Endpoint, marker: &[u8], what: &[u8]) {
@@ -1111,8 +1132,13 @@ fn trunc_demo(vfs: Endpoint) {
     let mut buf = [0u8; 8];
     let n = vfs_read(vfs, fd, &mut buf);
     let _ = vfs_close(vfs, fd);
+    if n < 0 {
+        // The errno, not `off=0`: what the read refused with is the whole content
+        // of this line.
+        return report_rc(vfs, b"fs.trunc", b"read", n);
+    }
     if n != 0 {
-        return report_at(vfs, b"fs.trunc", b"read", n.max(0) as usize);
+        return report_at(vfs, b"fs.trunc", b"read", n as usize);
     }
     let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.trunc ok n=0\n");
 }

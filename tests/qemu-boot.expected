@@ -486,9 +486,12 @@ minix.rs hello: iov ok match=1
 # a dropped EEXIST would silently shadow the original entry with a second one,
 # and the errno alone would not catch that; `FS_CREATE` under a parent that is a
 # FILE, not a directory (-> ENOTDIR, the same `is_dir` gate on the create path);
-# `FS_TRUNC` on a directory (-> EISDIR -- an accidental success would free that
-# directory's zones and take every later `/etc` marker down with it); and
-# `FS_TRUNC` on inode 0 (-> EINVAL).
+# `FS_TRUNC` on a directory (-> EISDIR), aimed at `/deny`, which the image ships
+# holding nothing but the EEXIST probe's own target: it has to be a real
+# directory, but an accidental success must not be able to destroy a proof other
+# than this battery's own -- aimed at `/etc` it would take five markers down at
+# once and the log would not say which guard broke; and `FS_TRUNC` on inode 0
+# (-> EINVAL).
 [diag vfs] fs.deny ok n=14
 
 # ---------------------------------------------------------------------------

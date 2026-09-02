@@ -382,9 +382,9 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
     use minixrs_kernel_shared::rootfs::{
         ROOTFS_DENY_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES, ROOTFS_HELLO_PATH,
-        ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN,
-        ROOTFS_PATTERN_PATH, ROOTFS_RUNTIME_INODES, ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_PATH,
-        rootfs_holey_byte, rootfs_pattern_byte,
+        ROOTFS_HOLEY_HOLE, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_LEAK_PROBES, ROOTFS_MOTD,
+        ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH, ROOTFS_RUNTIME_INODES,
+        ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_PATH, rootfs_holey_byte, rootfs_pattern_byte,
     };
     use minixrs_mkfs_mfs::Manifest;
 
@@ -401,7 +401,7 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
         // write at position 0 assigns a zone without moving the file's size --
         // the only way to reach the `dirty` half of MFS's write-back condition,
         // since with no `lseek` every write runs forward and extends the file.
-        .add_sparse(ROOTFS_HOLEY_PATH, holey, minixrs_mfs::MFS_BLOCK_SIZE)
+        .add_sparse(ROOTFS_HOLEY_PATH, holey, ROOTFS_HOLEY_HOLE)
         // The `EEXIST` probe's target, read by nothing else.
         .add(ROOTFS_DENY_PATH, Vec::new());
 
@@ -434,6 +434,22 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
         "the root image leaves {free} free zones, but the boot-time probes need \
          {ROOTFS_RUNTIME_ZONES} to grow at runtime. Its contents have outgrown \
          ROOTFS_IMAGE_BLOCKS -- raise that constant, or shrink what the image ships."
+    );
+
+    // The leak battery only proves anything if a *pre-fix* build would have run
+    // out of zones before it finished: each failing write leaked one, so
+    // `ROOTFS_LEAK_PROBES` of them must out-number every zone the image leaves
+    // free. Checked here for the same reason as the two headroom asserts --
+    // `kernel-shared` cannot know this number, because it depends on the size of
+    // `/bin/hello` and so on the toolchain flavour. Without it, growing the image
+    // turns the probe vacuous silently: `fs.leak ok` would print because the
+    // battery never exhausted anything, not because nothing leaked.
+    assert!(
+        free < ROOTFS_LEAK_PROBES,
+        "the root image leaves {free} free zones, but the leak battery only issues \
+         {ROOTFS_LEAK_PROBES} failing writes. A build that leaked one zone per \
+         failure would still have zones to spare, so `fs.leak ok` would prove \
+         nothing -- raise ROOTFS_LEAK_PROBES above {free}."
     );
 
     let free = minixrs_mkfs_mfs::verify::free_inodes(&img)
