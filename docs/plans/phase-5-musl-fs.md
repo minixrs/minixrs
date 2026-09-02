@@ -1496,8 +1496,10 @@ truncate. `VFS_OPEN` gained a `flags` field (`VFS_FLAGS_OFF`) honouring
 outside `O_KNOWN` is `EINVAL`, and the access-mode bits are accepted and
 ignored (no uid/gid/permission check anywhere in the tree). The image gained
 sparse-file support, 128 inodes (was 64), a `/full` directory holding exactly
-one block of entries with no free slot, and `/etc/holey`, `/etc/deny`, plus
-paths for the create/dirgrow/leak probes.
+one block of entries with no free slot, and `/etc/holey`, `/deny/file` (in its
+own `/deny` directory, so that the destructive `FS_TRUNC`-on-a-directory probe
+has nothing but its own sibling to lose), plus paths for the create/dirgrow/leak
+probes.
 
 Also closes the item 5.10a deferred into it: the **mid-write zone leak**.
 `do_write` now stages the client's bytes into a second `.bss` buffer *before*
@@ -1506,6 +1508,14 @@ allocation — a restaging, not a rollback, because clearing the bitmap bit on
 the error path would be actively wrong for an indirect slot whose indirect
 block already existed (the block on disk still names the zone, so freeing it
 there would hand one zone to two files).
+
+`create` gets the same invariant, which review of this slice found it did not
+originally have: `reserve_slot` places the directory's slot — including the zone
+its growth may need, the only `ENOSPC` a client can provoke on that path —
+before `alloc_inode` claims anything, so a full image answers a clean `ENOSPC`
+instead of orphaning one of the 128 inodes per attempt. That is the strictly
+worse half of the same defect, because `do_trunc` can hand a leaked zone back
+and nothing can recover an orphaned inode.
 
 **Two corrections to 5.10a's hand-off, found while implementing this slice:**
 

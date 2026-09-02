@@ -251,7 +251,16 @@ grant; the bytes still never pass through VFS.
 that musl's `open()` fills in. A plain lookup answering `ENOENT` is no longer the
 end of the story: `O_CREAT` on a missing name dispatches `FS_CREATE` instead, and
 `O_TRUNC` on an existing regular file dispatches `FS_TRUNC` after the lookup
-succeeds. The access-mode bits (`O_RDONLY`/`O_WRONLY`/`O_RDWR`) are accepted and
+succeeds. `O_CREAT | O_TRUNC` on a missing name takes the create arm and stops
+there — a fresh file is already empty.
+
+**The descriptor is allocated before that truncate runs, and handed back if it
+fails.** A full descriptor table is `EMFILE`, and a caller whose `open` failed
+has no reason to believe anything changed — so emptying the file first and *then*
+refusing the descriptor would destroy its contents behind a failure. Linux orders
+it the same way. The converse still holds too: a truncate that fails closes the
+descriptor before returning, so nobody is ever left holding one onto a
+half-truncated file. The access-mode bits (`O_RDONLY`/`O_WRONLY`/`O_RDWR`) are accepted and
 ignored — there is no uid, gid, or permission check anywhere in the tree, so
 honouring them would be a check with nothing behind it. A flag bit outside
 `O_KNOWN` is `EINVAL`, and that comparison is written **against `O_KNOWN`**
@@ -448,7 +457,17 @@ length field: `O_TRUNC` is the only client anywhere in the tree, and there is no
 opposite order from each other, on purpose.** `create` allocates the inode and
 writes it back *before* the directory entry names it — a failure in between
 orphans an inode (a leak, reclaimable by a future `fsck`) rather than leaving a
-directory entry pointing at an inode that was never written. `do_trunc` writes
+directory entry pointing at an inode that was never written. **And nothing
+reaches that failure**, because `create` extends `do_write`'s "no
+client-controlled failure after an allocation" rule to its own path:
+`reserve_slot` places the directory's slot — including the zone its growth may
+need, the only `ENOSPC` a client can provoke here — *before* `alloc_inode` claims
+anything. A reservation that fails has allocated nothing; one that succeeds
+leaves the directory one legitimately grown block larger, which is not a leak
+because the parent inode names that zone. Without that ordering the path would be
+the 5.10a denial of service one step later: each failure would burn one of the
+image's 128 inodes for good, and unlike a leaked zone — which `do_trunc` hands
+back — no amount of truncating recovers an orphaned inode. `do_trunc` writes
 the zeroed inode back *before* freeing the zones it used to hold — a failure in
 between merely fails to reclaim some zones, where the reverse order could leave a
 live inode still naming zones the allocator has already handed to someone else.
@@ -458,17 +477,18 @@ between the inode write-back and the zone free that nothing this slice can send
 induces — the same class of gap slice 5.10a documented for the `dirty` half of
 the write-back condition, recorded here rather than repeated by omission.
 
-**A directory grows through the same allocator a file's data does.** `insert_entry`
-tries every existing block for a free slot first — and it does not stop at the
+**A directory grows through the same allocator a file's data does.**
+`find_free_slot` tries every existing block first — and it does not stop at the
 first free slot it finds, because a name occupying a *later* block would
 otherwise get shadowed by a duplicate inserted ahead of it; `Occupied` has to win
 over `Free` across the *whole* scan, not just within one block. Only when no
-block has room does it append a new one, and it does that through `place_zone`,
-the exact function `do_write` uses for file data — so directory growth costs no
-second code path and inherits the bitmap-before-pointer ordering already proved
-for files. The image ships `/full`, a directory with `.` and `..` plus 62 empty
-files — exactly 64 entries, one block — so that a single boot-time create is
-guaranteed to take the append arm; no other probe reaches it. `/etc/holey` plays
+block has room does `reserve_slot` append one, and it does that through
+`place_zone`, the exact function `do_write` uses for file data — so directory
+growth costs no second code path and inherits the bitmap-before-pointer ordering
+already proved for files. The image ships `/full`, a directory with `.` and `..`
+plus 62 empty files — exactly 64 entries, one block — so that a single boot-time
+create is guaranteed to take the append arm; no other probe reaches it.
+`/etc/holey` plays
 the same role for the write-back condition's other half: its first block is a
 hole, so writing into it assigns a zone pointer with the file's size unchanged,
 which is the one case a size-only write-back condition would silently drop.
