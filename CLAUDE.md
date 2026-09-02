@@ -97,6 +97,12 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release -
 #   tools/check-boot-log.sh <log>   (tests/qemu-boot.expected/.forbidden;
 # update those marker files in the same PR when trace formats or the boot
 # roster change, or the qemu-smoke CI job goes red)
+#
+# It works on a **partial** log: the marker files test first occurrences only, so
+# once it reports PASS on a still-growing log the verdict is final and the boot
+# can be stopped -- the 5.10b review round got all 97 markers well inside the
+# 600 s budget. Only qemu-smoke's exit-124 assertion needs the timeout to elapse.
+# Copy the log aside before checking; the live file grows underneath the script.
 
 # (There is no `kernel-x86_64` alias: `forced-target` pins the kernel to
 # aarch64, so such an alias would silently build aarch64 instead of failing.
@@ -325,6 +331,7 @@ See `docs/architecture.md` for the full system design. Key concepts:
 - The demo stubs A–D are gated behind a **`boot-stubs` cargo feature (default-on)** — `--no-default-features` gives a clean, stub-free boot (servers + init/worker only) for debugging (chunk-3 prep). The feature lives on **two crates**, the kernel (gates `arch::aarch64::userland`'s stub code) and PM (gates `mproc::seed`'s stub loop), because those are the only two that install/seed stubs. `kernel/build.rs` reads `CARGO_FEATURE_BOOT_STUBS` to (a) drop `user_stub.S` from the assembly `sources` and (b) pass `--no-default-features` to the *nested* PM build (the nested build has its own feature resolution, so the flag must be threaded through), keeping kernel and PM in lockstep. The feature is deliberately **not** on `kernel-shared`: a shared-crate default feature gets force-enabled by other dependents (`minixrs-ipc`, `server-rt`) via cargo **feature unification**, making it impossible to turn off — so `NR_STUB_PROCS` stays a constant `4` and `FORK_POOL_BASE` (= 15) is stable; disabling stubs just leaves slots 11–14 unoccupied, it doesn't renumber the fork pool
 - User-process capacity is one shared constant (chunk-4 prep): `kernel-shared::com::NR_SERVED_PROCS` (= 32) is the exclusive proc-nr ceiling the user-space servers track, and all three per-process server tables derive their size from it — PM `mproc` (`NR_MPROCS = NR_SERVED_PROCS`, proc-nr-indexed), VM `ClientRegions` (`MAX_CLIENTS = NR_SERVED_PROCS`, proc-nr-indexed), and SCHED `policy` (`CAP = NR_SERVED_PROCS`, an *associative* count, not proc-nr-indexed, so `NR_SERVED_PROCS` over-covers the delegatable set). Never reintroduce independent capacity literals: each crate carries a `const _: () = assert!(… >= NR_SERVED_PROCS)` guard (plus `NR_SERVED_PROCS <= NR_PROCS` and `> NR_BOOT_PROCS + NR_STUB_PROCS` in com.rs) so an under-sized local edit fails at compile time. VM `MAX_REGIONS` (regions per client, heap + mmaps) is a separate knob (= 16), unrelated to the kernel frame allocator's like-named `MAX_REGIONS` in `mm/frame.rs`
 - Feature-toggle debugging: when a `--no-default-features` build doesn't actually drop a feature, suspect cargo **feature unification** — diagnose with `cargo tree -p <crate> --no-default-features -e features -i <shared-crate>` (inverted tree shows *who* still activates it) or `cargo tree -p <crate> -f "{p} {f}"` (feature set per crate)
+- Before accepting any "this adds a dependency/compile cost" claim — a review finding included — check it with `cargo tree -p minixrs-kernel -e build`, which prints the build-script graph. `minixrs-mfs` already sits there transitively under `minixrs-mkfs-mfs`, so a *direct* dep on it costs nothing to compile and that argument is never the reason to add or drop one. Decide such a dependency on **where the constant belongs** instead (5.10b's review moved `/etc/holey`'s hole size into `kernel-shared::rootfs` beside the file's length, which is the real argument; the compile-cost one was false)
 - `kernel-shared` carries **zero `unsafe`** — keep it that way (geiger measures per-package). Byte-level ABI helpers there (e.g. `GrantEntry::from_ne_bytes`) decode field-by-field, and tests tie the codec to the real layout via `offset_of!` rather than reading the struct's memory image
 - `kernel-shared` is unconditionally `no_std` (no `cfg_attr(not(test))`), but a `#[cfg(test)]` module may declare `extern crate std;` locally when fixed-size arrays are impractical — libtest links std anyway. `brand.rs`'s synthetic-ELF `Vec` tests are the precedent; `message.rs`'s older tests predate it and stick to arrays
 - `cargo test -p minixrs-kernel` does not run — the crate is bare-metal only (see above) and in-QEMU test infra is not yet built, so **there is no `#[cfg(test)]` code under `kernel/src/`**. Host-runnable logic belongs in `kernel-shared`: chunk 7 moved `user_va_ok` + `USER_VA_TOP` there (`kernel-shared/src/message.rs`) precisely because its 5 tests had never executed while the module was cfg-gated. Put new pure predicates over shared ABI types there — the crate doc carries a narrow carve-out for exactly that — and keep raw-pointer/hardware behaviour (e.g. `copy_msg_from_user`) in the kernel. QEMU is the primary verification for kernel code (`timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release` — see the Build section on why that number tracks the boot's length rather than being a constant; CI smoke-boots it in the blocking `qemu-smoke` job)
@@ -573,6 +580,15 @@ the touched crates for every `unreachable`, `nothing reaches this`, `there is no
 `until slice N` claim, and for every `assert_eq!(fields.len(), N)` or similar count-the-fields
 tripwire, and check each against what the branch actually added. **A tripwire the adding branch
 does not grow is worse than none**, because it reads as coverage.
+
+That sweep is owed by a **review-fix round** too, not just by the slice, and a rename or a
+moved path is its loudest trigger: a reviewer works finding-by-finding inside one crate, so
+the copies living in `book/`, `tests/qemu-boot.expected` and `docs/plans/` are exactly the
+ones nobody looks at. 5.10b's review named three falsified claims; grepping the old names
+across the whole tree found four more (`book/`'s `insert_entry`, two `/etc/deny` comments in
+VFS, and the expected-marker file's commentary on a probe that had been re-aimed). Run
+`grep -rn '<old name>' --include='*.rs' --include='*.md' .` before committing, every time
+something is renamed or relocated.
 
 `docs/plan.md` and the `docs/plans/*` files track slice/chunk status with three markers: `◀ next` (unstarted), `◀ ready (branch ..., pending merge)` (implemented but unmerged), `✓ shipped (PR #N, merged YYYY-MM-DD)` (merged). Flip the previous slice forward and slide `◀ next` ahead as part of each slice's PR — in **both** plan.md's summary line and the corresponding `docs/plans/` detail file. When opening a new slice PR, also reconcile any older `◀ ready` markers against `git log` — stale "pending merge" labels on already-merged PRs accumulate otherwise.
 
