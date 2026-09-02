@@ -1,0 +1,169 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "e1299618cd31",
+  "session_id": "49b24af8-20ee-4300-aeeb-c537a7cd9e9c",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-02T07:21:55.09802Z",
+  "branch": "feature/slice-5.10b-mfs-create-truncate",
+  "checkpoints_count": 3,
+  "save_step_count": 2,
+  "files_touched": [
+    "Cargo.lock",
+    "fs/mfs/src/layout.rs",
+    "fs/mfs/src/main.rs",
+    "fs/mfs/src/walk.rs",
+    "kernel-shared/src/rootfs.rs",
+    "kernel/Cargo.toml",
+    "kernel/build.rs",
+    "servers/vfs/src/main.rs",
+    "tests/qemu-boot.expected",
+    "userland/init/src/main.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "e894601a0ab8",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 226,
+    "cache_creation_tokens": 819430,
+    "cache_read_tokens": 20679856,
+    "output_tokens": 86950,
+    "api_call_count": 113
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-review-2026-08-30T16:40:23.225752Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "f613b8d6a607",
+      "timestamp": "2026-08-30T16:40:23.225752Z",
+      "native": {
+        "command": "/review"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01AKXFNw4gwSvnntvshN3N6V",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:receiving-code-review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "e894601a0ab8",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 61,
+        "end": 62,
+        "entry_ids": [
+          "0ff6ec64-928a-4a91-a1c2-3fda6a9e9cd6"
+        ],
+        "tool_use_id": "toolu_01AKXFNw4gwSvnntvshN3N6V"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01AKXFNw4gwSvnntvshN3N6V"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:receiving-code-review",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_017jTZcYwGXtwadh4KhisD6N",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "claude-md-management:revise-claude-md"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "e894601a0ab8",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 529,
+        "end": 530,
+        "entry_ids": [
+          "9d4d5b71-a25a-406e-b773-93bcb654bedb"
+        ],
+        "tool_use_id": "toolu_017jTZcYwGXtwadh4KhisD6N"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_017jTZcYwGXtwadh4KhisD6N"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: claude-md-management:revise-claude-md",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-02T07:21:55.052624Z",
+    "agent_lines": 295,
+    "agent_removed": 104,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 295,
+    "total_lines_changed": 399,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 550,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "PRE6-RECOMMEND.md": 275,
+        "RECOMMEND.md": 274,
+        "tmp": 1
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 613,
+      "agent_lines_removed": 116,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 613,
+      "agent_lines_removed": 116,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    }
+  ]
+}
