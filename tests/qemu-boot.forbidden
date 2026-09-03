@@ -35,3 +35,14 @@ minix.rs hello: iov FAIL
 # and the failing spellings carry a byte offset, so `verify off=` at a multiple
 # of 4096 is a whole lost block while `read off=28672` is the indirect arm.
 minix.rs init: fs.write FAIL
+# Slice 5.10b: a create/truncate probe ran and disagreed with itself. Distinct
+# from the marker simply going missing (init never got that far): these
+# spellings mean the probe executed and produced the wrong answer, and the ones
+# carrying `off=` name the byte where it went wrong -- `fs.hole FAIL verify
+# off=0` is a dropped zone pointer (the `dirty` half of the write-back
+# condition), and `off=4096` is a write that disturbed the zone already there.
+minix.rs init: fs.create FAIL
+minix.rs init: fs.dirgrow FAIL
+minix.rs init: fs.hole FAIL
+minix.rs init: fs.trunc FAIL
+minix.rs init: fs.leak FAIL

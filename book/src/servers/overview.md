@@ -49,7 +49,7 @@ take; it has to find a home outside that span.
 |------|-------|------------------|
 | `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC` |
 | `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE` |
-| `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` (MFS) |
+| `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` (MFS) |
 | `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`) |
 | `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK` |
@@ -229,9 +229,10 @@ no `PUTNODE`.
 ### The read path, and its two copies
 
 ```text
-user ──VFS_OPEN{path,len}───► VFS ──SYS_COPY──────────► (the path, into VFS)
-                               │
-                               └──FS_LOOKUP{path}─────► MFS  → (ino, mode)
+user ──VFS_OPEN{path,len,flags}──► VFS ──SYS_COPY──────────► (the path, into VFS)
+                                    │
+                                    └──FS_LOOKUP{path}─────► MFS  → (ino, mode)
+                                       (or FS_CREATE / FS_TRUNC, below)
 
 user ──VFS_READ{fd,buf,len}──► VFS ──FS_READ{ino,gid,len,pos}──► MFS
                                 │                                 │
@@ -244,6 +245,28 @@ of it. A MinixFS read is rarely block-aligned in both the file and the
 destination, and a *hole* has no device block to copy from at all — so the staging
 cannot be elided. This is MINIX 3's own shape. Only the second copy is VFS's
 grant; the bytes still never pass through VFS.
+
+**`open` is not lookup-only.** Slice 5.10b gave `VFS_OPEN` a third payload field,
+`flags` (`VFS_FLAGS_OFF`, i32), read straight from the same `kernel-shared/fcntl`
+that musl's `open()` fills in. A plain lookup answering `ENOENT` is no longer the
+end of the story: `O_CREAT` on a missing name dispatches `FS_CREATE` instead, and
+`O_TRUNC` on an existing regular file dispatches `FS_TRUNC` after the lookup
+succeeds. `O_CREAT | O_TRUNC` on a missing name takes the create arm and stops
+there — a fresh file is already empty.
+
+**The descriptor is allocated before that truncate runs, and handed back if it
+fails.** A full descriptor table is `EMFILE`, and a caller whose `open` failed
+has no reason to believe anything changed — so emptying the file first and *then*
+refusing the descriptor would destroy its contents behind a failure. Linux orders
+it the same way. The converse still holds too: a truncate that fails closes the
+descriptor before returning, so nobody is ever left holding one onto a
+half-truncated file. The access-mode bits (`O_RDONLY`/`O_WRONLY`/`O_RDWR`) are accepted and
+ignored — there is no uid, gid, or permission check anywhere in the tree, so
+honouring them would be a check with nothing behind it. A flag bit outside
+`O_KNOWN` is `EINVAL`, and that comparison is written **against `O_KNOWN`**
+rather than as a literal mask, so a future flag becoming real fails a stale denial
+probe loudly instead of letting it pass vacuously — the same lesson slice 5.8's
+`VFS_WRITE + 1` probe taught the hard way.
 
 Two more properties, each with its own boot marker:
 
@@ -308,14 +331,16 @@ knowing nothing about block devices.
 ## MFS: the file system
 
 **MFS** (`fs/mfs/`) is the first file system in minix.rs — read-only as of slice
-5.8, writable as of 5.10a. It sits between VFS and a block driver, and it is the
-piece that makes a path resolve to bytes: VFS asks `FS_LOOKUP` for an inode,
-`FS_READ` for its contents and `FS_WRITE` to replace them, and MFS answers by
-moving blocks to and from the `memory` ramdisk over BDEV, decoding them with the
-`minixrs-mfs` format library (`superblock`, `inode`, `layout`, `dirent`, `read`,
-and 5.10a's `write`) that slice 5.7 began and host-tested. The image lives in RAM,
-so a write survives until the machine stops — long enough to be read back and
-proved, not long enough to be persistence.
+5.8, writable as of 5.10a, and able to create and truncate files as of 5.10b. It
+sits between VFS and a block driver, and it is the piece that makes a path
+resolve to bytes: VFS asks `FS_LOOKUP` for an inode, `FS_READ` for its contents,
+`FS_WRITE` to replace them, `FS_CREATE` to name a new one, and `FS_TRUNC` to
+discard one's contents, and MFS answers by moving blocks to and from the
+`memory` ramdisk over BDEV, decoding them with the `minixrs-mfs` format library
+(`superblock`, `inode`, `layout`, `dirent`, `read`, 5.10a's `write`, and 5.10b's
+allocator) that slice 5.7 began and host-tested. The image lives in RAM, so a
+write survives until the machine stops — long enough to be read back and proved,
+not long enough to be persistence.
 
 The crate is split unusually hard. Its `[[bin]]` carries
 `required-features = ["server"]` so the format library stays a one-dependency
@@ -378,10 +403,30 @@ and the asymmetry is the whole argument: a leak is unreachable space some future
 `fsck` can reclaim, while a shared zone is silent corruption on a filesystem that
 has no `fsck` to notice it. The alternative — rolling the bit back on the error
 path — is worse in exactly the direction that matters, because a rollback that
-itself fails hands the same zone out twice. A freshly allocated zone is also
-*zeroed* before anything can reach it, which is what makes a new **indirect** block
-safe to read: all 1024 of its slots come back as holes rather than as whatever the
-previous owner left there, which this code would read as zone pointers.
+itself fails hands the same zone out twice; worse still, an indirect slot whose
+indirect block *already existed* has the zone durably referenced by that block
+the instant the bit is set, so clearing the bit again on any later failure would
+hand the same zone to two files rather than merely leaking it. A freshly
+allocated zone is also *zeroed* before anything can reach it, which is what makes
+a new **indirect** block safe to read: all 1024 of its slots come back as holes
+rather than as whatever the previous owner left there, which this code would read
+as zone pointers.
+
+**Slice 5.10b closes the one gap that ordering alone didn't cover.** Through
+5.10a, `do_write` allocated a zone and only *then* copied the client's bytes out
+of its grant — and that copy could still fail on the client's own account, if the
+buffer it granted was unmapped. Looping `write()` against such a buffer leaked
+one zone per call (each `EFAULT`, none rolled back, for the reason above), which
+exhausted the image's free zones in under 200 calls and left every write after
+that — including a legitimate one — answering `ENOSPC` for the rest of the boot: a
+reachable denial of service, not a benign leak. The fix is a second `.bss`
+staging buffer (`Stage`) that `do_write` fills from the client's grant **before**
+anything is allocated, so no client-controlled failure can occur after an
+allocation. Note what this is not: it is a *restaging*, not a rollback — the
+corruption case above (an indirect slot's already-existing block) is exactly why
+rolling back was never the right fix. The `fs.leak` boot probe proves the closure
+directly: 256 writes aimed at an unmapped buffer must all answer `EFAULT` and
+allocate nothing, and a real write must still succeed afterwards.
 
 The write path checks zone numbers against a **lower bound the read path
 deliberately lacks** (`write_zone_ok`, requiring `zone >= first_data_zone`). The
@@ -397,6 +442,61 @@ there is no clock a user-space filesystem can read yet. A written file keeps the
 timestamps `tools/mkfs-mfs` stamped into it, on the grounds that an obviously
 stale timestamp is better than an invented one — and this becomes a real field to
 fill the moment a clock is reachable.
+
+### Create, truncate, and directory growth
+
+Slice 5.10b gave the FS band two more requests. `FS_CREATE` reuses `FS_LOOKUP`'s
+wire codec **verbatim** — same request shape, same reply shape, one parser and
+one classifier for both — because a create is a path operation exactly like a
+lookup, just one that is allowed to make something exist. `FS_TRUNC` carries only
+an inode number and discards a regular file's contents down to zero, with no
+length field: `O_TRUNC` is the only client anywhere in the tree, and there is no
+`ftruncate()` to serve.
+
+**Both new requests mirror the write path's leak-over-corruption ordering, in the
+opposite order from each other, on purpose.** `create` allocates the inode and
+writes it back *before* the directory entry names it — a failure in between
+orphans an inode (a leak, reclaimable by a future `fsck`) rather than leaving a
+directory entry pointing at an inode that was never written. **And nothing
+reaches that failure**, because `create` extends `do_write`'s "no
+client-controlled failure after an allocation" rule to its own path:
+`reserve_slot` places the directory's slot — including the zone its growth may
+need, the only `ENOSPC` a client can provoke here — *before* `alloc_inode` claims
+anything. A reservation that fails has allocated nothing; one that succeeds
+leaves the directory one legitimately grown block larger, which is not a leak
+because the parent inode names that zone. Without that ordering the path would be
+the 5.10a denial of service one step later: each failure would burn one of the
+image's 128 inodes for good, and unlike a leaked zone — which `do_trunc` hands
+back — no amount of truncating recovers an orphaned inode. `do_trunc` writes
+the zeroed inode back *before* freeing the zones it used to hold — a failure in
+between merely fails to reclaim some zones, where the reverse order could leave a
+live inode still naming zones the allocator has already handed to someone else.
+**That truncate ordering has no boot probe, and the honest thing is to say so
+rather than let a passing boot imply otherwise**: proving it needs a failure
+between the inode write-back and the zone free that nothing this slice can send
+induces — the same class of gap slice 5.10a documented for the `dirty` half of
+the write-back condition, recorded here rather than repeated by omission.
+
+**A directory grows through the same allocator a file's data does.**
+`find_free_slot` tries every existing block first — and it does not stop at the
+first free slot it finds, because a name occupying a *later* block would
+otherwise get shadowed by a duplicate inserted ahead of it; `Occupied` has to win
+over `Free` across the *whole* scan, not just within one block. Only when no
+block has room does `reserve_slot` append one, and it does that through
+`place_zone`, the exact function `do_write` uses for file data — so directory
+growth costs no second code path and inherits the bitmap-before-pointer ordering
+already proved for files. The image ships `/full`, a directory with `.` and `..`
+plus 62 empty files — exactly 64 entries, one block — so that a single boot-time
+create is guaranteed to take the append arm; no other probe reaches it.
+`/etc/holey` plays
+the same role for the write-back condition's other half: its first block is a
+hole, so writing into it assigns a zone pointer with the file's size unchanged,
+which is the one case a size-only write-back condition would silently drop.
+
+`FS_CREATE` on a name that already exists is `EEXIST`, checked by re-resolving
+the name afterwards and confirming the inode number **did not change** — the
+errno alone would not catch a dropped guard that shadowed the original entry with
+a second one.
 
 ## init: PID 1
 

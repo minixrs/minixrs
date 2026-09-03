@@ -25,8 +25,9 @@
 //! ([`classify`]).
 
 use minixrs_kernel_shared::Message;
-use minixrs_kernel_shared::callnr::{FS_PATH_MAX, VFS_PATH_LEN_OFF, VFS_PATH_OFF};
+use minixrs_kernel_shared::callnr::{FS_PATH_MAX, VFS_FLAGS_OFF, VFS_PATH_LEN_OFF, VFS_PATH_OFF};
 use minixrs_kernel_shared::error::{EFAULT, EINVAL, EISDIR, ENAMETOOLONG};
+use minixrs_kernel_shared::fcntl::{O_ACCMODE, O_CREAT, O_KNOWN, O_RDWR, O_TRUNC};
 use minixrs_kernel_shared::message::user_range_ok;
 use minixrs_server_rt::{rd_i32, rd_u64};
 
@@ -40,6 +41,9 @@ pub struct OpenRequest {
     pub path: u64,
     /// Its length in bytes, not counting any terminator the caller may have.
     pub len: i32,
+    /// `open(2)` flags — [`minixrs_kernel_shared::fcntl`]'s values, which are
+    /// musl's. Checked by [`validate_flags`].
+    pub flags: i32,
 }
 
 /// Read a `VFS_OPEN` request out of a message payload.
@@ -50,6 +54,7 @@ pub fn parse(msg: &Message) -> OpenRequest {
     OpenRequest {
         path: rd_u64(msg, VFS_PATH_OFF),
         len: rd_i32(msg, VFS_PATH_LEN_OFF),
+        flags: rd_i32(msg, VFS_FLAGS_OFF),
     }
 }
 
@@ -85,6 +90,44 @@ pub fn validate(len: i32, path: u64) -> Result<usize, i32> {
     Ok(len)
 }
 
+/// What the honoured open flags amount to.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct OpenFlags {
+    /// Create the file if the lookup says it is not there.
+    pub create: bool,
+    /// Discard the contents of a file that is there.
+    pub truncate: bool,
+}
+
+/// Check `flags` and reduce them to what this build acts on.
+///
+/// The **access mode is accepted and ignored**. There is no uid, no gid and no
+/// permission check anywhere in the tree, so honouring it would be a check with
+/// nothing behind it: `open(path, O_RDONLY)` followed by a successful `write` is
+/// what this build does, and refusing the write would be inventing an
+/// authorization model in the one place it could be seen.
+///
+/// **Every other bit is `EINVAL`.** `O_APPEND` is the case that makes this the
+/// right default: silently ignoring it would have a client's appends overwrite
+/// from position 0 and report success. An unimplemented flag has to fail loudly,
+/// and this function is where each one lands as it becomes real.
+///
+/// The reserved access-mode value `3` needs its own check, because it is *inside*
+/// [`O_ACCMODE`] and therefore inside [`O_KNOWN`]: the mask cannot catch it, and
+/// without this it would read as `O_RDONLY` with a stray bit.
+pub fn validate_flags(flags: i32) -> Result<OpenFlags, i32> {
+    if flags & !O_KNOWN != 0 {
+        return Err(EINVAL);
+    }
+    if flags & O_ACCMODE > O_RDWR {
+        return Err(EINVAL);
+    }
+    Ok(OpenFlags {
+        create: flags & O_CREAT != 0,
+        truncate: flags & O_TRUNC != 0,
+    })
+}
+
 /// Turn an `FS_LOOKUP` reply's mode into the descriptor entry to install, or the
 /// errno to reply.
 ///
@@ -117,6 +160,7 @@ pub fn classify(mode: i32) -> Result<Fd, i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use minixrs_kernel_shared::fcntl::{O_RDONLY, O_UNKNOWN_BIT, O_WRONLY};
     use minixrs_kernel_shared::message::USER_VA_TOP;
     use minixrs_server_rt::{wr_i32, wr_u64};
 
@@ -135,9 +179,82 @@ mod tests {
     }
 
     #[test]
-    fn parse_reads_both_fields_from_their_own_offsets() {
-        // Two distinct values, so a swapped pair of offsets would fail.
-        assert_eq!(parse(&request(BUF, 9)), OpenRequest { path: BUF, len: 9 });
+    fn parse_reads_all_three_fields_from_their_own_offsets() {
+        // Three distinct values, so any swapped pair of offsets would fail.
+        let mut m = request(BUF, 9);
+        wr_i32(&mut m, VFS_FLAGS_OFF, O_CREAT);
+        assert_eq!(
+            parse(&m),
+            OpenRequest {
+                path: BUF,
+                len: 9,
+                flags: O_CREAT
+            }
+        );
+    }
+
+    #[test]
+    fn a_bare_access_mode_honours_nothing_and_is_accepted() {
+        // Accepted and ignored: there is no permission check anywhere in the
+        // tree, so honouring the access mode would be a check with nothing
+        // behind it -- `open(path, O_RDONLY)` then `write` is what this build
+        // does, and pretending otherwise would be theatre.
+        for mode in [O_RDONLY, O_WRONLY, O_RDWR] {
+            assert_eq!(
+                validate_flags(mode),
+                Ok(OpenFlags {
+                    create: false,
+                    truncate: false
+                }),
+                "mode {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_honoured_bit_is_reported_on_its_own_and_together() {
+        assert_eq!(
+            validate_flags(O_RDWR | O_CREAT),
+            Ok(OpenFlags {
+                create: true,
+                truncate: false
+            })
+        );
+        assert_eq!(
+            validate_flags(O_RDWR | O_TRUNC),
+            Ok(OpenFlags {
+                create: false,
+                truncate: true
+            })
+        );
+        assert_eq!(
+            validate_flags(O_RDWR | O_CREAT | O_TRUNC),
+            Ok(OpenFlags {
+                create: true,
+                truncate: true
+            })
+        );
+    }
+
+    #[test]
+    fn any_unimplemented_bit_is_einval() {
+        // The case that matters is `O_APPEND`: ignoring it silently would have a
+        // client's appends overwrite from position 0 and report success. So an
+        // unimplemented flag fails loudly, and this function is where each one
+        // lands as it becomes real.
+        for flag in [O_UNKNOWN_BIT, 0o2000, 0o4000, i32::MIN] {
+            assert_eq!(validate_flags(flag), Err(EINVAL), "flag {flag:o}");
+            assert_eq!(validate_flags(O_RDWR | flag), Err(EINVAL), "flag {flag:o}");
+        }
+    }
+
+    #[test]
+    fn the_reserved_access_mode_value_is_einval() {
+        // 3 is not an access mode. It is inside `O_ACCMODE` and therefore inside
+        // `O_KNOWN`, so the mask cannot catch it -- without its own check it
+        // would read as `O_RDONLY | something`.
+        assert_eq!(validate_flags(O_ACCMODE), Err(EINVAL));
+        assert_eq!(validate_flags(O_ACCMODE | O_CREAT), Err(EINVAL));
     }
 
     #[test]

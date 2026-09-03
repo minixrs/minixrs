@@ -51,19 +51,22 @@ use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     BDEV_BLOCK_SIZE, CDEV_MAX_IO, FS_PATH_MAX, NR_VFS_MSGS, PM_EXEC, PM_EXEC_PATH_MAX,
     PM_EXEC_PATH_OFF, PM_FORK, PM_WAIT, VFS_BUF_OFF, VFS_CLOSE, VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE,
-    VFS_FD_OFF, VFS_LEN_OFF, VFS_OPEN, VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE,
-    VFS_WRITE,
+    VFS_FD_OFF, VFS_FLAGS_OFF, VFS_LEN_OFF, VFS_OPEN, VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ,
+    VFS_RQ_BASE, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{
-    EBADF, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOEXEC, ENOSYS, EPERM, OK,
+    EBADF, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOEXEC, ENOSPC, ENOSYS, EPERM, OK,
 };
 use minixrs_kernel_shared::execstack::EXEC_STACK_PROBE_PASS;
+use minixrs_kernel_shared::fcntl::{O_CREAT, O_RDWR, O_TRUNC, O_UNKNOWN_BIT};
 use minixrs_kernel_shared::message::USER_VA_TOP;
 use minixrs_kernel_shared::rootfs::{
-    ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_SCRATCH_LEN, ROOTFS_SCRATCH_PATH,
-    ROOTFS_SCRATCH_PERIOD, rootfs_scratch_byte,
+    ROOTFS_CREATE_PATH, ROOTFS_CREATE_TEXT, ROOTFS_DIRGROW_TEXT, ROOTFS_FULL_NEW_PATH,
+    ROOTFS_HELLO_PATH, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_HOLEY_TEXT, ROOTFS_LEAK_PATH,
+    ROOTFS_LEAK_PROBES, ROOTFS_LEAK_TEXT, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_SCRATCH_LEN,
+    ROOTFS_SCRATCH_PATH, ROOTFS_SCRATCH_PERIOD, rootfs_holey_byte, rootfs_scratch_byte,
 };
 use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
 
@@ -205,6 +208,18 @@ fn main() -> ! {
     // same rule — so a hang inside it localizes to the `fs.write` marker instead
     // of taking 5.4's, 5.5's, 5.6's and 5.8's with it. See [`write_demo`].
     write_demo(vfs);
+    // Slice 5.10b. `trunc_demo` runs **immediately after** `write_demo`: it
+    // truncates what that probe wrote, and running it first would truncate an
+    // empty file and prove nothing.
+    trunc_demo(vfs);
+    create_demo(vfs);
+    dirgrow_demo(vfs);
+    hole_demo(vfs);
+    // The leak probe issues 256 deliberately failing writes, so it goes last
+    // among the filesystem probes — the standing rule that a battery of
+    // malformed requests must not be able to take the proofs before it down with
+    // it if a peer wedges on one.
+    leak_probe(vfs);
     // The exec battery runs last in the prologue, the standing rule: a hang
     // inside it localizes to `exec.deny` instead of taking 5.4's, 5.5's, 5.6's,
     // 5.8's and 5.10a's markers with it. Every probe execs *init itself* and
@@ -484,6 +499,16 @@ fn fd_demo(vfs: Endpoint) {
 ///     perfectly good, and `CDEV_READ` is what does not exist until Phase 6.
 ///   - `close-twice` — closing an already-closed descriptor. `EBADF`, which is
 ///     what makes the `fs.fd` re-open above mean something.
+///   - `create-no-dir` — `O_CREAT` naming a parent directory that does not exist.
+///     `ENOENT`, from MFS's own walk of the *directory*, relayed unflattened.
+///   - `create-is-dir` — `O_CREAT` naming `/etc`, an existing directory. The
+///     lookup succeeds, so the create arm is never taken and `classify` answers
+///     `EISDIR`.
+///   - `trunc-is-dir` — `O_TRUNC` naming `/etc`, the same reason: it keeps
+///     `FS_TRUNC` from ever being aimed at a directory.
+///   - `bad-flag` — a flag bit this build does not honour, spelled relative to
+///     [`O_UNKNOWN_BIT`] rather than as a literal so a flag becoming real makes
+///     this fail loudly instead of passing vacuously. `EINVAL`.
 ///
 /// There used to be a `write-file` probe here, expecting `EROFS` from a `write()`
 /// on a file descriptor. Slice 5.10a made that write succeed, so the probe went
@@ -516,7 +541,7 @@ fn open_denials(vfs: Endpoint) {
         ("bad-len", addr, -1, EINVAL),
         ("bad-buf", UNMAPPED_VA, 9, EFAULT),
     ] {
-        if open_request(vfs, path, len) == want {
+        if open_request(vfs, path, len, O_RDWR) == want {
             denied += 1;
         } else {
             return report_open_fail(vfs, name);
@@ -529,6 +554,38 @@ fn open_denials(vfs: Endpoint) {
         denied += 1;
     } else {
         return report_open_fail(vfs, "read-console");
+    }
+
+    // Slice 5.10b: the flag-shaped refusals.
+    for (name, path, flags, want) in [
+        // `O_CREAT` cannot conjure a parent: `/no-such-dir` does not exist, so
+        // MFS's own walk answers `ENOENT` for the *directory*, relayed unflattened.
+        ("create-no-dir", "/no-such-dir/f", O_RDWR | O_CREAT, ENOENT),
+        // ...nor replace a directory. The lookup *succeeds*, so the create arm is
+        // never taken and `classify` answers `EISDIR`.
+        ("create-is-dir", "/etc", O_RDWR | O_CREAT, EISDIR),
+        // `O_TRUNC` on a directory is the same answer for the same reason, and it
+        // is what keeps `FS_TRUNC` from ever being aimed at one. Delete
+        // `classify`'s directory arm and this frees `/etc`'s zones.
+        ("trunc-is-dir", "/etc", O_RDWR | O_TRUNC, EISDIR),
+    ] {
+        let rc = vfs_open_flags(vfs, path, flags);
+        if rc == want {
+            denied += 1;
+        } else {
+            return report_open_fail(vfs, name);
+        }
+    }
+
+    // A flag bit this build does not honour. **Spelled relative to what it does
+    // honour** ([`O_UNKNOWN_BIT`]), never as a literal, so that a flag becoming
+    // real makes this probe fail loudly rather than pass vacuously — slice 5.8's
+    // `VFS_WRITE + 1` probe and slice 5.10a's `write-file` probe are what that
+    // rule is made of.
+    if vfs_open_flags(vfs, ROOTFS_MOTD_PATH, O_RDWR | O_UNKNOWN_BIT) == EINVAL {
+        denied += 1;
+    } else {
+        return report_open_fail(vfs, "bad-flag");
     }
 
     // Slice 5.10a retired the probe that used to sit here: it wrote to a
@@ -552,7 +609,7 @@ fn open_denials(vfs: Endpoint) {
     }
 
     if denied == OPEN_DENIAL_PROBES {
-        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=7\n");
+        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=11\n");
     }
 }
 
@@ -705,9 +762,9 @@ fn write_demo(vfs: Endpoint) {
         // `verify_file` cannot return a short `Ok` — its loop runs until the count
         // is reached — but saying so with an arm rather than a comment means a
         // future edit that makes it possible is reported instead of ignored.
-        Ok(verified) => report_at(vfs, b"verify-short", verified),
-        Err(VerifyFail::Read(at)) => report_at(vfs, b"read", at),
-        Err(VerifyFail::Mismatch(at)) => report_at(vfs, b"verify", at),
+        Ok(verified) => report_at(vfs, b"fs.write", b"verify-short", verified),
+        Err(VerifyFail::Read(at)) => report_at(vfs, b"fs.write", b"read", at),
+        Err(VerifyFail::Mismatch(at)) => report_at(vfs, b"fs.write", b"verify", at),
         Err(VerifyFail::NotEof) => report_line(vfs, b"minix.rs init: fs.write FAIL eof"),
     }
 }
@@ -768,21 +825,385 @@ fn verify_file(vfs: Endpoint, fd: i32) -> Result<usize, VerifyFail> {
     Ok(pos)
 }
 
-/// Report a failing step of [`write_demo`] by name and byte offset, on fd 2.
+/// Report a failing step by marker, name and byte offset, on fd 2.
 ///
 /// The offset is what makes the line worth more than its absence: `read` at 28672
-/// is the indirect arm, `verify` at a multiple of 4096 is a whole lost block, and a
-/// mismatch anywhere else is a splice bug. Hand-assembled like every other line
+/// is the indirect arm, `verify` at a multiple of 4096 is a whole lost block, and
+/// a mismatch anywhere else is a splice bug. Hand-assembled like every other line
 /// here — init has no formatting runtime.
 #[cfg_attr(test, allow(dead_code))]
-fn report_at(vfs: Endpoint, what: &[u8], at: usize) {
+fn report_at(vfs: Endpoint, marker: &[u8], what: &[u8], at: usize) {
     let mut line = [0u8; 64];
-    let mut n = append(&mut line, 0, b"minix.rs init: fs.write FAIL ");
+    let mut n = append(&mut line, 0, b"minix.rs init: ");
+    n = append(&mut line, n, marker);
+    n = append(&mut line, n, b" FAIL ");
     n = append(&mut line, n, what);
     n = append(&mut line, n, b" off=");
     n = append_dec(&mut line, n, at as u64);
     n = append(&mut line, n, b"\n");
     let _ = vfs_write(vfs, STDERR, &line[..n]);
+}
+
+// ----- Slice 5.10b: create, truncate, holes, and the leak fix ---------------
+
+/// Create `path`, write `text` to it, close, re-open **without** `O_CREAT`, and
+/// compare every byte back.
+///
+/// The re-open is the load-bearing half: it forces a fresh `FS_LOOKUP`, so the
+/// file has to be findable by an ordinary path walk — which is what proves the
+/// *directory entry* reached the device, rather than only the inode having been
+/// allocated. Nothing on this path caches a size or an inode, which is exactly
+/// what makes that test meaningful.
+///
+/// Returns `true` when every byte matched and the file is exactly `text.len()`
+/// long. The trailing read is what turns `size >= len` into `size == len`.
+///
+/// `buf` is the caller's, because init's stack is one page and each caller
+/// already has a `.rodata` constant to size it from.
+#[cfg_attr(test, allow(dead_code))]
+fn create_write_verify(
+    vfs: Endpoint,
+    path: &str,
+    text: &[u8],
+    buf: &mut [u8],
+) -> Result<(), &'static [u8]> {
+    let fd = vfs_open_flags(vfs, path, O_RDWR | O_CREAT);
+    if fd < 0 {
+        return Err(b"open");
+    }
+    // VFS absorbs short writes (slice 5.4), so anything but the full count is a
+    // failure here rather than something to retry.
+    let n = vfs_write(vfs, fd, text);
+    if n != text.len() as i32 {
+        let _ = vfs_close(vfs, fd);
+        return Err(b"write");
+    }
+    if vfs_close(vfs, fd) != OK {
+        return Err(b"close");
+    }
+
+    let fd = vfs_open(vfs, path);
+    if fd < 0 {
+        return Err(b"reopen");
+    }
+    let want = match buf.get_mut(..text.len()) {
+        Some(w) => w,
+        None => {
+            let _ = vfs_close(vfs, fd);
+            return Err(b"buf");
+        }
+    };
+    let n = vfs_read(vfs, fd, want);
+    if n != text.len() as i32 {
+        let _ = vfs_close(vfs, fd);
+        return Err(b"read");
+    }
+    if want != text {
+        let _ = vfs_close(vfs, fd);
+        return Err(b"verify");
+    }
+    // One more read, which must be a clean EOF: the file is exactly this long,
+    // not merely at least this long.
+    let mut tail = [0u8; 1];
+    let eof = vfs_read(vfs, fd, &mut tail);
+    let _ = vfs_close(vfs, fd);
+    if eof != 0 {
+        return Err(b"eof");
+    }
+    Ok(())
+}
+
+/// [`report_at`]'s sibling for a step that failed with an errno rather than at an
+/// offset.
+///
+/// The two must stay distinguishable in the log. Folding a negative result into
+/// `report_at` with `n.max(0)` prints `off=0` for `EIO`, `EBADF` and `EINVAL`
+/// alike — one line for three different bugs, in the same shape a report of a
+/// real byte offset takes. The magnitude is printed after a literal `-` because
+/// init cannot format a signed integer.
+#[cfg_attr(test, allow(dead_code))]
+fn report_rc(vfs: Endpoint, marker: &[u8], what: &[u8], rc: i32) {
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: ");
+    n = append(&mut line, n, marker);
+    n = append(&mut line, n, b" FAIL ");
+    n = append(&mut line, n, what);
+    n = append(&mut line, n, b" rc=-");
+    n = append_dec(&mut line, n, u64::from(rc.unsigned_abs()));
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
+}
+
+/// Report a failing step of a create-shaped probe by marker and step name, fd 2.
+#[cfg_attr(test, allow(dead_code))]
+fn report_step(vfs: Endpoint, marker: &[u8], what: &[u8]) {
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: ");
+    n = append(&mut line, n, marker);
+    n = append(&mut line, n, b" FAIL ");
+    n = append(&mut line, n, what);
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
+}
+
+/// Longest text either create-shaped probe compares, and the size of their
+/// read-back buffer. `.rodata`-sized, not a guess.
+const CREATE_BUF_LEN: usize = 64;
+
+const _: () = assert!(CREATE_BUF_LEN >= ROOTFS_CREATE_TEXT.len());
+const _: () = assert!(CREATE_BUF_LEN >= ROOTFS_DIRGROW_TEXT.len());
+// The markers' `n=` are literals -- init cannot format an integer -- so these are
+// what make the constants moving underneath them loud at compile time rather than
+// a line that quietly means something else.
+const _: () = assert!(ROOTFS_CREATE_TEXT.len() == 25);
+const _: () = assert!(ROOTFS_DIRGROW_TEXT.len() == 25);
+
+/// Create a file that is **not** in the image, write to it, and read it back.
+///
+/// `/etc/new` does not exist until this runs, so every part of it — the inode
+/// bitmap bit, the inode itself, and the directory entry naming it — was produced
+/// at run time. The re-open is without `O_CREAT`, so the file has to be findable
+/// by an ordinary lookup.
+///
+/// Best-effort: init's job is to keep the system running, so a failure here is
+/// reported and stepped over, never fatal.
+#[cfg_attr(test, allow(dead_code))]
+fn create_demo(vfs: Endpoint) {
+    let mut buf = [0u8; CREATE_BUF_LEN];
+    match create_write_verify(vfs, ROOTFS_CREATE_PATH, ROOTFS_CREATE_TEXT, &mut buf) {
+        Ok(()) => {
+            let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.create ok n=25\n");
+        }
+        Err(what) => report_step(vfs, b"fs.create", what),
+    }
+}
+
+/// Create a file in a directory whose single block is **exactly full**.
+///
+/// `/full` ships 62 empty files, so with `.` and `..` its block holds 64 used
+/// slots and this create *must* allocate a second directory zone. That arm is
+/// otherwise unreachable in both boot configurations — `/` holds 5 entries and
+/// `/etc` 7, against 64 slots — and an arm no QEMU boot executes is what the
+/// `/etc/pattern` mandate and the device-teardown selftest exist to prevent.
+///
+/// The proof that growth *worked* is the read-back: the entry lands in the new
+/// block, so a lookup finding it at all means the parent's new zone pointer and
+/// its new size both reached the inode.
+#[cfg_attr(test, allow(dead_code))]
+fn dirgrow_demo(vfs: Endpoint) {
+    let mut buf = [0u8; CREATE_BUF_LEN];
+    match create_write_verify(vfs, ROOTFS_FULL_NEW_PATH, ROOTFS_DIRGROW_TEXT, &mut buf) {
+        Ok(()) => {
+            let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.dirgrow ok n=25\n");
+        }
+        Err(what) => report_step(vfs, b"fs.dirgrow", what),
+    }
+}
+
+/// Bytes read back per verification read in [`hole_demo`]. A divisor of the
+/// block, so no read straddles one and MFS's clamp never splits one.
+const HOLE_CHUNK: usize = 512;
+
+const _: () = assert!(HOLE_CHUNK > 0);
+const _: () = assert!(BDEV_BLOCK_SIZE.is_multiple_of(HOLE_CHUNK));
+
+/// Fill the hole at the front of a sparse file, and verify **the whole file**.
+///
+/// This is the only probe that reaches the second half of MFS's inode write-back
+/// condition — "a zone was assigned **or** the size grew". `/etc/holey` ships two
+/// blocks with the first a hole, so writing at position 0 assigns `zone[0]` while
+/// `size` stays 8192: keying the write-back on the size alone would drop that
+/// pointer while leaving its bitmap bit set, which is the bitmap and the inode
+/// disagreeing about a live zone — corruption rather than a leak.
+///
+/// Slice 5.10a left that half unproven and predicted `FS_TRUNC` would reach it.
+/// It does not: with no `lseek` every write runs forward from a descriptor's
+/// position, so a write that assigns a zone always extends the file. The case
+/// needs a hole *below* EOF, and only the image can supply one.
+///
+/// **Both windows are load-bearing and both are covered by verifying every
+/// byte.** The text at 0 proves the assigned zone's pointer reached the inode
+/// (drop `dirty` from the condition and the read returns zeroes); the pattern
+/// from 4096 proves the write did not disturb the zone that was already there;
+/// and the zeroes between them prove the rest of the hole still reads as a hole.
+/// Verifying the whole file costs nothing over sampling it — there is no `lseek`,
+/// so reaching any offset already read every byte before it.
+///
+/// Best-effort: a failure here is reported and stepped over, never fatal.
+#[cfg_attr(test, allow(dead_code))]
+fn hole_demo(vfs: Endpoint) {
+    let fd = vfs_open(vfs, ROOTFS_HOLEY_PATH);
+    if fd < 0 {
+        return report_step(vfs, b"fs.hole", b"open");
+    }
+    let n = vfs_write(vfs, fd, ROOTFS_HOLEY_TEXT);
+    if n != ROOTFS_HOLEY_TEXT.len() as i32 {
+        let _ = vfs_close(vfs, fd);
+        return report_step(vfs, b"fs.hole", b"write");
+    }
+    if vfs_close(vfs, fd) != OK {
+        return report_step(vfs, b"fs.hole", b"close");
+    }
+
+    // Re-open: a fresh lookup, so the inode has to carry the new zone pointer for
+    // these reads to return anything but zeroes.
+    let fd = vfs_open(vfs, ROOTFS_HOLEY_PATH);
+    if fd < 0 {
+        return report_step(vfs, b"fs.hole", b"reopen");
+    }
+
+    let mut buf = [0u8; HOLE_CHUNK];
+    let mut pos = 0usize;
+    while pos < ROOTFS_HOLEY_LEN {
+        let want = HOLE_CHUNK.min(ROOTFS_HOLEY_LEN - pos);
+        let n = vfs_read(vfs, fd, &mut buf[..want]);
+        if n <= 0 || n as usize > want {
+            let _ = vfs_close(vfs, fd);
+            return report_at(vfs, b"fs.hole", b"read", pos);
+        }
+        let got = n as usize;
+
+        let mut i = 0usize;
+        while i < got {
+            let Some(at) = pos.checked_add(i) else {
+                let _ = vfs_close(vfs, fd);
+                return report_at(vfs, b"fs.hole", b"read", pos);
+            };
+            if buf[i] != holey_expected(at) {
+                let _ = vfs_close(vfs, fd);
+                return report_at(vfs, b"fs.hole", b"verify", at);
+            }
+            i += 1;
+        }
+
+        let Some(next) = pos.checked_add(got) else {
+            let _ = vfs_close(vfs, fd);
+            return report_at(vfs, b"fs.hole", b"read", pos);
+        };
+        pos = next;
+    }
+
+    // The file is exactly this long, not merely at least this long: a filled hole
+    // must not have moved the size.
+    let eof = vfs_read(vfs, fd, &mut buf[..1]);
+    let _ = vfs_close(vfs, fd);
+    if eof != 0 {
+        return report_step(vfs, b"fs.hole", b"eof");
+    }
+    let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.hole ok\n");
+}
+
+/// Byte `i` of `/etc/holey` **after** the hole has been filled: init's text where
+/// it wrote, and the shipped contents everywhere else.
+#[cfg_attr(test, allow(dead_code))]
+fn holey_expected(i: usize) -> u8 {
+    match ROOTFS_HOLEY_TEXT.get(i) {
+        Some(&b) => b,
+        None => rootfs_holey_byte(i),
+    }
+}
+
+/// Truncate the file [`write_demo`] just filled, and prove it is empty.
+///
+/// **It must run after [`write_demo`]** — it truncates what that probe wrote, and
+/// running it first would truncate an already-empty file and prove nothing. The
+/// re-open forces a fresh lookup, so a size that never reached the inode shows up
+/// here as a non-empty read rather than being papered over by a descriptor that
+/// remembered something.
+///
+/// The `n=0` in the marker is the byte count the first read returned — a clean
+/// EOF at position 0, which is what an empty file is.
+///
+/// Best-effort: a failure here is reported and stepped over, never fatal.
+#[cfg_attr(test, allow(dead_code))]
+fn trunc_demo(vfs: Endpoint) {
+    let fd = vfs_open_flags(vfs, ROOTFS_SCRATCH_PATH, O_RDWR | O_TRUNC);
+    if fd < 0 {
+        return report_step(vfs, b"fs.trunc", b"open");
+    }
+    if vfs_close(vfs, fd) != OK {
+        return report_step(vfs, b"fs.trunc", b"close");
+    }
+
+    let fd = vfs_open(vfs, ROOTFS_SCRATCH_PATH);
+    if fd < 0 {
+        return report_step(vfs, b"fs.trunc", b"reopen");
+    }
+    let mut buf = [0u8; 8];
+    let n = vfs_read(vfs, fd, &mut buf);
+    let _ = vfs_close(vfs, fd);
+    if n < 0 {
+        // The errno, not `off=0`: what the read refused with is the whole content
+        // of this line.
+        return report_rc(vfs, b"fs.trunc", b"read", n);
+    }
+    if n != 0 {
+        return report_at(vfs, b"fs.trunc", b"read", n as usize);
+    }
+    let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.trunc ok n=0\n");
+}
+
+// The marker's `n=` is a literal, so this is what pins it to the constant.
+const _: () = assert!(ROOTFS_LEAK_PROBES == 256);
+
+/// Bytes each failing write asks for. Small: the copy never happens, so this only
+/// has to be non-zero — a zero-length write is a legal no-op that VFS answers
+/// before the grant is touched, which would probe nothing.
+const LEAK_WRITE_LEN: usize = 64;
+
+const _: () = assert!(LEAK_WRITE_LEN > 0);
+
+/// Prove that a **failing** write allocates nothing — slice 5.10b's leak fix.
+///
+/// Creates `/etc/leak`, then issues [`ROOTFS_LEAK_PROBES`] writes whose buffer is
+/// [`UNMAPPED_VA`]. Every one must answer `EFAULT`: VFS's own range check passes
+/// (the address is inside the user range), VFS issues a magic grant naming it,
+/// and the **kernel's page-table walk** is what refuses the copy — which is
+/// precisely the client-controlled failure that used to leak a zone per attempt.
+/// The descriptor's position does not advance on a failure, so every attempt aims
+/// at the same hole at offset 0 and would allocate again.
+///
+/// Then one real write, which must succeed. Before the fix, 256 failures leaked
+/// more zones than the image has free and this final write answered `ENOSPC`.
+///
+/// **The count is `ROOTFS_IMAGE_BLOCKS`**, which exceeds any possible free-zone
+/// count in the image, so the probe is config-independent *by construction*
+/// rather than by measurement: no number here differs between the musl, SDK and
+/// sysroot-absent `hello` flavours. That is the slice-5.5/5.6 trap, avoided
+/// rather than measured around.
+///
+/// Best-effort: a failure here is reported and stepped over, never fatal.
+#[cfg_attr(test, allow(dead_code))]
+fn leak_probe(vfs: Endpoint) {
+    let fd = vfs_open_flags(vfs, ROOTFS_LEAK_PATH, O_RDWR | O_CREAT);
+    if fd < 0 {
+        return report_step(vfs, b"fs.leak", b"open");
+    }
+
+    let mut i = 0usize;
+    while i < ROOTFS_LEAK_PROBES {
+        // Built directly rather than through `vfs_write`, which takes a slice:
+        // the whole point is a buffer address init cannot form a reference to.
+        let rc = vfs_request(vfs, VFS_WRITE, fd, UNMAPPED_VA, LEAK_WRITE_LEN as i32);
+        if rc != EFAULT {
+            let _ = vfs_close(vfs, fd);
+            return report_at(vfs, b"fs.leak", b"probe", i);
+        }
+        i += 1;
+    }
+
+    let n = vfs_write(vfs, fd, ROOTFS_LEAK_TEXT);
+    let _ = vfs_close(vfs, fd);
+    if n != ROOTFS_LEAK_TEXT.len() as i32 {
+        // `ENOSPC` here is the un-fixed failure mode, and it is worth naming
+        // separately from a short write.
+        return report_step(
+            vfs,
+            b"fs.leak",
+            if n == ENOSPC { b"enospc" } else { b"write" },
+        );
+    }
+    let _ = vfs_write(vfs, STDOUT, b"minix.rs init: fs.leak ok n=256\n");
 }
 
 // ----- Slice 5.9: the exec-from-FS denial battery ---------------------------
@@ -929,7 +1350,11 @@ fn report_exec_fail(vfs: Endpoint, name: &str) {
 /// The `n=` in the marker line is this number spelled out as a literal, because
 /// init has no formatting machinery and the line is a `grep -aF` marker. The two
 /// move together; the const below is what makes forgetting the second half loud.
-const OPEN_DENIAL_PROBES: usize = 7;
+const OPEN_DENIAL_PROBES: usize = 11;
+// The `n=11` literal in `open_denials`' marker line, pinned the same way
+// `fs.create`'s `n=25` is pinned against `ROOTFS_CREATE_TEXT.len()`: init cannot
+// format an integer, so nothing else ties the printed digit to this constant.
+const _: () = assert!(OPEN_DENIAL_PROBES == 11);
 
 /// Report a failing `open` probe by name, on fd 2.
 #[cfg_attr(test, allow(dead_code))]
@@ -950,10 +1375,21 @@ fn report_line(vfs: Endpoint, text: &[u8]) {
     let _ = vfs_write(vfs, STDERR, &line[..n]);
 }
 
-/// `open(path)` through VFS. Returns the new descriptor, or a negative errno.
+/// `open(path, flags)` through VFS. Returns the new descriptor, or a negative
+/// errno.
+#[cfg_attr(test, allow(dead_code))]
+fn vfs_open_flags(vfs: Endpoint, path: &str, flags: i32) -> i32 {
+    open_request(vfs, path.as_ptr() as usize as u64, path.len() as i32, flags)
+}
+
+/// `open(path, O_RDWR)` through VFS — every existing caller's intent.
+///
+/// `O_RDWR` rather than 0: the access mode is accepted and ignored by VFS, so
+/// either works, and naming the one that matches what init then does with the
+/// descriptor keeps a non-zero access mode on the live path.
 #[cfg_attr(test, allow(dead_code))]
 fn vfs_open(vfs: Endpoint, path: &str) -> i32 {
-    open_request(vfs, path.as_ptr() as usize as u64, path.len() as i32)
+    vfs_open_flags(vfs, path, O_RDWR)
 }
 
 /// Send one `VFS_OPEN` and return the reply `m_type`.
@@ -966,7 +1402,7 @@ fn vfs_open(vfs: Endpoint, path: &str) -> i32 {
 /// The address and length are parameters rather than a `&str` so the malformed
 /// probes can vary each independently.
 #[cfg_attr(test, allow(dead_code))]
-fn open_request(vfs: Endpoint, path: u64, len: i32) -> i32 {
+fn open_request(vfs: Endpoint, path: u64, len: i32, flags: i32) -> i32 {
     let mut m = Message {
         m_source: 0,
         m_type: VFS_OPEN,
@@ -974,6 +1410,7 @@ fn open_request(vfs: Endpoint, path: u64, len: i32) -> i32 {
     };
     m.payload[VFS_PATH_OFF..VFS_PATH_OFF + 8].copy_from_slice(&path.to_ne_bytes());
     m.payload[VFS_PATH_LEN_OFF..VFS_PATH_LEN_OFF + 4].copy_from_slice(&len.to_ne_bytes());
+    m.payload[VFS_FLAGS_OFF..VFS_FLAGS_OFF + 4].copy_from_slice(&flags.to_ne_bytes());
 
     let trap_rc = ipc_sendrec(vfs, &mut m);
     if trap_rc != OK {

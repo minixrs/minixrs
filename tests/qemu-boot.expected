@@ -466,8 +466,8 @@ minix.rs hello: iov ok match=1
 # statements, and a broken FS band shows up here while MFS's stays green.
 [diag vfs] fs.mount ok root=1 bs=4096 blocks=256
 
-# Ten refusals from the FS band, each well-formed but for one thing: a path that
-# does not exist (-> ENOENT), `/etc/motd/x` naming a FILE as an intermediate
+# Fourteen refusals from the FS band, each well-formed but for one thing: a path
+# that does not exist (-> ENOENT), `/etc/motd/x` naming a FILE as an intermediate
 # component (-> ENOTDIR, the `is_dir` gate without which MFS would read a file's
 # bytes as directory entries), a relative path (-> EINVAL: there is no working
 # directory on minix.rs), a path field with no NUL anywhere (-> ENAMETOOLONG,
@@ -480,7 +480,19 @@ minix.rs hello: iov ok match=1
 # dropped unknown would block VFS in its SENDREC forever). None is reachable from
 # init's open/read -- VFS refuses most of them before the wire -- which is exactly
 # why they are sent from VFS's own prologue.
-[diag vfs] fs.deny ok n=10
+#
+# Slice 5.10b adds four more: `FS_CREATE` on a name that already exists
+# (-> EEXIST) with the target re-resolved afterwards to prove nothing changed --
+# a dropped EEXIST would silently shadow the original entry with a second one,
+# and the errno alone would not catch that; `FS_CREATE` under a parent that is a
+# FILE, not a directory (-> ENOTDIR, the same `is_dir` gate on the create path);
+# `FS_TRUNC` on a directory (-> EISDIR), aimed at `/deny`, which the image ships
+# holding nothing but the EEXIST probe's own target: it has to be a real
+# directory, but an accidental success must not be able to destroy a proof other
+# than this battery's own -- aimed at `/etc` it would take five markers down at
+# once and the log would not say which guard broke; and `FS_TRUNC` on inode 0
+# (-> EINVAL).
+[diag vfs] fs.deny ok n=14
 
 # ---------------------------------------------------------------------------
 # THE MILESTONE. A file's contents, read out of a MinixFS image by an ordinary
@@ -510,7 +522,7 @@ minix.rs init: fs.read ok match=1
 # at all, and this is the only exercise of VFS_CLOSE anywhere.
 minix.rs init: fs.fd ok match=1
 
-# Seven refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
+# Eleven refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
 # a path with no such file (-> ENOENT), `/etc` (-> EISDIR from open::classify --
 # delete that arm and open succeeds, handing back a descriptor every later read
 # would have to refuse), a path filling the FS band's inline field
@@ -528,7 +540,14 @@ minix.rs init: fs.fd ok match=1
 # time: a denial probe must be written so that a growing capability makes it
 # FAIL loudly, never pass vacuously, and the count moving is what makes its
 # retirement a visible diff rather than a deletion nobody reviews.
-minix.rs init: open.deny ok n=7
+#
+# Slice 5.10b adds four flag-shaped refusals: O_CREAT naming a parent directory
+# that does not exist (-> ENOENT from MFS's own walk of the directory), O_CREAT
+# naming an existing directory (-> EISDIR, the create arm never taken), O_TRUNC
+# naming a directory for the same reason, and a flag bit this build does not
+# honour, spelled relative to O_UNKNOWN_BIT rather than as a literal so a flag
+# becoming real fails this loudly instead of passing vacuously (-> EINVAL).
+minix.rs init: open.deny ok n=11
 
 # ---------------------------------------------------------------------------
 # Slice 5.9: exec-from-FS -- /bin/hello, out of the filesystem (milestone B).
@@ -608,3 +627,51 @@ minix.rs init: exec.deny ok n=8
 # reached the inode shows up as a short read instead of being papered over by a
 # descriptor that remembered it. Nothing on this path caches a file size.
 minix.rs init: fs.write ok n=32768 v=32768
+
+# ---------------------------------------------------------------------------
+# Slice 5.10b: MFS create/truncate -- new files, directory growth, holes, and
+# the leak fix, each proved from init through the path under test.
+# ---------------------------------------------------------------------------
+
+# fs.trunc runs immediately after fs.write: it truncates the very file that
+# probe just filled, re-opens (a fresh FS_LOOKUP, so a size that never reached
+# the inode shows up as a non-empty read), and reads back a clean EOF at
+# position 0 -- an empty file. Running it first would truncate an already-empty
+# file and prove nothing.
+minix.rs init: fs.trunc ok n=0
+
+# /etc/new does not exist until this runs, so every part of it -- the inode
+# bitmap bit, the inode itself, and the directory entry naming it -- was
+# produced at run time. Create, write, close, then re-open WITHOUT O_CREAT: the
+# file has to be findable by an ordinary lookup, which is what proves the
+# directory entry reached the device rather than only an inode having been
+# allocated.
+minix.rs init: fs.create ok n=25
+
+# /full ships 62 empty files, so with `.` and `..` its one block holds all 64
+# slots and this create MUST allocate a second directory zone -- an arm no
+# other boot probe reaches. The read-back proves growth worked: the entry
+# lands in the new block, so finding it at all means the parent's new zone
+# pointer and its new size both reached the inode.
+minix.rs init: fs.dirgrow ok n=25
+
+# The only probe that reaches the second half of MFS's inode write-back
+# condition -- "a zone was assigned OR the size grew". /etc/holey's first block
+# is a hole; writing at position 0 assigns zone[0] while size stays 8192, so
+# keying the write-back on size alone would drop that pointer while leaving its
+# bitmap bit set -- the bitmap and the inode disagreeing about a live zone,
+# corruption rather than a leak. Verifies the WHOLE file, not sampled windows:
+# there is no lseek, so reaching any offset already read every byte before it,
+# and a mutation corrupting one byte in the middle would otherwise still print
+# ok.
+minix.rs init: fs.hole ok
+
+# Proves slice 5.10b's leak fix: /etc/leak is created, then 256 writes aimed at
+# an unmapped buffer must all answer EFAULT from the kernel's page-table walk,
+# each allocating nothing, before one real write succeeds. Before the fix, 256
+# failing writes leaked more zones than the image has free and the final write
+# answered ENOSPC. The count is ROOTFS_IMAGE_BLOCKS, which exceeds any possible
+# free-zone count the image can have, so it is config-independent by
+# construction rather than by measurement -- the slice-5.5/5.6 trap, avoided
+# rather than measured around.
+minix.rs init: fs.leak ok n=256

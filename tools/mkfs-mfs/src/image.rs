@@ -82,6 +82,9 @@ pub enum MkfsError {
     BadPath(String),
     /// Two manifest entries name the same path.
     Duplicate(String),
+    /// An entry's hole is not a whole number of blocks, covers the whole file, or
+    /// names a prefix of the contents that is not already zero.
+    BadHole(String),
 }
 
 impl fmt::Display for MkfsError {
@@ -100,6 +103,10 @@ impl fmt::Display for MkfsError {
             ),
             Self::BadPath(p) => write!(f, "{p:?} is not of the form /<dir>/<name>"),
             Self::Duplicate(p) => write!(f, "{p:?} appears twice in the manifest"),
+            Self::BadHole(p) => write!(
+                f,
+                "{p:?} has a hole that is not whole blocks of zeroes inside the file"
+            ),
         }
     }
 }
@@ -151,6 +158,15 @@ impl<'a> Tree<'a> {
 
         for (i, entry) in manifest.entries.iter().enumerate() {
             let (dir, name) = split_path(&entry.path)?;
+            if entry.hole != 0 {
+                let bad = || MkfsError::BadHole(entry.path.clone());
+                if !entry.hole.is_multiple_of(MFS_BLOCK_SIZE) || entry.hole >= entry.bytes.len() {
+                    return Err(bad());
+                }
+                if entry.bytes[..entry.hole].iter().any(|&b| b != 0) {
+                    return Err(bad());
+                }
+            }
             if !seen_paths.insert(entry.path.as_str()) {
                 return Err(MkfsError::Duplicate(entry.path.clone()));
             }
@@ -227,21 +243,26 @@ impl<'a> Tree<'a> {
     fn check_block_budget(&self) -> Result<(), MkfsError> {
         let have = self.available_zones();
         let mut needed = 0u32;
-        for bytes in self
+        let sized = self
             .dir_blocks
             .iter()
-            .map(|(_, b)| b.as_slice())
-            .chain(self.manifest.entries.iter().map(|e| e.bytes.as_slice()))
-        {
+            .map(|(_, b)| (b.as_slice(), 0usize))
+            .chain(
+                self.manifest
+                    .entries
+                    .iter()
+                    .map(|e| (e.bytes.as_slice(), e.hole)),
+            );
+        for (bytes, hole) in sized {
             if bytes.len() > max_file_bytes() {
                 // Unreachable while the image is smaller than the format's reach,
                 // but reported in the same terms rather than left to a panic.
                 return Err(MkfsError::TooBig {
-                    needed: blocks_for(bytes.len()),
+                    needed: blocks_for(bytes.len(), hole),
                     have,
                 });
             }
-            needed += blocks_for(bytes.len());
+            needed += blocks_for(bytes.len(), hole);
         }
         if needed > have {
             return Err(MkfsError::TooBig { needed, have });
@@ -264,7 +285,7 @@ impl<'a> Tree<'a> {
         // image byte-for-byte reproducible.
         let dir_count = self.dirs.len() as u16;
         for (i, (ino, bytes)) in self.dir_blocks.iter().enumerate() {
-            let zones = write_data(&mut img, &mut alloc, bytes)?;
+            let zones = write_data(&mut img, &mut alloc, bytes, 0)?;
             let nlinks = if *ino == ROOT_INODE {
                 // "." + ".." + one per subdirectory's own "..".
                 2 + dir_count
@@ -286,7 +307,7 @@ impl<'a> Tree<'a> {
         }
 
         for (entry, planned) in self.manifest.entries.iter().zip(&self.files) {
-            let zones = write_data(&mut img, &mut alloc, &entry.bytes)?;
+            let zones = write_data(&mut img, &mut alloc, &entry.bytes, entry.hole)?;
             img.write_inode(
                 &self.layout,
                 planned.ino,
@@ -333,11 +354,17 @@ impl<'a> Tree<'a> {
     }
 }
 
-/// Blocks a byte count occupies, including its indirect block if it needs one.
-fn blocks_for(len: usize) -> u32 {
-    let data = len.div_ceil(MFS_BLOCK_SIZE);
-    let indirect = usize::from(data > NR_DIRECT_ZONES);
-    (data + indirect) as u32
+/// Blocks a file occupies, including its indirect block if it needs one and
+/// excluding any leading hole.
+///
+/// The *indirect* test is on the total block count, not the allocated one: a hole
+/// does not renumber the zones after it, so a file whose last block sits past the
+/// seventh still needs an indirect block however much of its front is missing.
+fn blocks_for(len: usize, hole: usize) -> u32 {
+    let total = len.div_ceil(MFS_BLOCK_SIZE);
+    let holed = hole / MFS_BLOCK_SIZE;
+    let indirect = usize::from(total > NR_DIRECT_ZONES);
+    (total.saturating_sub(holed) + indirect) as u32
 }
 
 /// Accumulates a directory's entries. Every directory starts with `.` and `..`,
@@ -393,16 +420,26 @@ impl ZoneAlloc {
 /// Write `data` into freshly allocated zones and return the inode's zone array.
 ///
 /// The indirect block is allocated lazily, on the first zone past the seventh, so
-/// a file inside the direct range costs no extra block.
+/// a file inside the direct range costs no extra block. Blocks inside `hole` are
+/// skipped entirely: the pointer stays 0, which is exactly what the reader treats
+/// as a hole.
 fn write_data(
     img: &mut Image,
     alloc: &mut ZoneAlloc,
     data: &[u8],
+    hole: usize,
 ) -> Result<[u32; NR_TZONES], MkfsError> {
     let mut zone = [0u32; NR_TZONES];
     let mut indirect: Option<u32> = None;
+    let hole_blocks = hole / MFS_BLOCK_SIZE;
 
     for (i, chunk) in data.chunks(MFS_BLOCK_SIZE).enumerate() {
+        // A hole: no zone at all. The pointer stays 0, which is exactly what the
+        // reader treats as a hole, and the prefix is already zero (checked in
+        // `plan`), so the file's bytes are unchanged by not storing them.
+        if i < hole_blocks {
+            continue;
+        }
         let z = alloc.alloc()?;
         img.block_mut(z)[..chunk.len()].copy_from_slice(chunk);
 
@@ -513,17 +550,32 @@ fn write_label(hdr: &mut [u8; IMAGE_HDR_LEN], label: &[u8; IMAGE_LABEL_LEN]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verify;
 
     #[test]
     fn blocks_for_counts_the_indirect_block_only_when_it_is_needed() {
-        assert_eq!(blocks_for(0), 0);
-        assert_eq!(blocks_for(1), 1);
-        assert_eq!(blocks_for(MFS_BLOCK_SIZE), 1);
-        assert_eq!(blocks_for(MFS_BLOCK_SIZE + 1), 2);
+        assert_eq!(blocks_for(0, 0), 0);
+        assert_eq!(blocks_for(1, 0), 1);
+        assert_eq!(blocks_for(MFS_BLOCK_SIZE, 0), 1);
+        assert_eq!(blocks_for(MFS_BLOCK_SIZE + 1, 0), 2);
         // Exactly seven blocks still fits the direct zones...
-        assert_eq!(blocks_for(NR_DIRECT_ZONES * MFS_BLOCK_SIZE), 7);
+        assert_eq!(blocks_for(NR_DIRECT_ZONES * MFS_BLOCK_SIZE, 0), 7);
         // ...and the eighth costs an indirect block as well as itself.
-        assert_eq!(blocks_for(NR_DIRECT_ZONES * MFS_BLOCK_SIZE + 1), 9);
+        assert_eq!(blocks_for(NR_DIRECT_ZONES * MFS_BLOCK_SIZE + 1, 0), 9);
+    }
+
+    #[test]
+    fn blocks_for_excludes_the_hole_but_not_the_indirect_test() {
+        // A one-block hole in a two-block file costs one zone, not two.
+        assert_eq!(blocks_for(2 * MFS_BLOCK_SIZE, MFS_BLOCK_SIZE), 1);
+        // A hole below the seam does not change whether the *total* length needs
+        // an indirect block -- the file's last block still sits past the seventh.
+        let past_seam = (NR_DIRECT_ZONES + 1) * MFS_BLOCK_SIZE;
+        assert_eq!(
+            blocks_for(past_seam, MFS_BLOCK_SIZE),
+            blocks_for(past_seam, 0) - 1,
+            "one fewer data zone, same indirect block"
+        );
     }
 
     #[test]
@@ -571,5 +623,72 @@ mod tests {
             }
             other => panic!("expected TooManyInodes, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_sparse_file_reads_back_whole_but_allocates_only_its_tail() {
+        // The hole occupies no zone, so the image spends one block on a
+        // two-block file -- and `read_inode_bytes` still returns all 8192 bytes,
+        // because a zero zone pointer *means* zeroes.
+        let mut bytes = vec![0u8; 2 * MFS_BLOCK_SIZE];
+        for (i, b) in bytes.iter_mut().enumerate().skip(MFS_BLOCK_SIZE) {
+            *b = (i % 251) as u8;
+        }
+        let mut m = Manifest::new();
+        m.add_sparse("/etc/holey", bytes.clone(), MFS_BLOCK_SIZE);
+        let img = build_image(&m).expect("a one-hole file is buildable");
+
+        assert_eq!(verify::read_file(&img, "/etc/holey"), Some(bytes));
+        let (_, node) = verify::lookup(&img, "/etc/holey").expect("it is there");
+        assert_eq!(node.zone[0], 0, "the hole must occupy no zone");
+        assert_ne!(node.zone[1], 0, "the tail must be allocated");
+        assert_eq!(node.size, 2 * MFS_BLOCK_SIZE as i32);
+    }
+
+    #[test]
+    fn a_hole_that_is_not_whole_blocks_or_not_zero_is_refused() {
+        // Both would have the image claim content it does not store.
+        for (bytes, hole) in [
+            (vec![0u8; 2 * MFS_BLOCK_SIZE], MFS_BLOCK_SIZE + 1), // not block-aligned
+            (vec![1u8; 2 * MFS_BLOCK_SIZE], MFS_BLOCK_SIZE),     // prefix not zero
+            (vec![0u8; MFS_BLOCK_SIZE], MFS_BLOCK_SIZE),         // wholly hole
+        ] {
+            let mut m = Manifest::new();
+            m.add_sparse("/etc/holey", bytes, hole);
+            assert_eq!(
+                build_image(&m),
+                Err(MkfsError::BadHole("/etc/holey".to_string())),
+                "hole {hole}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shared_dirent_size_matches_the_format_crate() {
+        // `kernel-shared` cannot depend on `minixrs-mfs` (the dependency runs the
+        // other way), so `ROOTFS_DIRENT_SIZE` is a duplicate. This crate depends
+        // on both and is therefore the only place that can pin them equal.
+        assert_eq!(
+            minixrs_kernel_shared::rootfs::ROOTFS_DIRENT_SIZE,
+            minixrs_mfs::dirent::DIRENT_SIZE
+        );
+    }
+
+    #[test]
+    fn a_directory_of_exactly_sixty_four_entries_fills_one_block() {
+        // C10's arithmetic, checked against a real image rather than reasoned
+        // about: `.` + `..` + ROOTFS_FULL_ENTRIES must be exactly one block, so
+        // that the first create in it has to grow the directory.
+        use minixrs_kernel_shared::rootfs::ROOTFS_FULL_ENTRIES;
+        let mut m = Manifest::new();
+        for i in 0..ROOTFS_FULL_ENTRIES {
+            m.add(format!("/full/f{i:02}"), Vec::new());
+        }
+        let img = build_image(&m).expect("62 empty files fit");
+        let (_, dir) = verify::lookup(&img, "/full").expect("the directory is there");
+        assert_eq!(
+            dir.size, MFS_BLOCK_SIZE as i32,
+            "exactly full, not one short"
+        );
     }
 }

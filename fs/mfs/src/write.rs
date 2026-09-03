@@ -28,11 +28,12 @@
 //! `Image::set_bit` and its `verify.rs` reader. The image is written by one and
 //! read by the other two; a divergence here corrupts every image silently.
 
+use crate::dirent::{DIRENT_SIZE, DirEntry};
 use crate::inode::NR_DIRECT_ZONES;
 use crate::read::ptrs_per_block;
 use crate::walk::Chunk;
 use minixrs_kernel_shared::callnr::FS_MAX_IO;
-use minixrs_kernel_shared::error::{EFBIG, EINVAL, EIO};
+use minixrs_kernel_shared::error::{EFBIG, EINVAL, EIO, ENOSPC};
 
 /// Where the zone backing a given file offset *would* live.
 ///
@@ -165,9 +166,125 @@ pub fn grow_size(cur: i32, pos: u64, n: usize) -> Result<i32, i32> {
     Ok((cur as u64).max(end) as i32)
 }
 
+/// Mark `bit` free. [`bitmap_set`]'s twin — **same byte, same mask**, because a
+/// divergence between the two would free a different object than the caller
+/// named.
+///
+/// `None` if the bit lies past the block, which is how a caller that mixed up its
+/// bitmap arithmetic finds out rather than by writing into the wrong byte.
+///
+/// **Order matters at the call site, in both directions.** Allocation sets the
+/// bit *before* anything references the object it names (see [`bitmap_set`]'s
+/// callers), so a failure between the two leaks. Freeing runs the other way: the
+/// reference is removed first, so this is called only once nothing points at the
+/// object. Leak over corruption, stated once and applied both ways.
+pub fn bitmap_clear(block: &mut [u8], bit: u32) -> Option<()> {
+    let byte = block.get_mut((bit / 8) as usize)?;
+    *byte &= !(1 << (bit % 8));
+    Some(())
+}
+
+/// What one directory block has to say about a name.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum DirentSlot {
+    /// The name is already here, in slot `.0`.
+    Occupied(usize),
+    /// The name is not here, and slot `.0` is free.
+    Free(usize),
+    /// The name is not here and no slot is free.
+    Full,
+}
+
+/// Scan one directory block for `want`, and for the first free slot.
+///
+/// **One pass**, because the create path needs both answers and this server has
+/// exactly one block buffer — a second scan would be a second fetch.
+///
+/// **`Occupied` wins over `Free`, whatever the indices.** If a free slot
+/// short-circuited the scan, a create could insert a duplicate entry *before* the
+/// real one — and [`crate::walk::find_in_block`] stops at the first match, so the
+/// original would be shadowed silently. That is why the free slot is remembered
+/// and the whole block scanned anyway.
+///
+/// A trailing partial entry is ignored rather than half-decoded ([`crate::dirent`]'s
+/// rule), so a short block cannot synthesize a free slot out of whatever followed
+/// it.
+pub fn dirent_slot(block: &[u8], want: &str) -> DirentSlot {
+    let mut free: Option<usize> = None;
+    for (i, chunk) in block.as_chunks::<DIRENT_SIZE>().0.iter().enumerate() {
+        let Some(e) = DirEntry::from_le_bytes(chunk) else {
+            continue;
+        };
+        if e.ino == 0 {
+            if free.is_none() {
+                free = Some(i);
+            }
+            continue;
+        }
+        // A name that is not valid UTF-8 decodes to "", which cannot equal any
+        // component `parse_path` accepted -- so it cannot be matched by accident.
+        if e.name_str() == want {
+            return DirentSlot::Occupied(i);
+        }
+    }
+    match free {
+        Some(i) => DirentSlot::Free(i),
+        None => DirentSlot::Full,
+    }
+}
+
+/// Byte offset at which an appended directory entry goes, given the directory's
+/// current size.
+///
+/// Used when no slot in any existing block is free: the entry lands at the end
+/// and the directory grows by one entry — through exactly the allocator a file
+/// grows through, which is why growth needs no second code path.
+///
+/// `EIO` for a size that is negative, past [`crate::walk::MAX_DIR_BYTES`], or not
+/// a whole number of entries — all three are a corrupt directory inode, and
+/// appending at a misaligned offset would splice an entry across two others.
+/// `ENOSPC` when the appended entry would not fit under the cap, which is a
+/// *full* directory rather than a corrupt one and is a different thing to tell a
+/// caller.
+pub fn dir_append_offset(size: i32) -> Result<u64, i32> {
+    let size = crate::walk::dir_size(size)?;
+    if !size.is_multiple_of(DIRENT_SIZE) {
+        return Err(EIO);
+    }
+    let end = size.checked_add(DIRENT_SIZE).ok_or(EIO)?;
+    if end > crate::walk::MAX_DIR_BYTES {
+        return Err(ENOSPC);
+    }
+    Ok(size as u64)
+}
+
+/// How many single-indirect slots a file of `size` bytes reaches.
+///
+/// `0` for a file inside the direct zones. **This is what bounds truncate's slot
+/// scan** (C8): a 32 KiB file examines one slot rather than the block's 1024.
+/// Capped at [`ptrs_per_block`] anyway, because every device-derived loop in this
+/// crate carries a cap and a corrupt size must not walk past the block.
+///
+/// `EIO` for a negative size — a corrupt inode rather than a caller error,
+/// [`grow_size`]'s split.
+pub fn indirect_slots_used(size: i32, bs: usize) -> Result<usize, i32> {
+    if size < 0 || bs == 0 {
+        return Err(EIO);
+    }
+    let blocks = (size as usize).div_ceil(bs);
+    Ok(blocks
+        .saturating_sub(NR_DIRECT_ZONES)
+        .min(ptrs_per_block(bs)))
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
+    use std::format;
+    use std::string::String;
+    use std::vec::Vec;
 
     const BS: usize = crate::MFS_BLOCK_SIZE;
     /// First byte the single-indirect region covers: seven direct zones in.
@@ -398,5 +515,193 @@ mod tests {
     fn a_negative_stored_size_is_eio() {
         // A corrupt inode, not a caller error.
         assert_eq!(grow_size(-1, 0, 1), Err(EIO));
+    }
+
+    // ----- bitmap_clear -----------------------------------------------------
+
+    #[test]
+    fn clearing_a_bit_uses_the_same_ordering_as_setting_one() {
+        // Same byte, same mask. A divergence between the two would free a
+        // different zone than the one the caller named -- silent corruption.
+        let mut b = [0u8; 8];
+        assert_eq!(bitmap_set(&mut b, 9), Some(()));
+        assert_eq!(b[1], 0b0000_0010);
+        assert_eq!(bitmap_clear(&mut b, 9), Some(()));
+        assert_eq!(b[1], 0);
+    }
+
+    #[test]
+    fn clearing_a_bit_leaves_its_neighbours_alone() {
+        let mut b = [0xffu8; 8];
+        assert_eq!(bitmap_clear(&mut b, 9), Some(()));
+        assert_eq!(b[1], 0b1111_1101);
+        assert_eq!(b[0], 0xff);
+        assert_eq!(b[2], 0xff);
+    }
+
+    #[test]
+    fn clearing_an_already_free_bit_is_a_no_op_not_an_error() {
+        // Truncate walks a file's zone array, which may hold holes.
+        let mut b = [0u8; 8];
+        assert_eq!(bitmap_clear(&mut b, 3), Some(()));
+        assert_eq!(b, [0u8; 8]);
+    }
+
+    #[test]
+    fn clearing_a_bit_past_the_block_is_none_not_a_panic() {
+        // `bitmap_set`'s rule: a caller that mixed up its bitmap arithmetic finds
+        // out, rather than writing into the wrong byte.
+        let mut b = [0u8; 8];
+        assert_eq!(bitmap_clear(&mut b, 64), None);
+        assert_eq!(bitmap_clear(&mut b, u32::MAX), None);
+    }
+
+    // ----- dirent_slot ------------------------------------------------------
+
+    /// One directory block: `.`, `..`, then whatever `names` says, and free slots
+    /// for the rest.
+    fn dir_block(names: &[(u32, &str)]) -> [u8; BS] {
+        let mut b = [0u8; BS];
+        let mut at = 0usize;
+        for (ino, name) in names {
+            let e = crate::dirent::DirEntry::new(*ino, name.as_bytes()).unwrap();
+            b[at..at + crate::dirent::DIRENT_SIZE].copy_from_slice(&e.to_le_bytes());
+            at += crate::dirent::DIRENT_SIZE;
+        }
+        b
+    }
+
+    #[test]
+    fn an_existing_name_is_occupied_at_its_own_slot() {
+        let b = dir_block(&[(1, "."), (1, ".."), (7, "motd")]);
+        assert_eq!(dirent_slot(&b, "motd"), DirentSlot::Occupied(2));
+    }
+
+    #[test]
+    fn a_missing_name_reports_the_first_free_slot() {
+        let b = dir_block(&[(1, "."), (1, ".."), (7, "motd")]);
+        assert_eq!(dirent_slot(&b, "new"), DirentSlot::Free(3));
+    }
+
+    #[test]
+    fn a_freed_slot_in_the_middle_is_the_one_reported() {
+        // Directories are not compacted, so a removed entry leaves a zeroed slot
+        // behind and a create should reuse it rather than growing the directory.
+        let mut b = dir_block(&[(1, "."), (1, ".."), (7, "motd"), (8, "pattern")]);
+        b[2 * crate::dirent::DIRENT_SIZE..3 * crate::dirent::DIRENT_SIZE].fill(0);
+        assert_eq!(dirent_slot(&b, "new"), DirentSlot::Free(2));
+    }
+
+    #[test]
+    fn an_existing_name_wins_over_an_earlier_free_slot() {
+        // The one ordering that matters. If `Free` short-circuited, a create
+        // would insert a duplicate entry *before* the real one -- and the reader
+        // stops at the first match, so the original would be shadowed silently.
+        let mut b = dir_block(&[(1, "."), (1, ".."), (7, "motd"), (8, "keep")]);
+        b[2 * crate::dirent::DIRENT_SIZE..3 * crate::dirent::DIRENT_SIZE].fill(0);
+        assert_eq!(dirent_slot(&b, "keep"), DirentSlot::Occupied(3));
+    }
+
+    #[test]
+    fn a_block_with_every_slot_used_is_full() {
+        let names: Vec<(u32, String)> = (0..BS / crate::dirent::DIRENT_SIZE)
+            .map(|i| (i as u32 + 1, format!("f{i:02}")))
+            .collect();
+        let refs: Vec<(u32, &str)> = names.iter().map(|(i, n)| (*i, n.as_str())).collect();
+        let b = dir_block(&refs);
+        assert_eq!(dirent_slot(&b, "new"), DirentSlot::Full);
+        // ...and a name that *is* there is still found in a full block.
+        assert_eq!(dirent_slot(&b, "f00"), DirentSlot::Occupied(0));
+    }
+
+    #[test]
+    fn a_short_block_decodes_only_whole_entries() {
+        // A trailing partial entry is ignored rather than half-decoded, so a
+        // short read cannot synthesize a free slot out of whatever followed it.
+        let b = dir_block(&[(1, "."), (1, "..")]);
+        assert_eq!(
+            dirent_slot(&b[..2 * crate::dirent::DIRENT_SIZE], "new"),
+            DirentSlot::Full
+        );
+        assert_eq!(
+            dirent_slot(&b[..2 * crate::dirent::DIRENT_SIZE + 8], "new"),
+            DirentSlot::Full
+        );
+        assert_eq!(dirent_slot(&[], "new"), DirentSlot::Full);
+    }
+
+    // ----- dir_append_offset ------------------------------------------------
+
+    #[test]
+    fn an_appended_entry_lands_at_the_directorys_current_end() {
+        assert_eq!(dir_append_offset(0), Ok(0));
+        assert_eq!(dir_append_offset(BS as i32), Ok(BS as u64));
+    }
+
+    #[test]
+    fn a_size_that_is_not_a_whole_number_of_entries_is_eio() {
+        // A corrupt directory inode. Appending at a misaligned offset would
+        // splice an entry across two others.
+        assert_eq!(dir_append_offset(1), Err(EIO));
+        assert_eq!(
+            dir_append_offset(crate::dirent::DIRENT_SIZE as i32 - 1),
+            Err(EIO)
+        );
+    }
+
+    #[test]
+    fn a_negative_or_oversized_directory_is_eio() {
+        // `dir_size`'s rules, inherited: a corrupt inode, not a caller error.
+        assert_eq!(dir_append_offset(-1), Err(EIO));
+        assert_eq!(
+            dir_append_offset(crate::walk::MAX_DIR_BYTES as i32 + 1),
+            Err(EIO)
+        );
+    }
+
+    #[test]
+    fn a_directory_at_the_cap_cannot_grow_and_is_enospc() {
+        // Distinct from EIO: the directory is well-formed, it is simply full.
+        // `MAX_DIR_BYTES` is a whole number of blocks and therefore of entries,
+        // so this is exactly the boundary.
+        let cap = crate::walk::MAX_DIR_BYTES as i32;
+        assert_eq!(dir_append_offset(cap), Err(ENOSPC));
+        assert_eq!(
+            dir_append_offset(cap - crate::dirent::DIRENT_SIZE as i32),
+            Ok((cap - crate::dirent::DIRENT_SIZE as i32) as u64),
+            "one entry short of the cap still fits"
+        );
+    }
+
+    // ----- indirect_slots_used ----------------------------------------------
+
+    #[test]
+    fn a_file_inside_the_direct_zones_reaches_no_indirect_slot() {
+        assert_eq!(indirect_slots_used(0, BS), Ok(0));
+        assert_eq!(indirect_slots_used(SEAM as i32, BS), Ok(0));
+    }
+
+    #[test]
+    fn a_file_past_the_seam_reaches_one_slot_per_block_past_it() {
+        assert_eq!(indirect_slots_used(SEAM as i32 + 1, BS), Ok(1));
+        assert_eq!(indirect_slots_used(SEAM as i32 + BS as i32, BS), Ok(1));
+        assert_eq!(indirect_slots_used(SEAM as i32 + BS as i32 + 1, BS), Ok(2));
+        // 32 KiB -- what init's write proof produces -- is exactly SEAM + BS
+        // (seven direct zones plus one whole indirect-addressed block), so it
+        // examines one slot, not the block's 1024. That bound is C8, and it is
+        // what lets truncate work with a single block buffer.
+        assert_eq!(indirect_slots_used(32 * 1024, BS), Ok(1));
+    }
+
+    #[test]
+    fn the_slot_count_is_capped_at_the_blocks_own_pointers() {
+        // A corrupt size must not walk past the indirect block.
+        assert_eq!(indirect_slots_used(i32::MAX, BS), Ok(BS / 4));
+    }
+
+    #[test]
+    fn a_negative_size_or_zero_block_is_eio() {
+        assert_eq!(indirect_slots_used(-1, BS), Err(EIO));
+        assert_eq!(indirect_slots_used(0, 0), Err(EIO));
     }
 }

@@ -1401,7 +1401,7 @@ breakdown, the error taxonomy, and the mutation/boot-matrix plan — lives in
 [`docs/superpowers/specs/2026-08-18-mfs-write-path-design.md`](../superpowers/specs/2026-08-18-mfs-write-path-design.md)
 and is not duplicated here.
 
-#### Slice 5.10a: the write path ◀ ready (branch `feature/slice-5.10a-mfs-write-path`, pending merge)
+#### Slice 5.10a: the write path ✓ shipped (PR #53, merged 2026-08-20)
 
 **Scope:** `BDEV_WRITE` becomes a real store in `drivers/memory`; one new FS
 request, `FS_WRITE` (`FS_READ`'s payload verbatim, and a short write is
@@ -1480,24 +1480,79 @@ contradict what this plan predicted:**
   that no client-controlled failure can occur after one. That costs a page of
   `.bss`; the one-page limit in MFS is the *stack*, not `.bss`.
 
-#### Slice 5.10b: create and truncate ◀ next
+#### Slice 5.10b: create and truncate ◀ ready (branch `feature/slice-5.10b-mfs-create-truncate`, pending merge)
 
-**Scope:** `FS_CREATE` + `FS_TRUNC`, an inode allocator (5.10a's `bitmap_*`
-helpers are already general), directory-entry insertion into a free
-`ino == 0` slot with directory growth when none is free, and a flags field in
-the `VFS_OPEN` payload for `O_CREAT` / `O_TRUNC`.
+Full design — decisions, the per-component breakdown, the error taxonomy, and
+the mutation/boot-matrix plan — lives in
+[`docs/superpowers/specs/2026-08-25-mfs-create-truncate-design.md`](../superpowers/specs/2026-08-25-mfs-create-truncate-design.md)
+and is not duplicated here.
 
-Also carries two items 5.10a deferred into it: the **mid-write zone leak**
-above (a second staging buffer, plus an init probe that writes through a bad
-buffer and confirms the free-zone count held), and a probe for the **`dirty`
-half of the inode write-back condition**, which `FS_TRUNC` finally makes
-reachable — a truncate followed by a write into the hole assigns a zone without
-moving `size`, which is precisely the case nothing could reach in 5.10a.
+**Scope, as shipped:** `FS_CREATE` (`FS_RQ_BASE + 4`, reusing `FS_LOOKUP`'s wire
+codec verbatim) and `FS_TRUNC` (`FS_RQ_BASE + 5`); `NR_FS_MSGS` 4 → 6. MFS
+gained an inode allocator, directory-entry insertion that grows a directory
+through the same `place_zone` a file's data uses, and a zone-freeing path for
+truncate. `VFS_OPEN` gained a `flags` field (`VFS_FLAGS_OFF`) honouring
+`O_CREAT` and `O_TRUNC` from the new `kernel-shared/src/fcntl.rs`; a flag bit
+outside `O_KNOWN` is `EINVAL`, and the access-mode bits are accepted and
+ignored (no uid/gid/permission check anywhere in the tree). The image gained
+sparse-file support, 128 inodes (was 64), a `/full` directory holding exactly
+one block of entries with no free slot, and `/etc/holey`, `/deny/file` (in its
+own `/deny` directory, so that the destructive `FS_TRUNC`-on-a-directory probe
+has nothing but its own sibling to lose), plus paths for the create/dirgrow/leak
+probes.
 
-**Proof:** init creates a file that is not in the image, writes it, reads it
-back, and echoes it to fd 1.
+Also closes the item 5.10a deferred into it: the **mid-write zone leak**.
+`do_write` now stages the client's bytes into a second `.bss` buffer *before*
+anything is allocated, so no client-controlled failure occurs after an
+allocation — a restaging, not a rollback, because clearing the bitmap bit on
+the error path would be actively wrong for an indirect slot whose indirect
+block already existed (the block on disk still names the zone, so freeing it
+there would hand one zone to two files).
 
-### Slice 5.11 (stretch): `/dev/null` + `/dev/zero`
+`create` gets the same invariant, which review of this slice found it did not
+originally have: `reserve_slot` places the directory's slot — including the zone
+its growth may need, the only `ENOSPC` a client can provoke on that path —
+before `alloc_inode` claims anything, so a full image answers a clean `ENOSPC`
+instead of orphaning one of the 128 inodes per attempt. That is the strictly
+worse half of the same defect, because `do_trunc` can hand a leaked zone back
+and nothing can recover an orphaned inode.
+
+**Two corrections to 5.10a's hand-off, found while implementing this slice:**
+
+- **`FS_TRUNC` does not make the `dirty` write-back case reachable.** 5.10a's
+  hand-off predicted that a truncate followed by a write into the hole would
+  exercise it; it does not, because a truncate zeroes `size` back to 0 and the
+  next write starts at position 0 growing `size` again — an ordinary append,
+  not a hole. Only a hole strictly **below** the file's end-of-file reaches the
+  `dirty` case (a zone assigned with `size` unchanged), which is why the image
+  ships `/etc/holey` — a file whose first block is a hole below its nominal
+  size — rather than relying on truncate for it.
+- **The truncate ordering (write the zeroed inode back, then free the zones) is
+  itself unproven, for the same class of reason the `dirty` condition was.**
+  Reversing it needs a failure between the two steps that nothing this slice
+  can induce; the invariant is correct and stays, but no boot probe covers it.
+  `do_trunc`'s docstring says so directly rather than letting a passing boot
+  imply otherwise.
+
+**Proof — five new init markers, in prologue order:** `fs.trunc ok n=0` (empty
+after truncating `/etc/scratch`, the file the previous slice just filled);
+`fs.create ok n=25` (`/etc/new`, found again through a lookup with no
+`O_CREAT`, proving the directory entry — not just the inode — reached the
+device); `fs.dirgrow ok n=25` (`/full`'s 65th entry, forcing a second directory
+zone — the append arm no other boot probe reaches); `fs.hole ok` (`/etc/holey`,
+the `dirty` write-back proof, verified over the *whole* file rather than
+sampled windows); `fs.leak ok n=256` (256 writes at an unmapped buffer, all
+`EFAULT`, followed by one real write that still succeeds — the zone-leak
+closure). `fs.deny` grew 10 → 14, sent straight at the FS band (`EEXIST` with
+the target re-resolved unchanged, create under a file parent → `ENOTDIR`,
+truncate on a directory → `EISDIR`, truncate on inode 0 → `EINVAL`), and
+`open.deny` grew 7 → 11, sent through `VFS_OPEN`'s flags field (`O_CREAT`
+naming a missing parent → `ENOENT`, `O_CREAT` naming an existing directory →
+`EISDIR`, `O_TRUNC` naming a directory → `EISDIR`, and a flag bit outside
+`O_KNOWN` → `EINVAL`, spelled relative to `O_UNKNOWN_BIT` rather than as a
+literal so a flag becoming real fails loudly instead of passing vacuously).
+
+### Slice 5.11 (stretch): `/dev/null` + `/dev/zero` ◀ next
 
 **Scope:** MEM gains CDEV minors for null/zero on the 5.3 band; VFS grows a
 static device-node table (`/dev/null`, `/dev/zero`, `/dev/console` →

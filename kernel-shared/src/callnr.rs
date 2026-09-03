@@ -536,29 +536,33 @@ pub const VFS_RQ_BASE: i32 = 0x800;
 /// success beats an error.
 pub const VFS_WRITE: i32 = VFS_RQ_BASE;
 
-/// User → VFS: `open(path)`.
+/// User → VFS: `open(path, flags)`.
 ///
 /// Payload: the path buffer's address *in the caller's own address space* in
-/// [`VFS_PATH_OFF`]`..+8` (u64), and its length in [`VFS_PATH_LEN_OFF`]`..+4`
-/// (i32). VFS reads the bytes out with `SYS_COPY`; a user process has no grant
-/// table to describe them with.
+/// [`VFS_PATH_OFF`]`..+8` (u64), its length in [`VFS_PATH_LEN_OFF`]`..+4` (i32),
+/// and the open flags in [`VFS_FLAGS_OFF`]`..+4` (i32, [`crate::fcntl`]'s
+/// values). VFS reads the path bytes out with `SYS_COPY`; a user process has no
+/// grant table to describe them with.
 ///
 /// Reply `m_type` is the **new descriptor** (`>= 0`), or a negative errno:
-/// `ENOENT` for a path that does not exist, `EISDIR` for a directory (there is no
-/// `O_DIRECTORY` and nothing that could read one), `ENOTDIR` for an intermediate
-/// component that is not a directory, `ENAMETOOLONG` past [`FS_PATH_MAX`],
-/// `EINVAL` for a relative or empty path, `EMFILE` when the caller's descriptor
-/// row is full, `ENODEV` when no filesystem is mounted.
+/// `ENOENT` for a path that does not exist and `O_CREAT` was not given,
+/// `EISDIR` for a directory (there is no `O_DIRECTORY` and nothing that could
+/// read one), `ENOTDIR` for an intermediate component that is not a directory,
+/// `ENAMETOOLONG` past [`FS_PATH_MAX`], `EINVAL` for a relative or empty path
+/// or a flag bit outside [`crate::fcntl::O_KNOWN`], `EMFILE` when the caller's
+/// descriptor row is full, `ENODEV` when no filesystem is mounted.
 ///
-/// **There is deliberately no `flags` field.** Every descriptor this request
-/// hands out is readable and writable alike — slice 5.10a made writes real
-/// without needing one, because the file it writes to is already in the image —
-/// so a flag a client could pass and VFS would have to refuse is worse than no
-/// field at all. One arrives with slice 5.10b, which needs `O_CREAT` / `O_TRUNC`
-/// to name a file that does not exist yet; that is an ABI bump this request is
-/// already numbered for. The lowest free descriptor is returned, which
-/// is POSIX's rule and what makes the `fs.fd` boot probe (open, open, close both,
-/// re-open) mean anything.
+/// **Every descriptor this request hands out is readable and writable alike**
+/// — slice 5.10a made writes real without needing a flags field, because the
+/// file it wrote to was already in the image. The flags field arrives with
+/// slice 5.10b: `O_CREAT` names a file that does not exist yet (dispatched to
+/// [`FS_CREATE`] after a lookup answers `ENOENT`), and `O_TRUNC` discards an
+/// existing file's contents (dispatched to [`FS_TRUNC`]) — both acted on by
+/// VFS, not by the FS server's [`FS_LOOKUP`] path. The access-mode bits
+/// (`O_RDONLY`/`O_WRONLY`/`O_RDWR`) are accepted and ignored, per
+/// [`crate::fcntl::O_KNOWN`]'s doc comment. The lowest free descriptor is
+/// returned, which is POSIX's rule and what makes the `fs.fd` boot probe (open,
+/// open, close both, re-open) mean anything.
 pub const VFS_OPEN: i32 = VFS_RQ_BASE + 1;
 
 /// User → VFS: `read(fd, buf, len)`.
@@ -660,6 +664,11 @@ pub const VFS_EXEC_MAX: usize = 256 * 1024;
 pub const VFS_PATH_OFF: usize = 0;
 /// Offset of the path's length in a `VFS_OPEN` payload (i32).
 pub const VFS_PATH_LEN_OFF: usize = 8;
+/// Offset of the open flags in a `VFS_OPEN` payload (i32).
+///
+/// Values are [`crate::fcntl`]'s, which are musl's. A new *field* on an existing
+/// request rather than a new request, so [`NR_VFS_MSGS`] does not move.
+pub const VFS_FLAGS_OFF: usize = 12;
 
 // The VFS range sits strictly above the PM range and strictly below FS's (and
 // therefore every other server request range) and the NOTIFY marker.
@@ -678,7 +687,8 @@ const _: () = assert!((8 + VFS_BUF_OFF).is_multiple_of(8));
 
 // The `VFS_OPEN` payload, likewise. A separate message, so it may reuse byte 0.
 const _: () = assert!(VFS_PATH_OFF + 8 <= VFS_PATH_LEN_OFF);
-const _: () = assert!(VFS_PATH_LEN_OFF + 4 <= 96);
+const _: () = assert!(VFS_PATH_LEN_OFF + 4 <= VFS_FLAGS_OFF);
+const _: () = assert!(VFS_FLAGS_OFF + 4 <= 96);
 const _: () = assert!((8 + VFS_PATH_OFF).is_multiple_of(8));
 
 // The `VFS_EXEC_STAGE` request's inline path and its reply's grant id each fill
@@ -804,9 +814,54 @@ pub const FS_READ: i32 = FS_RQ_BASE + 2;
 /// `m_source`, and VFS issues a fresh grant over exactly the round's bytes.
 pub const FS_WRITE: i32 = FS_RQ_BASE + 3;
 
+/// VFS → FS server: create a regular file.
+///
+/// **Payload is [`FS_LOOKUP`]'s, field for field** — the path inline at
+/// [`FS_PATH_OFF`], NUL-padded to [`FS_PATH_MAX`] — and **so is the reply**:
+/// [`FS_INO_OFF`] / [`FS_MODE_OFF`] / [`FS_SIZE_OFF`], with `m_type = OK`. One
+/// wire codec serves both, and VFS classifies either answer through the same
+/// function. That is [`FS_WRITE`]-reuses-[`FS_READ`] applied to the control
+/// plane.
+///
+/// The FS server resolves the parent itself, because the band's rule since slice
+/// 5.8 is that the control plane travels inline and a create is a path operation.
+/// Splitting the path in VFS and sending `{parent_ino, name}` would put path
+/// syntax in two servers and cost an extra `FS_LOOKUP`.
+///
+/// **There is no mode field.** There is no uid, no gid and no permission logic
+/// anywhere in the tree, so a mode would be a value nothing reads — and a field
+/// with one legal value is worse than no field. The server creates
+/// `I_REGULAR | 0o644` with `nlinks = 1`. `open(2)`'s `mode_t` argument is
+/// dropped by VFS until a permission model exists.
+///
+/// **An existing name is `EEXIST`**, not the existing inode: VFS only sends this
+/// after a lookup answered `ENOENT`, so the strict answer costs nothing and is
+/// what `O_EXCL` will need. Returning the existing inode would make "created" and
+/// "found" indistinguishable on the wire and hide a duplicate-entry bug behind a
+/// success. `ENOENT` when the parent is missing, `ENOTDIR` when it is a file,
+/// `ENOSPC` when there is no free inode or the directory cannot grow.
+pub const FS_CREATE: i32 = FS_RQ_BASE + 4;
+
+/// VFS → FS server: discard a regular file's contents.
+///
+/// Payload: the inode number at [`FS_INO_OFF`]`..+4` (i32). Reply `m_type` is
+/// `OK`, with no payload.
+///
+/// **It truncates to zero and has no length field.** `O_TRUNC` is the only
+/// client, and there is no `ftruncate()` anywhere in the tree — no VFS request,
+/// no musl wrapper — so a length field would ship five unreachable behaviours
+/// (shrink-to-N, extend, no-op, past-EOF, negative) to serve one reachable one.
+/// It is a request of its own rather than a flag on [`FS_CREATE`] because VFS
+/// must be able to truncate a file that already exists, which is precisely what
+/// `O_TRUNC` means.
+///
+/// `EISDIR` for a directory and `EINVAL` for any other non-regular inode — the
+/// same guards, with the same wording, `FS_WRITE` applies.
+pub const FS_TRUNC: i32 = FS_RQ_BASE + 5;
+
 /// Number of file-system requests defined so far. Locks an FS server's dispatch
 /// coverage the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_FS_MSGS: usize = 4;
+pub const NR_FS_MSGS: usize = 6;
 
 /// Offset of the block-device minor in an `FS_READSUPER` payload (i32).
 pub const FS_SUPER_MINOR_OFF: usize = 0;
@@ -1811,13 +1866,17 @@ mod tests {
         // payload-supplied source would let any client read any process's memory
         // through VFS.
         //
-        // There is also no `flags` field until slice 5.10b, which needs
-        // `O_CREAT` / `O_TRUNC`. Through 5.10a every descriptor is readable and
-        // writable alike, and a flag a client could pass and VFS would have to
-        // refuse is worse than no field. The length assertion below is what makes
-        // adding either a visible change rather than a quiet one.
-        let fields = [("path", VFS_PATH_OFF, 8), ("path_len", VFS_PATH_LEN_OFF, 4)];
-        assert_eq!(fields.len(), 2, "a VFS_OPEN payload field was added");
+        // Slice 5.10b added `flags` in [`VFS_FLAGS_OFF`]`..+4` (i32,
+        // `crate::fcntl`'s bits) for `O_CREAT` / `O_TRUNC`. Through 5.10a every
+        // descriptor was readable and writable alike; the length assertion
+        // below is what makes adding a fourth field a visible change rather
+        // than a quiet one.
+        let fields = [
+            ("path", VFS_PATH_OFF, 8),
+            ("path_len", VFS_PATH_LEN_OFF, 4),
+            ("flags", VFS_FLAGS_OFF, 4),
+        ];
+        assert_eq!(fields.len(), 3, "a VFS_OPEN payload field was added");
         assert_eq!(VFS_PATH_OFF, 0, "the first field must start the payload");
         assert_ordered_and_disjoint(&fields);
 
@@ -1997,7 +2056,14 @@ mod tests {
     fn fs_msgs_contiguous_from_base() {
         // FS requests are contiguous from FS_RQ_BASE; NR_FS_MSGS locks an FS
         // server's dispatch coverage.
-        let msgs = [FS_READSUPER, FS_LOOKUP, FS_READ, FS_WRITE];
+        let msgs = [
+            FS_READSUPER,
+            FS_LOOKUP,
+            FS_READ,
+            FS_WRITE,
+            FS_CREATE,
+            FS_TRUNC,
+        ];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, FS_RQ_BASE + i as i32);
         }
@@ -2011,7 +2077,14 @@ mod tests {
         // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a server's m_type
         // dispatcher and the SEF classifier never collide. FS sits between VFS
         // and BDEV, which is what its two bounds assert.
-        for m in [FS_READSUPER, FS_LOOKUP, FS_READ, FS_WRITE] {
+        for m in [
+            FS_READSUPER,
+            FS_LOOKUP,
+            FS_READ,
+            FS_WRITE,
+            FS_CREATE,
+            FS_TRUNC,
+        ] {
             for other in [
                 PM_GETPID,
                 PM_FORK,

@@ -113,7 +113,19 @@ pub fn imap_bit(ino: u32) -> u32 {
 /// is *not* a data zone and is always marked in use. `None` for a zone below that
 /// base — such a zone is metadata and has no bitmap bit at all.
 pub fn zmap_bit(zone: u32, first_data_zone: u32) -> Option<u32> {
-    zone.checked_sub(first_data_zone - 1)
+    // Both subtractions are checked, and the base one is not decoration: this
+    // crate ships with `overflow-checks = false`, where `first_data_zone - 1`
+    // wraps to `u32::MAX` in the server and panics under `cargo test` — the
+    // two-profile divergence the workspace rule exists to eliminate. `free_zone`
+    // is a caller as of slice 5.10b, and a wrapped base there would clear a
+    // bitmap bit chosen at random.
+    //
+    // It is unreachable today — every caller's `Mount.layout` is *derived* by
+    // `layout()` above, never decoded from an on-disk superblock, and `layout()`
+    // computes `first_data_zone = inode_start + inode_blocks >= START_BLOCK = 2`
+    // — but `Superblock::validate` does not itself check that, so the guarantee
+    // lives in one constructor rather than in the type.
+    zone.checked_sub(first_data_zone.checked_sub(1)?)
 }
 
 #[cfg(test)]
@@ -144,24 +156,25 @@ mod tests {
         assert_eq!(bitmap_blocks(8193, 4096), 1);
     }
 
-    /// The geometry of the slice-5.7 root image, computed by hand:
+    /// The geometry of the slice-5.10b root image (128 inodes, since `/full`'s
+    /// 62-entry directory alone costs that many), computed by hand:
     ///
-    /// * imap: `1 + 64 = 65` bits → 1 block, at 2
+    /// * imap: `1 + 128 = 129` bits → 1 block, at 2
     /// * zmap: `1 + 256 = 257` bits → 1 block, at 3
-    /// * inodes: `64 / (4096/64) = 1` block, at 4
-    /// * first data zone: 5
+    /// * inodes: `128 / (4096/64) = 2` blocks, at 4
+    /// * first data zone: 6
     #[test]
     fn the_rootfs_geometry_matches_the_hand_computation() {
         assert_eq!(
-            layout(64, 256, BS),
+            layout(128, 256, BS),
             Layout {
                 imap_start: 2,
                 imap_blocks: 1,
                 zmap_start: 3,
                 zmap_blocks: 1,
                 inode_start: 4,
-                inode_blocks: 1,
-                first_data_zone: 5,
+                inode_blocks: 2,
+                first_data_zone: 6,
             }
         );
     }
