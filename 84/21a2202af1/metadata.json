@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "8421a2202af1",
+  "strategy": "manual-commit",
+  "branch": "chore/claude-subagent-stop-hook",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/84/21a2202af1/0/metadata.json",
+      "transcript": "/84/21a2202af1/0/full.jsonl",
+      "compact_transcript": "/84/21a2202af1/0/transcript.jsonl",
+      "content_hash": "/84/21a2202af1/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 226,
+    "cache_creation_tokens": 89753,
+    "cache_read_tokens": 804432,
+    "output_tokens": 6068,
+    "api_call_count": 8
+  }
+}
