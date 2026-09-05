@@ -166,6 +166,17 @@ minix.rs console: tty online (EL0)
 [diag vfs] cdev.deny ok n=2
 
 # ---------------------------------------------------------------------------
+# Slice 5.11: /dev/null and /dev/zero on the memory driver, and CDEV_READ.
+# ---------------------------------------------------------------------------
+
+# VFS resolves the memory driver through DS -- the third link in the chain
+# `ds < tty < memory < mfs < vfs`, which is packing order in kernel/build.rs and
+# nothing stronger. A failed lookup falls back to the boot endpoint and prints
+# `mem.ds FAIL` instead, so every device marker below stays alive and only this
+# one disappears: an ordering regression turns CI red here specifically.
+[diag vfs] mem.ds ok ep=
+
+# ---------------------------------------------------------------------------
 # Slice 5.4: the POSIX write path -- init -> VFS -> TTY, with one copy.
 # ---------------------------------------------------------------------------
 #
@@ -494,6 +505,17 @@ minix.rs hello: iov ok match=1
 # (-> EINVAL).
 [diag vfs] fs.deny ok n=14
 
+# The memory driver's CDEV refusals, probed from VFS's prologue because VFS's own
+# device table can never send them (it maps only minors that exist). Five, each
+# well-formed but for one thing: minor 7 on a write and on a read (ENXIO from the
+# driver's classify, on both requests independently), a negative length (EINVAL),
+# GRANT_INVALID (EINVAL), and a CDEV_READ through a grant carrying only CPF_READ
+# -- the driver passes it to SYS_SAFECOPY(SAFECOPY_TO) in good faith and the
+# KERNEL refuses the direction (EPERM, relayed verbatim). That last one is the
+# first CPF_WRITE-required refusal any boot marker exercises. Drop a check and
+# its probe succeeds, turning this into `mem.deny FAIL <name>`.
+[diag vfs] mem.deny ok n=5
+
 # ---------------------------------------------------------------------------
 # THE MILESTONE. A file's contents, read out of a MinixFS image by an ordinary
 # user process and printed. The path is:
@@ -522,6 +544,29 @@ minix.rs init: fs.read ok match=1
 # at all, and this is the only exercise of VFS_CLOSE anywhere.
 minix.rs init: fs.fd ok match=1
 
+# /dev/zero through the whole POSIX path: open by path (VFS's device table,
+# consulted after the path copy and BEFORE the mount -- a device needs no
+# filesystem), then a 64-byte read that must come back whole and all-zero into a
+# buffer poisoned with 0xA5, then a SECOND read that must also be 64 rather than
+# EOF. The second read is what separates zero from null: swap the two minors in
+# VFS's table and this prints `dev.zero FAIL short`. Clamp the driver's read and
+# it prints the same. n= is the constant, pinned by a const assert.
+minix.rs init: dev.zero ok n=64
+
+# /dev/null: the 35-byte hello line is written and the WHOLE count must come
+# back in one round (the memory driver does not clamp -- there is no staging
+# buffer to protect), then a read must be EOF and must leave the poisoned buffer
+# untouched. A write here issues no copy at all, which is why no bad-buffer
+# probe may ever be aimed at /dev/null: it would succeed.
+minix.rs init: dev.null ok n=35
+
+# /dev/console: this line is written THROUGH the descriptor that open("/dev/
+# console") returned, not through fd 1. Printing it on fd 1 after the open would
+# prove only that a number came back; routing the table's console row to the
+# memory driver makes this line vanish (discarded by null, or ENXIO), which is
+# the proof that the row points at TTY.
+minix.rs init: dev.console ok
+
 # Eleven refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
 # a path with no such file (-> ENOENT), `/etc` (-> EISDIR from open::classify --
 # delete that arm and open succeeds, handing back a descriptor every later read
@@ -547,7 +592,13 @@ minix.rs init: fs.fd ok match=1
 # naming a directory for the same reason, and a flag bit this build does not
 # honour, spelled relative to O_UNKNOWN_BIT rather than as a literal so a flag
 # becoming real fails this loudly instead of passing vacuously (-> EINVAL).
-minix.rs init: open.deny ok n=11
+#
+# Slice 5.11 adds `dev-no-such`: open("/dev/nope") must fall through the device
+# table to MFS and answer ENOENT from the walk of a /dev that does not exist --
+# a table that claimed the whole prefix, or matched by prefix, fails this. The
+# read-console probe keeps ENOSYS, but the answer now comes from TTY's
+# unknown-request arm over a real CDEV_READ rather than from VFS short-circuiting.
+minix.rs init: open.deny ok n=12
 
 # ---------------------------------------------------------------------------
 # Slice 5.9: exec-from-FS -- /bin/hello, out of the filesystem (milestone B).
