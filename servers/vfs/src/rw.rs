@@ -338,17 +338,18 @@ mod tests {
 
     #[test]
     fn a_driver_reporting_zero_ends_the_write_rather_than_spinning() {
-        // Unreachable through TTY, which is exactly why it needs a test: in the
-        // loop this rule is only observable by breaking the driver.
+        // Unreachable through a working driver (TTY or the memory driver), which
+        // is exactly why it needs a test: in the loop this rule is only
+        // observable by breaking the driver.
         assert_eq!(advance(0, 100, 0), Step::Done(0));
         assert_eq!(advance(40, 100, 0), Step::Done(40));
     }
 
     #[test]
     fn a_driver_reporting_more_than_asked_cannot_over_report_the_write() {
-        // Also unreachable through TTY. Without the clamp the reply would exceed
-        // the length the client handed over — the one number a client acts on
-        // unconditionally.
+        // Also unreachable through a working driver (TTY or the memory driver).
+        // Without the clamp the reply would exceed the length the client handed
+        // over — the one number a client acts on unconditionally.
         assert_eq!(advance(0, 100, 100_000), Step::Done(100));
         assert_eq!(advance(90, 100, i32::MAX), Step::Done(100));
     }

@@ -13,7 +13,7 @@
 //! MINIX 3 boots the same shape, and Phase 6 swaps virtio-blk in underneath an
 //! unchanged MFS — which is why nothing here knows what a filesystem is.
 //!
-//! ## Four things worth knowing
+//! ## Five things worth knowing
 //!
 //! **This driver never dereferences the mapping, and contains no `unsafe` block.**
 //! (The only `unsafe` tokens in the crate are the two ELF-only attributes on

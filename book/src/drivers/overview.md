@@ -170,12 +170,12 @@ It reports `[devmap] selftest ok freed=0 devs=1`, asserting **both** numbers —
 ## The CDEV protocol
 
 Character drivers answer requests in the `CDEV_RQ_BASE = 0xB00` band. Phase 5
-defines one:
+defines two, sharing one payload:
 
 | Field | Payload offset | Meaning |
 |---|---|---|
 | minor | `0..4` (i32) | which device; `CDEV_MINOR_CONSOLE = 0` is the UART |
-| grant id | `4..8` (i32) | names the client's source buffer |
+| grant id | `4..8` (i32) | names the client's buffer (`CPF_READ` for a write, `CPF_WRITE` for a read) |
 | length | `8..12` (i32) | bytes requested |
 | offset | `16..24` (u64) | where in the granted range to start |
 
@@ -198,19 +198,31 @@ count; the client re-sends with `offset` advanced. That is POSIX `write()`'s
 contract, and it is what lets a driver stage through a fixed buffer in its `main`
 frame with no allocator at all.
 
-`CDEV_READ` is deliberately absent: receive needs interrupts (`SYS_IRQCTL`) and
-arrives in Phase 6. The `/dev/null` and `/dev/zero` devices planned for slice 5.11
-are new *minors* of `CDEV_WRITE`, not new request numbers.
+**`CDEV_READ` is the same payload, copy reversed** (slice 5.11). The reply is
+the byte count read, `0` is EOF, and a short read is legal — POSIX `read()`'s
+contract and the one VFS already assumes for `FS_READ`, so VFS sends one request
+and reports what came back. It existed only as a plan note until `/dev/zero`
+needed it: the 5.3 text said the two devices would be "new minors, not new
+requests", which is true of `/dev/null` and of writing `/dev/zero` and false of
+reading it. TTY does not serve it until Phase 6 gives it RX (`SYS_IRQCTL`), and
+answers it `ENOSYS` from its unknown-request arm until then — VFS routes a
+console `read()` there anyway, so Phase 6 changes TTY and nothing else.
+
+**Minors are a per-driver namespace.** TTY's console is 0; the memory driver's
+`/dev/null` and `/dev/zero` are CDEV minors 3 and 5 (MINIX 3's `NULL_DEV` and
+`ZERO_DEV`), on the same driver as BDEV minor 0's ramdisk. The request band, not
+the minor value, tells them apart.
 
 ## TTY
 
 `drivers/tty/` is three files:
 
-- **`cdev.rs`** — the pure, host-tested half: `parse_write` reads the four payload
-  fields, `validate_write` applies the checks in order (unknown minor → `ENXIO`,
-  negative length → `EINVAL`, invalid grant id → `EINVAL`, then clamp to
-  `CDEV_MAX_IO`). Both are total functions, so a malformed request becomes an
-  invalid *value* the validator rejects, never a panic.
+- **`cdev.rs`** — the pure, host-tested half: `validate_write` applies the checks
+  in order (unknown minor → `ENXIO`, negative length → `EINVAL`, invalid grant id
+  → `EINVAL`, then clamp to `CDEV_MAX_IO`) (the four-field parse moved to
+  `server-rt::cdev` in 5.11, when the memory driver became its second user). It is
+  a total function, so a malformed request becomes an invalid *value* the
+  validator rejects, never a panic.
 - **`pl011.rs`** — the crate's only `unsafe`: volatile accesses to `FR` and `DR` at
   `TTY_UART_VA`, polling `FR.TXFF` before each store, translating LF to CRLF. The
   register offsets are deliberately duplicated from the kernel's own PL011 writer;
@@ -365,6 +377,28 @@ advance would map 256 pages of block 0 and pass every header check. The tail is 
 only thing in the boot that proves the copy reached the end of the blob — confirmed
 by mutation, where sourcing every page from block 0 moved exactly one marker,
 `ramdisk FAIL tail label`.
+
+### The character minors
+
+Since slice 5.11 the same driver serves `/dev/null` (CDEV minor 3) and
+`/dev/zero` (minor 5), as MINIX 3's memory driver does beside its ramdisks. They
+share the driver with the BDEV ramdisk but not a namespace — a minor is per
+request band — so `cdev::classify` refuses minor 0 here, which is TTY's console.
+
+Both minors discard a `CDEV_WRITE` and answer the **whole** count with no copy
+at all; `/dev/null` answers a `CDEV_READ` with `0`, and `/dev/zero` fills the
+whole request from a 256-byte static, walking the grant in `CDEV_MAX_IO` steps.
+Nothing is clamped: `CDEV_MAX_IO` protects TTY's stack staging buffer, and there
+is no staging here. Two consequences worth knowing. A `/dev/null` write with an
+unmapped buffer *succeeds*, as it does on Linux, because nothing reads the
+buffer — so no bad-buffer probe may ever be aimed at it. And the driver still
+has no `unsafe` block: both arms are kernel calls.
+
+VFS probes the validator from its prologue (`[diag vfs] mem.deny ok n=5`),
+because VFS's own device table maps only minors that exist and could never send
+a bad one. One of those five is the first `CPF_WRITE`-required refusal any boot
+marker exercises: a `CDEV_READ` through a read-only grant, refused by the kernel's
+`verify_grant` and relayed as `EPERM`.
 
 ### What the boot log proves
 

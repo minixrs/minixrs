@@ -17,7 +17,7 @@
 //! ## The write path, and its one copy
 //!
 //! ```text
-//! user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off}──► TTY
+//! user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off}──► driver
 //!                                  │                                      │
 //!                                  └── magic grant: caller's buf ──────────┘
 //!                                          (kernel copies, once)
@@ -544,6 +544,7 @@ fn mem_endpoint() -> Endpoint {
 }
 
 /// The one place a [`CharDriver`] becomes an address.
+#[cfg_attr(test, allow(dead_code))]
 fn cdev_endpoint(dev: CharDriver, tty: Endpoint, mem: Endpoint) -> Endpoint {
     match dev {
         CharDriver::Tty => tty,
