@@ -1,0 +1,57 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "aa27a228ca77",
+  "session_id": "01a06feb-d3e7-7510-a005-50652371d54e",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-05T05:21:48.389599Z",
+  "branch": "chore/grok-native-config",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".grok/agents/entire-search.md",
+    ".grok/hooks/entire.json",
+    ".grok/skills/mdbook-preview/SKILL.md"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "ed12fa09a4bc",
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-05T05:21:48.131976Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 119,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 119,
+    "total_lines_changed": 119,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 701,
+      "user_lines_removed": 5,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 11,
+        ".gemini/settings.json": 141,
+        "PRE6-RECOMMEND.md": 275,
+        "RECOMMEND.md": 274
+      },
+      "user_removed_per_file": {
+        ".claude/settings.json": 5
+      }
+    }
+  ]
+}
