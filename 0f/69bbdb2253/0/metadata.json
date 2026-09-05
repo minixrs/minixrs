@@ -1,0 +1,85 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "0f69bbdb2253",
+  "session_id": "d473a02b-2a5d-499a-b52d-798a03065536",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-05T05:22:50.639029Z",
+  "branch": "feature/slice-5.11-dev-null-zero",
+  "checkpoints_count": 3,
+  "save_step_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-fable-5-1",
+  "turn_id": "24d59e59e6ff",
+  "checkpoint_transcript_start": 234,
+  "transcript_lines_at_start": 234,
+  "compact_transcript_start": 29,
+  "token_usage": {
+    "input_tokens": 64,
+    "cache_creation_tokens": 13348,
+    "cache_read_tokens": 369993,
+    "output_tokens": 13789,
+    "api_call_count": 2
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01KR4QtRGzjMY6eSUib5KBwf",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "24d59e59e6ff",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 32,
+        "end": 33,
+        "entry_ids": [
+          "535bb9e1-1eeb-40f9-acb4-19fdf8263891"
+        ],
+        "tool_use_id": "toolu_01KR4QtRGzjMY6eSUib5KBwf"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01KR4QtRGzjMY6eSUib5KBwf"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 426,
+      "user_lines_removed": 5,
+      "agent_lines_added": 275,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 11,
+        ".gemini/settings.json": 141,
+        "RECOMMEND.md": 274
+      },
+      "user_removed_per_file": {
+        ".claude/settings.json": 5
+      }
+    }
+  ]
+}
