@@ -91,8 +91,9 @@ itself, and RS restarts it. They talk to the kernel (interrupts, I/O) and to VFS
   device tree), PCI on x86_64. Devices exchange data through **virtqueues**: a
   descriptor table plus an available ring (driver → device) and a used ring
   (device → driver).
-- The planned set is `virtio-blk`, `virtio-net`, `virtio-console` (a VirtIO TTY),
-  and a hardware-free `memory` driver (`/dev/null`, `/dev/zero`, ramdisk).
+- The hardware-free `memory` driver already shipped in Phase 5 — the ramdisk in
+  slice 5.7, `/dev/null` and `/dev/zero` in slice 5.11 — so Phase 6's driver work
+  is VirtIO only: `virtio-blk`, `virtio-net`, and `virtio-console` (a VirtIO TTY).
 - A `driver-rt` crate will provide the reusable `BlockDriver` / `CharDriver`
   traits and the VirtIO transport types. Only a console story is needed for the
   Phase-5 `printf` milestone; the rest is Phase 6.

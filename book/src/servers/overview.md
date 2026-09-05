@@ -175,18 +175,19 @@ reading too, against a real filesystem served by MFS.
 ### One request, one copy
 
 ```text
-user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off}──► TTY
+user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off}──► driver
                                  │                                      │
                                  └── magic grant: caller's buf ──────────┘
                                          (kernel copies, once)
 ```
 
 VFS resolves the descriptor, issues a **magic** (third-party) grant naming the
-*caller's* buffer with the driver as grantee, and forwards the grant id. TTY then
-safecopies straight out of the caller's address space. The bytes never pass
-through VFS: there is exactly one copy, from the process that wrote them to the
-driver that transmits them. This is the first consumer of the magic grant form on
-a real data path, and the rail slice 5.6's musl `write()` lands on.
+*caller's* buffer with the driver as grantee, and forwards the grant id. The
+driver — TTY for the console, the memory driver for `/dev/null` and `/dev/zero`
+— then safecopies straight out of the caller's address space. The bytes never
+pass through VFS: there is exactly one copy, from the process that wrote them to
+the driver that transmits them. This is the first consumer of the magic grant
+form on a real data path, and the rail slice 5.6's musl `write()` lands on.
 
 Three properties hold that path together:
 

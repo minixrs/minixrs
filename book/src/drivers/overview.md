@@ -179,7 +179,7 @@ defines two, sharing one payload:
 | length | `8..12` (i32) | bytes requested |
 | offset | `16..24` (u64) | where in the granted range to start |
 
-Three properties of that table are load-bearing.
+Five properties of that table are load-bearing.
 
 **There is no granter field.** The driver takes the granter from the
 kernel-stamped `m_source`. TTY holds `SYS_SAFECOPY` and its clients do not, so a
@@ -392,13 +392,15 @@ Nothing is clamped: `CDEV_MAX_IO` protects TTY's stack staging buffer, and there
 is no staging here. Two consequences worth knowing. A `/dev/null` write with an
 unmapped buffer *succeeds*, as it does on Linux, because nothing reads the
 buffer — so no bad-buffer probe may ever be aimed at it. And the driver still
-has no `unsafe` block: both arms are kernel calls.
+has no `unsafe` block: the only copy is a kernel call.
 
 VFS probes the validator from its prologue (`[diag vfs] mem.deny ok n=5`),
 because VFS's own device table maps only minors that exist and could never send
-a bad one. One of those five is the first `CPF_WRITE`-required refusal any boot
-marker exercises: a `CDEV_READ` through a read-only grant, refused by the kernel's
-`verify_grant` and relayed as `EPERM`.
+a bad one. One of those five is the first such refusal on the CDEV band: a
+`CDEV_READ` through a read-only grant, refused by the kernel's `verify_grant`
+and relayed as `EPERM`. MFS's `bdev.deny` battery already exercises the same
+`CPF_WRITE` check against a `BDEV_READ` (its `read-only` probe), so this is a
+CDEV-band first, not a kernel-wide one.
 
 ### What the boot log proves
 

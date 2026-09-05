@@ -1553,7 +1553,7 @@ naming a missing parent → `ENOENT`, `O_CREAT` naming an existing directory →
 `O_KNOWN` → `EINVAL`, spelled relative to `O_UNKNOWN_BIT` rather than as a
 literal so a flag becoming real fails loudly instead of passing vacuously).
 
-#### Slice 5.11 (stretch): `/dev/null` + `/dev/zero` + `CDEV_READ` ◀ ready (branch `feature/slice-5.11-dev-null-zero`, pending merge)
+### Slice 5.11 (stretch): `/dev/null` + `/dev/zero` + `CDEV_READ` ◀ ready (branch `feature/slice-5.11-dev-null-zero`, pending merge)
 
 Full design — decisions `Z1…Z10`, the per-component breakdown, the error
 taxonomy, and the mutation plan — lives in

@@ -1676,7 +1676,8 @@ const MEM_DENY_LEN: usize = 32;
 ///     The driver passes it to `SYS_SAFECOPY(SAFECOPY_TO)` in good faith and the
 ///     *kernel* refuses the direction on `verify_grant`'s access check. `EPERM`,
 ///     relayed verbatim — the read-path twin of `cdev.deny`'s `not-mine`, and
-///     the first `CPF_WRITE`-required refusal any boot marker exercises.
+///     the first such refusal on the CDEV band (MFS's `bdev.deny` battery already
+///     exercises the same `CPF_WRITE` check on `BDEV_READ`).
 #[cfg_attr(test, allow(dead_code))]
 fn mem_denials(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) {
     let mut buf = [0u8; MEM_DENY_LEN];

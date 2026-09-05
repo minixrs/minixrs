@@ -552,7 +552,8 @@ See `docs/architecture.md` for the full system design. Key concepts:
   Phase 6 — same errno init's `read-console` probe always expected, now the driver's answer
   rather than VFS's guess, so Phase 6 adds one TTY arm and touches VFS not at all. The memory
   driver's validator is probed from VFS's prologue (`mem.deny ok n=5`, last, after `fs.deny`),
-  including the first `CPF_WRITE`-required kernel refusal any marker exercises. init's
+  including the first `CPF_WRITE`-required refusal on the CDEV band (MFS's `bdev.deny` battery
+  already exercises the same kernel check on a `BDEV_READ`). init's
   `dev.console ok` is written **through** the `/dev/console` descriptor, never fd 1: that is the
   only thing that proves the table row points at TTY. Paths are `callnr::DEV_*_PATH` so init and
   VFS cannot drift.
