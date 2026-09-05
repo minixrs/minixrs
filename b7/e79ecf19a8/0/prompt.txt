@@ -1,0 +1,9 @@
+Now that we are in a non claude compat mode validate things are working as expected
+
+---
+
+Fix the entire so we are using it's native
+
+---
+
+yes
