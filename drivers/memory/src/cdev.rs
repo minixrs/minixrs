@@ -4,9 +4,10 @@
 //! pure logic behind them (slice 5.11).
 //!
 //! MINIX 3's memory driver owns these two devices beside its ramdisks, and so
-//! does this one, under MINIX's minor numbers (`NULL_DEV` 3, `ZERO_DEV` 5). They
-//! share the driver with the BDEV ramdisk but not a namespace: a minor is
-//! per-request-band, so `BDEV_MINOR_RAMDISK` 0 and these two never meet.
+//! does this one, under MINIX's minor numbers (`NULL_DEV` 3, `ZERO_DEV` 5).
+//! Minors are a per-driver namespace, and on a driver serving two bands, the
+//! band tells them apart — never the minor value — so `BDEV_MINOR_RAMDISK` 0
+//! and these two never meet.
 //!
 //! ## Two things this module is careful about
 //!

@@ -655,7 +655,8 @@ transmits; replies bytes-written. **No payload `granter`** — the driver takes
 it from the kernel-stamped `m_source`, the 5.2 confused-deputy rule.
 `kernel/build.rs` `servers` array +1 (proc_nr 4, at index 2 so the console is
 serving before its first client); `qemu-boot.expected` gains the `[as]` line
-and the demo markers. `CDEV_READ` was absent until 5.11 defined it for `/dev/zero`; TTY serves it in Phase 6.
+and the demo markers. `CDEV_READ` was absent until 5.11 defined it for
+`/dev/zero`; TTY serves it in Phase 6.
 
 **Proof:** VFS retrieves TTY's endpoint from DS and `CDEV_WRITE`s a banner via
 direct grant — the banner reaches serial *from EL0* (no kernel trace prefix),

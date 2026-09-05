@@ -9,10 +9,11 @@
 //!
 //! ## Every process starts with the same three descriptors
 //!
-//! fds 0, 1, and 2 name the console — TTY's `CDEV_MINOR_CONSOLE` — in every row. That is the
-//! POSIX convention — a process inherits stdin/stdout/stderr rather than opening
-//! them — and it is what lets init write a banner before a filesystem exists.
-//! Everything above them starts closed and is handed out by [`alloc_in`].
+//! fds 0, 1, and 2 name the console — TTY's `CDEV_MINOR_CONSOLE` — in every row.
+//! That is the POSIX convention — a process inherits stdin/stdout/stderr rather
+//! than opening them — and it is what lets init write a banner before a
+//! filesystem exists. Everything above them starts closed and is handed out by
+//! [`alloc_in`].
 //!
 //! ## The storage became interior-mutable, and that is the hazard
 //!
@@ -24,12 +25,12 @@
 //! straight-line receive loop, with no interrupt handlers of its own).
 //!
 //! **The rule that comes with it: never hold a borrow of the table across a
-//! SENDREC.** A handler resolves a descriptor, sends a request to MFS or TTY —
-//! which blocks, and during which nothing else touches the table, but the borrow
-//! would still be live across a call that can reach `alloc_in`/`close_in` in a
-//! later refactor — and then updates the position. [`Fd`] is `Copy` precisely so
-//! that is easy to obey: the borrow dies at the destructuring `let`, and the
-//! handler carries values.
+//! SENDREC.** A handler resolves a descriptor, sends a request to MFS, TTY, or
+//! the memory driver — which blocks, and during which nothing else touches the
+//! table, but the borrow would still be live across a call that can reach
+//! `alloc_in`/`close_in` in a later refactor — and then updates the position.
+//! [`Fd`] is `Copy` precisely so that is easy to obey: the borrow dies at the
+//! destructuring `let`, and the handler carries values.
 //!
 //! This is not a theoretical concern. CLAUDE.md records aliasing-through-an
 //! -`UnsafeCell`-newtype as a class of bug this repo has *shipped* (slice 5.3's

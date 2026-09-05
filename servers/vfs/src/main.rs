@@ -809,6 +809,10 @@ fn do_read(
             let _ = grants.revoke(gid);
             n
         }
+        // `target` is only ever assigned from the `CharDev`/`File` arms of the
+        // `resolve` match above — `Unused` already returned early there — so
+        // this arm is unreachable too; kept so a future `Fd` variant is a
+        // compile error here as well (the `do_write` shape).
         Fd::Unused => EBADF,
     }
 }
@@ -1682,10 +1686,10 @@ const MEM_DENY_LEN: usize = 32;
 fn mem_denials(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) {
     let mut buf = [0u8; MEM_DENY_LEN];
     let addr = buf_addr(&mut buf);
-    let len = MEM_DENY_LEN as u64;
+    let glen = MEM_DENY_LEN as u64;
     let (Ok(readable), Ok(writable)) = (
-        grants.grant_direct(mem, addr, len, CPF_READ),
-        grants.grant_direct(mem, addr, len, CPF_WRITE),
+        grants.grant_direct(mem, addr, glen, CPF_READ),
+        grants.grant_direct(mem, addr, glen, CPF_WRITE),
     ) else {
         return diag_fmt(format_args!("mem.deny FAIL setup"));
     };

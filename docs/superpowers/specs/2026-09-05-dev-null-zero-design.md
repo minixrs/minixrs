@@ -299,10 +299,10 @@ a second variant.
 
 ```rust
 pub const NR_DEV_NODES: usize = 3;
-static DEV_NODES: [(&[u8], CharDriver, i32); NR_DEV_NODES] = [
-    (b"/dev/console", CharDriver::Tty,    CDEV_MINOR_CONSOLE),
-    (b"/dev/null",    CharDriver::Memory, CDEV_MINOR_NULL),
-    (b"/dev/zero",    CharDriver::Memory, CDEV_MINOR_ZERO),
+static DEV_NODES: [(&str, CharDriver, i32); NR_DEV_NODES] = [
+    (DEV_CONSOLE_PATH, CharDriver::Tty,    CDEV_MINOR_CONSOLE),
+    (DEV_NULL_PATH,    CharDriver::Memory, CDEV_MINOR_NULL),
+    (DEV_ZERO_PATH,    CharDriver::Memory, CDEV_MINOR_ZERO),
 ];
 pub fn lookup(path: &[u8]) -> Option<Fd>
 ```

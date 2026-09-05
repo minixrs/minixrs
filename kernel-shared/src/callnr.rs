@@ -1096,11 +1096,13 @@ pub const CDEV_RQ_BASE: i32 = 0xB00;
 /// reads the bytes with `SYS_SAFECOPY(SAFECOPY_FROM, m_source, …)`.
 ///
 /// Reply `m_type` is the **number of bytes written** (`>= 0`; `0` is legal), or a
-/// negative errno. A request longer than [`CDEV_MAX_IO`] is a **short write, not
-/// a failure**: the driver moves the first `CDEV_MAX_IO` bytes and reports that
-/// count, and the client re-sends with `offset` advanced. That is POSIX
-/// `write()`'s contract, and it is what lets a driver stage through a small
-/// stack buffer with no allocator.
+/// negative errno. This is the client's contract, not a per-driver one: **a
+/// driver MAY answer short**, and the client re-sends with `offset` advanced
+/// until the request is out. That is POSIX `write()`'s contract, and it is what
+/// lets a driver stage through a fixed buffer with no allocator — TTY clamps to
+/// [`CDEV_MAX_IO`] for exactly that reason, but a driver with nothing to stage
+/// need not clamp at all (the memory driver's `/dev/null`/`/dev/zero`, slice
+/// 5.11, never do).
 ///
 /// [`CDEV_READ`] is the same payload with the copy running the other way.
 pub const CDEV_WRITE: i32 = CDEV_RQ_BASE;
@@ -1130,15 +1132,19 @@ pub const CDEV_READ: i32 = CDEV_RQ_BASE + 1;
 /// dispatch coverage the way `NR_DS_REQUESTS` locks the DS server.
 pub const NR_CDEV_MSGS: usize = 2;
 
-/// Offset of the device minor number in a `CDEV_WRITE` payload (i32).
+/// Offset of the device minor number in a CDEV request payload (`CDEV_WRITE`
+/// and `CDEV_READ` share it) (i32).
 pub const CDEV_MINOR_OFF: usize = 0;
-/// Offset of the grant id in a `CDEV_WRITE` payload (i32).
+/// Offset of the grant id in a CDEV request payload (`CDEV_WRITE` and
+/// `CDEV_READ` share it) (i32).
 pub const CDEV_GRANT_OFF: usize = 4;
-/// Offset of the requested byte count in a `CDEV_WRITE` payload (i32).
+/// Offset of the requested byte count in a CDEV request payload (`CDEV_WRITE`
+/// and `CDEV_READ` share it) (i32).
 pub const CDEV_LEN_OFF: usize = 8;
-/// Offset of the byte offset within the granted range in a `CDEV_WRITE` payload
-/// (u64, so 8-aligned relative to the message base — the payload itself starts at
-/// message offset 8, hence 16 rather than 12).
+/// Offset of the byte offset within the granted range in a CDEV request payload
+/// (`CDEV_WRITE` and `CDEV_READ` share it) (u64, so 8-aligned relative to the
+/// message base — the payload itself starts at message offset 8, hence 16
+/// rather than 12).
 pub const CDEV_OFFSET_OFF: usize = 16;
 
 /// The console minor: TTY's UART, and TTY's only minor — any other is `ENXIO`
@@ -1173,9 +1179,11 @@ pub const DEV_NULL_PATH: &str = "/dev/null";
 /// See [`DEV_CONSOLE_PATH`].
 pub const DEV_ZERO_PATH: &str = "/dev/zero";
 
-/// Largest byte count a character driver moves in one `CDEV_WRITE`. A longer
-/// request is short-written (see [`CDEV_WRITE`]). Sized for a staging buffer in a
-/// driver's `main` frame on a one-page stack.
+/// The count TTY clamps a `CDEV_WRITE` to before staging it through its fixed
+/// buffer — the largest a *staging* driver moves in one request, sized for a
+/// buffer in a driver's `main` frame on a one-page stack. Not every driver
+/// clamps to it: a driver with nothing to stage may answer the whole request in
+/// one round (see [`CDEV_WRITE`]).
 pub const CDEV_MAX_IO: usize = 256;
 
 // The CDEV range sits strictly above the BDEV range and strictly below VM's (and
@@ -1184,8 +1192,9 @@ const _: () = assert!(CDEV_RQ_BASE > BDEV_RQ_BASE + (NR_BDEV_MSGS as i32 - 1));
 const _: () = assert!(CDEV_RQ_BASE + (NR_CDEV_MSGS as i32 - 1) < VM_RQ_BASE);
 const _: () = assert!(CDEV_RQ_BASE + (NR_CDEV_MSGS as i32 - 1) < crate::ipc_const::NOTIFY_MESSAGE);
 
-// The `CDEV_WRITE` payload fields are ordered, non-overlapping, and fit the
-// 96-byte payload. `CDEV_OFFSET_OFF` is 8 wide (u64); the rest are 4 (i32).
+// The CDEV request payload fields (`CDEV_WRITE` and `CDEV_READ` share it) are
+// ordered, non-overlapping, and fit the 96-byte payload. `CDEV_OFFSET_OFF` is
+// 8 wide (u64); the rest are 4 (i32).
 const _: () = assert!(CDEV_MINOR_OFF + 4 <= CDEV_GRANT_OFF);
 const _: () = assert!(CDEV_GRANT_OFF + 4 <= CDEV_LEN_OFF);
 const _: () = assert!(CDEV_LEN_OFF + 4 <= CDEV_OFFSET_OFF);

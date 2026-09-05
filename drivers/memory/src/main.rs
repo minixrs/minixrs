@@ -144,8 +144,9 @@ fn main() -> ! {
                 reply(caller_e, &mut msg, rc);
             }
             // Slice 5.11: the character minors. Same driver, different band —
-            // `cdev::classify` refuses the ramdisk's minor 0 here, because a minor
-            // is per band, not per driver.
+            // `cdev::classify` refuses the ramdisk's minor 0 here, because minors
+            // are a per-driver namespace and the band, not the minor value, is
+            // what tells the ramdisk and the character minors apart here.
             CDEV_WRITE => {
                 let rc = do_cdev_write(&msg);
                 reply(caller_e, &mut msg, rc);
@@ -415,7 +416,7 @@ fn do_cdev_read(caller_e: Endpoint, msg: &Message) -> i32 {
                 if rc != OK {
                     return if done == 0 { rc } else { done as i32 };
                 }
-                done += chunk;
+                done = done.saturating_add(chunk);
             }
             len as i32
         }

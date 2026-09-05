@@ -512,8 +512,9 @@ minix.rs hello: iov ok match=1
 # GRANT_INVALID (EINVAL), and a CDEV_READ through a grant carrying only CPF_READ
 # -- the driver passes it to SYS_SAFECOPY(SAFECOPY_TO) in good faith and the
 # KERNEL refuses the direction (EPERM, relayed verbatim). That last one is the
-# first CPF_WRITE-required refusal any boot marker exercises. Drop a check and
-# its probe succeeds, turning this into `mem.deny FAIL <name>`.
+# first such refusal on the CDEV band (MFS's bdev.deny battery already
+# exercises the same kernel check on a BDEV_READ). Drop a check and its probe
+# succeeds, turning this into `mem.deny FAIL <name>`.
 [diag vfs] mem.deny ok n=5
 
 # ---------------------------------------------------------------------------
@@ -567,7 +568,7 @@ minix.rs init: dev.null ok n=35
 # the proof that the row points at TTY.
 minix.rs init: dev.console ok
 
-# Eleven refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
+# Twelve refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
 # a path with no such file (-> ENOENT), `/etc` (-> EISDIR from open::classify --
 # delete that arm and open succeeds, handing back a descriptor every later read
 # would have to refuse), a path filling the FS band's inline field

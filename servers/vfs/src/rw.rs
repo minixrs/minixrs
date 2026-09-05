@@ -28,9 +28,10 @@
 //! [`advance`] holds the whole of what makes a short-write loop correct — when to
 //! stop, what to report, and what to do about a driver that answers implausibly —
 //! with the SENDREC lifted out. That is what makes those rules testable at all: in
-//! the loop itself they are only reachable through a live TTY, so a driver that
-//! reported `0`, or more bytes than it was asked for, could not be exercised
-//! without breaking the driver. Here they are three lines of test each.
+//! the loop itself they are only reachable through a working driver (TTY or the
+//! memory driver), so a driver that reported `0`, or more bytes than it was
+//! asked for, could not be exercised without breaking the driver. Here they are
+//! three lines of test each.
 //!
 //! ## Where the length rules live, and where they don't
 //!
