@@ -1,0 +1,13 @@
+How much of the claude setup do you carry over?  I would like to make sure you are aware that we are running in herdr and have access to it's functions
+
+---
+
+Let's keep the existing claude setup alone, but migrate what makes sense to a grok config so we can turn off the compatibility mode.  I would still like grok to be aware of a claude session in the same working directory so we don't stomp over each other.  We should setup a herdr worktree for this work
+
+---
+
+Let's go with option 1
+
+---
+
+Yes, let's do it
