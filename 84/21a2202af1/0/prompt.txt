@@ -1,0 +1,1 @@
+there are local changes to the claude settings along with a PR for grok changes.  I would like a pr on the claude changes committed and then both of those prs to land on this branch before we continue with reviewing this branch
