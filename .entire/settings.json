@@ -1,4 +1,5 @@
 {
   "enabled": true,
-  "telemetry": false
+  "telemetry": false,
+  "external_agents": true
 }
