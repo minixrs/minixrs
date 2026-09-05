@@ -3,7 +3,7 @@
   "checkpoint_id": "aa27a228ca77",
   "strategy": "manual-commit",
   "branch": "chore/grok-native-config",
-  "checkpoints_count": 3,
+  "checkpoints_count": 6,
   "files_touched": [
     ".grok/agents/entire-search.md",
     ".grok/hooks/entire.json",
@@ -15,13 +15,20 @@
       "transcript": "/aa/27a228ca77/0/full.jsonl",
       "content_hash": "/aa/27a228ca77/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/aa/27a228ca77/1/metadata.json",
+      "transcript": "/aa/27a228ca77/1/full.jsonl",
+      "compact_transcript": "/aa/27a228ca77/1/transcript.jsonl",
+      "content_hash": "/aa/27a228ca77/1/content_hash.txt",
+      "prompt": "/aa/27a228ca77/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 428,
+    "cache_creation_tokens": 294376,
+    "cache_read_tokens": 2444594,
+    "output_tokens": 23216,
+    "api_call_count": 19
   }
 }
