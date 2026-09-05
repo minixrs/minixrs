@@ -115,6 +115,9 @@
 minixrs_abi_note::brand!();
 
 mod fd;
+// Consumed by `do_open` in the next commit; the allow goes with it.
+#[allow(dead_code)]
+mod dev;
 mod open;
 mod rw;
 mod stage;
@@ -392,7 +395,7 @@ fn do_write(
     let req = rw::parse(msg);
 
     let target = match fd::resolve(endpoint_proc(caller_e).get(), req.fd) {
-        Ok(Fd::CharDev { minor }) => Fd::CharDev { minor },
+        Ok(Fd::CharDev { dev, minor }) => Fd::CharDev { dev, minor },
         // Slice 5.10a: this arm was `EROFS` from 5.8, defined and refused rather
         // than folded into `Unused` precisely so the write path would land in one
         // place. It now writes.
@@ -415,7 +418,7 @@ fn do_write(
     }
 
     match target {
-        Fd::CharDev { minor } => {
+        Fd::CharDev { dev: _, minor } => {
             // The single-copy hop: the grant names the *caller's* memory, so the
             // kernel moves the bytes from the caller straight into the driver.
             let gid = match grants.grant_magic(tty, caller_e, req.buf, len as u64, CPF_READ) {

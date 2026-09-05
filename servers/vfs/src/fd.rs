@@ -9,7 +9,7 @@
 //!
 //! ## Every process starts with the same three descriptors
 //!
-//! fds 0, 1, and 2 name the console character device in every row. That is the
+//! fds 0, 1, and 2 name the console — TTY's `CDEV_MINOR_CONSOLE` — in every row. That is the
 //! POSIX convention — a process inherits stdin/stdout/stderr rather than opening
 //! them — and it is what lets init write a banner before a filesystem exists.
 //! Everything above them starts closed and is handed out by [`alloc_in`].
@@ -86,13 +86,30 @@ use core::cell::UnsafeCell;
 /// arithmetic on a published constant.
 pub const NR_FDS: usize = 8;
 
+/// Which character driver a [`Fd::CharDev`] descriptor talks to (slice 5.11).
+///
+/// An enum rather than an `Endpoint`, because [`DEFAULT_ROW`] is a `const` and a
+/// DS-resolved endpoint is a runtime value. `main.rs`'s `cdev_endpoint` is the
+/// one place this becomes an address.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum CharDriver {
+    /// TTY: the console, minor `CDEV_MINOR_CONSOLE`.
+    Tty,
+    /// The memory driver: `CDEV_MINOR_NULL` and `CDEV_MINOR_ZERO`.
+    Memory,
+}
+
 /// What a descriptor refers to.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Fd {
     /// Not open. Every operation on it is `EBADF`.
     Unused,
-    /// A character device — today only the console, via `CDEV_WRITE` to TTY.
+    /// A character device: the console on TTY, or `/dev/null` / `/dev/zero` on
+    /// the memory driver, routed by `dev`.
     CharDev {
+        /// The driver that owns `minor`. Minors are a per-driver namespace, so
+        /// this is half of the address, not decoration.
+        dev: CharDriver,
         /// Device minor, e.g. [`CDEV_MINOR_CONSOLE`]. Passed through to the
         /// driver, which is the one that decides whether it exists (`ENXIO`).
         minor: i32,
@@ -113,12 +130,15 @@ pub type FdRow = [Fd; NR_FDS];
 const DEFAULT_ROW: FdRow = {
     let mut row = [Fd::Unused; NR_FDS];
     row[0] = Fd::CharDev {
+        dev: CharDriver::Tty,
         minor: CDEV_MINOR_CONSOLE,
     };
     row[1] = Fd::CharDev {
+        dev: CharDriver::Tty,
         minor: CDEV_MINOR_CONSOLE,
     };
     row[2] = Fd::CharDev {
+        dev: CharDriver::Tty,
         minor: CDEV_MINOR_CONSOLE,
     };
     row
@@ -278,6 +298,7 @@ mod tests {
     use super::*;
 
     const CONSOLE: Fd = Fd::CharDev {
+        dev: CharDriver::Tty,
         minor: CDEV_MINOR_CONSOLE,
     };
     const FILE: Fd = Fd::File { ino: 5, pos: 0 };
@@ -386,11 +407,20 @@ mod tests {
         // sibling test holds `&mut` to it on another libtest thread.)
         let mut r = rows();
         r[1][1] = Fd::Unused;
-        r[1][3] = Fd::CharDev { minor: 7 };
+        r[1][3] = Fd::CharDev {
+            dev: CharDriver::Memory,
+            minor: 7,
+        };
 
         assert_eq!(resolve_in(&r, 0, 1), Ok(CONSOLE));
         assert_eq!(resolve_in(&r, 1, 1), Err(EBADF));
-        assert_eq!(resolve_in(&r, 1, 3), Ok(Fd::CharDev { minor: 7 }));
+        assert_eq!(
+            resolve_in(&r, 1, 3),
+            Ok(Fd::CharDev {
+                dev: CharDriver::Memory,
+                minor: 7,
+            })
+        );
         // ...and no other row moved, so the write really was row-local.
         assert_eq!(r[0], DEFAULT_ROW);
     }
