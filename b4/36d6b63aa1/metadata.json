@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "b436d6b63aa1",
+  "strategy": "manual-commit",
+  "branch": "feature/slice-5.11-dev-null-zero",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/b4/36d6b63aa1/0/metadata.json",
+      "transcript": "/b4/36d6b63aa1/0/full.jsonl",
+      "compact_transcript": "/b4/36d6b63aa1/0/transcript.jsonl",
+      "content_hash": "/b4/36d6b63aa1/0/content_hash.txt",
+      "prompt": "/b4/36d6b63aa1/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 816,
+    "cache_creation_tokens": 414018,
+    "cache_read_tokens": 5436803,
+    "output_tokens": 102459,
+    "api_call_count": 33
+  }
+}
