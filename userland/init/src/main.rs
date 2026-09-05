@@ -49,10 +49,10 @@ minixrs_abi_note::brand!();
 use minixrs_ipc::ipc_sendrec;
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    BDEV_BLOCK_SIZE, CDEV_MAX_IO, FS_PATH_MAX, NR_VFS_MSGS, PM_EXEC, PM_EXEC_PATH_MAX,
-    PM_EXEC_PATH_OFF, PM_FORK, PM_WAIT, VFS_BUF_OFF, VFS_CLOSE, VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE,
-    VFS_FD_OFF, VFS_FLAGS_OFF, VFS_LEN_OFF, VFS_OPEN, VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ,
-    VFS_RQ_BASE, VFS_WRITE,
+    BDEV_BLOCK_SIZE, CDEV_MAX_IO, DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH, FS_PATH_MAX,
+    NR_VFS_MSGS, PM_EXEC, PM_EXEC_PATH_MAX, PM_EXEC_PATH_OFF, PM_FORK, PM_WAIT, VFS_BUF_OFF,
+    VFS_CLOSE, VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE, VFS_FD_OFF, VFS_FLAGS_OFF, VFS_LEN_OFF, VFS_OPEN,
+    VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -204,6 +204,10 @@ fn main() -> ! {
     // `fs.*` markers instead of taking 5.4's, 5.5's and 5.6's with it. Do not
     // reorder this prologue.
     fs_demo(vfs);
+    // Slice 5.11: the device nodes. After the read path (a device open goes
+    // through `VFS_OPEN` like any other) and before the write battery, so a hang
+    // here localizes to the `dev.*` markers. Cheap — no filesystem traffic.
+    dev_demo(vfs);
     // The filesystem write path runs after the read path it depends on — the
     // same rule — so a hang inside it localizes to the `fs.write` marker instead
     // of taking 5.4's, 5.5's, 5.6's and 5.8's with it. See [`write_demo`].
@@ -496,7 +500,11 @@ fn fd_demo(vfs: Endpoint) {
 ///     kernel's page-table walk in the middle of VFS's `SYS_COPY`, relayed back
 ///     unflattened — the read-path twin of the write path's `bad-buf`.
 ///   - `read-console` — `read()` on fd 1. `ENOSYS`, not `EBADF`: the descriptor is
-///     perfectly good, and `CDEV_READ` is what does not exist until Phase 6.
+///     good, and TTY does not serve `CDEV_READ` until Phase 6, answering it from
+///     its unknown-request arm (slice 5.11 made VFS send the request instead of
+///     guessing).
+///   - `dev-no-such` — `/dev/nope`. `ENOENT` from MFS's walk: the device table
+///     does not claim the `/dev` prefix, only three exact paths.
 ///   - `close-twice` — closing an already-closed descriptor. `EBADF`, which is
 ///     what makes the `fs.fd` re-open above mean something.
 ///   - `create-no-dir` — `O_CREAT` naming a parent directory that does not exist.
@@ -524,6 +532,11 @@ fn open_denials(vfs: Endpoint) {
     for (name, path, want) in [
         ("no-such", "/no-such-file", ENOENT),
         ("is-dir", "/etc", EISDIR),
+        // Slice 5.11: a `/dev` path the device table does not know. It must fall
+        // through to MFS — where there is no `/dev` at all — and answer `ENOENT`
+        // from the walk. A table that claimed the whole prefix would answer
+        // something else, and a table that matched by prefix would open null.
+        ("dev-no-such", "/dev/nope", ENOENT),
     ] {
         let rc = vfs_open(vfs, path);
         if rc == want {
@@ -548,7 +561,10 @@ fn open_denials(vfs: Endpoint) {
         }
     }
 
-    // A console descriptor cannot be read from...
+    // A console descriptor cannot be read from *yet*: since slice 5.11 VFS routes
+    // the read to TTY as a real `CDEV_READ`, and TTY answers `ENOSYS` from its
+    // unknown-request arm until Phase 6 gives it RX. Same errno as before the
+    // slice, now the driver's answer rather than VFS's guess about it.
     let mut buf = [0u8; 8];
     if vfs_read(vfs, STDOUT, &mut buf) == ENOSYS {
         denied += 1;
@@ -609,7 +625,117 @@ fn open_denials(vfs: Endpoint) {
     }
 
     if denied == OPEN_DENIAL_PROBES {
-        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=11\n");
+        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=12\n");
+    }
+}
+
+// ----- Slice 5.11: the device nodes ------------------------------------------
+
+/// Bytes each device probe reads. A local in the probe's frame — init's stack is
+/// one page — and the whole buffer is checked, not sampled.
+const DEV_BUF_LEN: usize = 64;
+
+/// What the buffer holds *before* a read: every byte must change on `/dev/zero`
+/// and no byte may change on `/dev/null`. Chosen so neither `0x00` nor `0xFF`
+/// could pass by accident.
+const DEV_POISON: u8 = 0xA5;
+
+// The literals in the `ok` lines below are pinned to the constants they report:
+// init cannot format an integer, so a count that drifted would print a stale
+// number and the marker would go stale with it.
+const _: () = assert!(DEV_BUF_LEN == 64);
+const _: () = assert!(HELLO.len() == 35);
+
+/// Prove `/dev/zero`, `/dev/null`, and `/dev/console` through the POSIX path.
+///
+/// Three probes, three markers, each reporting its first failing step by name so
+/// a `FAIL` line says *which* device and *what* went wrong. Every probe closes
+/// what it opened, so the descriptor table [`open_denials`] and [`write_demo`]
+/// see afterwards is the one they expect.
+#[cfg_attr(test, allow(dead_code))]
+fn dev_demo(vfs: Endpoint) {
+    zero_demo(vfs);
+    null_demo(vfs);
+    console_demo(vfs);
+}
+
+/// `/dev/zero`: a read fills the whole request, and a second read is **not** EOF.
+///
+/// That second read is what separates zero from null — swap the two minors in
+/// VFS's table and this prints `dev.zero FAIL short` (null answers `0`) while
+/// [`null_demo`] fails on its write count or its EOF.
+#[cfg_attr(test, allow(dead_code))]
+fn zero_demo(vfs: Endpoint) {
+    let mut buf = [DEV_POISON; DEV_BUF_LEN];
+    let fd = vfs_open(vfs, DEV_ZERO_PATH);
+    if fd < 0 {
+        return report_line(vfs, b"minix.rs init: dev.zero FAIL open");
+    }
+    let n1 = vfs_read(vfs, fd, &mut buf);
+    if n1 != DEV_BUF_LEN as i32 {
+        let _ = vfs_close(vfs, fd);
+        return report_line(vfs, b"minix.rs init: dev.zero FAIL short");
+    }
+    if buf.iter().any(|&b| b != 0) {
+        let _ = vfs_close(vfs, fd);
+        return report_line(vfs, b"minix.rs init: dev.zero FAIL dirty");
+    }
+    let n2 = vfs_read(vfs, fd, &mut buf);
+    if n2 != DEV_BUF_LEN as i32 {
+        let _ = vfs_close(vfs, fd);
+        return report_line(vfs, b"minix.rs init: dev.zero FAIL eof");
+    }
+    if vfs_close(vfs, fd) != OK {
+        return report_line(vfs, b"minix.rs init: dev.zero FAIL close");
+    }
+    let _ = vfs_write(vfs, STDOUT, b"minix.rs init: dev.zero ok n=64\n");
+}
+
+/// `/dev/null`: a write reports its whole count, a read is EOF and touches
+/// nothing.
+#[cfg_attr(test, allow(dead_code))]
+fn null_demo(vfs: Endpoint) {
+    let mut buf = [DEV_POISON; DEV_BUF_LEN];
+    let fd = vfs_open(vfs, DEV_NULL_PATH);
+    if fd < 0 {
+        return report_line(vfs, b"minix.rs init: dev.null FAIL open");
+    }
+    if vfs_write(vfs, fd, HELLO.as_bytes()) != HELLO.len() as i32 {
+        let _ = vfs_close(vfs, fd);
+        return report_line(vfs, b"minix.rs init: dev.null FAIL write");
+    }
+    if vfs_read(vfs, fd, &mut buf) != 0 {
+        let _ = vfs_close(vfs, fd);
+        return report_line(vfs, b"minix.rs init: dev.null FAIL read");
+    }
+    if buf.iter().any(|&b| b != DEV_POISON) {
+        let _ = vfs_close(vfs, fd);
+        return report_line(vfs, b"minix.rs init: dev.null FAIL touched");
+    }
+    if vfs_close(vfs, fd) != OK {
+        return report_line(vfs, b"minix.rs init: dev.null FAIL close");
+    }
+    let _ = vfs_write(vfs, STDOUT, b"minix.rs init: dev.null ok n=35\n");
+}
+
+/// `/dev/console`: the marker is written **through the new descriptor**, not fd 1
+/// (Z10). Printing it on fd 1 after a successful open would prove only that a
+/// number came back; routing the table's console row to the memory driver makes
+/// this line vanish, which is the proof that the row points at TTY.
+#[cfg_attr(test, allow(dead_code))]
+fn console_demo(vfs: Endpoint) {
+    let fd = vfs_open(vfs, DEV_CONSOLE_PATH);
+    if fd < 0 {
+        return report_line(vfs, b"minix.rs init: dev.console FAIL open");
+    }
+    let line = b"minix.rs init: dev.console ok\n";
+    let n = vfs_write(vfs, fd, line);
+    let closed = vfs_close(vfs, fd);
+    if n != line.len() as i32 {
+        return report_line(vfs, b"minix.rs init: dev.console FAIL write");
+    }
+    if closed != OK {
+        report_line(vfs, b"minix.rs init: dev.console FAIL close");
     }
 }
 
@@ -1350,11 +1476,11 @@ fn report_exec_fail(vfs: Endpoint, name: &str) {
 /// The `n=` in the marker line is this number spelled out as a literal, because
 /// init has no formatting machinery and the line is a `grep -aF` marker. The two
 /// move together; the const below is what makes forgetting the second half loud.
-const OPEN_DENIAL_PROBES: usize = 11;
-// The `n=11` literal in `open_denials`' marker line, pinned the same way
+const OPEN_DENIAL_PROBES: usize = 12;
+// The `n=12` literal in `open_denials`' marker line, pinned the same way
 // `fs.create`'s `n=25` is pinned against `ROOTFS_CREATE_TEXT.len()`: init cannot
 // format an integer, so nothing else ties the printed digit to this constant.
-const _: () = assert!(OPEN_DENIAL_PROBES == 11);
+const _: () = assert!(OPEN_DENIAL_PROBES == 12);
 
 /// Report a failing `open` probe by name, on fd 2.
 #[cfg_attr(test, allow(dead_code))]
