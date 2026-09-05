@@ -1641,6 +1641,7 @@ mod tests {
             assert_ne!(r, BDEV_READ);
             assert_ne!(r, BDEV_WRITE);
             assert_ne!(r, CDEV_WRITE);
+            assert_ne!(r, CDEV_READ);
             assert_ne!(r, SEF_INIT);
             assert_ne!(r, SEF_SIGNAL);
             assert!(r > SEF_RQ_BASE + (NR_SEF_MSGS as i32 - 1));
@@ -2528,6 +2529,7 @@ mod tests {
             assert_ne!(m, BDEV_READ);
             assert_ne!(m, BDEV_WRITE);
             assert_ne!(m, CDEV_WRITE);
+            assert_ne!(m, CDEV_READ);
             assert_ne!(m, VM_PAGEFAULT);
             assert_ne!(m, VM_BRK);
             assert_ne!(m, VM_MMAP);
