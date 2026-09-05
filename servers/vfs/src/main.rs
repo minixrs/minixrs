@@ -24,7 +24,8 @@
 //! ```
 //!
 //! VFS resolves the descriptor, issues a **magic** (third-party) grant naming the
-//! *caller's* buffer with the driver as grantee, and forwards the id. TTY then
+//! *caller's* buffer with the driver as grantee, and forwards the id. The driver
+//! (TTY for the console, the memory driver for `/dev/null` and `/dev/zero`) then
 //! safecopies straight out of the caller's address space into its staging buffer.
 //! The bytes never pass through VFS — there is exactly one copy, from the process
 //! that wrote them to the driver that transmits them, which is the whole point of
@@ -75,6 +76,9 @@
 //! limit may not reach `write()`'s return value; `read()` is explicitly allowed to
 //! return less than asked for, and a file read is short at EOF regardless.
 //!
+//! A device descriptor reads through `CDEV_READ` against its driver instead of
+//! `FS_READ` against MFS, one round, no position (slice 5.11).
+//!
 //! ## Staging an executable (slice 5.9)
 //!
 //! ```text
@@ -114,10 +118,8 @@
 
 minixrs_abi_note::brand!();
 
-mod fd;
-// Consumed by `do_open` in the next commit; the allow goes with it.
-#[allow(dead_code)]
 mod dev;
+mod fd;
 mod open;
 mod rw;
 mod stage;
@@ -128,13 +130,16 @@ use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
     BDEV_MINOR_RAMDISK, CDEV_GRANT_OFF, CDEV_LEN_OFF, CDEV_MAX_IO, CDEV_MINOR_CONSOLE,
-    CDEV_MINOR_OFF, CDEV_OFFSET_OFF, CDEV_WRITE, FS_CREATE, FS_GRANT_OFF, FS_INO_OFF, FS_LEN_OFF,
-    FS_LOOKUP, FS_MAX_IO, FS_MODE_OFF, FS_PATH_MAX, FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER,
-    FS_RQ_BASE, FS_SIZE_OFF, FS_SUPER_BLOCK_SIZE_OFF, FS_SUPER_BLOCKS_OFF, FS_SUPER_MINOR_OFF,
-    FS_SUPER_ROOT_OFF, FS_TRUNC, FS_WRITE, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN,
-    VFS_CLOSE, VFS_EXEC_GRANT_OFF, VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_OPEN, VFS_READ, VFS_WRITE,
+    CDEV_MINOR_OFF, CDEV_MINOR_ZERO, CDEV_OFFSET_OFF, CDEV_READ, CDEV_WRITE, FS_CREATE,
+    FS_GRANT_OFF, FS_INO_OFF, FS_LEN_OFF, FS_LOOKUP, FS_MAX_IO, FS_MODE_OFF, FS_PATH_MAX,
+    FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER, FS_RQ_BASE, FS_SIZE_OFF,
+    FS_SUPER_BLOCK_SIZE_OFF, FS_SUPER_BLOCKS_OFF, FS_SUPER_MINOR_OFF, FS_SUPER_ROOT_OFF, FS_TRUNC,
+    FS_WRITE, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_CLOSE, VFS_EXEC_GRANT_OFF,
+    VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_OPEN, VFS_READ, VFS_WRITE,
 };
-use minixrs_kernel_shared::com::{MFS_PROC_NR, PM_PROC_NR, TTY_PROC_NR, boot_endpoint};
+use minixrs_kernel_shared::com::{
+    MEM_PROC_NR, MFS_PROC_NR, PM_PROC_NR, TTY_PROC_NR, boot_endpoint,
+};
 use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
 use minixrs_kernel_shared::error::{
     EBADF, EEXIST, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, OK,
@@ -148,7 +153,7 @@ use minixrs_server_rt::{
     sef_startup, sys_copy, wr_i32, wr_u64,
 };
 
-use fd::Fd;
+use fd::{CharDriver, Fd};
 
 // ---------------------------------------------------------------------------
 // Slice 5.9: the exec staging buffer.
@@ -287,12 +292,16 @@ fn main() -> ! {
     // static precisely so it can be owned like this.)
     let mut grants: GrantPool<GRANT_SLOTS> = GrantPool::new();
 
-    // Resolve the two peers once, before serving anyone: every `VFS_WRITE`
-    // targets TTY and every `VFS_OPEN`/`VFS_READ` targets MFS, and a DS lookup
-    // per request would be a round trip per request for endpoints that cannot
-    // change.
+    // Resolve the three peers once, before serving anyone: every `VFS_WRITE`
+    // targets TTY or the memory driver, every `VFS_OPEN`/`VFS_READ` targets MFS
+    // or a driver, and a DS lookup per request would be a round trip per request
+    // for endpoints that cannot change.
     let tty = tty_endpoint();
     let mfs = mfs_endpoint();
+    // Slice 5.11: the third peer. `/dev/null` and `/dev/zero` live on the memory
+    // driver, so a device read or write needs its endpoint — resolved once, like
+    // the other two, for the same reason.
+    let mem = mem_endpoint();
 
     // The mount, and the one piece of VFS state that outlives a request. `None`
     // until something succeeds; a failure is deliberately **not** cached, so the
@@ -314,6 +323,8 @@ fn main() -> ! {
     // localizes to `fs.deny` instead of blacking out 5.2's, 5.3's, and 5.4's
     // markers as well. Do not tidy this prologue into alphabetical order.
     fs_denials(&mut grants, mfs, mount);
+    // Slice 5.11: the memory driver's CDEV refusals, last for the same reason.
+    mem_denials(&mut grants, mem);
 
     let mut msg = Message {
         m_source: 0,
@@ -330,9 +341,9 @@ fn main() -> ! {
         // `msg.m_source` on the way out.
         let caller_e = msg.m_source;
         let rc = match msg.m_type {
-            VFS_WRITE => do_write(caller_e, &msg, &mut grants, tty, mfs),
+            VFS_WRITE => do_write(caller_e, &msg, &mut grants, tty, mem, mfs),
             VFS_OPEN => do_open(caller_e, &msg, &mut mount, mfs),
-            VFS_READ => do_read(caller_e, &msg, &mut grants, mfs),
+            VFS_READ => do_read(caller_e, &msg, &mut grants, tty, mem, mfs),
             VFS_CLOSE => do_close(caller_e, &msg),
             VFS_EXEC_STAGE => do_exec_stage(
                 caller_e,
@@ -390,6 +401,7 @@ fn do_write(
     msg: &Message,
     grants: &mut GrantPool<GRANT_SLOTS>,
     tty: Endpoint,
+    mem: Endpoint,
     mfs: Endpoint,
 ) -> i32 {
     let req = rw::parse(msg);
@@ -418,14 +430,16 @@ fn do_write(
     }
 
     match target {
-        Fd::CharDev { dev: _, minor } => {
+        Fd::CharDev { dev, minor } => {
             // The single-copy hop: the grant names the *caller's* memory, so the
-            // kernel moves the bytes from the caller straight into the driver.
-            let gid = match grants.grant_magic(tty, caller_e, req.buf, len as u64, CPF_READ) {
+            // kernel moves the bytes from the caller straight into the driver —
+            // TTY for the console, the memory driver for `/dev/null`/`/dev/zero`.
+            let driver = cdev_endpoint(dev, tty, mem);
+            let gid = match grants.grant_magic(driver, caller_e, req.buf, len as u64, CPF_READ) {
                 Ok(gid) => gid,
                 Err(e) => return e,
             };
-            let written = write_all(tty, minor, gid, len);
+            let written = write_all(driver, minor, gid, len);
             let _ = grants.revoke(gid);
             written
         }
@@ -448,16 +462,16 @@ fn do_write(
 /// This is the IPC half only: every decision about when to stop and what to
 /// report lives in [`rw::advance`], which is where its rules are documented and
 /// unit-tested. Two of those rules — a driver reporting `0`, and a driver
-/// reporting more than it was asked for — are unreachable through a working TTY,
-/// so keeping them out of this loop is what makes them testable at all.
+/// reporting more than it was asked for — are unreachable through a working
+/// driver, so keeping them out of this loop is what makes them testable at all.
 ///
 /// `len > 0` on entry (`do_write` returns early on an empty write), so at least
 /// one request always goes out and `len - off` is never zero.
 #[cfg_attr(test, allow(dead_code))]
-fn write_all(tty: Endpoint, minor: i32, gid: i32, len: usize) -> i32 {
+fn write_all(driver: Endpoint, minor: i32, gid: i32, len: usize) -> i32 {
     let mut off = 0usize;
     loop {
-        let n = cdev_write(tty, minor, gid, (len - off) as i32, off as u64);
+        let n = cdev_write(driver, minor, gid, (len - off) as i32, off as u64);
         match rw::advance(off, len, n) {
             rw::Step::More(next) => off = next,
             rw::Step::Done(rc) => return rc,
@@ -508,6 +522,35 @@ fn mfs_endpoint() -> Endpoint {
     }
 }
 
+/// Resolve the memory driver's endpoint through DS, falling back to its boot
+/// endpoint (slice 5.11). [`tty_endpoint`]'s contract, third copy: the DS chain
+/// `ds < tty < memory < mfs < vfs` is packing order in `kernel/build.rs`, and a
+/// failed lookup keeps every device marker alive while `mem.ds ok` disappears.
+#[cfg_attr(test, allow(dead_code))]
+fn mem_endpoint() -> Endpoint {
+    let mut key = [0u8; SYS_GETINFO_NAME_LEN];
+    key[0..6].copy_from_slice(b"memory");
+    match sef_retrieve_from_ds(&key) {
+        Ok(ep) => {
+            diag_fmt(format_args!("mem.ds ok ep={ep}"));
+            ep
+        }
+        Err(rc) => {
+            let ep = boot_endpoint(MEM_PROC_NR);
+            diag_fmt(format_args!("mem.ds FAIL rc={rc} fallback={ep}"));
+            ep
+        }
+    }
+}
+
+/// The one place a [`CharDriver`] becomes an address.
+fn cdev_endpoint(dev: CharDriver, tty: Endpoint, mem: Endpoint) -> Endpoint {
+    match dev {
+        CharDriver::Tty => tty,
+        CharDriver::Memory => mem,
+    }
+}
+
 /// Mount the root filesystem if it is not mounted already.
 ///
 /// **A failure is not cached.** `mount` stays `None`, so the next `open` tries
@@ -551,19 +594,23 @@ fn mount_root(mount: &mut Option<Mount>, mfs: Endpoint) {
 /// 1. The path's length and buffer are sane ([`open::validate`]). Length first,
 ///    so a malformed request never reaches the copy.
 /// 2. The flags are sane ([`open::validate_flags`]).
-/// 3. Something is mounted (retried here, not cached — see [`ensure_mounted`]).
-/// 4. The path bytes copy in. **This is the first live consumer of decision D4's
+/// 3. The path bytes copy in. **This is the first live consumer of decision D4's
 ///    "`SYS_COPY` for small control-plane reads" sentence**, and the
 ///    confused-deputy rule in its sharpest form: `SYS_COPY` has *no per-target
 ///    authorization at all* — the caller's `k_call_mask` bit is the whole check —
 ///    so a payload-supplied source process would let any client read any process's
 ///    memory through VFS. The source is `caller_e`, the kernel-stamped `m_source`,
 ///    and there is no payload field for it.
-/// 5. MFS resolves the path — a hit optionally through [`open::classify`], a miss
+/// 4. The device table ([`dev::lookup`]) is checked. A hit returns a
+///    [`Fd::CharDev`] straight away — **before the mount is consulted** — because
+///    a device open must not need a filesystem; `O_CREAT`/`O_TRUNC` are ignored
+///    on a hit, Linux's behaviour for a device node (slice 5.11, Z6).
+/// 5. Something is mounted (retried here, not cached — see [`ensure_mounted`]).
+/// 6. MFS resolves the path — a hit optionally through [`open::classify`], a miss
 ///    with `O_CREAT` through [`fs_create`] instead — and the mode becomes either a
 ///    descriptor entry or an errno.
-/// 6. The entry lands at the caller's lowest free descriptor.
-/// 7. `O_TRUNC` on an existing hit runs [`fs_trunc`] **last**, with the descriptor
+/// 7. The entry lands at the caller's lowest free descriptor.
+/// 8. `O_TRUNC` on an existing hit runs [`fs_trunc`] **last**, with the descriptor
 ///    already allocated and handed back if it fails. An `EMFILE` must not come
 ///    back with the file already emptied.
 ///
@@ -585,9 +632,6 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
         Ok(flags) => flags,
         Err(e) => return e,
     };
-    if let Err(e) = ensure_mounted(mount, mfs) {
-        return e;
-    }
 
     let mut path = [0u8; FS_PATH_MAX];
     let rc = sys_copy(
@@ -601,6 +645,22 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
         // Verbatim: `EFAULT` (the caller's buffer is not mapped) is the client's
         // bug, and flattening it would hide which of its two pointers was wrong.
         return rc;
+    }
+
+    // Slice 5.11 (Z6): device nodes are answered here — after the path is in,
+    // **before** the mount is consulted, because a device open must not need a
+    // filesystem. `O_CREAT` and `O_TRUNC` are ignored on a hit, Linux's behaviour
+    // for a device node: creating an existing name is a plain open, and
+    // truncating a device has no meaning. Every other flag rule already ran.
+    if let Some(entry) = dev::lookup(&path[..len]) {
+        return match fd::alloc(endpoint_proc(caller_e).get(), entry) {
+            Ok(fd) => fd,
+            Err(e) => e,
+        };
+    }
+
+    if let Err(e) = ensure_mounted(mount, mfs) {
+        return e;
     }
 
     // `O_CREAT` is reached only when the lookup says `ENOENT`, so a create that
@@ -637,8 +697,9 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
             Err(e) => return e,
         },
         // No other variant is reachable — `classify` returns only `File` or an
-        // error — but routing it explicitly means a future device-node arm is a
-        // compile error to handle rather than a silent `EINVAL`.
+        // error, and the device arm lives above, before the mount — but routing
+        // it explicitly keeps a new `Fd` variant a compile error here rather than
+        // a silent `EINVAL`.
         _ => return EINVAL,
     };
 
@@ -678,11 +739,16 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
 /// caller's address space and VFS never touches the data. Owner is the
 /// kernel-stamped `m_source`; there is no payload field for it and there must
 /// never be one.
+///
+/// A device descriptor takes the same shape against its driver, with `CDEV_READ`
+/// in place of `FS_READ` and no position to advance.
 #[cfg_attr(test, allow(dead_code))]
 fn do_read(
     caller_e: Endpoint,
     msg: &Message,
     grants: &mut GrantPool<GRANT_SLOTS>,
+    tty: Endpoint,
+    mem: Endpoint,
     mfs: Endpoint,
 ) -> i32 {
     let req = rw::parse(msg);
@@ -692,13 +758,14 @@ fn do_read(
     // leaves values behind and nothing is held across the SENDREC below. That is
     // the rule `fd.rs`'s module note states, and this is the call site it is
     // about.
-    let (ino, pos) = match fd::resolve(proc_nr, req.fd) {
-        Ok(Fd::File { ino, pos }) => (ino, pos),
-        // There is no `CDEV_READ` until Phase 6 (RX needs `SYS_IRQCTL`), so a
-        // console descriptor has nothing to read from. `ENOSYS` rather than
-        // `EBADF`: the descriptor is perfectly good, the operation is what does
-        // not exist yet.
-        Ok(Fd::CharDev { .. }) => return ENOSYS,
+    let target = match fd::resolve(proc_nr, req.fd) {
+        Ok(Fd::File { ino, pos }) => Fd::File { ino, pos },
+        // Slice 5.11 (Z7): routed to its driver, TTY included. TTY does not serve
+        // `CDEV_READ` until Phase 6 gives it RX and answers `ENOSYS` from its
+        // unknown-request arm — the same errno this arm used to short-circuit
+        // locally, now the driver's answer rather than VFS's guess about it. So
+        // Phase 6 changes TTY and nothing here.
+        Ok(Fd::CharDev { dev, minor }) => Fd::CharDev { dev, minor },
         Ok(Fd::Unused) => return EBADF,
         Err(e) => return e,
     };
@@ -713,19 +780,36 @@ fn do_read(
         return 0;
     }
 
-    let gid = match grants.grant_magic(mfs, caller_e, req.buf, len as u64, CPF_WRITE) {
-        Ok(gid) => gid,
-        Err(e) => return e,
-    };
-    let n = fs_read(mfs, ino as i32, gid, len as i32, pos);
-    let _ = grants.revoke(gid);
+    match target {
+        Fd::File { ino, pos } => {
+            let gid = match grants.grant_magic(mfs, caller_e, req.buf, len as u64, CPF_WRITE) {
+                Ok(gid) => gid,
+                Err(e) => return e,
+            };
+            let n = fs_read(mfs, ino as i32, gid, len as i32, pos);
+            let _ = grants.revoke(gid);
 
-    if n > 0 {
-        // Only on real progress: advancing on an error or on EOF would silently
-        // move the descriptor past bytes nobody read.
-        fd::advance(proc_nr, req.fd, n as u64);
+            if n > 0 {
+                // Only on real progress: advancing on an error or on EOF would
+                // silently move the descriptor past bytes nobody read.
+                fd::advance(proc_nr, req.fd, n as u64);
+            }
+            n
+        }
+        Fd::CharDev { dev, minor } => {
+            // One round, no loop (the `FS_READ` stance: a short read is legal),
+            // and no `fd::advance` — a character device has no position.
+            let driver = cdev_endpoint(dev, tty, mem);
+            let gid = match grants.grant_magic(driver, caller_e, req.buf, len as u64, CPF_WRITE) {
+                Ok(gid) => gid,
+                Err(e) => return e,
+            };
+            let n = cdev_read(driver, minor, gid, len as i32, 0);
+            let _ = grants.revoke(gid);
+            n
+        }
+        Fd::Unused => EBADF,
     }
-    n
 }
 
 /// Serve one `VFS_EXEC_STAGE`. Returns the reply `m_type`: the staged byte count
@@ -1571,28 +1655,114 @@ fn cdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, tty: Endpoint, addr: u64, l
     let _ = grants.revoke(not_mine);
 }
 
-/// Issue one `CDEV_WRITE` to `tty` and return the reply `m_type` — the byte count
-/// written, or a negative errno.
+/// Bytes granted to the memory driver by [`mem_denials`]. A `main`-frame local's
+/// worth; nothing here ever succeeds in writing them.
+const MEM_DENY_LEN: usize = 32;
+
+/// Probe the memory driver's CDEV refusals (slice 5.11, Z8) — the ones VFS's own
+/// device table can never send, because it maps only minors that exist.
 ///
-/// No granter goes in the payload: TTY takes it from the kernel-stamped `m_source`,
-/// so this message cannot aim TTY's privileged `SYS_SAFECOPY` anywhere but VFS's own
-/// address space.
+/// Each probe is well-formed in every respect but one:
+///
+///   - `bad-minor-w` / `bad-minor-r` — a good grant aimed at minor 7, on each
+///     request. `ENXIO` from the driver's `classify`; nothing is wrong with the
+///     grant.
+///   - `bad-len` — a negative length, which unchecked would widen into a ~16 EiB
+///     `u64` on the copy. `EINVAL`.
+///   - `bad-gid` — `GRANT_INVALID`. `EINVAL`, the driver's local reject of the one
+///     value that can never name a grant.
+///   - `read-only-grant` — a `CDEV_READ` through a grant carrying only `CPF_READ`.
+///     The driver passes it to `SYS_SAFECOPY(SAFECOPY_TO)` in good faith and the
+///     *kernel* refuses the direction on `verify_grant`'s access check. `EPERM`,
+///     relayed verbatim — the read-path twin of `cdev.deny`'s `not-mine`, and
+///     the first `CPF_WRITE`-required refusal any boot marker exercises.
 #[cfg_attr(test, allow(dead_code))]
-fn cdev_write(tty: Endpoint, minor: i32, gid: i32, len: i32, offset: u64) -> i32 {
+fn mem_denials(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) {
+    let mut buf = [0u8; MEM_DENY_LEN];
+    let addr = buf_addr(&mut buf);
+    let len = MEM_DENY_LEN as u64;
+    let (Ok(readable), Ok(writable)) = (
+        grants.grant_direct(mem, addr, len, CPF_READ),
+        grants.grant_direct(mem, addr, len, CPF_WRITE),
+    ) else {
+        return diag_fmt(format_args!("mem.deny FAIL setup"));
+    };
+
+    let n = MEM_DENY_LEN as i32;
+    // (name, request, minor, len, grant, expected reply)
+    let probes: [(&str, i32, i32, i32, i32, i32); 5] = [
+        ("bad-minor-w", CDEV_WRITE, 7, n, readable, ENXIO),
+        ("bad-minor-r", CDEV_READ, 7, n, writable, ENXIO),
+        ("bad-len", CDEV_READ, CDEV_MINOR_ZERO, -1, writable, EINVAL),
+        (
+            "bad-gid",
+            CDEV_READ,
+            CDEV_MINOR_ZERO,
+            n,
+            GRANT_INVALID,
+            EINVAL,
+        ),
+        (
+            "read-only-grant",
+            CDEV_READ,
+            CDEV_MINOR_ZERO,
+            n,
+            readable,
+            EPERM,
+        ),
+    ];
+
+    let mut denied = 0usize;
+    for (name, m_type, minor, len, gid, want) in probes {
+        let rc = cdev_request(mem, m_type, minor, gid, len, 0);
+        if rc == want {
+            denied += 1;
+        } else {
+            diag_fmt(format_args!("mem.deny FAIL {name} rc={rc}"));
+        }
+    }
+    if denied == probes.len() {
+        diag_fmt(format_args!("mem.deny ok n={denied}"));
+    }
+    let _ = grants.revoke(readable);
+    let _ = grants.revoke(writable);
+}
+
+/// Issue one CDEV request to `driver` and return the reply `m_type` — the byte
+/// count moved, or a negative errno.
+///
+/// No granter goes in the payload: the driver takes it from the kernel-stamped
+/// `m_source`, so this message cannot aim a driver's privileged `SYS_SAFECOPY`
+/// anywhere but VFS's own address space (or, through a magic grant VFS issued,
+/// exactly the client buffer VFS named).
+#[cfg_attr(test, allow(dead_code))]
+fn cdev_request(driver: Endpoint, m_type: i32, minor: i32, gid: i32, len: i32, offset: u64) -> i32 {
     let mut m = Message {
         m_source: 0,
-        m_type: CDEV_WRITE,
+        m_type,
         payload: [0u8; 96],
     };
     wr_i32(&mut m, CDEV_MINOR_OFF, minor);
     wr_i32(&mut m, CDEV_GRANT_OFF, gid);
     wr_i32(&mut m, CDEV_LEN_OFF, len);
     wr_u64(&mut m, CDEV_OFFSET_OFF, offset);
-    let trap_rc = ipc_sendrec(tty, &mut m);
+    let trap_rc = ipc_sendrec(driver, &mut m);
     if trap_rc != OK {
         return trap_rc;
     }
     m.m_type
+}
+
+/// One `CDEV_WRITE`. See [`cdev_request`].
+#[cfg_attr(test, allow(dead_code))]
+fn cdev_write(driver: Endpoint, minor: i32, gid: i32, len: i32, offset: u64) -> i32 {
+    cdev_request(driver, CDEV_WRITE, minor, gid, len, offset)
+}
+
+/// One `CDEV_READ` (slice 5.11). See [`cdev_request`].
+#[cfg_attr(test, allow(dead_code))]
+fn cdev_read(driver: Endpoint, minor: i32, gid: i32, len: i32, offset: u64) -> i32 {
+    cdev_request(driver, CDEV_READ, minor, gid, len, offset)
 }
 
 /// SEF fresh-init callback: publish VFS's endpoint to DS under its name. DS
