@@ -713,8 +713,9 @@ const _: () = assert!(VFS_EXEC_MAX <= crate::execimage::MAX_IMAGE_BYTES);
 // 3 carries its VFS↔FS protocol in `include/minix/vfsif.h` with a far larger
 // request set (PUTNODE, STAT, GETDENTS, the whole write path), none of which
 // minix.rs inherits: this band is exactly the three requests a read-only open →
-// read → close needs, on the `CDEV_READ` precedent that a request absent until it
-// has a consumer is better than a request stubbed out.
+// read → close needs, on the precedent `CDEV_READ` set from 5.3 to 5.11: a
+// request without a consumer is better absent than stubbed, and gets defined the
+// moment one exists.
 //
 // Two shapes travel here, and the split is deliberate:
 //
@@ -1101,14 +1102,33 @@ pub const CDEV_RQ_BASE: i32 = 0xB00;
 /// `write()`'s contract, and it is what lets a driver stage through a small
 /// stack buffer with no allocator.
 ///
-/// There is deliberately no `CDEV_READ`: RX needs interrupts (`SYS_IRQCTL`) and
-/// arrives in Phase 6. Slice 5.11's `/dev/null` and `/dev/zero` are new *minors*
-/// of this same request, not new request numbers.
+/// [`CDEV_READ`] is the same payload with the copy running the other way.
 pub const CDEV_WRITE: i32 = CDEV_RQ_BASE;
+
+/// Client → character driver: read bytes from a device minor (slice 5.11).
+///
+/// Payload: [`CDEV_WRITE`]'s, field for field — minor, grant id, byte count, and
+/// the offset within the granted range. The grant must carry `CPF_WRITE` and name
+/// the driver as its grantee; the driver fills the bytes with
+/// `SYS_SAFECOPY(SAFECOPY_TO, m_source, …)`. There is no granter field and there
+/// must never be one — the rule the whole band lives by.
+///
+/// Reply `m_type` is the **number of bytes read** (`>= 0`), or a negative errno.
+/// **`0` is EOF, and a short read is legal.** That is POSIX `read()`'s contract
+/// and the one VFS already assumes for `FS_READ`: VFS sends one request and
+/// reports the count, with no retry loop. `/dev/null` answers `0` on every read;
+/// `/dev/zero` never answers `0` for a positive count.
+///
+/// This request existed only as a plan note until 5.11 — the 5.3 text said
+/// `/dev/null` and `/dev/zero` would be "new minors, not new requests", which is
+/// true of null and of *writing* zero and false of *reading* it. TTY does not
+/// serve it until Phase 6 gives it RX (`SYS_IRQCTL`), and answers it `ENOSYS`
+/// from its unknown-request arm until then.
+pub const CDEV_READ: i32 = CDEV_RQ_BASE + 1;
 
 /// Number of character-device requests defined so far. Locks a driver's
 /// dispatch coverage the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_CDEV_MSGS: usize = 1;
+pub const NR_CDEV_MSGS: usize = 2;
 
 /// Offset of the device minor number in a `CDEV_WRITE` payload (i32).
 pub const CDEV_MINOR_OFF: usize = 0;
@@ -1121,9 +1141,37 @@ pub const CDEV_LEN_OFF: usize = 8;
 /// message offset 8, hence 16 rather than 12).
 pub const CDEV_OFFSET_OFF: usize = 16;
 
-/// The console minor: TTY's UART. Any other minor is `ENXIO` until slice 5.11
-/// adds `/dev/null` and `/dev/zero`.
+/// The console minor: TTY's UART, and TTY's only minor — any other is `ENXIO`
+/// there.
+///
+/// **Minors are a per-driver namespace.** This is TTY's 0; the memory driver's
+/// ramdisk is `BDEV_MINOR_RAMDISK` 0; [`CDEV_MINOR_NULL`] and [`CDEV_MINOR_ZERO`]
+/// are CDEV minors *of the memory driver*. The request band, never the minor
+/// value, is what tells the ramdisk and the character minors apart on that
+/// driver — so nothing asserts `CDEV_MINOR_*` against `BDEV_MINOR_*`, and a
+/// numeric collision would be fine.
 pub const CDEV_MINOR_CONSOLE: i32 = 0;
+
+/// `/dev/null`, served by the memory driver (slice 5.11). MINIX 3's `NULL_DEV`
+/// from `include/minix/dmap.h`: every read answers `0`, every write discards.
+pub const CDEV_MINOR_NULL: i32 = 3;
+
+/// `/dev/zero`, served by the memory driver (slice 5.11). MINIX 3's `ZERO_DEV`:
+/// a read fills the whole request with zeroes, a write discards.
+pub const CDEV_MINOR_ZERO: i32 = 5;
+
+/// The paths VFS's device-node table answers with these minors (slice 5.11).
+///
+/// Here rather than in VFS so init's probes and VFS's table cannot drift: VFS
+/// matches these byte-for-byte ahead of the FS lookup (there is no `/dev` on
+/// the image and no device inode — the deliberate simplification D11 names), and
+/// init opens them by the same constants. **Not** emitted in the generated C
+/// headers: a C program spells `"/dev/null"` itself.
+pub const DEV_CONSOLE_PATH: &str = "/dev/console";
+/// See [`DEV_CONSOLE_PATH`].
+pub const DEV_NULL_PATH: &str = "/dev/null";
+/// See [`DEV_CONSOLE_PATH`].
+pub const DEV_ZERO_PATH: &str = "/dev/zero";
 
 /// Largest byte count a character driver moves in one `CDEV_WRITE`. A longer
 /// request is short-written (see [`CDEV_WRITE`]). Sized for a staging buffer in a
@@ -1653,6 +1701,7 @@ mod tests {
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
+                CDEV_READ,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -1733,6 +1782,7 @@ mod tests {
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
+                CDEV_READ,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -1790,6 +1840,7 @@ mod tests {
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
+                CDEV_READ,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -1958,8 +2009,9 @@ mod tests {
     #[test]
     fn cdev_msgs_contiguous_from_base() {
         // CDEV requests are contiguous from CDEV_RQ_BASE; NR_CDEV_MSGS locks a
-        // character driver's dispatch coverage.
-        let msgs = [CDEV_WRITE];
+        // character driver's dispatch coverage. Slice 5.11 grew this from one
+        // request to two.
+        let msgs = [CDEV_WRITE, CDEV_READ];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, CDEV_RQ_BASE + i as i32);
         }
@@ -1971,7 +2023,7 @@ mod tests {
         // Each CDEV request must stay distinct from every other band and the
         // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a driver's m_type
         // dispatcher and the SEF classifier never collide.
-        for m in [CDEV_WRITE] {
+        for m in [CDEV_WRITE, CDEV_READ] {
             for other in [
                 PM_GETPID,
                 PM_FORK,
@@ -2100,6 +2152,7 @@ mod tests {
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
+                CDEV_READ,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -2297,6 +2350,7 @@ mod tests {
                 FS_READ,
                 FS_WRITE,
                 CDEV_WRITE,
+                CDEV_READ,
                 VM_PAGEFAULT,
                 VM_BRK,
                 VM_MMAP,
@@ -2426,7 +2480,33 @@ mod tests {
         // land in the negative, errno-shaped band and read as a failure.
         assert_eq!(i32::try_from(CDEV_MAX_IO), Ok(256));
         assert_eq!(CDEV_MAX_IO, 256);
+    }
+
+    #[test]
+    fn cdev_minors_take_minix3s_values_and_are_distinct() {
+        // TTY's console is 0. The memory driver's two character minors take
+        // MINIX 3's `NULL_DEV` / `ZERO_DEV` values from `include/minix/dmap.h`
+        // (slice 5.11, Z3). Minors are a per-driver namespace, so only the
+        // memory driver's own pair has to be distinct — nothing here compares
+        // them with `BDEV_MINOR_RAMDISK`, and a collision there would be fine.
         assert_eq!(CDEV_MINOR_CONSOLE, 0);
+        assert_eq!(CDEV_MINOR_NULL, 3);
+        assert_eq!(CDEV_MINOR_ZERO, 5);
+        assert_ne!(CDEV_MINOR_NULL, CDEV_MINOR_ZERO);
+    }
+
+    #[test]
+    fn device_node_paths_are_absolute_and_distinct() {
+        // VFS's device-node table matches these byte-for-byte and init opens
+        // them by the same constants, which is why they live here rather than
+        // in either crate.
+        let paths = [DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH];
+        for p in paths {
+            assert!(p.starts_with("/dev/"), "{p}");
+            assert!(p.len() < FS_PATH_MAX, "{p} would be ENAMETOOLONG");
+        }
+        assert_ne!(DEV_NULL_PATH, DEV_ZERO_PATH);
+        assert_ne!(DEV_CONSOLE_PATH, DEV_NULL_PATH);
     }
 
     #[test]
