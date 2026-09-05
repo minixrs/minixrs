@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! minix.rs `memory` driver — the boot ramdisk, read-only (slice 5.7, decision D3).
+//! minix.rs `memory` driver — the boot ramdisk (slice 5.7, decision D3), plus
+//! `/dev/null` and `/dev/zero` as of slice 5.11.
 //!
 //! The first *block* device in minix.rs, and the storage MFS lands on in slice 5.8.
 //! `kernel/build.rs` builds a MinixFS v3 image at compile time and packs it into
@@ -38,6 +39,15 @@
 //! different things to tell a client. That distinction is what made this a
 //! one-arm change: the geometry validation was already here, so 5.10a replaced a
 //! refusal with a `SAFECOPY_FROM` rather than adding a request.
+//!
+//! **Two character minors ride the same driver, on a different band.** MINIX 3's
+//! memory driver owns `/dev/null` and `/dev/zero` beside its ramdisks, and so does
+//! this one — `CDEV_WRITE` discards and answers the full count, `CDEV_READ`
+//! answers `0` for null and fills the whole request for zero. Nothing is clamped
+//! (there is no staging buffer to protect), and a null/zero *write* issues no
+//! `SYS_SAFECOPY` at all, so a write with an unmapped buffer succeeds — Linux's
+//! behaviour, and the reason no `bad-buf` probe may ever be aimed at `/dev/null`.
+//! See `cdev.rs`.
 
 // Freestanding for the real (bare-metal) build, but a normal host binary under
 // `cargo test` so `bdev`'s logic gets host-runnable unit tests. The test harness
@@ -49,15 +59,17 @@
 minixrs_abi_note::brand!();
 
 mod bdev;
+mod cdev;
 
 use minixrs_ipc::ipc_send;
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    BDEV_BLOCK_SIZE, BDEV_READ, BDEV_WRITE, GET_RAMDISK, GETINFO_RAMDISK_LEN_OFF,
-    GETINFO_RAMDISK_VA_OFF, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    BDEV_BLOCK_SIZE, BDEV_READ, BDEV_WRITE, CDEV_MAX_IO, CDEV_READ, CDEV_WRITE, GET_RAMDISK,
+    GETINFO_RAMDISK_LEN_OFF, GETINFO_RAMDISK_VA_OFF, SAFECOPY_FROM, SAFECOPY_TO,
+    SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, SELF};
-use minixrs_kernel_shared::error::{ENOSYS, OK};
+use minixrs_kernel_shared::error::{EINVAL, ENOSYS, OK};
 use minixrs_kernel_shared::rootfs::{
     HDR_BLOCKS_OFF, IMAGE_HDR_LEN, IMAGE_LABEL, IMAGE_LABEL_LEN, IMAGE_TAIL_LABEL,
 };
@@ -129,6 +141,17 @@ fn main() -> ! {
             // into a real store without a client-visible change of shape.
             BDEV_WRITE => {
                 let rc = do_write(caller_e, &msg, va, blocks);
+                reply(caller_e, &mut msg, rc);
+            }
+            // Slice 5.11: the character minors. Same driver, different band —
+            // `cdev::classify` refuses the ramdisk's minor 0 here, because a minor
+            // is per band, not per driver.
+            CDEV_WRITE => {
+                let rc = do_cdev_write(&msg);
+                reply(caller_e, &mut msg, rc);
+            }
+            CDEV_READ => {
+                let rc = do_cdev_read(caller_e, &msg);
                 reply(caller_e, &mut msg, rc);
             }
             // Unlike DS, reply rather than drop — the caller is inside a SENDREC
@@ -324,6 +347,79 @@ fn do_write(caller_e: Endpoint, msg: &Message, va: u64, blocks: u64) -> i32 {
         return rc;
     }
     n as i32
+}
+
+/// The bytes a `/dev/zero` read is served from: one `CDEV_MAX_IO` window of
+/// zeroes, copied at advancing grant offsets until the request is filled.
+///
+/// A static rather than a `main`-frame local for the reason MFS's block buffer
+/// is one: the address never changes. (At 256 bytes the one-page stack was never
+/// the concern; `.bss` is simply the right home for a constant the kernel reads
+/// through a copy call.)
+static ZEROS: [u8; CDEV_MAX_IO] = [0u8; CDEV_MAX_IO];
+
+/// Serve one `CDEV_WRITE` to a character minor. Returns the reply `m_type`: the
+/// byte count "written" (`>= 0`), or a negative errno.
+///
+/// Both minors discard, so **no `SYS_SAFECOPY` is issued** — the grant is
+/// checked for shape only ([`cdev::validate`]) — and the whole count comes back
+/// in one round, `CDEV_MAX_IO` being TTY's staging limit rather than a band rule.
+/// A write whose buffer is unmapped therefore succeeds, as it does on Linux,
+/// because nothing reads the buffer.
+#[cfg_attr(test, allow(dead_code))]
+fn do_cdev_write(msg: &Message) -> i32 {
+    let req = minixrs_server_rt::cdev::parse(msg);
+    match cdev::validate(req) {
+        Ok((_, n)) => n as i32,
+        Err(e) => e,
+    }
+}
+
+/// Serve one `CDEV_READ` from a character minor. Returns the reply `m_type`: the
+/// byte count read (`0` is EOF), or a negative errno.
+///
+/// `/dev/null` is EOF. `/dev/zero` pushes [`ZEROS`] into the client's granted
+/// buffer one [`cdev::zero_chunk`] at a time, advancing the grant offset, and
+/// reports the full length — a short read is *legal* here but there is no
+/// reason to give one. `caller_e` is the kernel-stamped source of this very
+/// message: the granter can be nothing else.
+///
+/// A negative `SYS_SAFECOPY` result is relayed verbatim (`EPERM` vs `EFAULT` are
+/// different client bugs) — **unless bytes already landed**, in which case the
+/// progress is reported, `write_all`'s rule from slice 5.4: those bytes really
+/// are in the buffer.
+#[cfg_attr(test, allow(dead_code))]
+fn do_cdev_read(caller_e: Endpoint, msg: &Message) -> i32 {
+    let req = minixrs_server_rt::cdev::parse(msg);
+    let (minor, len) = match cdev::validate(req) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match minor {
+        cdev::Minor::Null => 0,
+        cdev::Minor::Zero => {
+            let mut done = 0usize;
+            while done < len {
+                let chunk = cdev::zero_chunk(len, done);
+                let Some(offset) = req.offset.checked_add(done as u64) else {
+                    return if done == 0 { EINVAL } else { done as i32 };
+                };
+                let rc = sys_safecopy(
+                    SAFECOPY_TO,
+                    caller_e,
+                    req.gid,
+                    offset,
+                    ZEROS.as_ptr() as usize as u64,
+                    chunk as u64,
+                );
+                if rc != OK {
+                    return if done == 0 { rc } else { done as i32 };
+                }
+                done += chunk;
+            }
+            len as i32
+        }
+    }
 }
 
 /// Reply to a SENDREC caller: stamp `m_type`, zero `m_source` (the kernel
