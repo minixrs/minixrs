@@ -307,6 +307,10 @@ static DEV_NODES: [(&[u8], CharDriver, i32); NR_DEV_NODES] = [
 pub fn lookup(path: &[u8]) -> Option<Fd>
 ```
 
+The three path strings live in `kernel-shared::callnr` as `DEV_CONSOLE_PATH`,
+`DEV_NULL_PATH`, `DEV_ZERO_PATH` (not emitted in the C headers), so the table
+and init's probes cannot drift; the table stores `&str` and compares bytes.
+
 Exact byte equality on the whole path (the `len` VFS copied, no NUL). Tests:
 each row resolves to its `(dev, minor)`; `/dev/null/`, `/dev/nul`, `/dev/NULL`,
 `dev/null`, `/dev/null\0` and the empty path all miss; the table has no
