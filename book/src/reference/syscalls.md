@@ -205,10 +205,10 @@ disjoint in `kernel-shared/src/callnr.rs`:
 | Base | Value | Server / requests |
 |------|-------|-------------------|
 | `PM_RQ_BASE`    | `0x700` | PM: `GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC` |
-| `VFS_RQ_BASE`   | `0x800` | VFS: `WRITE` (slice 5.4) |
-| *(reserved)*    | `0x900` | the VFS↔FS band, slice 5.8 |
+| `VFS_RQ_BASE`   | `0x800` | VFS: `WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE` |
+| `FS_RQ_BASE`    | `0x900` | MFS: `READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` |
 | `BDEV_RQ_BASE`  | `0xA00` | block drivers: `READ` / `WRITE` (slice 5.7) |
-| `CDEV_RQ_BASE`  | `0xB00` | character drivers: `WRITE` (slice 5.3) |
+| `CDEV_RQ_BASE`  | `0xB00` | character drivers: `WRITE` (slice 5.3) / `READ` (5.11) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK` |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control: `INIT` / `SIGNAL` |
 | `DS_RQ_BASE`    | `0xE00` | DS: `PUBLISH` / `RETRIEVE` / `CHECK` |

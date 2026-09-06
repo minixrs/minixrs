@@ -304,7 +304,8 @@ a healthy build.
 ### D11. Scope fences
 
 **In (post-milestone stretch):** MFS write path (5.10); `/dev/null` +
-`/dev/zero` via the memory driver's CDEV minors (5.11).
+`/dev/zero` via the memory driver's CDEV minors, plus the `CDEV_READ` request
+reading zero needs (5.11).
 
 **Out — deferred with owners:** PFS/pipes → **Phase 7** (first consumer is
 the shell; `plan.md`'s old Phase 5 bullet moves out); TTY RX/IRQs +
@@ -654,7 +655,8 @@ transmits; replies bytes-written. **No payload `granter`** — the driver takes
 it from the kernel-stamped `m_source`, the 5.2 confused-deputy rule.
 `kernel/build.rs` `servers` array +1 (proc_nr 4, at index 2 so the console is
 serving before its first client); `qemu-boot.expected` gains the `[as]` line
-and the demo markers. `CDEV_READ` is deliberately absent (Phase 6).
+and the demo markers. `CDEV_READ` was absent until 5.11 defined it for
+`/dev/zero`; TTY serves it in Phase 6.
 
 **Proof:** VFS retrieves TTY's endpoint from DS and `CDEV_WRITE`s a banner via
 direct grant — the banner reaches serial *from EL0* (no kernel trace prefix),
@@ -1480,7 +1482,7 @@ contradict what this plan predicted:**
   that no client-controlled failure can occur after one. That costs a page of
   `.bss`; the one-page limit in MFS is the *stack*, not `.bss`.
 
-#### Slice 5.10b: create and truncate ◀ ready (branch `feature/slice-5.10b-mfs-create-truncate`, pending merge)
+#### Slice 5.10b: create and truncate ✓ shipped (PR #54, merged 2026-09-02)
 
 Full design — decisions, the per-component breakdown, the error taxonomy, and
 the mutation/boot-matrix plan — lives in
@@ -1552,15 +1554,28 @@ naming a missing parent → `ENOENT`, `O_CREAT` naming an existing directory →
 `O_KNOWN` → `EINVAL`, spelled relative to `O_UNKNOWN_BIT` rather than as a
 literal so a flag becoming real fails loudly instead of passing vacuously).
 
-### Slice 5.11 (stretch): `/dev/null` + `/dev/zero` ◀ next
+### Slice 5.11 (stretch): `/dev/null` + `/dev/zero` + `CDEV_READ` ◀ ready (branch `feature/slice-5.11-dev-null-zero`, pending merge)
 
-**Scope:** MEM gains CDEV minors for null/zero on the 5.3 band; VFS grows a
-static device-node table (`/dev/null`, `/dev/zero`, `/dev/console` →
-(driver, minor)) intercepting paths ahead of FS lookup (deliberate
-simplification — no on-disk device inodes yet).
+Full design — decisions `Z1…Z10`, the per-component breakdown, the error
+taxonomy, and the mutation plan — lives in
+[`docs/superpowers/specs/2026-09-05-dev-null-zero-design.md`](../superpowers/specs/2026-09-05-dev-null-zero-design.md)
+and is not duplicated here.
 
-**Proof:** reading `/dev/zero` and writing `/dev/null` from init, traced
-and echoed.
+**Scope, as shipped:** `CDEV_READ` (`CDEV_RQ_BASE + 1`, `NR_CDEV_MSGS` 1 → 2;
+`CDEV_WRITE`'s payload with the copy reversed, `0` is EOF, short reads legal);
+`CDEV_MINOR_NULL = 3` / `CDEV_MINOR_ZERO = 5` (MINIX 3's values) served by the
+memory driver with no clamp; the CDEV request codec lifted into `server-rt`;
+VFS's `Fd::CharDev` names its driver and a three-row device-node table
+intercepts `/dev/console`, `/dev/null`, `/dev/zero` after the path copy and
+before the mount; a console `read()` now reaches TTY and hears `ENOSYS` from its
+unknown-request arm. **The 5.3 note that 5.11 would be "new minors, not new
+requests" was wrong for reading `/dev/zero`**, and is corrected wherever it was
+copied.
+
+**Proof:** `dev.zero ok n=64` (64 bytes, all zero, a second read not EOF),
+`dev.null ok n=35` (whole count accepted, read is EOF and touches nothing),
+`dev.console ok` (written *through* the `/dev/console` descriptor), `mem.ds ok`,
+`mem.deny ok n=5`, `open.deny` 11 → 12 (`/dev/nope` → `ENOENT`).
 
 ---
 

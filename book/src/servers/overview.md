@@ -51,7 +51,7 @@ take; it has to find a home outside that span.
 | `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE` |
 | `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` (MFS) |
 | `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`) |
-| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY) |
+| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY, memory driver) / `CDEV_READ` (memory driver; TTY answers `ENOSYS` until Phase 6) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK` |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init) |
 | `DS_RQ_BASE`    | `0xE00` | DS: `DS_PUBLISH` / `RETRIEVE` / `CHECK` |
@@ -175,18 +175,20 @@ reading too, against a real filesystem served by MFS.
 ### One request, one copy
 
 ```text
-user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off}──► TTY
+user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off}──► driver
                                  │                                      │
                                  └── magic grant: caller's buf ──────────┘
                                          (kernel copies, once)
 ```
 
 VFS resolves the descriptor, issues a **magic** (third-party) grant naming the
-*caller's* buffer with the driver as grantee, and forwards the grant id. TTY then
-safecopies straight out of the caller's address space. The bytes never pass
-through VFS: there is exactly one copy, from the process that wrote them to the
-driver that transmits them. This is the first consumer of the magic grant form on
-a real data path, and the rail slice 5.6's musl `write()` lands on.
+*caller's* buffer with the driver as grantee, and forwards the grant id. TTY
+safecopies straight out of the caller's address space; the memory driver's
+`/dev/null` and `/dev/zero` writes issue no `SYS_SAFECOPY` at all — they discard
+the bytes and reply the whole count with no copy. Either way the bytes never
+pass through VFS: at most one copy happens, from the process that wrote them to
+the driver that transmits them. This is the first consumer of the magic grant
+form on a real data path, and the rail slice 5.6's musl `write()` lands on.
 
 Three properties hold that path together:
 
@@ -214,6 +216,20 @@ kernel proc number and sized from the shared `NR_SERVED_PROCS` ceiling that PM's
 `mproc` and VM's `ClientRegions` also derive from. Every row *starts* identical —
 fds 0, 1, and 2 name the console, everything else is `EBADF` — which is POSIX's
 inheritance convention and is what lets init write before any filesystem exists.
+
+Since slice 5.11 a character-device entry names its **driver** as well as its
+minor (`Fd::CharDev { dev: CharDriver, minor }`, with `CharDriver` an enum
+because the default row is a `const` and a DS-resolved endpoint is not) — minors
+are a per-driver namespace, so the driver is half the address. `open` consults a
+three-row **device-node table** (`servers/vfs/src/dev.rs`: `/dev/console`,
+`/dev/null`, `/dev/zero`, matched byte-for-byte) after copying the path in and
+*before* touching the mount, so a device open needs no filesystem; `O_CREAT` and
+`O_TRUNC` are ignored on a hit, Linux's behaviour for a device node. Everything
+else falls through to MFS, `/dev/other` included, and there is no `/dev` on the
+image at all. A device `read()` is one `CDEV_READ` against the descriptor's
+driver, no loop and no position; a console `read()` therefore reaches TTY and
+hears `ENOSYS` from its unknown-request arm until Phase 6.
+
 Slice 5.8's `open` is what makes rows diverge, and it moved the storage to the
 `UnsafeCell` newtype VM's region table already uses. That brings a rule with it:
 **never hold a borrow of the table across a SENDREC**. `Fd` is `Copy` precisely so

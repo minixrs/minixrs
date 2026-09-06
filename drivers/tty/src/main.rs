@@ -34,6 +34,12 @@
 //! does not authorize this") and `EFAULT` ("your buffer is not mapped") are
 //! different bugs on the client's side, and collapsing them to one errno would hide
 //! which.
+//!
+//! **`CDEV_READ` lands in the unknown-request arm, on purpose.** Slice 5.11
+//! defined the request for the memory driver's `/dev/zero`; TTY cannot serve it
+//! until Phase 6 gives it RX (`SYS_IRQCTL`), and `ENOSYS` — "this driver does not
+//! know the request" — is the honest answer until then. VFS routes a console
+//! `read()` here anyway, so Phase 6 adds one arm below and changes VFS not at all.
 
 // Freestanding for the real (bare-metal) build, but a normal host binary under
 // `cargo test` so `cdev`'s logic gets host-runnable unit tests. The test harness
@@ -152,7 +158,7 @@ fn tty_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
 /// lives in `main`'s frame (see the comment at its declaration).
 #[cfg_attr(test, allow(dead_code))]
 fn do_write(caller_e: Endpoint, msg: &Message, staging: &mut [u8; CDEV_MAX_IO]) -> i32 {
-    let req = cdev::parse_write(msg);
+    let req = minixrs_server_rt::cdev::parse(msg);
     let n = match cdev::validate_write(req) {
         Ok(n) => n,
         Err(e) => return e,

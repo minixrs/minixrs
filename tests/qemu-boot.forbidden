@@ -46,3 +46,14 @@ minix.rs init: fs.dirgrow FAIL
 minix.rs init: fs.hole FAIL
 minix.rs init: fs.trunc FAIL
 minix.rs init: fs.leak FAIL
+# Slice 5.11: a device probe ran and disagreed with itself. Distinct from the
+# marker simply going missing (init never got that far): these spellings mean the
+# open, read, write, or close executed and produced the wrong answer, and the
+# word after FAIL names the step -- `dev.zero FAIL short` is null answering for
+# zero (or a clamp), `dev.null FAIL touched` is a read that wrote, `dev.console
+# FAIL write` is the table's console row not reaching TTY.
+minix.rs init: dev.zero FAIL
+minix.rs init: dev.null FAIL
+minix.rs init: dev.console FAIL
+# ...and VFS's prologue battery against the memory driver's CDEV validator.
+[diag vfs] mem.deny FAIL

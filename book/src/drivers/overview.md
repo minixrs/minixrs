@@ -11,15 +11,18 @@ other process has: the device's memory-mapped registers. Everything interesting
 about this chapter follows from that page.
 
 As of Phase 5 there are two drivers: **TTY** (`drivers/tty/`), the console, and
-**`memory`** (`drivers/memory/`), the boot ramdisk. The VirtIO block, network, and
-console drivers under `drivers/` are still empty placeholders (Phase 6), and so is
-`drivers/driver-rt` — the shared driver runtime they will eventually use.
+**`memory`** (`drivers/memory/`), the boot ramdisk plus, since slice 5.11, the
+[`/dev/null` and `/dev/zero` character minors](#the-character-minors). The VirtIO
+block, network, and console drivers under `drivers/` are still empty placeholders
+(Phase 6), and so is `drivers/driver-rt` — the shared driver runtime they will
+eventually use.
 
 The two are worth contrasting up front, because `memory` is the counter-example to
 the paragraph above: **its window is ordinary RAM, not MMIO**. It owns no hardware
 at all. What makes it a driver rather than a server is its *protocol* — it answers
-[BDEV](#the-bdev-protocol-and-the-memory-ramdisk) requests and knows nothing about
-what its blocks contain. That is exactly the property Phase 6 needs, when
+[BDEV](#the-bdev-protocol-and-the-memory-ramdisk) requests for the ramdisk and
+[CDEV](#the-cdev-protocol) requests for its null/zero minors, and knows nothing
+about what its blocks contain. That is exactly the property Phase 6 needs, when
 virtio-blk replaces it underneath an unchanged MFS.
 
 ## The device window
@@ -170,16 +173,16 @@ It reports `[devmap] selftest ok freed=0 devs=1`, asserting **both** numbers —
 ## The CDEV protocol
 
 Character drivers answer requests in the `CDEV_RQ_BASE = 0xB00` band. Phase 5
-defines one:
+defines two, sharing one payload:
 
 | Field | Payload offset | Meaning |
 |---|---|---|
 | minor | `0..4` (i32) | which device; `CDEV_MINOR_CONSOLE = 0` is the UART |
-| grant id | `4..8` (i32) | names the client's source buffer |
+| grant id | `4..8` (i32) | names the client's buffer (`CPF_READ` for a write, `CPF_WRITE` for a read) |
 | length | `8..12` (i32) | bytes requested |
 | offset | `16..24` (u64) | where in the granted range to start |
 
-Three properties of that table are load-bearing.
+Five properties of that table are load-bearing.
 
 **There is no granter field.** The driver takes the granter from the
 kernel-stamped `m_source`. TTY holds `SYS_SAFECOPY` and its clients do not, so a
@@ -189,28 +192,43 @@ confused deputy. This is the same anti-spoof property `DS_PUBLISH` relies on, an
 it binds every grant-id-carrying request in the CDEV, BDEV, and FS bands.
 
 **The reply is a byte count, not a status.** `m_type` comes back as the number of
-bytes written (`>= 0`; zero is legal) or a negative errno. A driver replying `OK`
-would be telling its client that the whole buffer went out.
+bytes transferred (written or read; `>= 0`, zero is legal) or a negative errno —
+which direction depends on the request, covered in its own paragraph below. A
+driver replying `OK` would be telling its client that the whole buffer went out.
 
-**An over-long request is a short write, not a failure.** A request longer than
-`CDEV_MAX_IO` (256 bytes) moves the first `CDEV_MAX_IO` bytes and reports that
-count; the client re-sends with `offset` advanced. That is POSIX `write()`'s
-contract, and it is what lets a driver stage through a fixed buffer in its `main`
-frame with no allocator at all.
+**A driver MAY answer short — never must.** The client's contract, POSIX
+`write()`'s, is to re-send with `offset` advanced until the request is out; that
+is what lets a driver stage through a fixed buffer in its `main` frame with no
+allocator at all. TTY clamps to `CDEV_MAX_IO` (256 bytes) for exactly that
+reason. The memory driver's `/dev/null` and `/dev/zero` (slice 5.11) stage
+nothing and never clamp — a `CDEV_WRITE` longer than `CDEV_MAX_IO` still comes
+back reporting the whole count.
 
-`CDEV_READ` is deliberately absent: receive needs interrupts (`SYS_IRQCTL`) and
-arrives in Phase 6. The `/dev/null` and `/dev/zero` devices planned for slice 5.11
-are new *minors* of `CDEV_WRITE`, not new request numbers.
+**`CDEV_READ` is the same payload, copy reversed** (slice 5.11). The reply is
+the byte count read, `0` is EOF, and a short read is legal — POSIX `read()`'s
+contract and the one VFS already assumes for `FS_READ`, so VFS sends one request
+and reports what came back. It existed only as a plan note until `/dev/zero`
+needed it: the 5.3 text said the two devices would be "new minors, not new
+requests", which is true of `/dev/null` and of writing `/dev/zero` and false of
+reading it. TTY does not serve it until Phase 6 gives it RX (`SYS_IRQCTL`), and
+answers it `ENOSYS` from its unknown-request arm until then — VFS routes a
+console `read()` there anyway, so Phase 6 changes TTY and nothing else.
+
+**Minors are a per-driver namespace.** TTY's console is 0; the memory driver's
+`/dev/null` and `/dev/zero` are CDEV minors 3 and 5 (MINIX 3's `NULL_DEV` and
+`ZERO_DEV`), on the same driver as BDEV minor 0's ramdisk. The request band, not
+the minor value, tells them apart.
 
 ## TTY
 
 `drivers/tty/` is three files:
 
-- **`cdev.rs`** — the pure, host-tested half: `parse_write` reads the four payload
-  fields, `validate_write` applies the checks in order (unknown minor → `ENXIO`,
-  negative length → `EINVAL`, invalid grant id → `EINVAL`, then clamp to
-  `CDEV_MAX_IO`). Both are total functions, so a malformed request becomes an
-  invalid *value* the validator rejects, never a panic.
+- **`cdev.rs`** — the pure, host-tested half: `validate_write` applies the checks
+  in order (unknown minor → `ENXIO`, negative length → `EINVAL`, invalid grant id
+  → `EINVAL`, then clamp to `CDEV_MAX_IO`) (the four-field parse moved to
+  `server-rt::cdev` in 5.11, when the memory driver became its second user). It is
+  a total function, so a malformed request becomes an invalid *value* the
+  validator rejects, never a panic.
 - **`pl011.rs`** — the crate's only `unsafe`: volatile accesses to `FR` and `DR` at
   `TTY_UART_VA`, polling `FR.TXFF` before each store, translating LF to CRLF. The
   register offsets are deliberately duplicated from the kernel's own PL011 writer;
@@ -265,7 +283,7 @@ literal substrings and cannot express a carriage return).
 ## The BDEV protocol and the `memory` ramdisk
 
 Block drivers answer requests in the `BDEV_RQ_BASE = 0xA00` band — between VFS
-(`0x800`) and CDEV (`0xB00`), with `0x900` reserved for the VFS↔FS band. Two
+(`0x800`) and CDEV (`0xB00`), with FS (`0x900`) between VFS and BDEV. Two
 requests are defined:
 
 | Field | Payload offset | Meaning |
@@ -366,29 +384,59 @@ only thing in the boot that proves the copy reached the end of the blob — conf
 by mutation, where sourcing every page from block 0 moved exactly one marker,
 `ramdisk FAIL tail label`.
 
+### The character minors
+
+Since slice 5.11 the same driver serves `/dev/null` (CDEV minor 3) and
+`/dev/zero` (minor 5), as MINIX 3's memory driver does beside its ramdisks.
+Minors are a per-driver namespace, and on a driver serving two bands, the band
+tells them apart — so `cdev::classify` refuses minor 0 here, which is TTY's
+console, and the BDEV ramdisk's minor 0 never meets these two.
+
+Both minors discard a `CDEV_WRITE` and answer the **whole** count with no copy
+at all; `/dev/null` answers a `CDEV_READ` with `0`, and `/dev/zero` fills the
+whole request from a 256-byte static, walking the grant in `CDEV_MAX_IO` steps.
+Nothing is clamped: `CDEV_MAX_IO` protects TTY's stack staging buffer, and there
+is no staging here. Two consequences worth knowing. A `/dev/null` write with an
+unmapped buffer *succeeds*, as it does on Linux, because nothing reads the
+buffer — so no bad-buffer probe may ever be aimed at it. And the driver still
+has no `unsafe` block: the only copy is a kernel call.
+
+VFS probes the validator from its prologue (`[diag vfs] mem.deny ok n=5`),
+because VFS's own device table maps only minors that exist and could never send
+a bad one. One of those five is the first such refusal on the CDEV band: a
+`CDEV_READ` through a read-only grant, refused by the kernel's `verify_grant`
+and relayed as `EPERM`. MFS's `bdev.deny` battery already exercises the same
+`CPF_WRITE` check against a `BDEV_READ` (its `read-only` probe), so this is a
+CDEV-band first, not a kernel-wide one.
+
 ### What the boot log proves
 
 ```
 [ramdisk] mem va=0x80000000 len=1048576 pages=256
 [diag memory] ramdisk ok blocks=256 tail=1
-[diag vfs] bdev.ds ok ep=3
-[diag vfs] bdev.read ok n=32
-[diag vfs] bdev.head ok match=1
-[diag vfs] bdev.tail ok match=1
-[diag vfs] bdev.deny ok n=9
+[diag mfs] bdev.ds ok ep=3
+[diag mfs] bdev.tail ok match=1
+[diag mfs] bdev.deny ok n=10
 ```
 
 `blocks=256` cross-checks the header's own block count against the length
 `GET_RAMDISK` reported — two independently derived numbers, binding the build-time
 image geometry to the kernel's runtime copy.
 
-VFS then drives the protocol as the first client, and `bdev.read` matters beyond
-this driver: it is the first **successful** `SAFECOPY_TO` anywhere in the tree.
-Every other use of that direction is a denial probe, so until now the kernel's
-`CPF_WRITE` + `Prot::writable` success path had never run. `bdev.head` and
-`bdev.tail` do not subsume each other — a driver that ignored the `block` field
-would return the header for both — and the nine refusals include the one grant check
-slice 5.3 could not reach: a `CPF_READ`-only grant used as a copy *destination*.
+MFS, not VFS, is this driver's BDEV client — since slice 5.8, when the
+filesystem server took over the band. Its own `mount ok root=1 bs=4096
+blocks=256` marker, the superblock decoded out of the block it asked for, is
+what retired the earlier `bdev.read`/`bdev.head` pair: a driver that replied
+`OK` to the wrong page, or returned the header for both, fails to decode there
+instead of printing a marker of its own. `bdev.tail` is the one thing `mount`
+cannot subsume — it reads the image's reserved *last* block, whose label
+differs from the header's, and is the only proof that the copy loop filling the
+ramdisk reached the end of the blob rather than looping over block 0. The ten
+refusals in `bdev.deny` include the one grant check slice 5.3 could not reach —
+a `CPF_READ`-only grant used as a copy *destination* — plus, since slice 5.10a,
+two `BDEV_WRITE` probes aimed at the write path this driver now really
+implements, refused by the kernel's grant-direction and minor checks rather
+than by a since-retired `EROFS` stub.
 
 Every one of those markers is identical with and without the `boot-stubs` feature
 **and** with and without the musl sysroot. That is what the fixed 1 MiB image size

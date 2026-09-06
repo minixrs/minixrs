@@ -138,7 +138,10 @@ fn bands() -> [Band; 9] {
             base_name: "CDEV_RQ_BASE",
             base: callnr::CDEV_RQ_BASE,
             count: Some(("NR_CDEV_MSGS", callnr::NR_CDEV_MSGS)),
-            members: vec![("CDEV_WRITE", callnr::CDEV_WRITE)],
+            members: vec![
+                ("CDEV_WRITE", callnr::CDEV_WRITE),
+                ("CDEV_READ", callnr::CDEV_READ),
+            ],
         },
         Band {
             title: "VM requests",
@@ -345,6 +348,11 @@ pub fn render() -> String {
         "CDEV_WRITE, by contrast, carries a grant id and NO granter field, for the",
         "same anti-spoof reason. Its offsets are emitted for completeness of the",
         "band, not because C talks to a driver: musl's write() goes to VFS.",
+        "",
+        "CDEV_READ (slice 5.11) is the same payload with the copy running the other",
+        "way: the grant carries CPF_WRITE and the driver fills the client's buffer.",
+        "CDEV_MINOR_NULL / CDEV_MINOR_ZERO are minors of the memory driver, not TTY:",
+        "minors are a per-driver namespace.",
     ]);
     f.define_dec("VFS_FD_OFF", callnr::VFS_FD_OFF as i64);
     f.define_dec("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64);
@@ -359,6 +367,8 @@ pub fn render() -> String {
     f.define_dec("CDEV_OFFSET_OFF", callnr::CDEV_OFFSET_OFF as i64);
     f.define_dec("CDEV_MAX_IO", callnr::CDEV_MAX_IO as i64);
     f.define_dec("CDEV_MINOR_CONSOLE", callnr::CDEV_MINOR_CONSOLE.into());
+    f.define_dec("CDEV_MINOR_NULL", callnr::CDEV_MINOR_NULL.into());
+    f.define_dec("CDEV_MINOR_ZERO", callnr::CDEV_MINOR_ZERO.into());
 
     f.section("band ordering");
     f.block_comment(&[
@@ -537,7 +547,7 @@ mod tests {
                 "{request} itself must be emitted"
             );
         }
-        let offsets: [(&str, i64); 11] = [
+        let offsets: [(&str, i64); 13] = [
             ("VFS_FD_OFF", callnr::VFS_FD_OFF as i64),
             ("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64),
             ("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64),
@@ -549,6 +559,8 @@ mod tests {
             ("CDEV_OFFSET_OFF", callnr::CDEV_OFFSET_OFF as i64),
             ("CDEV_MAX_IO", callnr::CDEV_MAX_IO as i64),
             ("CDEV_MINOR_CONSOLE", callnr::CDEV_MINOR_CONSOLE as i64),
+            ("CDEV_MINOR_NULL", callnr::CDEV_MINOR_NULL as i64),
+            ("CDEV_MINOR_ZERO", callnr::CDEV_MINOR_ZERO as i64),
         ];
         for (name, want) in offsets {
             assert_eq!(
