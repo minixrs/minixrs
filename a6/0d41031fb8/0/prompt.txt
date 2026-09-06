@@ -930,3 +930,7 @@ I created and merged claude settings you should be caught up from main now.  Go 
 ---
 
 Grok put review comments in the PR.  Takes those and put them as hunk notes to look at using the existing hunk session
+
+---
+
+rework the notes with STML and updated claude with a note to use STML for notes and when opening a new session make sure to add the experimental
