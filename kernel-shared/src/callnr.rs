@@ -712,10 +712,10 @@ const _: () = assert!(VFS_EXEC_MAX <= crate::execimage::MAX_IMAGE_BYTES);
 // the whole scheme rests on is preserved. Numbering is minix.rs-specific — MINIX
 // 3 carries its VFS↔FS protocol in `include/minix/vfsif.h` with a far larger
 // request set (PUTNODE, STAT, GETDENTS, the whole write path), none of which
-// minix.rs inherits: this band is exactly the three requests a read-only open →
-// read → close needs, on the precedent `CDEV_READ` set from 5.3 to 5.11: a
-// request without a consumer is better absent than stubbed, and gets defined the
-// moment one exists.
+// minix.rs inherits: this band is exactly the requests MFS's clients have
+// needed so far — READSUPER, LOOKUP, READ, WRITE, CREATE, TRUNC — on the
+// precedent `CDEV_READ` set from 5.3 to 5.11: a request without a consumer is
+// better absent than stubbed, and gets defined the moment one exists.
 //
 // Two shapes travel here, and the split is deliberate:
 //
@@ -1647,6 +1647,8 @@ mod tests {
             assert_ne!(r, FS_LOOKUP);
             assert_ne!(r, FS_READ);
             assert_ne!(r, FS_WRITE);
+            assert_ne!(r, FS_CREATE);
+            assert_ne!(r, FS_TRUNC);
             assert_ne!(r, BDEV_READ);
             assert_ne!(r, BDEV_WRITE);
             assert_ne!(r, CDEV_WRITE);
@@ -1708,6 +1710,8 @@ mod tests {
                 FS_LOOKUP,
                 FS_READ,
                 FS_WRITE,
+                FS_CREATE,
+                FS_TRUNC,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1789,6 +1793,8 @@ mod tests {
                 FS_LOOKUP,
                 FS_READ,
                 FS_WRITE,
+                FS_CREATE,
+                FS_TRUNC,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -1847,6 +1853,8 @@ mod tests {
                 FS_LOOKUP,
                 FS_READ,
                 FS_WRITE,
+                FS_CREATE,
+                FS_TRUNC,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -2050,6 +2058,8 @@ mod tests {
                 FS_LOOKUP,
                 FS_READ,
                 FS_WRITE,
+                FS_CREATE,
+                FS_TRUNC,
                 BDEV_READ,
                 BDEV_WRITE,
                 VM_PAGEFAULT,
@@ -2359,6 +2369,8 @@ mod tests {
                 FS_LOOKUP,
                 FS_READ,
                 FS_WRITE,
+                FS_CREATE,
+                FS_TRUNC,
                 CDEV_WRITE,
                 CDEV_READ,
                 VM_PAGEFAULT,
@@ -2535,6 +2547,8 @@ mod tests {
             assert_ne!(m, FS_LOOKUP);
             assert_ne!(m, FS_READ);
             assert_ne!(m, FS_WRITE);
+            assert_ne!(m, FS_CREATE);
+            assert_ne!(m, FS_TRUNC);
             assert_ne!(m, BDEV_READ);
             assert_ne!(m, BDEV_WRITE);
             assert_ne!(m, CDEV_WRITE);

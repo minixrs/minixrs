@@ -24,12 +24,14 @@
 //! ```
 //!
 //! VFS resolves the descriptor, issues a **magic** (third-party) grant naming the
-//! *caller's* buffer with the driver as grantee, and forwards the id. The driver
-//! (TTY for the console, the memory driver for `/dev/null` and `/dev/zero`) then
-//! safecopies straight out of the caller's address space into its staging buffer.
-//! The bytes never pass through VFS — there is exactly one copy, from the process
-//! that wrote them to the driver that transmits them, which is the whole point of
-//! the D4 grant design.
+//! *caller's* buffer with the driver as grantee, and forwards the id. TTY
+//! safecopies straight out of the caller's address space into its staging
+//! buffer; the memory driver's `/dev/null` and `/dev/zero` writes issue no
+//! `SYS_SAFECOPY` at all — they discard the bytes and reply `len` with no copy,
+//! Linux's unmapped-buffer-succeeds behaviour. Either way the bytes never pass
+//! through VFS — at most one copy happens, from the process that wrote them to
+//! the driver that transmits them, which is the whole point of the D4 grant
+//! design.
 //!
 //! Three properties hold that path together, each of which has its own probe in
 //! the boot log:

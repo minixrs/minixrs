@@ -51,7 +51,7 @@ take; it has to find a home outside that span.
 | `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE` |
 | `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` (MFS) |
 | `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`) |
-| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY) |
+| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY, memory driver) / `CDEV_READ` (memory driver; TTY answers `ENOSYS` until Phase 6) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK` |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init) |
 | `DS_RQ_BASE`    | `0xE00` | DS: `DS_PUBLISH` / `RETRIEVE` / `CHECK` |
@@ -182,10 +182,11 @@ user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off
 ```
 
 VFS resolves the descriptor, issues a **magic** (third-party) grant naming the
-*caller's* buffer with the driver as grantee, and forwards the grant id. The
-driver — TTY for the console, the memory driver for `/dev/null` and `/dev/zero`
-— then safecopies straight out of the caller's address space. The bytes never
-pass through VFS: there is exactly one copy, from the process that wrote them to
+*caller's* buffer with the driver as grantee, and forwards the grant id. TTY
+safecopies straight out of the caller's address space; the memory driver's
+`/dev/null` and `/dev/zero` writes issue no `SYS_SAFECOPY` at all — they discard
+the bytes and reply the whole count with no copy. Either way the bytes never
+pass through VFS: at most one copy happens, from the process that wrote them to
 the driver that transmits them. This is the first consumer of the magic grant
 form on a real data path, and the rail slice 5.6's musl `write()` lands on.
 

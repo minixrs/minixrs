@@ -575,9 +575,10 @@ minix.rs init: dev.console ok
 # (-> ENAMETOOLONG, refused before the wire), a negative path length (-> EINVAL,
 # which unchecked would widen into a ~16 EiB u64 on the SYS_COPY), an unmapped
 # path buffer (-> EFAULT from the kernel's page-table walk inside VFS's SYS_COPY),
-# read() on fd 1 (-> ENOSYS, not EBADF: the descriptor is fine and CDEV_READ is
-# what does not exist until Phase 6), and closing an already-closed descriptor
-# (-> EBADF, which is what makes the re-open above mean something).
+# read() on fd 1 (-> ENOSYS, not EBADF: the descriptor is fine, TTY does not
+# *serve* CDEV_READ until Phase 6, and ENOSYS is now the driver's answer over a
+# real CDEV_READ), and closing an already-closed descriptor (-> EBADF, which is
+# what makes the re-open above mean something).
 #
 # It was eight until slice 5.10a, and the count moved on purpose. The retired
 # probe was write() on a file descriptor, asserting `EROFS` -- which the write

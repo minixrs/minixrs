@@ -650,8 +650,8 @@ const _: () = assert!(HELLO.len() == 35);
 ///
 /// Three probes, three markers, each reporting its first failing step by name so
 /// a `FAIL` line says *which* device and *what* went wrong. Every probe closes
-/// what it opened, so the descriptor table [`open_denials`] and [`write_demo`]
-/// see afterwards is the one they expect.
+/// what it opened, so the descriptor table later prologue steps ([`write_demo`]
+/// and friends) see afterwards is the one they expect.
 #[cfg_attr(test, allow(dead_code))]
 fn dev_demo(vfs: Endpoint) {
     zero_demo(vfs);

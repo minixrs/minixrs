@@ -11,15 +11,18 @@ other process has: the device's memory-mapped registers. Everything interesting
 about this chapter follows from that page.
 
 As of Phase 5 there are two drivers: **TTY** (`drivers/tty/`), the console, and
-**`memory`** (`drivers/memory/`), the boot ramdisk. The VirtIO block, network, and
-console drivers under `drivers/` are still empty placeholders (Phase 6), and so is
-`drivers/driver-rt` — the shared driver runtime they will eventually use.
+**`memory`** (`drivers/memory/`), the boot ramdisk plus, since slice 5.11, the
+[`/dev/null` and `/dev/zero` character minors](#the-character-minors). The VirtIO
+block, network, and console drivers under `drivers/` are still empty placeholders
+(Phase 6), and so is `drivers/driver-rt` — the shared driver runtime they will
+eventually use.
 
 The two are worth contrasting up front, because `memory` is the counter-example to
 the paragraph above: **its window is ordinary RAM, not MMIO**. It owns no hardware
 at all. What makes it a driver rather than a server is its *protocol* — it answers
-[BDEV](#the-bdev-protocol-and-the-memory-ramdisk) requests and knows nothing about
-what its blocks contain. That is exactly the property Phase 6 needs, when
+[BDEV](#the-bdev-protocol-and-the-memory-ramdisk) requests for the ramdisk and
+[CDEV](#the-cdev-protocol) requests for its null/zero minors, and knows nothing
+about what its blocks contain. That is exactly the property Phase 6 needs, when
 virtio-blk replaces it underneath an unchanged MFS.
 
 ## The device window
@@ -189,8 +192,9 @@ confused deputy. This is the same anti-spoof property `DS_PUBLISH` relies on, an
 it binds every grant-id-carrying request in the CDEV, BDEV, and FS bands.
 
 **The reply is a byte count, not a status.** `m_type` comes back as the number of
-bytes written (`>= 0`; zero is legal) or a negative errno. A driver replying `OK`
-would be telling its client that the whole buffer went out.
+bytes transferred (written or read; `>= 0`, zero is legal) or a negative errno —
+which direction depends on the request, covered in its own paragraph below. A
+driver replying `OK` would be telling its client that the whole buffer went out.
 
 **A driver MAY answer short — never must.** The client's contract, POSIX
 `write()`'s, is to re-send with `offset` advanced until the request is out; that
@@ -279,7 +283,7 @@ literal substrings and cannot express a carriage return).
 ## The BDEV protocol and the `memory` ramdisk
 
 Block drivers answer requests in the `BDEV_RQ_BASE = 0xA00` band — between VFS
-(`0x800`) and CDEV (`0xB00`), with `0x900` reserved for the VFS↔FS band. Two
+(`0x800`) and CDEV (`0xB00`), with FS (`0x900`) between VFS and BDEV. Two
 requests are defined:
 
 | Field | Payload offset | Meaning |
