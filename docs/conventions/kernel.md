@@ -1,13 +1,14 @@
 # Kernel conventions
 
 Rules that bind code under `kernel/src/` — crate shape, `unsafe` and static-table discipline,
-assembly placement, IPC and scheduling invariants, and the memory-access, grant, device-mapping and
-`exec` contracts established across Phase 5.
+assembly placement, IPC and scheduling invariants, the process-lifetime contracts (signals, exit
+teardown, endpoint generations, fork) established across Phase 4, and the memory-access, grant,
+device-mapping and `exec` contracts established across Phase 5.
 
 Neighbouring areas, linked rather than restated: [`rust-style.md`](./rust-style.md) for lint traps
 and source hygiene, [`servers-and-drivers.md`](./servers-and-drivers.md) for the user-space crates
 that sit on the other side of these contracts, and [`abi.md`](./abi.md) for request-band numbers,
-the errno bands and the D8 ABI freeze.
+the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
 
 ## Crate shape
 
@@ -34,7 +35,7 @@ the errno bands and the D8 ABI freeze.
 - `cargo test -p minixrs-kernel` does not run — the crate is bare-metal only and in-QEMU test infra
   is not yet built, so **there is no `#[cfg(test)]` code under `kernel/src/`**. Host-runnable logic
   belongs in `kernel-shared`: `user_va_ok` + `USER_VA_TOP` live in `kernel-shared/src/message.rs`
-  precisely because their tests had never executed while the module was cfg-gated. Put new pure
+  precisely because **its 5 tests** had never executed while the module was cfg-gated. Put new pure
   predicates over shared ABI types there — the crate doc carries a narrow carve-out for exactly that
   — and keep raw-pointer/hardware behaviour (e.g. `copy_msg_from_user`) in the kernel. QEMU is the
   primary verification for kernel code; see [`build-and-boot.md`](./build-and-boot.md)
@@ -73,6 +74,9 @@ the errno bands and the D8 ABI freeze.
 - IPC blocking pairs with the `sched::rts_set` / `rts_unset` helpers — they capture `nr`, end the
   `&mut Proc` borrow, then call `enqueue` / `dequeue` so RTS state and the run queue stay in sync.
   Same NLL-capture pattern slice 2.4 used in `clock::tick`
+- **`sched::rts_unset` enqueues only when the *last* block bit clears.** That is the invariant the
+  whole frozen-child ordering below rests on; do not weaken it to "enqueue on any unset" (slice 4.6b
+  — see [phase-4-servers.md](../plans/phase-4-servers.md))
 - Kernel-call handlers that act on a *target* proc named in the message (e.g. `system::do_vmctl`,
   `system::do_schedule`'s `do_schedule`/`do_schedctl`) take the whole `&mut [Proc; N_PROC_SLOTS]`
   slice + `caller_nr`; caller-only handlers (e.g. `do_getinfo`) get a single `&mut Proc` / `&Priv`.
@@ -80,6 +84,99 @@ the errno bands and the D8 ABI freeze.
   table-taking form (a small `match` before `dispatch_caller_local`) and the rest through
   `dispatch_caller_local`. Run-queue transitions on a target use the same `sched::rts_set` /
   `rts_unset` capture-then-borrow-end pattern the IPC primitives use
+
+## Scheduler delegation
+
+(slice 4.3 — see [phase-4-servers.md](../plans/phase-4-servers.md))
+
+- The kernel scheduler is **delegatable**. `Proc::scheduler == NONE` — the boot default, set by
+  `populate_proc` — means **kernel-scheduled**: `sched::reschedule` refills the quantum and rotates
+  as before
+- A non-`NONE` `scheduler` endpoint means **SCHED-scheduled**: on quantum exhaustion `reschedule`
+  dequeues the proc, **leaves `RTS_NO_QUANTUM` set**, and sends `SCHEDULING_NO_QUANTUM` to the
+  scheduler via `ipc::send::mini_sched_no_quantum_send` (a `mini_pf_send` clone; the wrapper
+  `ipc::send_no_quantum` materializes the proc-table slice the way `send_pagefault_to_vm` does)
+- A SCHED-scheduled proc **stays off the run queue** until the scheduler calls real `SYS_SCHEDULE`,
+  whose `do_schedule` sets priority/quantum and then `rts_unset(RTS_NO_QUANTUM)`
+- **Kernel tasks and SCHED itself stay `NONE`** — a scheduler must not schedule itself
+- `SYS_SCHEDCTL` claims a target (`scheduler = caller`) and releases it (`SCHEDCTL_FLAG_KERNEL` →
+  `NONE`)
+
+## Per-proc one-shot alarms
+
+(slice 4.4 — see [phase-4-servers.md](../plans/phase-4-servers.md))
+
+- `Proc::alarm_at` holds an **absolute uptime tick**; `0` means disarmed
+- `clock::EARLIEST_ALARM` is an **O(1) fast-path gate**, so `tick()` only pays the O(N) scan in
+  `ipc::fire_expired_alarms` when an alarm is actually due. Keep the gate in front of the scan
+- Expiry delivers a **kernel-originated `NOTIFY` from `CLOCK`** via `ipc::notify::deliver_alarm`
+  with **no `ipc_to` check** — kernel-originated, like `mini_pf_send`; `CLOCK`'s `ipc_to` is empty,
+  so `mini_notify` would deny it. Delivery is immediate if the owner is `RECEIVE`-blocked, else
+  deferred via `notify_pending` against CLOCK's priv slot
+- `SYS_SETALARM` is caller-local: the payload is a relative `delta` in ticks at `0..8` (0 cancels)
+  and the reply is the previous time-left. It reuses `NOTIFY_MESSAGE` + `CLOCK` and adds no
+  kernel-shared constants. A **periodic** alarm is a re-arm per fire, done in user space
+
+## Signals — the kernel half
+
+(slice 4.5, drain contract amended in 4.6a — see [phase-4-servers.md](../plans/phase-4-servers.md))
+
+- The kernel half is `system/do_sig.rs`. `SYS_KILL` → `cause_sig` sets a bit in `Proc::sig_pending`
+  plus `RTS_SIGNALED | RTS_SIG_PENDING`, then wakes PM with `ipc::notify::deliver_ksig`
+- `Proc::sig_pending` is a **u32 bitmap**, zeroed on slot free **and again on fork's child
+  populate**. Both zeroings are required
+- `ipc::notify::deliver_ksig` is a **kernel-originated `NOTIFY` from `SYSTEM` with no `ipc_to`
+  check** — the `deliver_alarm` pattern
+- `do_kill`'s deferred-notify write is why `kernel_call_dispatch` takes `&mut [Priv]`; do not narrow
+  that signature back
+- `SYS_GETKSIG`'s scan gates on **`sig_pending != 0`, not the RTS bit alone**, so a proc whose
+  bitmap has already been handed off is not returned twice
+- PM disposes of every endpoint `SYS_GETKSIG` returns: `SYS_ENDKSIG` for survivors, `SYS_EXIT` —
+  with **no** `SYS_ENDKSIG` after — for terminations, because the full exit zeroes signal state and
+  frees the slot, so a post-exit acknowledge just bounces off `okendpt` with `EDEADSRCDST`
+
+## Process lifetime: exit teardown, endpoint generations, fork
+
+(slices 4.5 / 4.6a / 4.6b — see [phase-4-servers.md](../plans/phase-4-servers.md))
+
+- **`SYS_EXIT` is a full teardown** (`do_exit.rs`): stop + `caller_q` unlink, then
+  `unblock_dependents`, then leaf frames freed via `addrspace::walk_leaves` + `flush_tlb_asid` +
+  `AddrSpace::destroy` + `asid::free_asid`, then `free_slot`
+- `unblock_dependents` resumes **every** proc blocked SENDING-to or RECEIVING-from the dead
+  endpoint, patching `EDEADSRCDST` into its **parked `x0`** — the MINIX `retreg` idiom
+- `unblock_dependents` purges **dedicated-priv** `notify_pending` bits and **deliberately skips the
+  shared `USER_PRIV_ID`** — the shared slot describes several processes, so purging it would discard
+  another process's pending notify
+- `free_slot` **bumps the endpoint generation**, which **wraps to 1, never to 0**, zeroes all
+  per-proc state and stores `RTS_SLOT_FREE`
+- **ASIDs recycle through a free-list**: `asid::free_asid` returns one for reuse rather than burning
+  it
+- **Every user-supplied-endpoint resolution goes through `table::okendpt`** (stored-endpoint +
+  not-free check → `EDEADSRCDST` on a stale generation): `mini_send`/`mini_notify` dst,
+  `mini_receive`'s non-ANY filter, and the target-taking kernel calls via `system::resolve_target`.
+  Never resolve a user-supplied endpoint by indexing the table directly
+- `system::resolve_target` **short-circuits `SELF` first**, before any `okendpt` lookup
+- `do_exit` **rejects `SELF` and a caller-named-self target outright** — tearing down the active
+  TTBR0 mid-call is the hazard
+- `do_fork` creates the child **`RTS_RECEIVING | RTS_NO_PRIV`** (frozen). Combined with
+  `rts_unset`'s enqueue-on-last-bit rule, both `SYS_SCHEDULE` (via `SCHEDULING_START`) and
+  `SYS_PRIVCTL` leave the child a blocked receiver off the run queue, so **only PM's reply** —
+  clearing `RTS_RECEIVING` — makes it runnable. The child therefore cannot run before its identity,
+  memory and scheduling are built; preserve the freeze
+
+## Privilege slots
+
+(slices 4.5 / 4.8 — see [phase-4-servers.md](../plans/phase-4-servers.md))
+
+- `SYS_PRIVCTL`'s `PRIVCTL_SET_USER` **requires the target frozen on `RTS_NO_PRIV`** — the freeze
+  *is* the authorization gate, and a live target gets `EPERM`. It then points the target at the
+  shared `table::USER_PRIV_ID`
+- `init_boot_image` special-cases **`entry.nr == INIT_PROC_NR`** to point init's proc slot at the
+  shared `USER_PRIV_ID` instead of populating a dedicated server-grade slot — so init has exactly
+  the forked-child profile (SENDRECs its servers, makes no kernel calls) and its would-be dedicated
+  priv slot stays free
+- For which `ipc_to` edges `init_boot_image` opens, and the reverse-edge rule for a proc in a higher
+  priv slot, see [`servers-and-drivers.md`](./servers-and-drivers.md)
 
 ## Fault-safe user access
 
@@ -106,34 +203,44 @@ the errno bands and the D8 ABI freeze.
   kernel crate has no `#[cfg(test)]`
 - `ipc/message.rs` carries **zero `unsafe`** — messages stage through a `[u8; 104]` — so all
   raw-pointer work stays in `mm::uaccess` alone
-- Error routing for a faulted copy: `EFAULT` to the caller's `x0` via `do_ipc` for the immediate
-  sites, and to a blocked receiver's **parked `x0`** (`p.regs.x[0] = e as i64 as u64` — the MINIX
-  `retreg` idiom `do_exit::unblock_dependents` uses) for the deferred flush, which also sets/clears
-  `MF_MSGFAILED`
-- **`SYS_DIAGCTL` is the servers' debug channel** (D2) — servers run at EL0 with no console, and it
-  must keep working while other subsystems are under construction, so the text rides **inline in the
+- Error routing for a faulted copy: `EFAULT` to the caller's `x0` via `do_ipc` for the **three**
+  immediate sites, and to a blocked receiver's **parked `x0`** (`p.regs.x[0] = e as i64 as u64` —
+  the MINIX `retreg` idiom `do_exit::unblock_dependents` uses) for the deferred flush, which also
+  sets/clears `MF_MSGFAILED`
+
+## How a server prints: `SYS_DIAGCTL`
+
+(slice 5.1, D2 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
+
+- **`SYS_DIAGCTL` is the servers' debug channel.** Servers run at EL0 with no console, and it must
+  keep working while other subsystems are under construction, so the text rides **inline in the
   payload** (subcode `0..4`, len `4..8`, up to `DIAG_TEXT_MAX = 88` bytes from `DIAG_TEXT_OFF = 8`)
-  and needs no user-copy machinery. `kernel/src/system/do_diagctl.rs` prints one line per call as
-  `[diag <name>] <text>`, where `<name>` is the caller's kernel-known `Proc::name` (never payload
-  data, so a server can only identify itself) and the text is sanitized to printable ASCII, so one
-  call is always exactly one line — the `grep -aF` marker contract depends on it. The client side is
-  `server-rt::diag_print`; see [`servers-and-drivers.md`](./servers-and-drivers.md)
+  and needs no user-copy machinery
+- `kernel/src/system/do_diagctl.rs` prints **one line per call** as `[diag <name>] <text>`, where
+  `<name>` is the caller's kernel-known `Proc::name` — never payload data, so a server can only
+  identify itself — and the text is sanitized to printable ASCII. One call is always exactly one
+  line; the `grep -aF` marker contract depends on it
+- The client side is `server-rt::diag_print`; see
+  [`servers-and-drivers.md`](./servers-and-drivers.md)
+
+## Demo stubs
+
 - Adding a demo stub is discouraged: `NR_STUB_PROCS` feeds `FORK_POOL_BASE`, so a fifth stub shifts
-  init's forked children 15 → 16 and breaks checked-in markers — put new probe behavior in an
-  existing stub's prologue
+  init's forked children 15 → 16 and breaks checked-in markers. Put new probe behavior in an
+  existing stub's prologue instead (slice 5.1 — see
+  [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
 
 ## Grants — the governed cross-address-space copy
 
 (slice 5.2, D4 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
 
+The wire shape of `GrantEntry` and the `GRANT_SHIFT` id packing are in [`abi.md`](./abi.md); what
+follows is the engine and the policy.
+
 - A granting process keeps its `GrantEntry` table **in its own address space** and registers `(addr,
   entries)` with `SYS_SETGRANT`; `SYS_SAFECOPY` reads the entry back out of the *granter's* address
   space on every call, so a granter revokes by writing its own memory and **the kernel caches
   nothing that could go stale**
-- The ABI is `kernel-shared/src/grant.rs` — a flat `#[repr(C)]` `GrantEntry`
-  (flags/seq/who_to/who_from/addr/len, 32 bytes, layout pinned by `offset_of!` asserts because the
-  kernel decodes it from raw bytes), MINIX's CPF flag values, and `GRANT_SHIFT = 20` id packing
-  (`grant_id`/`grant_idx`/`grant_seq`)
 - The engine is `mm::uaccess::copy_between_as(src_ttbr0, src_va, dst_ttbr0, dst_va, len)`: probe
   both ranges, then walk-and-`memcpy` per `dual_page_chunks` — **all-or-nothing on the
   destination**, and its `Prot::writable` check is load-bearing, because a granter may *lie* about
@@ -199,10 +306,9 @@ the errno bands and the D8 ABI freeze.
   on a live landmine whose failure is a *kernel panic*. It runs unconditionally at boot (so
   `--no-default-features` covers it) and asserts **both** counts, `[devmap] selftest ok freed=0
   devs=1` — a guard skipping every leaf gives `devs=0`. Keep it unconditional
-- The device VA map is an *address* ABI, not a message one, and lives in
-  `kernel-shared/src/uspace.rs`: `USER_DEVICE_WINDOW_BASE = 0x4000_0000` (one whole L1 slot),
-  `USER_DEVICE_WINDOW_SIZE = 16 MiB`, `TTY_UART_VA` = page 0; **not** emitted in the generated C
-  headers
+- The device VA map lives in `kernel-shared/src/uspace.rs`: `USER_DEVICE_WINDOW_BASE = 0x4000_0000`
+  (one whole L1 slot), `USER_DEVICE_WINDOW_SIZE = 16 MiB`, `TTY_UART_VA` = page 0. For what kind of
+  ABI that module is, see [`abi.md`](./abi.md)
 - The pre-map lives in `load_boot_server` gated on `nr == TTY_PROC_NR`, **deliberately not in
   `load_exec_image`** (shared with `do_exec`, so every exec'd binary would inherit a device window —
   and conversely a proc that exec'd would *lose* its window, which is why `do_exec` drops the device
@@ -210,10 +316,53 @@ the errno bands and the D8 ABI freeze.
   (a recycled ASID is clean — `teardown_addrspace` flushes before `free_asid`) and
   `switch_ttbr0_with_asid` already issues `isb; tlbi aside1; dsb ish; isb` on TTY's first schedule —
   the same reasoning `SERVER_STACK_VA` relies on. Do not diverge
-- PL011 register offsets are **duplicated** in `kernel/src/arch/aarch64/uart.rs` and
-  `drivers/tty/src/pl011.rs` and cannot be shared: the kernel crate is bare-metal-only and pinned by
-  `forced-target`, so it can never be a user-space dep, and a register layout is a hardware fact,
-  not a shared ABI
+- PL011 register offsets are duplicated between the kernel and `drivers/tty`, deliberately; that
+  rule lives in [`servers-and-drivers.md`](./servers-and-drivers.md)
+
+## The ramdisk window
+
+(slice 5.7, D3 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
+
+- `uspace::RAMDISK_WINDOW_BASE = 0x8000_0000` (one L1 slot, 4 MiB, `RAMDISK_VA` = page 0) is placed
+  **above** the device window on purpose: `region::REGION_LIMIT` is the base of the *lowest*
+  kernel-owned window, so VM needs **no edit** when a window is added
+- `assert!(USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE <= RAMDISK_WINDOW_BASE)` is what keeps
+  that true. It also makes the ramdisk's separation from every *process* VA **transitive**, which is
+  why `userland.rs`'s VA-collision block needs no new entries — say so when adding a window, or
+  someone adds six redundant asserts
+- The pre-map is a `nr == MEM_PROC_NR` arm in `load_boot_server` beside TTY's, **not** in
+  `load_exec_image` (shared with `do_exec`)
+- **No TLB maintenance** (TTY's two reasons) and **no cache maintenance** — the kernel writes and
+  MEM reads the same PA through Normal-WB mappings, and it is data, so there is no icache concern
+- This is **not** the TTY device-page problem: RAM mapped non-device takes the ordinary `free_frame`
+  path in all five leaf sweeps
+- **Every step `.expect()`s.** A `let _ = map_page_in(..)` would turn a non-advancing loop into a
+  1-page ramdisk with 255 leaked frames instead of an `AlreadyMapped` panic
+- The selector **`GET_RAMDISK = 64`** returns `(va, len)` and is **gated on `caller.nr ==
+  MEM_PROC_NR` → `EPERM`** (the VA is meaningless in any other address space). It adds no kernel
+  call and no kernel statics — the VA is a const and the length is `module_by_name("rootfs")`'s
+
+## `exec` — the kernel call
+
+(slice 4.7 — see [phase-4-servers.md](../plans/phase-4-servers.md))
+
+- **exec is done *to* the caller** (POSIX shape), so `SYS_EXEC` names the proc as its **target** and
+  lives in the **target-taking `match`** in `kernel_call_dispatch`, beside `SYS_FORK` — not in the
+  caller-local arm
+- `do_exec` **rejects `SELF` and a self-target** — the active-TTBR0 teardown hazard, the `do_exit`
+  stance
+- `do_exec` gates the target exactly like `do_fork`'s parent: a clean `RTS_RECEIVING` receiver. It
+  then builds the new AS, resets the frame (`ArchRegisterFrame::EMPTY` + `elr_el1` / `sp_el0` /
+  `spsr_el1 = STUB_SPSR_EL0`), swaps `(ttbr0_pa, asid)`, tears down the **old** image via
+  `do_exit::teardown_addrspace` (safe, because target ≠ caller), then `sched::rts_unset`s
+  `RTS_RECEIVING` to resume it at `_start`
+- **exec preserves pid, priv and scheduler.** The target gets **no reply on success** — the kernel
+  resumes it at the new entry — and an errno reply on failure, which is why PM's `handle_exec`
+  replies only on `rc != OK`
+- `userland::load_exec_image` is factored out of `load_boot_server` (`AddrSpace::new` +
+  `elf::load_into` + one RW stack page at `SERVER_STACK_VA` + `alloc_asid`, `mem::forget` the tree)
+  and **cleans up on OOM** via `destroy_addrspace_with_leaves` — the `do_fork` `copy_addrspace`
+  no-leak contract. Keep both halves when editing it
 
 ## `exec` — the initial stack
 
