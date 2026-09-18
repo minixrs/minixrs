@@ -3,6 +3,12 @@
 Full per-slice record for Phase 4, moved verbatim from `docs/plan.md` when it was restructured into
 a lean tracker (2026-07-23). Status summary and milestone live in [`../plan.md`](../plan.md).
 
+> **Status convention.** A slice's status is a GFM checkbox — `- [ ]` not started, `- [x]` done —
+> checked by the PR that does the work, in that same PR. The first unchecked box in plan order is
+> the next slice. Lines in the older form, `✓ shipped (PR #N, merged YYYY-MM-DD)`, are retired-form
+> history; never write a new one. Full rule:
+> [`docs/conventions/git-and-prs.md`](../conventions/git-and-prs.md).
+
 ---
 
 Phase 4 is split into 8 PR-sized slices (the decomposition was originally tracked in a local

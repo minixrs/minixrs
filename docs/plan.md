@@ -1,10 +1,21 @@
 # minix.rs: Implementation Plan
 
+> **Status convention.** A slice's status is a GFM checkbox — `- [ ]` not started, `- [x]` done —
+> checked by the PR that does the work, in that same PR. The first unchecked box in plan order is
+> the next slice. Lines in the older form, `✓ shipped (PR #N, merged YYYY-MM-DD)`, are retired-form
+> history; never write a new one. Full rule:
+> [`docs/conventions/git-and-prs.md`](conventions/git-and-prs.md).
+
 ## Context
 
-Build minix.rs as a learning OS that preserves MINIX 3's microkernel architecture -- message-passing IPC, user-space servers (PM, VFS, VM, RS, DS, SCHED), user-space drivers, and fine-grained privilege control -- but with a greenfield Rust kernel targeting modern 64-bit platforms (x86_64, aarch64) under QEMU/VirtIO. Someone familiar with MINIX 3 or the Tanenbaum book should recognize the concepts immediately.
+Build minix.rs as a learning OS that preserves MINIX 3's microkernel architecture -- message-passing
+IPC, user-space servers (PM, VFS, VM, RS, DS, SCHED), user-space drivers, and fine-grained privilege
+control -- but with a greenfield Rust kernel targeting modern 64-bit platforms (x86_64, aarch64)
+under QEMU/VirtIO. Someone familiar with MINIX 3 or the Tanenbaum book should recognize the concepts
+immediately.
 
 **Key constraints:**
+
 - BSD/MIT licensing only (no GPL)
 - musl-libc fork for MINIX syscall wrappers
 - aarch64 first (native Apple Silicon dev platform), then x86_64
@@ -12,7 +23,9 @@ Build minix.rs as a learning OS that preserves MINIX 3's microkernel architectur
 - Custom basic userland (not NetBSD)
 
 **Reference material:**
-- MINIX 3 source (architectural reference only): https://github.com/Stichting-MINIX-Research-Foundation/minix
+
+- MINIX 3 source (architectural reference only):
+  https://github.com/Stichting-MINIX-Research-Foundation/minix
 - musl-libc upstream: https://musl.libc.org/ (fork v1.2.5 for MINIX adaptation)
 - Limine bootloader: https://github.com/limine-bootloader/limine
 
@@ -214,7 +227,9 @@ pub struct Message {
 }
 ```
 
-Typed message accessors (e.g., `msg.as_vfs_read()`) replace MINIX 3's opaque `m1i1`/`m2l1` field names -- a major educational improvement. The `kernel-shared` crate provides both the raw `Message` and typed accessor structs for each call.
+Typed message accessors (e.g., `msg.as_vfs_read()`) replace MINIX 3's opaque `m1i1`/`m2l1` field
+names -- a major educational improvement. The `kernel-shared` crate provides both the raw `Message`
+and typed accessor structs for each call.
 
 ### Process Table (kernel)
 
@@ -244,7 +259,8 @@ pub struct Proc {
 }
 ```
 
-Using `Option<ProcNr>` (table indices) instead of raw pointers for linked lists eliminates aliasing hazards and makes the code safer and easier to reason about.
+Using `Option<ProcNr>` (table indices) instead of raw pointers for linked lists eliminates aliasing
+hazards and makes the code safer and easier to reason about.
 
 ### Privilege Structure (kernel)
 
@@ -269,18 +285,20 @@ pub struct Priv {
 
 Six primitives, same semantics as MINIX 3's `proc.c`:
 
-| Primitive | Behavior |
-|-----------|----------|
-| `SEND`    | Block until receiver accepts message |
+| Primitive | Behavior                                                                           |
+| --------- | ---------------------------------------------------------------------------------- |
+| `SEND`    | Block until receiver accepts message                                               |
 | `RECEIVE` | Block until a message arrives (checks notify pending, async pending, caller queue) |
-| `SENDREC` | Atomic SEND + RECEIVE (most common -- used by `_syscall()`) |
-| `NOTIFY`  | Set bit in receiver's `notify_pending` bitmap; non-blocking |
-| `SENDNB`  | Non-blocking send; returns error if receiver not waiting |
-| `SENDA`   | Process table of async messages |
+| `SENDREC` | Atomic SEND + RECEIVE (most common -- used by `_syscall()`)                        |
+| `NOTIFY`  | Set bit in receiver's `notify_pending` bitmap; non-blocking                        |
+| `SENDNB`  | Non-blocking send; returns error if receiver not waiting                           |
+| `SENDA`   | Process table of async messages                                                    |
 
-**Entry path (aarch64):** User executes `SVC #0`. Exception vector saves registers, calls `do_ipc()` in Rust.
+**Entry path (aarch64):** User executes `SVC #0`. Exception vector saves registers, calls `do_ipc()`
+in Rust.
 
-**Entry path (x86_64):** User executes `SYSCALL` instruction. Kernel entry in `entry.S` saves registers, calls same `do_ipc()`.
+**Entry path (x86_64):** User executes `SYSCALL` instruction. Kernel entry in `entry.S` saves
+registers, calls same `do_ipc()`.
 
 ---
 
@@ -322,17 +340,22 @@ User: read() returns bytes read
 The musl fork (v1.2.5, MIT license) needs the following changes:
 
 **New files to add (`src/minix/`):**
+
 - `_syscall.c` -- `int _syscall(endpoint_t who, int callnr, message *m)` using `ipc_sendrec()`
 - `_ipc_aarch64.S` -- `SVC`-based IPC trap
 - `_ipc_x86_64.S` -- `SYSCALL`-based IPC trap (matches kernel's `entry.S` ABI)
-- ~100 POSIX wrapper files (open.c, read.c, write.c, fork.c, exit.c, etc.) that construct MINIX messages and call `_syscall()`. Structurally identical to MINIX 3's `lib/libc/sys/` wrappers.
+- ~100 POSIX wrapper files (open.c, read.c, write.c, fork.c, exit.c, etc.) that construct MINIX
+  messages and call `_syscall()`. Structurally identical to MINIX 3's `lib/libc/sys/` wrappers.
 
 **Files to modify:**
+
 - `arch/aarch64/syscall_arch.h` -- Gut Linux `__syscall*` macros; redirect to MINIX path
 - `arch/x86_64/syscall_arch.h` -- Same
 - `Makefile` -- Add `src/minix/` sources
 
-**Include bridge:** A small header set (`minix/ipc.h`, `minix/com.h`, `minix/callnr.h`) generated from `kernel-shared` Rust crate via `cbindgen`, so the C wrappers use the same message types and call numbers as the Rust kernel and servers.
+**Include bridge:** A small header set (`minix/ipc.h`, `minix/com.h`, `minix/callnr.h`) generated
+from `kernel-shared` Rust crate via `cbindgen`, so the C wrappers use the same message types and
+call numbers as the Rust kernel and servers.
 
 ---
 
@@ -366,9 +389,12 @@ Boot modules are packed into the kernel ELF as a `.boot_image` section (MXBI hea
 ## Build System
 
 - **Cargo workspace** at root for all Rust crates (kernel, servers, drivers, userland)
-- **Custom Rust targets** (`aarch64-minix-kernel.json`, `aarch64-minix-user.json`, plus x86_64 variants) for `no_std` kernel and freestanding userspace
-- **musl** built separately via its own Makefile with cross-compilation flags; produces `libc.a` + `crt*.o` installed to a sysroot
-- **`tools/mkbootimage.rs`** packs server/driver ELF binaries into the boot archive linked into the kernel
+- **Custom Rust targets** (`aarch64-minix-kernel.json`, `aarch64-minix-user.json`, plus x86_64
+  variants) for `no_std` kernel and freestanding userspace
+- **musl** built separately via its own Makefile with cross-compilation flags; produces `libc.a` +
+  `crt*.o` installed to a sysroot
+- **`tools/mkbootimage.rs`** packs server/driver ELF binaries into the boot archive linked into the
+  kernel
 - **`tools/mkimage.sh`** creates GPT disk: FAT32 boot partition (Limine + kernel) + MinixFS root
 - **`tools/qemu-run.sh`** launches QEMU with VirtIO devices and serial console
 
@@ -382,33 +408,44 @@ Boot modules are packed into the kernel ELF as a `.boot_image` section (MXBI hea
 
 Full documentation and project scaffolding so future contributors have complete context.
 
-**Deliverables:** `docs/` directory with architecture, IPC, syscall catalog, servers, boot, drivers, musl, memory layout, build, and MINIX 3 mapping documentation. Cargo workspace with all crate placeholders. CLAUDE.md, LICENSE (BSD-3-Clause).
+**Deliverables:** `docs/` directory with architecture, IPC, syscall catalog, servers, boot, drivers,
+musl, memory layout, build, and MINIX 3 mapping documentation. Cargo workspace with all crate
+placeholders. CLAUDE.md, LICENSE (BSD-3-Clause).
 
 **Milestone:** `docs/` is comprehensive enough to start coding Phase 1 without re-exploring MINIX 3.
 
 ### Phase 1: Kernel Scaffolding + Boot (aarch64, QEMU virt) (complete)
 
 - Cargo workspace with `kernel`, `kernel-shared` crates
-- Builds via `aarch64-unknown-none` + linker script (`kernel/src/arch/aarch64/linker.ld`); the bespoke `aarch64-minix-kernel.json` target spec is deferred to Phase 2 (the stock target is sufficient for boot)
-- Vendor Limine v9.x binary + header (`external/limine/Makefile`); Rust-side request block in `kernel/src/arch/aarch64/limine.rs` (base revision, HHDM, memmap, paging mode, stack size)
-- PL011 UART driver at `kernel/src/arch/aarch64/uart.rs` with `core::fmt::Write` adapter; MMIO base is HHDM-relative (Limine base revision 2 keeps the [0, 4 GiB) blanket map covering PL011)
-- aarch64 exception vector table (`vectors.S` + `exception.rs`); any unexpected trap routes through `exception_entry` and panics with a decoded ESR_EL1/ELR_EL1/FAR_EL1 dump
-- `tools/qemu-run.sh` is the cargo runner: stages an ESP under `target/esp/`, auto-detects edk2 firmware, boots with `qemu-system-aarch64 -M virt` via `-drive file=fat:rw:...`
-- **Milestone:** `cargo run -p minixrs-kernel --target aarch64-unknown-none --release` boots through UEFI + Limine, prints `minix.rs booting on aarch64` + HHDM offset, then halts in `wfe`. Exception path verified by injecting a deliberate fault and observing a clean panic dump.
+- Builds via `aarch64-unknown-none` + linker script (`kernel/src/arch/aarch64/linker.ld`); the
+  bespoke `aarch64-minix-kernel.json` target spec is deferred to Phase 2 (the stock target is
+  sufficient for boot)
+- Vendor Limine v9.x binary + header (`external/limine/Makefile`); Rust-side request block in
+  `kernel/src/arch/aarch64/limine.rs` (base revision, HHDM, memmap, paging mode, stack size)
+- PL011 UART driver at `kernel/src/arch/aarch64/uart.rs` with `core::fmt::Write` adapter; MMIO base
+  is HHDM-relative (Limine base revision 2 keeps the [0, 4 GiB) blanket map covering PL011)
+- aarch64 exception vector table (`vectors.S` + `exception.rs`); any unexpected trap routes through
+  `exception_entry` and panics with a decoded ESR_EL1/ELR_EL1/FAR_EL1 dump
+- `tools/qemu-run.sh` is the cargo runner: stages an ESP under `target/esp/`, auto-detects edk2
+  firmware, boots with `qemu-system-aarch64 -M virt` via `-drive file=fat:rw:...`
+- **Milestone:** `cargo run -p minixrs-kernel --target aarch64-unknown-none --release` boots through
+  UEFI + Limine, prints `minix.rs booting on aarch64` + HHDM offset, then halts in `wfe`. Exception
+  path verified by injecting a deliberate fault and observing a clean panic dump.
 
 ### Phase 2: Kernel IPC + Scheduling (the heart of MINIX)
 
-Complete — 6 PR-sized slices, PRs #3–#8, merged 2026-05-20 → 2026-05-25. Each
-slice was independently buildable, booted, and produced observable output; the
-Phase 2 milestone ("two processes exchange IPC messages") was satisfied at the
-end of slice 2.5, with 2.6 finishing the kernel-call surface needed by Phase 3.
-Full slice history: [`docs/plans/phase-2-ipc.md`](plans/phase-2-ipc.md).
+Complete — 6 PR-sized slices, PRs #3–#8, merged 2026-05-20 → 2026-05-25. Each slice was
+independently buildable, booted, and produced observable output; the Phase 2 milestone ("two
+processes exchange IPC messages") was satisfied at the end of slice 2.5, with 2.6 finishing the
+kernel-call surface needed by Phase 3. Full slice history:
+[`docs/plans/phase-2-ipc.md`](plans/phase-2-ipc.md).
 
 - **2.1** ✓ `kernel-shared` foundation — Message, Endpoint, call numbers, errnos (PR #3, 2026-05-20)
 - **2.2** ✓ `Proc`/`Priv` structs, static tables, boot `IMAGE` (PR #4, 2026-05-22)
 - **2.3** ✓ aarch64 SVC entry + cooperative context switch + first EL0 stub (PR #5, 2026-05-22)
 - **2.4** ✓ GICv3 + ARM generic timer + priority-banded run queues (PR #6, 2026-05-23)
-- **2.5** ✓ IPC primitives (`mini_send`/`receive`/`notify`/`sendnb`, deadlock check) (PR #7, 2026-05-23) — **milestone**
+- **2.5** ✓ IPC primitives (`mini_send`/`receive`/`notify`/`sendnb`, deadlock check) (PR #7,
+  2026-05-23) — **milestone**
 - **2.6** ✓ kernel-call dispatch + real `SYS_GETINFO` + `ENOSYS` stubs (PR #8, 2026-05-25)
 
 Aggregate scope:
@@ -418,27 +455,29 @@ Aggregate scope:
 - IPC: `mini_send`, `mini_receive`, `mini_notify`, `deadlock_check`
 - aarch64 arch: exception vectors, GICv3, ARM generic timer, SVC entry, context switch
 - Run queues: `enqueue`, `dequeue`, `pick_proc`, `switch_to_user`
-- Kernel calls: minimum set (SYS_GETINFO, SYS_PRIVCTL, SYS_FORK, SYS_EXEC, SYS_EXIT, SYS_COPY, SYS_SAFECOPY, SYS_IRQCTL, SYS_VMCTL, SYS_SCHEDULE, SYS_SETALARM, SYS_TIMES, SYS_DIAGCTL, SYS_SETGRANT)
+- Kernel calls: minimum set (SYS_GETINFO, SYS_PRIVCTL, SYS_FORK, SYS_EXEC, SYS_EXIT, SYS_COPY,
+  SYS_SAFECOPY, SYS_IRQCTL, SYS_VMCTL, SYS_SCHEDULE, SYS_SETALARM, SYS_TIMES, SYS_DIAGCTL,
+  SYS_SETGRANT)
 - Boot image unpacking, load two test processes
 - **Milestone:** Two processes exchange IPC messages ("ping-pong test")
 
 ### Phase 3: VM Server + Memory Management
 
-Complete — 7 PR-sized slices, PRs #9–#15 and #21, merged 2026-05-27 →
-2026-06-13. The milestone ("boot processes each have isolated address spaces;
-VM handles page faults") was satisfied at the end of slice 3.4; 3.5/3.6 added
-brk + mmap on top. Architecture choices locked by the phase plan: per-process
-TTBR0 + 8-bit ARMv8 ASIDs, kernel writes all user PTEs (VM passes decisions in
-via `SYS_VMCTL` subcalls), kernel reads cross-AS user memory via HHDM, VM uses
-static `[Region; N]` per-proc tables (no allocator), stubs A/B/C kept as
-regression coverage. POSIX fork/exec were deferred to Phase 4 (PM-driven).
-Full slice history: [`docs/plans/phase-3-vm.md`](plans/phase-3-vm.md).
+Complete — 7 PR-sized slices, PRs #9–#15 and #21, merged 2026-05-27 → 2026-06-13. The milestone
+("boot processes each have isolated address spaces; VM handles page faults") was satisfied at the
+end of slice 3.4; 3.5/3.6 added brk + mmap on top. Architecture choices locked by the phase plan:
+per-process TTBR0 + 8-bit ARMv8 ASIDs, kernel writes all user PTEs (VM passes decisions in via
+`SYS_VMCTL` subcalls), kernel reads cross-AS user memory via HHDM, VM uses static `[Region; N]`
+per-proc tables (no allocator), stubs A/B/C kept as regression coverage. POSIX fork/exec were
+deferred to Phase 4 (PM-driven). Full slice history:
+[`docs/plans/phase-3-vm.md`](plans/phase-3-vm.md).
 
 - **3.1a** ✓ physical frame allocator + `AddrSpace` API (PR #9, 2026-05-27)
 - **3.1b** ✓ per-process TTBR0s + ASIDs + fault diagnostics (PR #10, 2026-05-27)
 - **3.2** ✓ EL0 page-fault handler + `RTS_PAGEFAULT` + stub D (PR #11, 2026-05-28)
 - **3.3** ✓ real `SYS_VMCTL` subcalls, stub D self-managing its heap (PR #12, 2026-06-01)
-- **3.4** ✓ VM server + kernel-originated `VM_PAGEFAULT` send (PRs #13/#14, 2026-06-04) — **milestone**
+- **3.4** ✓ VM server + kernel-originated `VM_PAGEFAULT` send (PRs #13/#14, 2026-06-04) —
+  **milestone**
 - **3.5** ✓ VM region tracking + `VM_BRK` (PR #15, 2026-06-08)
 - **3.6** ✓ `VM_MMAP`/`VM_MUNMAP` + Phase 3 doc cleanup (PR #21, 2026-06-13)
 
@@ -450,125 +489,134 @@ Aggregate scope (Phase 3 as a whole):
 - EL1 page-fault handler routes to VM via kernel-originated SEND
 - `kernel/src/system/do_vmctl.rs`: real SYS_VMCTL subcalls
 - `kernel/src/boot_image/elf.rs`: minimal ELF loader for VM bootstrap
-- `servers/vm/`: receive loop, region tracking, page-fault resolution,
-  brk, mmap (all static-allocation; no heap allocator in VM)
-- **Milestone:** Boot processes each have isolated address spaces; VM
-  handles page faults
+- `servers/vm/`: receive loop, region tracking, page-fault resolution, brk, mmap (all
+  static-allocation; no heap allocator in VM)
+- **Milestone:** Boot processes each have isolated address spaces; VM handles page faults
 
 ### Phase 4: Core Servers (PM, VFS, RS, DS, SCHED) + init
 
-Complete — 8 PR-sized slices (9 PRs), PRs #23–#31, merged 2026-06-14 →
-2026-07-18. Two scope decisions shaped the phase: **exec is real but
-boot-embedded** (no filesystem/musl until Phase 5, so `SYS_EXEC` loads ELF
-binaries packed into the boot-image archive; slice 5.9 added the second source, a VFS
-file with no PM/kernel rework), and **scheduling moved to a real user-space
-SCHED** by making the kernel scheduler *delegatable* rather than replacing it.
-Full slice history: [`docs/plans/phase-4-servers.md`](plans/phase-4-servers.md).
+Complete — 8 PR-sized slices (9 PRs), PRs #23–#31, merged 2026-06-14 → 2026-07-18. Two scope
+decisions shaped the phase: **exec is real but boot-embedded** (no filesystem/musl until Phase 5, so
+`SYS_EXEC` loads ELF binaries packed into the boot-image archive; slice 5.9 added the second source,
+a VFS file with no PM/kernel rework), and **scheduling moved to a real user-space SCHED** by making
+the kernel scheduler *delegatable* rather than replacing it. Full slice history:
+[`docs/plans/phase-4-servers.md`](plans/phase-4-servers.md).
 
-- **4.1** ✓ `server-rt` SEF framework, VM migrated onto it, `minixrs-ipc` finished (PR #23, 2026-06-14)
+- **4.1** ✓ `server-rt` SEF framework, VM migrated onto it, `minixrs-ipc` finished (PR #23,
+  2026-06-14)
 - **4.2** ✓ MXBI multi-module boot image + DS server + skeletal VFS (PR #24, 2026-06-21)
 - **4.3** ✓ delegatable kernel scheduler + SCHED server (PR #25, 2026-06-27)
 - **4.4** ✓ RS heartbeat monitor + real `SYS_SETALARM` (PR #26, 2026-06-27)
 - **4.5** ✓ PM part A — mproc, getpid, real `SYS_PRIVCTL`, minimal signals (PR #27, 2026-07-17)
 - **4.6** ✓ PM part B — fork/exit/wait: kernel half (PR #28), PM/VM/stub-E half (PR #29), 2026-07-18
 - **4.7** ✓ exec — `SYS_EXEC` + PM exec of the boot-embedded worker (PR #30, 2026-07-18)
-- **4.8** ✓ init (PID 1) + Phase 4 wrap-up + docs (PR #31, merged 2026-07-18) — **milestone; Phase 4 complete**
+- **4.8** ✓ init (PID 1) + Phase 4 wrap-up + docs (PR #31, merged 2026-07-18) — **milestone; Phase 4
+  complete**
 
 Aggregate scope (Phase 4 as a whole):
 
 - `minixrs-ipc`: NOTIFY + SENDNB primitives
 - `server-rt`: SEF startup + receive loop + init/signal callbacks (minimal subset)
 - Multi-module boot-image archive (MXBI) + generalized server loader
-- Kernel calls made real: `SYS_FORK`, `SYS_EXEC`, `SYS_EXIT`, `SYS_PRIVCTL`,
-  `SYS_SCHEDULE`, `SYS_SETALARM`, plus new `SYS_SCHEDCTL` and a minimal signal
-  mechanism; delegatable scheduler (`Proc::scheduler`)
-- Servers (all static-allocation, no heap): DS (endpoint registry), SCHED (real
-  user-space policy), RS (heartbeat monitor), VFS (skeletal boot), PM (process
-  table, fork, exec, exit, wait, getpid, minimal signals)
+- Kernel calls made real: `SYS_FORK`, `SYS_EXEC`, `SYS_EXIT`, `SYS_PRIVCTL`, `SYS_SCHEDULE`,
+  `SYS_SETALARM`, plus new `SYS_SCHEDCTL` and a minimal signal mechanism; delegatable scheduler
+  (`Proc::scheduler`)
+- Servers (all static-allocation, no heap): DS (endpoint registry), SCHED (real user-space policy),
+  RS (heartbeat monitor), VFS (skeletal boot), PM (process table, fork, exec, exit, wait, getpid,
+  minimal signals)
 - init (PID 1) forking/exec/waiting; embedded "worker" binary as the exec target
-- **Milestone:** Full server boot sequence completes; init process starts —
-  **reached; Phase 4 complete (slice 4.8, 2026-07-18).**
+- **Milestone:** Full server boot sequence completes; init process starts — **reached; Phase 4
+  complete (slice 4.8, 2026-07-18).**
 
 ### Pre-Phase-5 cleanup (complete)
 
-Phase 4's close-out review identified PR-sized cleanup/prep chunks to land
-before Phase 5 starts, tracked with the usual markers in
-[`docs/plans/phase-5-prep.md`](plans/phase-5-prep.md). All seven are done:
-chunks 1–5 (CI QEMU smoke job; mdBook content port + legacy `docs/`
-retirement; stub A–D `boot-stubs` disable flag; capacity-ceiling unification
-into `NR_SERVED_PROCS`; toolchain bump + kernel clippy debt) are `✓ shipped`
-(PRs #33–#37, merged 2026-07-24); chunk 7 (de-hosting the kernel crate, which
-also flipped `clippy-kernel` and `qemu-smoke` to blocking) is `✓ shipped`
-(PR #38, merged 2026-07-24); chunk 6 — the Phase 5 design + slicing session
-that gates Phase 5 and produced the slice plan below — is `✓ shipped`
-(PR #39, merged 2026-07-24).
+Phase 4's close-out review identified PR-sized cleanup/prep chunks to land before Phase 5 starts,
+tracked with the usual markers in [`docs/plans/phase-5-prep.md`](plans/phase-5-prep.md). All seven
+are done: chunks 1–5 (CI QEMU smoke job; mdBook content port + legacy `docs/` retirement; stub A–D
+`boot-stubs` disable flag; capacity-ceiling unification into `NR_SERVED_PROCS`; toolchain bump +
+kernel clippy debt) are `✓ shipped` (PRs #33–#37, merged 2026-07-24); chunk 7 (de-hosting the kernel
+crate, which also flipped `clippy-kernel` and `qemu-smoke` to blocking) is `✓ shipped` (PR #38,
+merged 2026-07-24); chunk 6 — the Phase 5 design + slicing session that gates Phase 5 and produced
+the slice plan below — is `✓ shipped` (PR #39, merged 2026-07-24).
 
 ### Phase 5: musl Fork + File Systems
 
-Next up. Designed and sliced by the chunk-6 session (2026-07-24) — full
-design record with locked decisions, rationale, and per-slice scope/proof in
-[`docs/plans/phase-5-musl-fs.md`](plans/phase-5-musl-fs.md). Headline
-decisions: a minimal TX-only TTY server is the stdio sink (with a real
-`SYS_DIAGCTL` as the servers' debug channel); the root image is an
-MFS-formatted blob in the MXBI archive served by the `memory` ramdisk driver
-over a new BDEV band; real MINIX-style grants (direct + magic, table in the
-granter's address space) plus `SYS_COPY`, all copying via explicit
-page-table walks through the HHDM — which also makes the fault-safe user
-copy exception-fixup-free; the kernel keeps ELF-loading authority with a
-grant-sourced `SYS_EXEC` form; `error.rs` is renumbered to classic-MINIX
-(≡ Linux/musl) values before any C exists; C headers are generated from
-`kernel-shared` by a hand-rolled host tool; musl enters as a submodule at
-`external/musl` built with clang `--target` + rust-lld. PFS/pipes moved out
+Next up. Designed and sliced by the chunk-6 session (2026-07-24) — full design record with locked
+decisions, rationale, and per-slice scope/proof in
+[`docs/plans/phase-5-musl-fs.md`](plans/phase-5-musl-fs.md). Headline decisions: a minimal TX-only
+TTY server is the stdio sink (with a real `SYS_DIAGCTL` as the servers' debug channel); the root
+image is an MFS-formatted blob in the MXBI archive served by the `memory` ramdisk driver over a new
+BDEV band; real MINIX-style grants (direct + magic, table in the granter's address space) plus
+`SYS_COPY`, all copying via explicit page-table walks through the HHDM — which also makes the
+fault-safe user copy exception-fixup-free; the kernel keeps ELF-loading authority with a
+grant-sourced `SYS_EXEC` form; `error.rs` is renumbered to classic-MINIX (≡ Linux/musl) values
+before any C exists; C headers are generated from `kernel-shared` by a hand-rolled host tool; musl
+enters as a submodule at `external/musl` built with clang `--target` + rust-lld. PFS/pipes moved out
 to Phase 7; TTY input/IRQs to Phase 6.
 
-- **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ✓ shipped (PR #40, merged 2026-07-25)
-- **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL` ✓ shipped (PR #41, merged 2026-07-25)
-- **5.2** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY` ✓ shipped (PR #42, merged 2026-07-25)
-- **5.3** TTY driver (TX-only, boot-premapped PL011) + CDEV band ✓ shipped (PR #43, merged 2026-07-25)
-- **M1** (toolchain program P1, out-of-band): `aarch64-unknown-minixrs` target JSON + ELF identity brand ✓ shipped (PR #44, merged 2026-07-25)
-- **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS ✓ shipped (PR #45, merged 2026-07-26)
+- **5.0** errno renumber (classic-MINIX/Linux values) + `tools/gen-c-headers` ✓ shipped (PR #40,
+  merged 2026-07-25)
+- **5.1** fault-safe user copy (PT-walk, `EFAULT` not panic) + real `SYS_DIAGCTL` ✓ shipped (PR #41,
+  merged 2026-07-25)
+- **5.2** grant table + `SYS_SETGRANT`/`SYS_SAFECOPY`/`SYS_COPY` ✓ shipped (PR #42, merged
+  2026-07-25)
+- **5.3** TTY driver (TX-only, boot-premapped PL011) + CDEV band ✓ shipped (PR #43, merged
+  2026-07-25)
+- **M1** (toolchain program P1, out-of-band): `aarch64-unknown-minixrs` target JSON + ELF identity
+  brand ✓ shipped (PR #44, merged 2026-07-25)
+- **5.4** VFS write path: fd 1/2 → CDEV(TTY); USER `ipc_to` += VFS ✓ shipped (PR #45, merged
+  2026-07-26)
 - **5.5** exec ABI: SysV initial stack + minimal auxv ✓ shipped (PR #46, merged 2026-07-26)
-- **5.6** musl fork (`minixrs/musl-minixrs` @ v1.2.6) + `src/minixrs` port + boot-embedded hello C program — **milestone A; ABI freeze** ✓ shipped (PR #47, merged 2026-07-26)
-- **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ✓ shipped (PR #48, merged 2026-07-27)
-- **P3c** (toolchain program, out-of-band): `kernel/build.rs` consumes `$MINIXRS_SDK` — `hello` builds from one `clang --target=aarch64-unknown-minixrs` call — **milestone M3a** ✓ shipped (PR #50, merged 2026-07-30)
-- **5.8** MFS server (read-only) + FS band + VFS mount/open/read ✓ shipped (PR #51, merged 2026-08-02)
-- **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5 complete** ✓ shipped (PR #52, merged 2026-08-04)
-- **5.10a** stretch: MFS write path — `BDEV_WRITE` + `FS_WRITE` + `VFS_WRITE` to files ✓ shipped (PR #53, merged 2026-08-20)
-- **5.10b** stretch: MFS create/truncate + `VFS_OPEN` flags (`O_CREAT`/`O_TRUNC`) ✓ shipped (PR #54, merged 2026-09-02)
-- **5.11** stretch: `/dev/null` + `/dev/zero` on the memory driver + `CDEV_READ` ◀ ready (branch `feature/slice-5.11-dev-null-zero`, pending merge)
+- **5.6** musl fork (`minixrs/musl-minixrs` @ v1.2.6) + `src/minixrs` port + boot-embedded hello C
+  program — **milestone A; ABI freeze** ✓ shipped (PR #47, merged 2026-07-26)
+- **5.7** BDEV band + `memory` ramdisk driver + `tools/mkfs-mfs` + rootfs blob ✓ shipped (PR #48,
+  merged 2026-07-27)
+- **P3c** (toolchain program, out-of-band): `kernel/build.rs` consumes `$MINIXRS_SDK` — `hello`
+  builds from one `clang --target=aarch64-unknown-minixrs` call — **milestone M3a** ✓ shipped (PR
+  #50, merged 2026-07-30)
+- **5.8** MFS server (read-only) + FS band + VFS mount/open/read ✓ shipped (PR #51, merged
+  2026-08-02)
+- **5.9** exec-from-FS: grant-sourced `SYS_EXEC` + PM/VFS staging — **milestone B; Phase 5
+  complete** ✓ shipped (PR #52, merged 2026-08-04)
+- **5.10a** stretch: MFS write path — `BDEV_WRITE` + `FS_WRITE` + `VFS_WRITE` to files ✓ shipped (PR
+  #53, merged 2026-08-20)
+- **5.10b** stretch: MFS create/truncate + `VFS_OPEN` flags (`O_CREAT`/`O_TRUNC`) ✓ shipped (PR #54,
+  merged 2026-09-02)
+- **5.11** stretch: `/dev/null` + `/dev/zero` on the memory driver + `CDEV_READ` ✓ shipped (PR #57,
+  merged 2026-09-06)
 
 Aggregate scope:
 
-- Kernel: PT-walk user/cross-AS copy engine; bodies for the six remaining
-  `ENOSYS` kernel-call stubs' Phase-5 subset (`SYS_DIAGCTL`, `SYS_SETGRANT`,
-  `SYS_SAFECOPY`, `SYS_COPY`) — zero new kernel-call numbers; device-memory
-  user mappings + boot premap for TTY; ramdisk blob copy/map + `SYS_GETINFO`
-  selector; SysV exec stack + auxv; grant-sourced chunked ELF loading
-- `kernel-shared`: `GrantEntry` + CPF flags + grant-id packing; four new
-  request bands (VFS `0x800`, FS `0x900`, BDEV `0xA00`, CDEV `0xB00`); errno
-  renumber + missing FS errnos
-- Servers/drivers: `drivers/tty` (TX-only PL011), `drivers/memory` (ramdisk
-  over BDEV), `fs/mfs` (host-tested on-disk lib + read-only server), VFS
-  grows fd table, console routing, mount/open/read, exec staging
-- Tooling: `tools/gen-c-headers`, `tools/mkfs-mfs`, `tools/build-musl.sh`;
-  musl fork submodule with `src/minix/` syscall layer; `userland/hello`
-- **Milestone:** C "Hello World" compiled against musl, exec'd from the MFS
-  root image, prints to serial through VFS→TTY
+- Kernel: PT-walk user/cross-AS copy engine; bodies for the six remaining `ENOSYS` kernel-call
+  stubs' Phase-5 subset (`SYS_DIAGCTL`, `SYS_SETGRANT`, `SYS_SAFECOPY`, `SYS_COPY`) — zero new
+  kernel-call numbers; device-memory user mappings + boot premap for TTY; ramdisk blob copy/map +
+  `SYS_GETINFO` selector; SysV exec stack + auxv; grant-sourced chunked ELF loading
+- `kernel-shared`: `GrantEntry` + CPF flags + grant-id packing; four new request bands (VFS `0x800`,
+  FS `0x900`, BDEV `0xA00`, CDEV `0xB00`); errno renumber + missing FS errnos
+- Servers/drivers: `drivers/tty` (TX-only PL011), `drivers/memory` (ramdisk over BDEV), `fs/mfs`
+  (host-tested on-disk lib + read-only server), VFS grows fd table, console routing,
+  mount/open/read, exec staging
+- Tooling: `tools/gen-c-headers`, `tools/mkfs-mfs`, `tools/build-musl.sh`; musl fork submodule with
+  `src/minix/` syscall layer; `userland/hello`
+- **Milestone:** C "Hello World" compiled against musl, exec'd from the MFS root image, prints to
+  serial through VFS→TTY
 
 ### Phase 6: VirtIO Drivers
 
-- `drivers/driver-rt/`: VirtIO MMIO transport (aarch64), virtqueue management, BDEV/CDEV protocol
-- `drivers/virtio-blk/`: Block device
-- `drivers/virtio-console/`: TTY
-- `drivers/virtio-net/`: Network (packet I/O only; TCP/IP stack is later)
-- Root filesystem on VirtIO disk
+- [ ] `drivers/driver-rt/`: VirtIO MMIO transport (aarch64), virtqueue management, BDEV/CDEV
+      protocol
+- [ ] `drivers/virtio-blk/`: Block device
+- [ ] `drivers/virtio-console/`: TTY
+- [ ] `drivers/virtio-net/`: Network (packet I/O only; TCP/IP stack is later)
+- [ ] Root filesystem on VirtIO disk
 - **Milestone:** Boots from VirtIO disk, mounts MinixFS root
 
 ### Phase 7: Userland
 
 - `userland/init/`: Run /etc/rc, respawn gettys
 - `userland/sh/`: Simple shell (pipes, redirects, background jobs, builtins)
-- `userland/coreutils/`: Multi-call binary -- ls, cat, cp, mv, rm, mkdir, rmdir, echo, wc, head, tail, grep, chmod, pwd, env, sleep, date, uname, kill, ps, true, false, test
+- `userland/coreutils/`: Multi-call binary -- ls, cat, cp, mv, rm, mkdir, rmdir, echo, wc, head,
+  tail, grep, chmod, pwd, env, sleep, date, uname, kill, ps, true, false, test
 - **Milestone:** Login, navigate filesystem, run scripts
 
 ### Phase 8: x86_64 Port
@@ -592,15 +640,25 @@ Aggregate scope:
 
 ## Key Design Decisions
 
-**Rust kernel, not incremental port:** MINIX 3's C kernel uses raw pointers, global mutable state, and macro-heavy abstractions that resist incremental Rustification. A greenfield kernel uses proper Rust patterns from the start (enums for flags, Result for errors, indices not pointers for linked lists).
+**Rust kernel, not incremental port:** MINIX 3's C kernel uses raw pointers, global mutable state,
+and macro-heavy abstractions that resist incremental Rustification. A greenfield kernel uses proper
+Rust patterns from the start (enums for flags, Result for errors, indices not pointers for linked
+lists).
 
-**`unsafe` boundaries in kernel:** (a) Process table access (`UnsafeCell` static array), (b) user-space memory copies, (c) hardware register access (inline asm), (d) assembly entry/exit paths. Each `unsafe` block gets a `// SAFETY:` comment.
+**`unsafe` boundaries in kernel:** (a) Process table access (`UnsafeCell` static array), (b)
+user-space memory copies, (c) hardware register access (inline asm), (d) assembly entry/exit paths.
+Each `unsafe` block gets a `// SAFETY:` comment.
 
-**musl over Rust libc:** musl is well-tested, BSD-compatible, and complete. The MINIX-specific work is confined to ~100 syscall wrappers + IPC assembly stub. The rest of musl (stdio, string, math, locale) works unchanged.
+**musl over Rust libc:** musl is well-tested, BSD-compatible, and complete. The MINIX-specific work
+is confined to ~100 syscall wrappers + IPC assembly stub. The rest of musl (stdio, string, math,
+locale) works unchanged.
 
-**Servers in Rust:** Shared `kernel-shared` message types provide compile-time IPC protocol verification. C servers (linked against musl) also work since the IPC mechanism is language-agnostic.
+**Servers in Rust:** Shared `kernel-shared` message types provide compile-time IPC protocol
+verification. C servers (linked against musl) also work since the IPC mechanism is
+language-agnostic.
 
-**Multi-call coreutils:** Single `coreutils` binary dispatching on argv[0] (like BusyBox) minimizes disk space and simplifies building.
+**Multi-call coreutils:** Single `coreutils` binary dispatching on argv[0] (like BusyBox) minimizes
+disk space and simplifies building.
 
 ---
 
@@ -620,33 +678,35 @@ Each phase has a concrete milestone testable in QEMU (aarch64 primary):
 - Phase 9: `cargo doc`, test suite green
 
 QEMU flags for aarch64 dev:
+
 ```
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
   -serial stdio -no-reboot -d int,cpu_reset -D qemu.log \
   -drive file=minixrs.img,format=raw,if=virtio \
   -device virtio-net-device
 ```
+
 GDB: add `-s -S` then `rust-gdb -ex "target remote :1234"`
 
 ---
 
 ## Critical Reference Files (MINIX 3)
 
-Paths are relative to the MINIX 3 source tree root (under the `minix/` subdirectory
-for MINIX-specific code). See https://github.com/Stichting-MINIX-Research-Foundation/minix
+Paths are relative to the MINIX 3 source tree root (under the `minix/` subdirectory for
+MINIX-specific code). See https://github.com/Stichting-MINIX-Research-Foundation/minix
 
-| Purpose | Path in MINIX 3 tree |
-|---------|---------------------|
-| IPC implementation (translate to Rust) | `kernel/proc.c` |
-| Process/privilege structures | `kernel/proc.h`, `kernel/priv.h` |
-| Kernel call dispatch | `kernel/system.c` |
-| x86_64 entry points | `kernel/arch/x86_64/mpx.S` |
-| Message definitions | `include/minix/ipc.h` |
-| IPC constants | `include/minix/ipcconst.h` |
-| Server endpoints + call numbers | `include/minix/com.h`, `include/minix/callnr.h` |
-| User-space IPC stubs | `lib/libc/arch/x86_64/sys/_ipc.S` |
-| _syscall() wrapper | `lib/libc/sys/syscall.c` |
-| POSIX wrappers (template for musl) | `lib/libc/sys/*.c` |
-| SEF framework | `lib/libsys/sef.c` |
-| Boot process table | `kernel/table.c` |
-| Limine integration design | `BOOT.md` (at repo root) |
+| Purpose                                | Path in MINIX 3 tree                            |
+| -------------------------------------- | ----------------------------------------------- |
+| IPC implementation (translate to Rust) | `kernel/proc.c`                                 |
+| Process/privilege structures           | `kernel/proc.h`, `kernel/priv.h`                |
+| Kernel call dispatch                   | `kernel/system.c`                               |
+| x86_64 entry points                    | `kernel/arch/x86_64/mpx.S`                      |
+| Message definitions                    | `include/minix/ipc.h`                           |
+| IPC constants                          | `include/minix/ipcconst.h`                      |
+| Server endpoints + call numbers        | `include/minix/com.h`, `include/minix/callnr.h` |
+| User-space IPC stubs                   | `lib/libc/arch/x86_64/sys/_ipc.S`               |
+| _syscall() wrapper                     | `lib/libc/sys/syscall.c`                        |
+| POSIX wrappers (template for musl)     | `lib/libc/sys/*.c`                              |
+| SEF framework                          | `lib/libsys/sef.c`                              |
+| Boot process table                     | `kernel/table.c`                                |
+| Limine integration design              | `BOOT.md` (at repo root)                        |

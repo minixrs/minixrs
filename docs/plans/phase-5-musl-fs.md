@@ -2,9 +2,13 @@
 
 Produced by the chunk-6 design session (`phase-5-prep.md`), 2026-07-24. Every design decision below
 is **locked** (decided with rationale, alternatives recorded); the slice list is the working
-decomposition. Markers follow the `docs/plan.md` convention: `◀ next` (unstarted), `◀ ready (branch
-…, pending merge)`, `✓ shipped (PR #N, merged YYYY-MM-DD)`. Flip markers in each slice's own PR —
-here and in `docs/plan.md`'s Phase 5 table.
+decomposition.
+
+> **Status convention.** A slice's status is a GFM checkbox — `- [ ]` not started, `- [x]` done —
+> checked by the PR that does the work, in that same PR. The first unchecked box in plan order is
+> the next slice. Lines in the older form, `✓ shipped (PR #N, merged YYYY-MM-DD)`, are retired-form
+> history; never write a new one. Full rule:
+> [`docs/conventions/git-and-prs.md`](../conventions/git-and-prs.md).
 
 **Milestone:** init execs `/bin/hello` — a C program compiled against the musl fork — from an MFS
 root image: `PM_EXEC("/bin/hello")` → VFS lookup/read from MFS-on-ramdisk → kernel grant-sourced ELF
@@ -2215,7 +2219,7 @@ Also worth a line: the image went to **128 inodes**, `mkfs-mfs` learned **sparse
 [servers-and-drivers.md](../conventions/servers-and-drivers.md#open-flags-and-dispatch) and
 [ci.md](../conventions/ci.md).)
 
-### Slice 5.11 (stretch): `/dev/null` + `/dev/zero` + `CDEV_READ` ◀ ready (branch `feature/slice-5.11-dev-null-zero`, pending merge)
+### Slice 5.11 (stretch): `/dev/null` + `/dev/zero` + `CDEV_READ` ✓ shipped (PR #57, merged 2026-09-06)
 
 Full design — decisions `Z1…Z10`, the per-component breakdown, the error taxonomy, and the mutation
 plan — lives in

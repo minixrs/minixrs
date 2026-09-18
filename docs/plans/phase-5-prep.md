@@ -6,11 +6,14 @@ build on soft ground.
 
 **How to use this file:** each chunk is one session / one PR. Chunks 1–5 and 7 were independent and
 could land in any order; chunk 6 (the Phase 5 design + slicing session) must come last — it gates
-starting Phase 5 proper (chunk 7 did not gate Phase 5). **All seven chunks are now done** (chunk 6
-pending merge); the next work is Phase 5 slice 5.0, tracked in
-[`phase-5-musl-fs.md`](phase-5-musl-fs.md). Markers follow the `docs/plan.md` convention: `◀ next`
-(unstarted), `◀ ready (branch …, pending merge)`, `✓ shipped (PR #N, merged YYYY-MM-DD)`. Flip a
-chunk's marker as part of its own PR, and move `◀ next` to whichever chunk you intend to take next.
+starting Phase 5 proper (chunk 7 did not gate Phase 5). **All seven chunks are now done**; the next
+work is Phase 5 slice 5.0, tracked in [`phase-5-musl-fs.md`](phase-5-musl-fs.md).
+
+> **Status convention.** A slice's status is a GFM checkbox — `- [ ]` not started, `- [x]` done —
+> checked by the PR that does the work, in that same PR. The first unchecked box in plan order is
+> the next slice. Lines in the older form, `✓ shipped (PR #N, merged YYYY-MM-DD)`, are retired-form
+> history; never write a new one. Full rule:
+> [`docs/conventions/git-and-prs.md`](../conventions/git-and-prs.md).
 
 ---
 
@@ -170,7 +173,8 @@ same treatment — and several design decisions locked *before* wrappers are wri
   (`EFAULT`, not a kernel panic, on a bad user pointer) and a real grant table +
   `SYS_SAFECOPY`/`SYS_SETGRANT` — every interesting Phase 5 data path (VFS read/write, MFS↔VFS,
   later BDEV) moves bytes cross-address-space.
-- Rewrite `docs/plan.md`'s Phase 5 section as the slice list and move `◀ next` onto slice 5.0.
+- Rewrite `docs/plan.md`'s Phase 5 section as the slice list, with slice 5.0 marked as the next
+  slice to take.
 
 **Proof:** the design doc exists with every decision above resolved (not "TBD"), and plan.md's Phase
 5 section is a slice table.
