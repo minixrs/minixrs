@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "edafe31cd51c",
+  "strategy": "manual-commit",
+  "branch": "chore/claude-md-split",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/conventions/README.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ed/afe31cd51c/0/metadata.json",
+      "transcript": "/ed/afe31cd51c/0/full.jsonl",
+      "compact_transcript": "/ed/afe31cd51c/0/transcript.jsonl",
+      "content_hash": "/ed/afe31cd51c/0/content_hash.txt",
+      "prompt": "/ed/afe31cd51c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 22,
+    "cache_creation_tokens": 34934,
+    "cache_read_tokens": 5136858,
+    "output_tokens": 17864,
+    "api_call_count": 11,
+    "subagent_tokens": {
+      "input_tokens": 218,
+      "cache_creation_tokens": 614936,
+      "cache_read_tokens": 16303948,
+      "output_tokens": 97718,
+      "api_call_count": 109
+    }
+  }
+}
