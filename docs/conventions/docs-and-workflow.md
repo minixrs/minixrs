@@ -68,13 +68,6 @@ commentary. Grep the *phrase* across `tests/ book/ docs/ CLAUDE.md` before commi
 fix. And read every `book/` chapter a slice touches **end to end once**, not diff-wise: 5.11's two
 remaining defects were self-contradictions 190 and 24 lines apart in the same chapter.
 
-`docs/plan.md` and the `docs/plans/*` files track slice/chunk status with three markers: `◀ next`
-(unstarted), `◀ ready (branch ..., pending merge)` (implemented but unmerged), `✓ shipped (PR #N,
-merged YYYY-MM-DD)` (merged). Flip the previous slice forward and slide `◀ next` ahead as part of
-each slice's PR — in **both** plan.md's summary line and the corresponding `docs/plans/` detail
-file. When opening a new slice PR, also reconcile any older `◀ ready` markers against `git log` —
-stale "pending merge" labels on already-merged PRs accumulate otherwise.
-
 For the mutation-testing discipline (how a mutation is applied, observed, and reverted; the
 boot-marker gotchas; the cases with no available proof), see
 [`testing-and-markers.md`](./testing-and-markers.md).
