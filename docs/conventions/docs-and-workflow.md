@@ -8,14 +8,16 @@ repository is formatted.
 Canonical docs are an **mdBook in `book/`** (content under `book/src/`, TOC in
 `book/src/SUMMARY.md`), published to GitHub Pages on push to `main` via `.github/workflows/docs.yml`
 (path-filtered to `book/**`; mdBook pinned to 0.5.3; Pages actions SHA-pinned like `ci.yml`). Write
-new documentation there, derived from source — the `docs/*.md` files are legacy bootstrap notes
-being retired. The planning tree is the exception and stays: `docs/plan.md` is the lean live tracker
-(phase status + slice summaries), and `docs/plans/` holds the full per-phase slice histories
-(`phase-2-ipc.md` / `phase-3-vm.md` / `phase-4-servers.md`), the pre-Phase-5 cleanup tracker
-(`phase-5-prep.md` — one PR-sized chunk per session, same markers), and the Phase 5 design + slice
-plan (`phase-5-musl-fs.md` — locked decisions D1–D13 and slices 5.0–5.11 with per-slice scope/proof;
-read it before starting any Phase 5 slice). Build locally with `mdbook build book`; output
-`book/book/` is gitignored.
+new documentation there, derived from source — the loose top-level `docs/*.md` files are legacy
+bootstrap notes being retired. Two trees under `docs/` are not leftovers and stay. The first is
+**`docs/conventions/`** — this tree: the durable working rules contributors and agents follow,
+indexed from `CLAUDE.md`. It documents not the system but the work on it, which is why it is not in
+`book/`. The second is the planning tree: `docs/plan.md` is the lean live tracker (phase status +
+slice summaries), and `docs/plans/` holds the full per-phase slice histories (`phase-2-ipc.md` /
+`phase-3-vm.md` / `phase-4-servers.md`), the pre-Phase-5 cleanup tracker (`phase-5-prep.md` — one
+PR-sized chunk per session, same markers), and the Phase 5 design + slice plan (`phase-5-musl-fs.md`
+— locked decisions D1–D13 and slices 5.0–5.11 with per-slice scope/proof; read it before starting
+any Phase 5 slice). Build locally with `mdbook build book`; output `book/book/` is gitignored.
 
 To install mdBook or preview the book locally, use the `mdbook-preview` skill.
 
@@ -23,12 +25,12 @@ To install mdBook or preview the book locally, use the `mdbook-preview` skill.
 `writing-plans` for the task breakdown, `subagent-driven-development` to execute it (a fresh
 subagent per task, a review after each, then a whole-branch review). The per-slice design and plan
 documents land in **`docs/superpowers/specs/`** and **`docs/superpowers/plans/`**, named
-`YYYY-MM-DD-<topic>-{design,plan}.md`. That is a third documentation tree and it is deliberately
-narrow: `book/` stays canonical for how the system works, `docs/plan.md` + `docs/plans/` stay
-canonical for slice *status*, and the superpowers tree holds the reasoning behind one slice — the
-decisions considered and rejected, the per-task steps, the verification plan. The phase tracker
-links to the spec by relative path rather than restating it; keep it that way, or the two drift and
-the tracker is the one people read.
+`YYYY-MM-DD-<topic>-{design,plan}.md`. That is the fourth documentation tree and it is deliberately
+narrow: `book/` stays canonical for how the system works, `docs/conventions/` for the rules the work
+follows, `docs/plan.md` + `docs/plans/` for slice *status*, and the superpowers tree holds the
+reasoning behind one slice — the decisions considered and rejected, the per-task steps, the
+verification plan. The phase tracker links to the spec by relative path rather than restating it;
+keep it that way, or the two drift and the tracker is the one people read.
 
 Two habits from 5.10a worth keeping, both of which caught real defects that slice-level review
 missed. **Give a fresh reviewer the diff as a file** and ask it to verify arithmetic by hand rather

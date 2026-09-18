@@ -58,8 +58,10 @@ Branching, signing, sign-off, and what a PR owes the plan trackers.
 ## A PR marks its own work complete
 
 A PR is atomic: it contains the work **and** the record that the work is done. The PR that
-implements a slice checks that slice's box in `docs/plan.md` and in the matching
-`docs/plans/phase-N-*.md`, in the same PR, as part of the same change.
+implements a slice checks that slice's box in `docs/plan.md` and, **when that file exists**, in the
+matching `docs/plans/phase-N-*.md`, in the same PR, as part of the same change. Not every phase has
+a detail file — there is no `docs/plans/phase-6-*.md` today, so a Phase 6 slice checks its box in
+`docs/plan.md` alone rather than inventing one.
 
 Marking completion is never a follow-up commit, never a separate PR, and never a cleanup task
 inherited by the next slice. Those are the shapes that go stale — the tracker carried a wrong status
@@ -72,9 +74,14 @@ answer better than a hand-maintained line.
 Lines in the older form — `✓ shipped (PR #N, merged YYYY-MM-DD)` — are retired-form history, kept
 because rewriting them would churn four files to no benefit. Never write a new one.
 
-Status is a GFM checkbox and nothing else:
+Status is a GFM checkbox and nothing else — here are `docs/plan.md`'s first two Phase 6 rows, as
+they will read once the first of them has shipped:
 
 ```markdown
-- [x] **5.11** /dev/null + /dev/zero on the memory driver + CDEV_READ
-- [ ] **6.1** SYS_IRQCTL + HARDWARE NOTIFY
+- [x] `drivers/driver-rt/`: VirtIO MMIO transport (aarch64), virtqueue management, BDEV/CDEV
+      protocol
+- [ ] `drivers/virtio-blk/`: Block device
 ```
+
+Check the box the tracker already carries; never invent a row, and never invent a slice number that
+is not on it.

@@ -16,6 +16,12 @@ whole-project picture.
   covers the host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm`) —
   `minixrs-ipc` has inline asm. `geiger`'s per-package sweep filters out `minixrs-kernel` (it can't
   host-build)
+- The `clippy` job runs a **second `run:` step**, `cargo clippy -p minixrs-mfs --features server
+  --all-targets -- -D warnings`, and it blocks like the first. It exists because `fs/mfs`'s
+  `[[bin]]` carries `required-features = ["server"]`, so `main.rs` is **invisible to every other CI
+  job** — clippy `--all-targets`, miri and llvm-cov all skip it without that feature. This step is
+  the mitigation: without it the only thing in CI that compiles `fs/mfs/src/main.rs` at all is the
+  `qemu-smoke` boot, which reports a lint failure as a mysterious build-script panic
 - `dco` runs `tools/check-dco.sh <base>..<head>` and is **PR-only** (`if: github.event_name ==
   'pull_request'`): a push to `main` lands a GitHub merge commit, which by design has no sign-off,
   and the authored commits under it were already checked on their own PR. It needs `fetch-depth: 0`
@@ -66,13 +72,19 @@ whole-project picture.
   once the slice is committed on a branch — detach to the merge base, and stash only the doc edits
   so `target/` and `target/musl-sysroot` survive and the two boots differ in nothing but the code.
   And build (`cargo build`) before the timed `cargo run`, or the rebuild lands inside the timeout
-  and skews the fraction. A boot-time selftest that reads a **configuration-dependent** file is the
-  usual culprit: prefer `/etc/pattern` (40 KiB in every config, so its count is assertable too) over
-  `/bin/hello`, which is ~46 KB with the SDK, ~200 KB with in-tree musl, and ~15 KB in the
-  sysroot-absent fallback
+  and skews the fraction. A third, which has already cost one silently-wrong measurement:
+  **`$MINIXRS_SDK` does not persist across separate shell invocations**, so setting it in one
+  command and booting in another measures the **SDK** flavour, not the musl one the number is
+  defined against. Confirm the flavour from the embedded `hello` size — ~200 KB musl, ~47 KB SDK,
+  ~15 KB fallback — rather than trusting the build warning. A boot-time selftest that reads a
+  **configuration-dependent** file is the usual culprit: prefer `/etc/pattern` (40 KiB in every
+  config, so its count is assertable too) over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB
+  with in-tree musl, and ~15 KB in the sysroot-absent fallback
 - Before pushing, the blocking gates must be green: `cargo fmt --all --check`, `cargo clippy
-  --workspace --all-targets -- -D warnings` (locally this lints the kernel too), and `cargo clippy
-  -p minixrs-kernel --target aarch64-unknown-none -- -D warnings` plus the same with
+  --workspace --all-targets -- -D warnings` (locally this lints the kernel too), `cargo clippy -p
+  minixrs-mfs --features server --all-targets -- -D warnings` (nothing else lints MFS's `[[bin]]`,
+  whose `required-features = ["server"]` hides it from every other job), and `cargo clippy -p
+  minixrs-kernel --target aarch64-unknown-none -- -D warnings` plus the same with
   `--no-default-features`. Run `cargo fmt --all` to fix formatting
 - CI's `clippy` and `coverage` still pass `--exclude minixrs-kernel`, but for **runner cost, not
   correctness**: `forced-target` means they *could* build the kernel, at the price of clang

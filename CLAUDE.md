@@ -59,8 +59,8 @@ These bind every task regardless of area. Everything else lives in
   DCO trailer and the cryptographic signature are orthogonal and both are required.
 - **Never commit to `main`; branch first.** Committing in auto mode is fine; **pushing, opening a
   PR, or triggering CI needs explicit approval** — that is where work leaves the machine.
-- **A PR marks its own work complete** — flip the slice/chunk status marker in the same PR that
-  implements it, in both `docs/plan.md` and the matching `docs/plans/` detail file.
+- **A PR marks its own work complete** — check the slice/chunk box in the same PR that implements
+  it, in `docs/plan.md` and in the matching `docs/plans/` detail file when one exists.
 - **Markdown prose wraps at 100 columns**; run `~/.dprint/bin/dprint fmt` (and `check`) on anything
   you edit.
 - **The D8 ABI freeze:** `Message` layout, call numbers, endpoints and errnos change only via a

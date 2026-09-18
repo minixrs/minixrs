@@ -316,7 +316,7 @@ the real implementation (slices 5.7, 5.8 and 5.10a — see
 
 No request in the CDEV, BDEV or FS bands carries a `granter` field: the server takes it from the
 kernel-stamped `m_source`. The general confused-deputy rule this follows from is in
-[abi.md](./abi.md).
+[kernel.md](./kernel.md#grants--the-governed-cross-address-space-copy).
 
 The rule binds the *granting* side too: when VFS issues a `CPF_MAGIC` grant naming a caller's
 buffer, the owner is the kernel-stamped `m_source`, never a payload field — VFS holds `SYS_PROC`, so
@@ -339,6 +339,12 @@ Reply `m_type` **is the byte count** (`>= 0`) on `CDEV_WRITE`, `CDEV_READ`, `BDE
 - **`BDEV` refuses an over-long or out-of-range request with `EINVAL`, not a short read.** Its
   client is a filesystem that cannot interpret half a block. `EIO` stays reserved for Phase 6's real
   media errors, where the request was well-formed and the *device* failed.
+- **`VFS_EXEC_STAGE` is the exception inside VFS: a short stream is `EIO`, not a short stage.** It
+  is the one VFS transfer that may not be partial — an ELF cannot be loaded in pieces by a loader
+  with no filesystem — so the surrounding "short transfers are normal" contract for
+  `FS_READ`/`FS_WRITE` does **not** apply to it. State the exception before writing another staging
+  path, or the wrong rule gets copied (slice 5.9 — see
+  [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
 These are not inconsistent: refuse when the client cannot use a fraction, clamp when it can (slices
 5.3, 5.7, 5.8 and 5.10a — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
@@ -532,6 +538,24 @@ Paths are `callnr::DEV_*_PATH` so clients and VFS cannot drift (slice 5.11 — s
 So the truncate, when it runs at all, runs **before the descriptor is installed**, and a failure
 never leaves a descriptor onto a half-truncated file (slice 5.10b — see
 [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+
+### Exec staging
+
+`VFS_EXEC_STAGE` reads a binary off the filesystem into a VFS-owned buffer so that `SYS_EXEC` can
+load it by grant. Four rules:
+
+- **The path travels inline**, with no `SYS_COPY`. Its client is PM, which already holds the path
+  inline — so there is no source process to misname, and the control-plane-travels-inline rule above
+  applies with the confused-deputy question deleted outright.
+- **A short stream is `EIO`, not a short stage** — the exception recorded under "Short transfers"
+  above, and the one place in VFS where a partial transfer is not a legitimate answer.
+- **The 256 KiB staging buffer is a `.bss` static** for the one-page-stack reason MFS's block buffer
+  is one. Unlike that buffer it needs **no capability token and no borrow discipline**: VFS never
+  dereferences the staged bytes, it only wants the buffer's address, which is why the crate keeps
+  zero `unsafe` blocks.
+- **Nothing releases the stage grant.** Re-granting per request bumps the sequence and kills the
+  previous id, and PM serialises exec (slice 5.9 — see
+  [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
 ### Prologue ordering
 
