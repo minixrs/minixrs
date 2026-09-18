@@ -1,0 +1,13 @@
+We are complete on the phase 5 stretch goals.  Validate @PRE6-RECOMMEND.md and update the assumptions based on where we stand now
+
+---
+
+We need to take a look at CLAUDE.md.  It is rather large at this point.  We should split it out into areas of concern with links so agents know where to find that information.  You are also maintaining this with text on a single line which makes reading on the command line more difficult.  When we rewrite this make the text wrap to 100 chars and keep this as a rule.  There is also something in our workflow that needs to change.  We currently write the completion once a PR merges with the merge information.  We are storing information that is really of no concern, and that can be determined via git history or on github PR history.  We don't need the exact date of the PR merge what is more important is that the PR marks the work that it completes as done not as a follow on documentation that either is it's own PR or a clean up task for the next chunk of work.  The PR should be atmoic the plan document marked complete for the work complete in that PR.
+
+---
+
+Yes to both of your calls.  One thing to look into which probably makes sense would be using dprint to setup the formating of MD.  That would make creating a CI rule later easier
+
+---
+
+yes, write the spec
