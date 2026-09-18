@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "3305c9078a65",
+  "strategy": "manual-commit",
+  "branch": "chore/claude-md-split",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "docs/conventions/rust-style.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/33/05c9078a65/0/metadata.json",
+      "transcript": "/33/05c9078a65/0/full.jsonl",
+      "compact_transcript": "/33/05c9078a65/0/transcript.jsonl",
+      "content_hash": "/33/05c9078a65/0/content_hash.txt",
+      "prompt": "/33/05c9078a65/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 198,
+    "cache_creation_tokens": 316519,
+    "cache_read_tokens": 22989525,
+    "output_tokens": 146438,
+    "api_call_count": 99
+  }
+}
