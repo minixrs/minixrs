@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "a00745165ffd",
+  "strategy": "manual-commit",
+  "branch": "chore/claude-md-split",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/plans/phase-4-servers.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a0/0745165ffd/0/metadata.json",
+      "transcript": "/a0/0745165ffd/0/full.jsonl",
+      "compact_transcript": "/a0/0745165ffd/0/transcript.jsonl",
+      "content_hash": "/a0/0745165ffd/0/content_hash.txt",
+      "prompt": "/a0/0745165ffd/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 284,
+    "cache_creation_tokens": 444834,
+    "cache_read_tokens": 41247482,
+    "output_tokens": 215208,
+    "api_call_count": 142
+  }
+}
