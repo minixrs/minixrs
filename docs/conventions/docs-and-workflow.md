@@ -68,6 +68,11 @@ commentary. Grep the *phrase* across `tests/ book/ docs/ CLAUDE.md` before commi
 fix. And read every `book/` chapter a slice touches **end to end once**, not diff-wise: 5.11's two
 remaining defects were self-contradictions 190 and 24 lines apart in the same chapter.
 
+**A subagent's report is a claim about its work, not evidence of it.** Verify the artifact, not the
+account — a handback can describe prose the agent did not write and cite a report file it never
+created. This is also why work dispatched in parallel needs a dedupe pass: two agents given
+overlapping source will each write the shared rules, and the duplicates drift immediately.
+
 For the mutation-testing discipline (how a mutation is applied, observed, and reverted; the
 boot-marker gotchas; the cases with no available proof), see
 [`testing-and-markers.md`](./testing-and-markers.md).
@@ -101,6 +106,27 @@ exempts the block that follows it.
 **`textWrap: "always"` reflows a whole paragraph**, so consecutive lines separated only by a newline
 are joined before being rewrapped. Anything that must keep its own line has to be a real markdown
 block: a list item, a table row, or a paragraph separated by a blank line.
+
+The installer puts the binary at `~/.dprint/bin/dprint`, which is **not** on `PATH` — use the
+absolute path or add it.
+
+**`grep -F` lies on formatted prose.** dprint wraps *inside* multi-word backticked tokens, so a
+phrase that is present can still fail to match. Verify with whitespace normalised:
+
+```bash
+python3 -c "
+import re,sys
+norm=lambda s: re.sub(r'\s+',' ',s)
+print(norm(sys.argv[1]) in norm(open(sys.argv[2],encoding='utf-8').read()))
+" 'phrase to find' path/to/file.md
+```
+
+**A nested fence must be the last element inside its outer fenced block.** Prose after it makes
+dprint close the outer fence early and strand that prose outside the block.
+
+To prove a reformat changed no content, compare the **non-whitespace character sequence** before and
+after. `git diff --ignore-all-space` is useless here: a reflow joins and splits lines, which git
+sees as hundreds of changed lines.
 
 Rust doc comments are out of scope — rustfmt does not reflow them and there is no gate that would.
 
