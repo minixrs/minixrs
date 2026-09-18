@@ -13,10 +13,14 @@ as two rows.
 
 Pipe characters are reworded (`A` + `B` for a bitwise-or) so cells stay parseable.
 
-Every row carries a backticked token for Task 16 to grep on, except 24 rules whose source
-sentence has no identifier at all and which must be verified by prose match instead: R007,
-R011, R028, R039, R040, R056, R068, R070, R072, R097, R106, R108, R109, R273, R513, R514,
-R558, R559, R562, R565, R566, R574, R579, R581.
+Task 16 probes each row with the longest backticked token in `rule`. Two row sets need a prose
+match instead of that grep. **No backticked token at all** (the source sentence has none either):
+R007, R011, R028, R039, R040, R056, R068, R070, R072, R097, R106, R108, R109, R296, R542, R543,
+R587, R588, R591, R594, R595, R603, R608, R610.
+
+**Weak probe** — the longest token is a word this repo uses everywhere, so the grep alone would
+tick them vacuously:
+R013, R098, R099, R123, R125, R211, R221, R225, R405, R408, R505, R510, R556, R559.
 
 | id | src | rule | destination | done |
 | --- | --- | --- | --- | --- |
@@ -68,7 +72,7 @@ R558, R559, R562, R565, R566, R574, R579, R581.
 | R046 | 156 | bare `cargo build` fails on the server/userland crates — `check`/`clippy`/`test` are the host gates, not `build` | build-and-boot.md |  |
 | R047 | 162 | `.github/workflows/ci.yml` runs on every PR and on pushes to `main`; eleven gates run in parallel | ci.md |  |
 | R048 | 167 | a `sonar` job feeds the LCOV report to SonarQube Cloud (org `minixrs`, project `minixrs_minixrs`, config in `sonar-project.properties`) | ci.md |  |
-| R049 | 169 | the Sonar scan auto-detects PR vs branch: PRs get decoration, `main` pushes refresh the whole-project picture | ci.md |  |
+| R049 | 169 | the `sonar` job auto-detects PR vs branch: PRs get decoration, `main` pushes refresh the whole-project picture | ci.md |  |
 | R050 | 172 | only `geiger` and `miri` are advisory (`continue-on-error`); the other nine block | ci.md |  |
 | R051 | 173 | miri covers only the host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm`) — `minixrs-ipc` has inline asm | ci.md |  |
 | R052 | 174 | `geiger`'s per-package sweep filters out `minixrs-kernel`, which cannot host-build | ci.md |  |
@@ -90,7 +94,7 @@ R558, R559, R562, R565, R566, R574, R579, R581.
 | R068 | 205 | keep boot expectations timing-robust — first occurrences only, never counts, because CI TCG is slower than local | ci.md |  |
 | R069 | 206 | `qemu-smoke` is blocking as of phase-5-prep chunk 7 | ci.md |  |
 | R070 | 207 | a slice can break the boot-timing budget, and "it passes locally" is not the check | ci.md |  |
-| R071 | 214 | measure a marker's position as a fraction of a fixed-timeout log on the `musl` flavour and compare against the merge base | ci.md |  |
+| R071 | 214 | measure a marker's position with `grep -abo` over `wc -c` of a fixed-timeout log on the `musl` flavour, against the merge base | ci.md |  |
 | R072 | 220 | raise the budget with real headroom — think in the ratio, not the wall-clock seconds, which are a property of the dev machine | ci.md |  |
 | R073 | 222 | `git stash` does not give you the "before" once a slice is committed — detach to the merge base and stash only the doc edits | ci.md |  |
 | R074 | 225 | build with `cargo build` before the timed `cargo run`, or the rebuild lands inside the timeout and skews the fraction | ci.md |  |
@@ -118,7 +122,7 @@ R558, R559, R562, R565, R566, R574, R579, R581.
 | R096 | 273 | verify with `git log -1 --format='%(trailers:key=Signed-off-by)'` before pushing, especially after a `git commit --amend` that omitted `-s` | git-and-prs.md |  |
 | R097 | 275 | PRs land by regular merge commit — never squash; rebase merge only for a solo series wanting a linear history | git-and-prs.md |  |
 | R098 | 276 | a merge preserves every commit object byte-for-byte, so both the sign-off trailer and the author's GPG signature reach `main` intact | git-and-prs.md |  |
-| R099 | 282 | GitHub's merge button is fine — it touches only the merge commit, so there is no reason to push to `main` locally | git-and-prs.md |  |
+| R099 | 282 | GitHub's merge button is fine — it touches only the merge commit and never rewrites the authored commits, so never push to `main` locally | git-and-prs.md |  |
 | R100 | 284 | history note: PRs up to #48 landed as merge commits, #49–#53 under the brief rebase rule (`1132e62` … 2026-08-30), then merge commits again | git-and-prs.md |  |
 | R101 | 288 | a merge commit has no sign-off; that is expected, and `tools/check-dco.sh` skips merge commits for exactly that reason | git-and-prs.md |  |
 | R102 | 290 | the blocking `dco` gate enforces this — run `tools/check-dco.sh` locally, which defaults to `<merge-base with origin/main>..HEAD` | git-and-prs.md |  |
@@ -130,491 +134,520 @@ R558, R559, R562, R565, R566, R574, R579, R581.
 | R108 | 303 | all OS services run as separate user-space processes communicating via IPC | CLAUDE.md |  |
 | R109 | 304 | the privilege model is fine-grained bitmaps over who may talk to whom and which kernel calls are allowed | CLAUDE.md |  |
 | R110 | 306 | the `## Code Conventions` heading itself carries no rule — heading only | DROPPED |  |
-| R111 | 308 | every new `.rs`/`.S` source file begins with the SPDX + copyright header before any other content | rust-style.md |  |
+| R111 | 308 | every new `.rs`/`.S` source file begins with the `SPDX-License-Identifier` + copyright header before any other content | rust-style.md |  |
 | R112 | 308 | Rust header is `// SPDX-License-Identifier: BSD-3-Clause` then `// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors` | rust-style.md |  |
 | R113 | 308 | assembly `.S` uses the block-comment form `/* SPDX-License-Identifier: BSD-3-Clause */` and the matching copyright line | rust-style.md |  |
 | R114 | 308 | `.toml`/`.ld`/`.conf` files get no SPDX header | rust-style.md |  |
-| R115 | 309 | the kernel ships `--release` only, so `debug_assert!` is compiled out | kernel.md |  |
-| R116 | 309 | use a hard `assert!` for invariants whose violation would silently corrupt; reserve `debug_assert!` for cheap can't-happen documentation | kernel.md |  |
-| R117 | 310 | offset/length arithmetic in `server-rt` and in any `servers/`, `drivers/`, `fs/`, `userland/` crate must use `checked_add`, not `+` | rust-style.md |  |
-| R118 | 310 | `[profile.release]` sets `overflow-checks = false`, so `off + 4` wraps in the shipped binary while panicking under `cargo test` | rust-style.md |  |
-| R119 | 310 | give every new payload accessor a `usize::MAX` unit test — `fs/mfs/src/proto.rs` shipped `off + 4` and only that test caught it | rust-style.md |  |
-| R120 | 311 | kernel `unsafe` blocks require a `// SAFETY:` comment documenting the invariant | kernel.md |  |
-| R121 | 312 | IPC linked lists use `Option<ProcNr>` indices into static arrays, not raw pointers | kernel.md |  |
-| R122 | 313 | `Message` types are defined in `kernel-shared` and shared across all crates | abi.md |  |
-| R123 | 314 | assembly is confined to `.S` files assembled via the `cc` crate in `build.rs`; `core::arch::asm!` only for single-instruction operations | kernel.md |  |
-| R124 | 315 | new `.S` files must be added to `kernel/build.rs`'s `sources` array | kernel.md |  |
-| R125 | 315 | offset blocks (`.equ REGS_*_OFFSET …`) are duplicated per-file since there is no cross-`.S` include | kernel.md |  |
-| R126 | 316 | to end a `&mut` borrow before an `unsafe` re-borrow of the same static, capture state into locals and rely on NLL — `drop(&mut x)` is a no-op | kernel.md |  |
-| R127 | 316 | hoisting a read-only loop into a shared-borrow helper is never a pure extraction: a live `&mut` plus the helper's `&` is aliasing UB | kernel.md |  |
-| R128 | 317 | run-queue admission is decoupled from boot: `IMAGE.runnable` marks IPC reachability, only `proc::sched::enqueue` enters the run queue | kernel.md |  |
-| R129 | 318 | static mutable tables use `UnsafeCell<[T; N]>` in a `#[repr(transparent)]` newtype with `unsafe impl Sync`, documenting the single-threaded-boot invariant | kernel.md |  |
-| R130 | 319 | custom `Display` impls honoring `{:<width$}` render through `arrayvec::ArrayString<N>` and call `f.pad(s)` | rust-style.md |  |
-| R131 | 320 | forward declarations for later slices get module-level `#![allow(dead_code)]` with a one-line comment naming the consuming slice | rust-style.md |  |
-| R132 | 321 | IPC primitives take an explicit `&mut [Proc; N_PROC_SLOTS]` (and `&mut [Priv; NR_SYS_PROCS]`) slice | kernel.md |  |
-| R133 | 321 | only `ipc::do_ipc` materializes those via `proc_table_mut_slice` / `priv_table_mut_slice`, dodging the two-`&mut`-from-one-`UnsafeCell` hazard | kernel.md |  |
-| R134 | 322 | every EL1 → EL0 transition calls `sched::schedule_next`, which flushes `Proc::deliver_msg` to `Proc::deliver_msg_vir` and clears `MF_DELIVERMSG` | kernel.md |  |
-| R135 | 323 | IPC blocking pairs with `sched::rts_set` / `rts_unset`, which capture `nr`, end the `&mut Proc` borrow, then `enqueue`/`dequeue` | kernel.md |  |
-| R136 | 324 | kernel-call handlers acting on a target proc take the whole `&mut [Proc; N_PROC_SLOTS]` slice + `caller_nr`; caller-only handlers get a single `&mut Proc` | kernel.md |  |
-| R137 | 324 | `system::kernel_call_dispatch` routes target-taking calls through a small `match` before `dispatch_caller_local` | kernel.md |  |
-| R138 | 325 | kernel tasks and SCHED itself stay `scheduler == NONE` — a scheduler must not schedule itself | kernel.md |  |
-| R139 | 325 | `Proc::scheduler == NONE` means kernel-scheduled; a non-`NONE` endpoint means SCHED-scheduled and quantum exhaustion sends `SCHEDULING_NO_QUANTUM` | kernel.md |  |
-| R140 | 325 | a SCHED-scheduled proc stays off the run queue until the scheduler calls real `SYS_SCHEDULE`, which clears `RTS_NO_QUANTUM` | kernel.md |  |
-| R141 | 325 | `SCHED_RQ_BASE = 0xF00` — clear of VM `0xC00`, SEF `0xD00`, DS `0xE00`, below `NOTIFY_MESSAGE` | abi.md |  |
-| R142 | 325 | slice 4.3 record: `SYS_SCHEDCTL` claim/release, `mini_sched_no_quantum_send`, stub C pre-delegated in `userland.rs` as the live demo | phase-4-servers.md |  |
-| R143 | 326 | `Proc::alarm_at` holds an absolute uptime tick with 0 meaning disarmed | kernel.md |  |
-| R144 | 326 | `clock::EARLIEST_ALARM` is an O(1) gate so `tick()` only pays the O(N) `ipc::fire_expired_alarms` scan when an alarm is due | kernel.md |  |
-| R145 | 326 | alarm expiry delivers a kernel-originated `NOTIFY` from `CLOCK` via `ipc::notify::deliver_alarm` with no `ipc_to` check | kernel.md |  |
-| R146 | 326 | `SYS_SETALARM` takes a relative `delta` in payload `0..8` (0 cancels) and replies with the previous time-left, reusing `NOTIFY_MESSAGE` + `CLOCK` | abi.md |  |
-| R147 | 326 | slice 4.4 record: a user-space periodic alarm is a re-arm per fire; RS keys its alarm on `m_source == boot_endpoint(CLOCK)` | phase-4-servers.md |  |
-| R148 | 327 | `SYS_KILL` → `cause_sig` sets a bit in `Proc::sig_pending` plus `RTS_SIGNALED` and `RTS_SIG_PENDING`, then wakes PM with `ipc::notify::deliver_ksig` | kernel.md |  |
-| R149 | 327 | `SYS_GETKSIG` hands off the bitmap and PM disposes of every returned endpoint — `SYS_ENDKSIG` for survivors, `SYS_EXIT` with no ENDKSIG after for terminations | servers-and-drivers.md |  |
-| R150 | 327 | `SYS_EXIT` is a full teardown: `unblock_dependents`, leaf frames freed, `AddrSpace::destroy`, `free_asid`, then `free_slot` | kernel.md |  |
-| R151 | 327 | `free_slot` bumps the endpoint generation, which wraps to 1 and never to 0 | kernel.md |  |
-| R152 | 327 | every user-supplied-endpoint resolution goes through `table::okendpt`, returning `EDEADSRCDST` on stale generations | kernel.md |  |
-| R153 | 327 | `do_exit` rejects `SELF` and a caller-named-self target outright — tearing down the active TTBR0 mid-call is the hazard | kernel.md |  |
-| R154 | 327 | `PRIVCTL_SET_USER` requires the target frozen on `RTS_NO_PRIV` — the freeze is the authorization gate, EPERM on a live target | kernel.md |  |
-| R155 | 327 | `PM_RQ_BASE = 0x700`; `PM_GETPID` replies `m_type` = pid with ppid in payload `0..4` (MINIX result-is-pid, errors negative) | abi.md |  |
-| R156 | 327 | slice 4.5 record: the frozen-stub pattern, shared `table::USER_PRIV_ID` = 20, and VM's out-of-region arm raising `SYS_KILL(faulter, SIGSEGV)` | phase-4-servers.md |  |
-| R157 | 328 | user procs drive the lifecycle entirely through PM — POSIX shape, user → PM, never user → kernel; the shared `USER_PRIV_ID` opened `ipc_to = {PM}` only | servers-and-drivers.md |  |
-| R158 | 328 | PM's `handle_fork` runs a fixed order the frozen-child invariant depends on: `SYS_FORK` → `VM_FORK` → `SCHEDULING_START` → `SYS_PRIVCTL` → reply to both halves | servers-and-drivers.md |  |
-| R159 | 328 | `do_fork` creates the child blocked on `RTS_RECEIVING` plus `RTS_NO_PRIV`, so only PM's reply makes it runnable | kernel.md |  |
-| R160 | 328 | on any mid-fork failure PM rolls back at every step — `SYS_EXIT` the child and `mproc::cleanup` the slot before returning the errno to the parent | servers-and-drivers.md |  |
-| R161 | 328 | `handle_exit` does `SCHEDULING_STOP` before `SYS_EXIT`, because `SYS_EXIT` bumps the generation and `okendpt` then rejects the endpoint | servers-and-drivers.md |  |
-| R162 | 328 | PM sends the dead child no reply; `handle_wait` reaps a zombie or suspends the parent with `MF_WAITING` until `handle_exit` wakes it | servers-and-drivers.md |  |
-| R163 | 328 | there is no async `SIGCHLD` — parent-notify is the zombie plus wait-reap handshake only | servers-and-drivers.md |  |
-| R164 | 328 | slice 4.6b record: `mproc` generation-aware endpoints, `W_EXITCODE`, VM `MAX_CLIENTS` widened 16 → 32, stub E as the live demo | phase-4-servers.md |  |
-| R165 | 329 | exec is done to the caller, so `SYS_EXEC` names the target and lives in the target-taking `match` in `kernel_call_dispatch` | kernel.md |  |
-| R166 | 329 | `do_exec` rejects `SELF`/self-target — the active-TTBR0 teardown hazard, the `do_exit` stance | kernel.md |  |
-| R167 | 329 | exec preserves pid/priv/scheduler; the target gets no reply on success and an errno reply on failure, so PM's `handle_exec` replies only on `rc != OK` | kernel.md |  |
-| R168 | 329 | `load_exec_image` is factored out of `load_boot_server` and cleans up on OOM — the `do_fork` copy_addrspace no-leak contract | kernel.md |  |
-| R169 | 329 | the boot loader skips any negative proc_nr, so a module packed under `com::EXEC_ONLY_PROC_NR = -1` is resolvable by name but never boot-loaded | servers-and-drivers.md |  |
-| R170 | 329 | `userland/**/src/main.rs` is in `sonar.coverage.exclusions` — freestanding entry points with no host-testable logic | ci.md |  |
-| R171 | 329 | slice 4.7 record: stub E's child branch flips `PM_EXIT` → `PM_EXEC` so a `[ksys SYS_EXEC]` sits between the `SYS_FORK`/`SYS_EXIT` twins | phase-4-servers.md |  |
-| R172 | 330 | `init` is PID 1 at `INIT_PROC_NR = 10`, a real boot process loaded by the ordinary `userland.rs` load loop with no PM hand-release | servers-and-drivers.md |  |
-| R173 | 330 | `init_boot_image` special-cases `entry.nr == INIT_PROC_NR` to point its proc slot at the shared `USER_PRIV_ID` instead of a dedicated server slot | kernel.md |  |
-| R174 | 330 | init carries `USR_T` trap_mask and makes no kernel calls — exactly the forked-child profile | servers-and-drivers.md |  |
-| R175 | 330 | `MF_PRIV_PROC` stays set on init's `mproc` seed (unkillable PID 1); the flag gates only the kill path, so PM still serves init as a client | servers-and-drivers.md |  |
-| R176 | 330 | slice 4.8 record: stub E retired, A–D kept as the live regression battery, `NR_STUB_PROCS` 5→4 shifting `FORK_POOL_BASE` 16→15; Phase 4 complete | phase-4-servers.md |  |
-| R177 | 331 | the `[ipc]` modulo sampler almost never catches low-rate callers, so zero sampled lines is NOT evidence a caller is stuck | testing-and-markers.md |  |
-| R178 | 331 | verify a low-rate caller via its downstream head-carved `[ksys …]` traces, or a temporary `[DBG]` trace in `ipc::do_ipc` removed before committing | testing-and-markers.md |  |
-| R179 | 332 | `kernel/Cargo.toml` sets `forced-target = "aarch64-unknown-none"` under `cargo-features = ["per-package-target"]`, so every cargo invocation cross-compiles | kernel.md |  |
-| R180 | 332 | `per-package-target` is unstable, so it needs the pinned nightly; workspace `default-members` omitting `"kernel"` is the fallback | kernel.md |  |
-| R181 | 332 | the kernel bin must keep `test = false`/`bench = false`, or `cargo check --all-targets` breaks with `E0463` on a phantom test harness | kernel.md |  |
-| R182 | 332 | Phase 8 must relax `forced-target` first | kernel.md |  |
-| R183 | 332 | no `#[cfg(target_os = "none")]` gates remain in `kernel/src/` — do not reintroduce them; a new kernel module is just `mod foo;` | kernel.md |  |
-| R184 | 332 | the `cfg_attr(target_os = "minixrs", …)` attributes in `servers/*`/`userland/*` are unrelated — those crates are host-built and host-tested | kernel.md |  |
-| R185 | 332 | phase-5-prep chunk 7 record: the two guards (`build.rs`'s `cargo::error=`, `main.rs`'s `compile_error!`) are now unreachable defense-in-depth | phase-5-prep.md |  |
-| R186 | 333 | the demo stubs A–D sit behind a default-on `boot-stubs` cargo feature; `--no-default-features` gives a clean stub-free boot | build-and-boot.md |  |
-| R187 | 333 | the feature lives on two crates — the kernel (`arch::aarch64::userland`) and PM (`mproc::seed`) — the only two that install or seed stubs | build-and-boot.md |  |
-| R188 | 333 | `kernel/build.rs` reads `CARGO_FEATURE_BOOT_STUBS` to drop `user_stub.S` and to thread `--no-default-features` into the nested PM build | build-and-boot.md |  |
-| R189 | 333 | the feature is deliberately not on `kernel-shared`: cargo feature unification would force it on, so `NR_STUB_PROCS` stays a constant `4` | build-and-boot.md |  |
-| R190 | 333 | `FORK_POOL_BASE` (= 15) is stable — disabling stubs leaves slots 11–14 unoccupied, it does not renumber the fork pool | build-and-boot.md |  |
-| R191 | 334 | `kernel-shared::com::NR_SERVED_PROCS` (= 32) is the one shared proc-nr ceiling, and all three per-process server tables derive their size from it | abi.md |  |
-| R192 | 334 | never reintroduce independent capacity literals — each crate carries a `const _: () = assert!(… >= NR_SERVED_PROCS)` guard | abi.md |  |
-| R193 | 334 | VM `MAX_REGIONS` (= 16) is a separate knob, unrelated to the kernel frame allocator's like-named `MAX_REGIONS` in `mm/frame.rs` | abi.md |  |
-| R194 | 334 | phase-5-prep chunk-4 record: SCHED's `CAP = NR_SERVED_PROCS` is an associative count, so the constant over-covers the delegatable set | phase-5-prep.md |  |
-| R195 | 335 | when a `--no-default-features` build does not drop a feature, suspect cargo feature unification and diagnose with `cargo tree … -e features -i <shared-crate>` | build-and-boot.md |  |
-| R196 | 336 | check any "this adds a dependency/compile cost" claim with `cargo tree -p minixrs-kernel -e build`, which prints the build-script graph | build-and-boot.md |  |
-| R197 | 336 | decide such a dependency on where the constant belongs, not on compile cost — 5.10b moved a hole size into `kernel-shared::rootfs` for that reason | build-and-boot.md |  |
-| R198 | 337 | `kernel-shared` carries zero `unsafe` — keep it that way, since geiger measures per-package | abi.md |  |
-| R199 | 337 | byte-level ABI helpers there decode field-by-field, and tests tie the codec to the real layout via `offset_of!` rather than reading the memory image | abi.md |  |
-| R200 | 338 | `kernel-shared` is unconditionally `no_std`, but a `#[cfg(test)]` module may declare `extern crate std;` locally — `brand.rs` is the precedent | abi.md |  |
-| R201 | 339 | there is no `#[cfg(test)]` code under `kernel/src/` — `cargo test -p minixrs-kernel` does not run | kernel.md |  |
-| R202 | 339 | host-runnable logic belongs in `kernel-shared`; put new pure predicates over shared ABI types there | kernel.md |  |
-| R203 | 339 | keep raw-pointer/hardware behaviour (e.g. `copy_msg_from_user`) in the kernel; QEMU is the primary verification for kernel code | kernel.md |  |
-| R204 | 340 | a const-only `assert!(A > B)` trips `assertions_on_constants` — use a module-level `const _: () = assert!(…)` like `callnr.rs` | rust-style.md |  |
-| R205 | 340 | a bare `loop {}` present under `test` trips `empty_loop` — use `loop { core::hint::spin_loop() }`; the `#[cfg(not(test))]` panic handler is exempt | rust-style.md |  |
-| R206 | 340 | inside a `const _: () = { … }` block the const evaluator has no iterators — use `while` + slice indexing + `<[T]>::len()` | rust-style.md |  |
-| R207 | 340 | in a const block `assert!` takes a literal message only; `assert_eq!` and `assert!(c, "{x}")` are both rejected | rust-style.md |  |
-| R208 | 340 | in a `#[test]` fn use `assert_eq!` rather than a bare `assert!(CONST op CONST)`; for an ordering comparison write `assert_eq!(a.min(b), a)` | rust-style.md |  |
-| R209 | 340 | a `const _: () = assert!(…)` may not reference a `static` — name the capacity as a `const` first, the `vm/region.rs` `MAX_CLIENTS` shape | rust-style.md |  |
-| R210 | 340 | a `chunks_exact(N)` with a const `N` trips `chunks_exact_to_as_chunks` — use `as_chunks::<N>().0.iter()` | rust-style.md |  |
-| R211 | 340 | `free >= X + 1` trips `int_plus_one` — write `free > X` | rust-style.md |  |
-| R212 | 340 | `N % M == 0` trips `manual_is_multiple_of` — write `N.is_multiple_of(M)`, which fires inside a `const _` assert too | rust-style.md |  |
-| R213 | 341 | a doc-comment line starting with `+ ` (or `- `/`* `) parses as a markdown bullet and trips `doc_lazy_continuation` — reword the continuation | rust-style.md |  |
-| R214 | 342 | user-space servers build as freestanding `#![no_std]`/`#![no_main]` ELFs linked with their own `user.ld` (page-aligned PT_LOADs, base `0x10_0000`) | servers-and-drivers.md |  |
-| R215 | 342 | the kernel sets `sp_el0`, so a server's `_start` needs no stack setup | servers-and-drivers.md |  |
-| R216 | 342 | servers are built for the custom target `tools/targets/aarch64-unknown-minixrs.json`, regenerated on nightly bumps with the `"os": "minixrs"` line re-applied | servers-and-drivers.md |  |
-| R217 | 342 | the nested build uses `-Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem` into the shared `target/minixrs-user` | servers-and-drivers.md |  |
-| R218 | 342 | the `-T<user.ld>` link arg comes from each crate's own `build.rs`, cfg-gated on `target_os = "minixrs"`; `kernel/build.rs` injects no rustflags and scrubs inherited ones | servers-and-drivers.md |  |
-| R219 | 342 | the `[workspace.lints.rust] unexpected_cfgs` check-cfg shim keeps host clippy green on the `"minixrs"` cfg — delete it at M5 | servers-and-drivers.md |  |
-| R220 | 342 | `-Zjson-target-spec` must be passed explicitly at the call site — a global `~/.cargo/config.toml` can mask the gate locally while CI fails | servers-and-drivers.md |  |
-| R221 | 342 | reproduce a suspected config-masking failure with `CARGO_UNSTABLE_<FLAG>=false cargo …` | servers-and-drivers.md |  |
-| R222 | 343 | every user-space binary crate invokes `minixrs_abi_note::brand!()` at the crate root | servers-and-drivers.md |  |
-| R223 | 343 | the 28-byte note goes into `.note.minixrs.ident` via a dedicated PT_NOTE phdr at the start of the RO PT_LOAD, per the `user.ld` dual-assignment rule | servers-and-drivers.md |  |
-| R224 | 343 | `KEEP()` is mandatory and the note rule must stay ahead of the `/DISCARD/ *(.note.*)` line | servers-and-drivers.md |  |
-| R225 | 343 | the kernel refuses unbranded ELFs via `kernel-shared::brand::scan_brand`, and `kernel/build.rs` re-asserts at pack time so a forgotten `brand!()` fails the build | servers-and-drivers.md |  |
-| R226 | 343 | `[brand]` traces appear only on failure — a healthy boot has none | testing-and-markers.md |  |
-| R227 | 344 | when a boot server gains a new path dependency, add that crate's `src` dir to `kernel/build.rs`'s server `rerun-if-changed` list | servers-and-drivers.md |  |
-| R228 | 344 | that list covers shared inputs only; a newly added boot crate needs no entry — `build_server` already watches its `src`/`user.ld`/`Cargo.toml`/`build.rs` | servers-and-drivers.md |  |
-| R229 | 345 | ELF-only attributes on server crates must be `#[cfg_attr(target_os = "minixrs", ...)]`-gated, because `cargo check --workspace` also builds them for the Mach-O host | servers-and-drivers.md |  |
-| R230 | 345 | `#![forbid(unsafe_code)]` is unusable on a freestanding binary crate here — a crate with no `unsafe` block says so in its crate docs instead | servers-and-drivers.md |  |
-| R231 | 346 | user-space servers run at EL0 and cannot print; verify behaviour through kernel-side traces (`[pf]`, `[ksys …]`, `[ipc N]`), never server-side logging | servers-and-drivers.md |  |
-| R232 | 346 | trace sampling is asymmetric — `[ipc N]` head-traces the first ~12 calls plus every 100th, `[ksys N]` samples every 100th with no head carve-out | testing-and-markers.md |  |
-| R233 | 347 | system servers drive their receive loop through `server-rt`'s SEF: `sef_startup(SefConfig { … })` then a loop over `sef.receive` | servers-and-drivers.md |  |
-| R234 | 347 | callbacks pass via the config struct and ride in the returned `Sef` handle — no global `setcb`/static state, which keeps `server-rt` `#![forbid(unsafe_code)]` | servers-and-drivers.md |  |
-| R235 | 347 | `sef_startup` learns the server's endpoint/name via `SYS_GETINFO(GET_WHOAMI)` and announces it via `diag_print` | servers-and-drivers.md |  |
-| R236 | 347 | the pure classifier in `server-rt/src/classify.rs` gates each control event on `m_source`, not `m_type` alone, so a client cannot spoof a signal/init | servers-and-drivers.md |  |
-| R237 | 347 | `classify.rs` is host-tested; the IPC glue in `sef.rs` is coverage-excluded like the server `main.rs`es | servers-and-drivers.md |  |
-| R238 | 348 | `init_boot_image` fills a boot server's `ipc_to` only for active boot priv slots `[0, n_active)` | servers-and-drivers.md |  |
-| R239 | 348 | a hand-installed stub in a priv slot 16+ that a server must reply to needs the reverse `ipc_to` bit opened explicitly — see `install_stub_d_priv` | servers-and-drivers.md |  |
-| R240 | 349 | VM tracks per-process memory as a static `[ClientRegions; 16]` keyed by proc number, with no heap allocator — the kernel owns frames | servers-and-drivers.md |  |
-| R241 | 349 | a page fault is satisfied only when its address lies inside a half-open `[start, end)` region tagged `Kind::{Heap, Mmap, Unused}` | servers-and-drivers.md |  |
-| R242 | 349 | `VM_BRK`/`VM_MMAP`/`VM_MUNMAP` all ride the single D→VM SENDREC edge, so adding an mmap client needs no new priv wiring | servers-and-drivers.md |  |
-| R243 | 350 | `SYS_VMCTL(VMCTL_PT_UNMAP)` returns `EINVAL` with no panic and no frame freed when nothing is mapped at the target VA | kernel.md |  |
-| R244 | 350 | keep VM's unmap sweep capped at the region's own `end` so an overstated `len` cannot reach a neighbor's frames | servers-and-drivers.md |  |
-| R245 | 351 | boot servers are packed into a single MXBI archive — a 16-byte header plus 32-byte `{proc_nr, offset, len, name}` records, all LE | servers-and-drivers.md |  |
-| R246 | 351 | to add a boot server, append a `(crate, dir, proc_nr)` row to `kernel/build.rs`'s `servers` array and watch its `src` dir | servers-and-drivers.md |  |
-| R247 | 351 | the `env!("BOOT_IMAGE_PATH")` `include_bytes!` lives only in `boot_image/mod.rs` — never reference `BOOT_IMAGE_PATH` from a host-compiled module | servers-and-drivers.md |  |
-| R248 | 351 | all servers share one `SERVER_STACK_VA` because each has its own TTBR0 | servers-and-drivers.md |  |
-| R249 | 351 | adding a boot server needs no new priv wiring — `init_boot_image` already grants every boot server `SRV_T` `ipc_to` over `[0, n_active)` | servers-and-drivers.md |  |
-| R250 | 352 | every server publishes its endpoint at SEF init via `server-rt::sef_publish_to_ds(endpoint, name)`, key = 16-byte NUL-padded name in payload `0..16` | servers-and-drivers.md |  |
-| R251 | 352 | DS is the exception — it seeds its own entry in-process in `ds_init`, because a SENDREC to itself before its receive loop would deadlock | servers-and-drivers.md |  |
-| R252 | 352 | `DS_RQ_BASE = 0xE00`, clear of VM `0xC00` and SEF `0xD00`, below `NOTIFY_MESSAGE` | abi.md |  |
-| R253 | 352 | the DS registry is a static `[Entry; 16]` `UnsafeCell` newtype like `vm/region.rs`, with `publish/retrieve/check` host-tested and `main.rs` coverage-excluded | servers-and-drivers.md |  |
-| R254 | 353 | adding a workspace crate means appending to `members` in the root `Cargo.toml` — there is no `default-members` | build-and-boot.md |  |
-| R255 | 353 | internal crates use literal manifest fields plus `publish = false`; only the hardcoded five-crate `release.yml` list inherits `[workspace.package]` | build-and-boot.md |  |
-| R256 | 353 | no CI edit is needed for a new crate — `fmt`, `clippy`, `geiger` and `coverage` sweep members automatically | build-and-boot.md |  |
-| R257 | 353 | a new crate must be clean under `clippy --workspace --all-targets -- -D warnings` from its first commit | build-and-boot.md |  |
-| R258 | 353 | if a crate's entry point is pure I/O with the logic in sibling modules, add its `main.rs` to `sonar.coverage.exclusions` — the `servers/ds` shape | build-and-boot.md |  |
-| R259 | 354 | `kernel-shared/src/error.rs` has two errno bands (D7): the POSIX block at magnitudes `1..=40`, identical to Linux/musl, and the MINIX IPC band at `>= 200` | abi.md |  |
-| R260 | 354 | nothing may land in the `41..=199` gap, where musl defines errnos minix.rs has not adopted | abi.md |  |
-| R261 | 354 | errno constants are stored negated, and the `errnos!` macro emits both the `pub const` and the `ALL` table | abi.md |  |
-| R262 | 354 | add an errno by adding one line to the `errnos!` invocation, never by hand-editing a second list — `ALL` is the single source of truth | abi.md |  |
-| R263 | 354 | the generated `include/minixrs/*.h` headers are a build artifact under `target/` and are never committed (D8); CI asserts nothing was written into the tree | abi.md |  |
-| R264 | 354 | generated C uses C11 keywords — `_Static_assert`, `_Alignas` on the struct's first member, `_Alignof` — never GNU attributes | abi.md |  |
-| R265 | 354 | `minixrs/ipc.h` includes nothing; `offsetof` comes from `__builtin_offsetof` under the private name `_MINIXRS_OFFSETOF` | abi.md |  |
-| R266 | 354 | every process gets both `<NAME>_PROC_NR` and `<NAME>_EP`, and the header `_Static_assert`s the C decode macro against the Rust-computed endpoints | abi.md |  |
-| R267 | 354 | `minixrs/errno.h` asserts but never defines the POSIX block, behind `#ifdef MINIXRS_ABI_CHECK_POSIX_ERRNO`; `tools/build-musl.sh` must define it | abi.md |  |
-| R268 | 354 | `abi-selftest.c` exists because a header is never a translation unit — without a `.c` file no `_Static_assert` would ever fire | abi.md |  |
-| R269 | 354 | adding a request number means editing `tools/gen-c-headers/src/callnr_h.rs` too — the per-band `members` lists in `bands()` are hand-maintained | abi.md |  |
-| R270 | 354 | run `cargo test -p minixrs-gen-c-headers` after any band change, not just `cargo gen-c-headers` — `every_band_member_list_matches_its_count` is the catch | abi.md |  |
-| R271 | 354 | `tools/gen-c-headers`'s `main.rs` is argv/IO only and is Sonar-coverage-excluded via `tools/**/src/main.rs` | ci.md |  |
-| R272 | 354 | slice 5.0 record: the POSIX-value identity is what lets musl's stock `bits/errno.h` and `syscall_ret.c` work unmodified | phase-5-musl-fs.md |  |
-| R273 | 355 | the kernel never dereferences a user VA, not even the active TTBR0's | kernel.md |  |
-| R274 | 355 | every byte in or out of a user address space goes through `kernel/src/mm/uaccess.rs` — `copy_from_user_as` / `copy_to_user_as` / `probe_user_range` | kernel.md |  |
-| R275 | 355 | `addrspace::walk_pt_in(ttbr0_pa, va)` is the walk primitive those use; `AddrSpace::walk_pt` delegates to it | kernel.md |  |
-| R276 | 355 | an unmapped page is a walk miss returning `EFAULT`, not an EL1 abort — so no exception-fixup table is needed or wanted (D5 rejected Linux's `extable`) | kernel.md |  |
-| R277 | 355 | the copy is address-space-independent, so `flush_deliver_msg` may write a receiver's buffer before its TTBR0 is installed | kernel.md |  |
-| R278 | 355 | `copy_to_user_as` must check `Prot::writable`, because the HHDM alias is a kernel mapping the MMU's EL0 permission bits do not police | kernel.md |  |
-| R279 | 355 | user writes are all-or-nothing, probing first, since a 104-byte `Message` is only 8-aligned and can straddle two pages | kernel.md |  |
-| R280 | 355 | `user_va_ok` stays the cheap range/alignment pre-gate; `page_chunks`/`PageChunk`/`USER_PAGE_SIZE` live in `kernel-shared/src/message.rs` | kernel.md |  |
-| R281 | 355 | `ipc/message.rs` carries zero `unsafe` — messages stage through a `[u8; 104]`, so all raw-pointer work is in `mm::uaccess` alone | kernel.md |  |
-| R282 | 355 | `EFAULT` routes to the caller's `x0` via `do_ipc`, and to a blocked receiver's parked `x0` for the deferred flush, setting/clearing `MF_MSGFAILED` | kernel.md |  |
-| R283 | 355 | the `[efault]` and `[efault deliver]` traces are uncounted, so they are stable boot markers unlike the sampled `[ipc {n}]` form | testing-and-markers.md |  |
-| R284 | 355 | `SYS_DIAGCTL` is the servers' debug channel (D2), riding text inline in the payload — `DIAG_TEXT_MAX = 88` bytes from `DIAG_TEXT_OFF = 8` | abi.md |  |
-| R285 | 355 | `do_diagctl` prints `[diag <name>] <text>` where `<name>` is the caller's kernel-known `Proc::name`, never payload data | kernel.md |  |
-| R286 | 355 | diag text is sanitized to printable ASCII so one call is always exactly one line — the `grep -aF` marker contract depends on it | kernel.md |  |
-| R287 | 355 | `server-rt::diag_print` is the client and is called from `sef_startup`, so every SEF server emits `[diag <name>] sef ready` at boot | servers-and-drivers.md |  |
-| R288 | 355 | adding a stub is discouraged — `NR_STUB_PROCS` feeds `FORK_POOL_BASE`, so a fifth stub shifts init's forked children and breaks checked-in markers | testing-and-markers.md |  |
-| R289 | 356 | a granting process keeps its `GrantEntry` table in its own address space and registers `(addr, entries)` with `SYS_SETGRANT` | kernel.md |  |
-| R290 | 356 | `SYS_SAFECOPY` re-reads the entry out of the granter's address space on every call, so a granter revokes by writing its own memory | kernel.md |  |
-| R291 | 356 | `GrantEntry` is a flat `#[repr(C)]` 32-byte struct whose layout is pinned by `offset_of!` asserts, because the kernel decodes it from raw bytes | abi.md |  |
-| R292 | 356 | grant ids pack via `GRANT_SHIFT = 20` into `grant_id`/`grant_idx`/`grant_seq` | abi.md |  |
-| R293 | 356 | `mm::uaccess::copy_between_as` probes both ranges then walks and memcpys per `dual_page_chunks`, all-or-nothing on the destination | kernel.md |  |
-| R294 | 356 | its `Prot::writable` check is load-bearing — a granter may lie about writability, and the HHDM alias is a kernel mapping | kernel.md |  |
-| R295 | 356 | `verify_grant` checks in MINIX's order: `okendpt`, table registered and idx in range, entry reads back, `CPF_USED` + `CPF_VALID`, seq, access, `who_to`, bounds | kernel.md |  |
-| R296 | 356 | a walk miss inside `verify_grant` is hidden as `EPERM`, not `EFAULT`, so a grantee cannot probe the granter's address space | kernel.md |  |
-| R297 | 356 | `CPF_DIRECT` resolves memory to the granter; `CPF_MAGIC` resolves to `who_from` and additionally requires the granter's `Priv::flags & SYS_PROC` | kernel.md |  |
-| R298 | 356 | `CPF_INDIRECT` is a documented `EINVAL` | kernel.md |  |
-| R299 | 356 | `SYS_COPY` is the same engine with no grant — `resolve_target` on both endpoints, `k_call_mask` the only gate, the `do_vmctl` trust stance | kernel.md |  |
-| R300 | 356 | `SYS_SETGRANT` rejects a shared priv slot (`proc_nr != Some(caller)` → `EPERM`) — one table address cannot describe several processes' memory | kernel.md |  |
-| R301 | 356 | both `do_exit` and `do_exec` clear a dedicated slot's grant registration, so a recycled slot cannot inherit a stale table address | kernel.md |  |
-| R302 | 356 | `server-rt::GrantPool<const N>` is a value the server owns — a `main`-frame local, never `init_fresh`'s frame — which keeps `server-rt` unsafe-free | servers-and-drivers.md |  |
-| R303 | 356 | `ensure_registered` compares the pool's live address against the last registered one and re-issues `SYS_SETGRANT` if they differ | servers-and-drivers.md |  |
-| R304 | 356 | byte buffers use `kernel-shared::message::user_range_ok` (no alignment requirement); `user_va_ok` stays right for the 8-aligned grant table | abi.md |  |
-| R305 | 356 | a server holding `SYS_COPY`/`SYS_SAFECOPY` takes the granter from the kernel-stamped `m_source`, never from the payload — the confused-deputy rule | servers-and-drivers.md |  |
-| R306 | 356 | apply that anti-spoof rule to every grant-id-carrying request, as `DS_PUBLISH` already relies on it | servers-and-drivers.md |  |
-| R307 | 356 | grant traces are head-carved at 6 like `do_vmctl`'s, because these are low-rate callers the `[ksys N]` sampler never catches | testing-and-markers.md |  |
-| R308 | 356 | slice 5.2 record: the VFS → PM `PM_GRANT_TEST` demo and its seven denial probes (`grant.deny ok n=7`) keep every validator boot-marked | phase-5-musl-fs.md |  |
-| R309 | 357 | device memory comes from reading `MAIR_EL1`, never writing it — writing byte i retroactively retypes every live mapping using that `AttrIndx` | kernel.md |  |
-| R310 | 357 | `mmu::init_device_attr_idx` runs once from `userland_bootstrap` before any device mapping and scans bytes `1..8` for `0x04` else `0x00` | kernel.md |  |
-| R311 | 357 | only Device-nGnRE and nGnRnE qualify — nGRE would gather two `DR` stores into one lost character and GRE would let a store pass the `FR` poll | kernel.md |  |
-| R312 | 357 | `[mair] device attr_idx=…` is forensic, not a boot marker, because it is firmware-dependent | testing-and-markers.md |  |
-| R313 | 357 | `Prot` carries a third field `device` (plus `Prot::DEVICE_RW`), which is a compile error at every struct literal — that is the point | kernel.md |  |
-| R314 | 357 | `do_vmctl`'s `pt_map` answers `device: false` permanently — D1 rejected a VM-mediated `VMCTL_MAP_PHYS` for Phase 5 | kernel.md |  |
-| R315 | 357 | `pte_prot` decodes `device` statelessly via `pte_attr_idx_of(pte) != ATTR_IDX_NORMAL`, sound because byte 0 is pinned Normal-WB by a `const _` assert | kernel.md |  |
-| R316 | 357 | `map_page_in` asserts the total invariant against `mm::is_usable_pa`: `prot.device` implies not-RAM, and not-device implies RAM | kernel.md |  |
-| R317 | 357 | that lemma is what makes `if !prot.device { free_frame(…) }` sound in all five leaf sweeps | kernel.md |  |
-| R318 | 357 | `free_frame` keeps its loud out-of-range assert — a silent skip would demote a forged-PA or double-free into an untraceable leak | kernel.md |  |
-| R319 | 357 | fork re-maps a device leaf rather than copying it — MMIO is shared, and a `memcpy` through the cacheable HHDM alias would read side-effecting registers | kernel.md |  |
-| R320 | 357 | `mm::uaccess::resolve_copyable` rejects a device leaf as copy source or destination with `EFAULT` | kernel.md |  |
-| R321 | 357 | `userland::device_teardown_selftest` runs unconditionally at boot and asserts both counts — `[devmap] selftest ok freed=0 devs=1` | testing-and-markers.md |  |
-| R322 | 357 | the device VA map lives in `kernel-shared/src/uspace.rs` — `USER_DEVICE_WINDOW_BASE`, `USER_DEVICE_WINDOW_SIZE`, `TTY_UART_VA` — and is not emitted in the C headers | abi.md |  |
-| R323 | 357 | a `const _` on the region bases is not enough: both the mmap bump cursor and the heap's end carry a runtime `region::REGION_LIMIT` check answering `ENOMEM` | servers-and-drivers.md |  |
-| R324 | 357 | the TTY device pre-map is a `nr == TTY_PROC_NR` arm in `load_boot_server`, deliberately not in `load_exec_image`, which `do_exec` shares | kernel.md |  |
-| R325 | 357 | the pre-map needs no TLB maintenance — the AS was just built and never installed in TTBR0, and `switch_ttbr0_with_asid` flushes on first schedule | kernel.md |  |
-| R326 | 357 | `CDEV_RQ_BASE = 0xB00`; `bands_are_in_ascending_numeric_order` enforces where each band goes, and only the ascending order is load-bearing | abi.md |  |
-| R327 | 357 | `CDEV_WRITE {minor, grant_id, len, offset}` has no payload `granter` — the driver takes it from the kernel-stamped `m_source` | abi.md |  |
-| R328 | 357 | a `CDEV_WRITE` reply `m_type` is the byte count, `>= 0`, and `0` is legal | abi.md |  |
-| R329 | 357 | a request longer than `CDEV_MAX_IO = 256` is a short write, not a failure — the client re-sends with `offset` advanced | servers-and-drivers.md |  |
-| R330 | 357 | a driver replies to an unknown `m_type` where DS may drop one, because a driver's clients all SENDREC and a dropped request blocks the caller forever | servers-and-drivers.md |  |
-| R331 | 357 | a negative `SYS_SAFECOPY` result is relayed verbatim — `EPERM` (bad grant) and `EFAULT` (unmapped buffer) are different client bugs | servers-and-drivers.md |  |
-| R332 | 357 | PL011 register offsets are duplicated in `kernel/src/arch/aarch64/uart.rs` and `drivers/tty/src/pl011.rs` and cannot be shared | servers-and-drivers.md |  |
-| R333 | 357 | `drivers/tty` deliberately does not depend on `minixrs-driver-rt`; Phase 6 makes that move plus the `kernel/build.rs` watch entry | servers-and-drivers.md |  |
-| R334 | 357 | DS publish-before-retrieve is not deterministic, so a DS lookup must fall back to `boot_endpoint(…)` and emit a distinguishable diag line | servers-and-drivers.md |  |
-| R335 | 357 | slice 5.3 record: the Device attribute, the `FR.TXFF` poll and LF→CRLF are not observable under TCG — they are proved by construction and assertion | phase-5-musl-fs.md |  |
-| R336 | 359 | `VFS_RQ_BASE = 0x800` with `VFS_WRITE {fd, len, buf}` carrying a raw buffer address, not a grant id, because VFS's client has no grant table | abi.md |  |
-| R337 | 359 | a `VFS_WRITE` reply `m_type` is the byte count, which is what musl's `write()` returns | abi.md |  |
-| R338 | 359 | VFS issues a `CPF_MAGIC` grant naming the caller's buffer with the driver as grantee, so the bytes move in one copy and VFS never touches them | servers-and-drivers.md |  |
-| R339 | 359 | the grant's owner is the kernel-stamped `m_source`, never a payload field, and there must never be a field for it | servers-and-drivers.md |  |
-| R340 | 359 | VFS absorbs short writes — `write_all` re-sends with `offset` advanced over the same grant until the buffer is out | servers-and-drivers.md |  |
-| R341 | 359 | `write_all` clamps `off` with `.min(len)` so an over-reporting driver cannot walk past the buffer, and breaks on `n == 0` rather than spinning | servers-and-drivers.md |  |
-| R342 | 359 | on an error after partial progress `write_all` reports the progress — POSIX, because those bytes really went out | servers-and-drivers.md |  |
-| R343 | 359 | VFS replies `ENOSYS` to an unknown `m_type`, TTY's rule, since its clients all SENDREC | servers-and-drivers.md |  |
-| R344 | 359 | `NR_FDS` is VFS-local, not ABI; fds 0/1/2 are pre-opened to `CDEV_MINOR_CONSOLE` in every row | servers-and-drivers.md |  |
-| R345 | 359 | `resolve_in` takes the fd rows as a borrowed slice precisely so it survives the switch to an `UnsafeCell<[FdRow; N]>` newtype untouched | servers-and-drivers.md |  |
-| R346 | 359 | `user_range_ok` in `do_write` is defence in depth, not the gate — the kernel's page-table walk answers `EFAULT` regardless (D5) | servers-and-drivers.md |  |
-| R347 | 359 | `populate_user_priv`'s `USER_IPC_TO` costs a pair of bits per entry: the reverse reply edge to `USER_PRIV_ID` must be opened explicitly | kernel.md |  |
-| R348 | 359 | init reports through the path under test, so a successful write's count needs its own marker (`vfs.long ok match=1`) beside the tail | testing-and-markers.md |  |
-| R349 | 359 | pure logic lives in `servers/vfs/src/write.rs` — a retry loop's rules for a misbehaving peer are unreachable while the peer works | servers-and-drivers.md |  |
-| R350 | 359 | lifting a loop body into a step function also keeps it Sonar-measured, since `main.rs` is coverage-excluded and a sibling module is not | ci.md |  |
-| R351 | 359 | slice 5.4 record: the generated C header emits `VFS_WRITE` but not its payload offsets, deferred to 5.6's `write()` wrapper | phase-5-musl-fs.md |  |
-| R352 | 361 | `SYS_EXEC` builds the Linux/SysV initial frame on the stack page so musl's crt, `__libc_start_main` and `__init_tls` run unpatched | kernel.md |  |
-| R353 | 361 | the frame's byte layout lives in `kernel-shared/src/execstack.rs` (`build_initial_stack`, pure, zero `unsafe`, host-tested) | abi.md |  |
-| R354 | 361 | `do_exec` stages the frame in a `[u8; INITIAL_STACK_MAX]` kernel-stack buffer and installs it with `copy_to_user_as` — no new copy machinery | kernel.md |  |
-| R355 | 361 | both frame failures — `None` → `E2BIG`, copy error → `ENOMEM` — tear down the fresh image and return before the point of no return | kernel.md |  |
-| R356 | 361 | `elf::load_into` returns `LoadedElf { entry, phdr_va, phnum, phentsize }`, with `phdr_va` from the first PT_LOAD whose file range covers the phdrs | kernel.md |  |
-| R357 | 361 | auxv order is fixed by the caller — `AT_PHDR`, `AT_PHNUM`, `AT_PHENT`, `AT_PAGESZ` — not Linux's incidental order, so traces and tests are deterministic | abi.md |  |
-| R358 | 361 | the `AT_*` values are the Linux/SysV ones and are deliberately not emitted by `gen-c-headers`, since musl defines them itself | abi.md |  |
-| R359 | 361 | `AT_PHDR` needs the `FILEHDR PHDRS` linker-script idiom, or lld's 64 KiB `max-page-size` leaves `e_phoff` in an unmapped prefix | servers-and-drivers.md |  |
-| R360 | 361 | any new exec'able binary that wants `AT_PHDR` must copy that idiom and be re-checked with `llvm-readobj --program-headers` | servers-and-drivers.md |  |
-| R361 | 361 | server `user.ld`s stay unchanged — boot-loaded images keep `sp = SERVER_STACK_VA + PAGE_SIZE` and never read an auxv | servers-and-drivers.md |  |
-| R362 | 361 | `worker`'s `_start` is `#[unsafe(naked)]` with `naked_asm!("mov x0, sp", "b {main}")`, because a prologue could perturb `sp` | servers-and-drivers.md |  |
-| R363 | 361 | the `#[cfg(all(not(test), target_arch = "aarch64"))]` split needs a plain `main(0)` fallback that still calls `main`, or it is dead code under `-D warnings` | servers-and-drivers.md |  |
-| R364 | 361 | key any reap-derived marker on the child's pid (`alloc_pid` never returns 0) — PM parents the stubs to init, so init's first reap is stub D's zombie | testing-and-markers.md |  |
-| R365 | 361 | a marker can be right in one feature config and prove nothing in the other — `--no-default-features` has no stubs, so mutation-test in the config that has them | testing-and-markers.md |  |
-| R366 | 361 | `mproc::handle_kill_in` zombifies a signalled process without touching `exit_status`, so a probe that died before reporting is reaped with status 0 | servers-and-drivers.md |  |
-| R367 | 361 | for any probe reporting through an exit status, encode the pass (`execstack::EXEC_STACK_PROBE_PASS`), never the absence of a failure | testing-and-markers.md |  |
-| R368 | 361 | slice 5.5 record: a bad enough frame faults the probe into VM's SIGSEGV arm, which prints no `!!! EL0 data abort` for the forbidden list to catch | phase-5-musl-fs.md |  |
-| R369 | 363 | the libc is a git submodule at `external/musl` tracking branch `minixrs` of `minixrs/musl-minixrs`, based on tag `v1.2.6` | build-and-boot.md |  |
-| R370 | 363 | the fork's whole delta is `arch/aarch64/syscall_arch.h`, `src/minixrs/`, a brand block in `crt/crt1.c` and `MINIXRS.md` — staying that small is the design goal | build-and-boot.md |  |
-| R371 | 363 | musl globs `src/*/`, so `src/minixrs/` needs no Makefile edit | build-and-boot.md |  |
-| R372 | 363 | every `__syscallN` calls `__minixrs_syscall`, which switches on the Linux number musl still emits, so musl's ~297 call sites stay untouched | build-and-boot.md |  |
-| R373 | 363 | `syscall_ret.c` is untouched because D7's magnitudes all sit inside its `> -4096UL` window | abi.md |  |
-| R374 | 363 | `ioctl` → `-ENOTTY` is load-bearing: it makes `__stdout_write` set `f->lbf = -1`, so stdout is fully buffered and `printf` flushes via `exit()` | build-and-boot.md |  |
-| R375 | 363 | the startup facts that let six syscalls suffice must be re-verified, never assumed, on any musl bump, and are recorded in the fork's `MINIXRS.md` | build-and-boot.md |  |
-| R376 | 363 | the auxv must stay `AT_NULL`-terminated, because `__init_tp` walks `libc.auxv` | abi.md |  |
-| R377 | 363 | `tools/build-musl.sh` builds out-of-tree so the submodule work tree stays pristine — the `c-headers` job asserts a clean `git status` | build-and-boot.md |  |
-| R378 | 363 | `RANLIB` is `llvm-ar s`, because the pinned toolchain ships `llvm-ar` but not `llvm-ranlib` | build-and-boot.md |  |
-| R379 | 363 | `userland/hello` is not a cargo crate — `hello.c` plus `hello.ld` compiled by clang and linked inside `kernel/build.rs`, packed under proc_nr `-1` | build-and-boot.md |  |
-| R380 | 363 | the fallback presence-checks the sysroot `.stamp`, not the submodule, so a fresh clone cannot trigger a multi-minute libc build from a build script | build-and-boot.md |  |
-| R381 | 363 | `worker`'s `ARGV0_NAMES` is the set `{worker, hello}`, because a missing sysroot otherwise prints the forbidden `worker: stack FAIL` | testing-and-markers.md |  |
-| R382 | 363 | boot the fallback config whenever you change the `worker`-as-`hello` substitution — two readings missed this and only running it caught it | testing-and-markers.md |  |
-| R383 | 363 | the binary128 soft-float builtins come from `compiler_builtins` as built by `-Zbuild-std` for `aarch64-unknown-minixrs` — glob the nested target dir, never the sysroot | build-and-boot.md |  |
-| R384 | 363 | `hello.ld` must carry `.init`/`.fini`, `.init_array`/`.fini_array` with bracketing symbols, `.got` and `.data.rel.ro`: an orphan section past the last PT_LOAD is a silent load failure | build-and-boot.md |  |
-| R385 | 363 | the `FILEHDR PHDRS` idiom is mandatory for the musl link because `__init_tls` dereferences `AT_PHDR` | build-and-boot.md |  |
-| R386 | 363 | the 4 KiB exec stack was measured sufficient and was NOT grown, but `fmt_fp`'s VLA (~7.4 KB for `%Lf`) would overflow it and no static frame scan predicts that | build-and-boot.md |  |
-| R387 | 363 | `PM_EXEC` gained a name payload at `PM_EXEC_NAME_OFF`, reusing `EXEC_NAME_LEN`, and PM's `EXEC_TARGET` is gone | abi.md |  |
-| R388 | 363 | init alternates `EXEC_TARGETS` `worker`/`hello` with worker first, and the target is chosen before the fork so both halves of the SENDREC agree | servers-and-drivers.md |  |
-| R389 | 363 | the C milestone marker is `name=hello entry=` with no `target=` slot, because init's fork pool gives `hello` a different slot per feature config | testing-and-markers.md |  |
-| R390 | 363 | ABI freeze (D8): `Message` layout, call numbers, endpoints and errnos change only via a deliberate ABI-bump PR touching both repos | abi.md |  |
-| R391 | 363 | the port branch is force-pushed on rebase, so a fork rebase and the `external/musl` bump must land in the same PR | git-and-prs.md |  |
-| R392 | 363 | slice 5.6 record: the six-syscall set is `writev`/`write` → `VFS_WRITE`, `exit`/`exit_group` → `PM_EXIT`, `set_tid_address` → 1, `ioctl` → `-ENOTTY`, else `-ENOSYS` | phase-5-musl-fs.md |  |
-| R393 | 365 | the MinixFS v3 root image is built at compile time by `tools/mkfs-mfs`, whose library `kernel/build.rs` calls directly as a `[build-dependencies]` path dep | build-and-boot.md |  |
-| R394 | 365 | cargo re-runs a build script when a build-dependency changes, so neither `mkfs-mfs` nor `fs/mfs` needs a `rerun-if-changed` entry | build-and-boot.md |  |
-| R395 | 365 | the image is packed into the MXBI archive as a non-ELF blob under `com::ROOTFS_MODULE_NAME = "rootfs"` with `EXEC_ONLY_PROC_NR` | servers-and-drivers.md |  |
-| R396 | 365 | `BDEV_RQ_BASE = 0xA00` with payload `{minor, grant, len, block}` — no granter field and no grant-offset field | abi.md |  |
-| R397 | 365 | a `BDEV_READ` reply `m_type` is the byte count | abi.md |  |
-| R398 | 365 | an over-long or out-of-range BDEV request is `EINVAL`, not a short read — a filesystem cannot interpret half a block | servers-and-drivers.md |  |
-| R399 | 365 | `EIO` stays reserved for Phase 6's real media errors, where the request was well-formed and the device failed | servers-and-drivers.md |  |
-| R400 | 365 | `BDEV_WRITE` was defined and answered `EROFS`, never `ENOSYS`, so "doesn't know about writes" and "knows and refuses" stay distinguishable | servers-and-drivers.md |  |
-| R401 | 365 | `uspace::RAMDISK_WINDOW_BASE = 0x8000_0000` sits above the device window, so `region::REGION_LIMIT` stays the base of the lowest kernel-owned window | abi.md |  |
-| R402 | 365 | the `assert!(USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE <= RAMDISK_WINDOW_BASE)` is what keeps VM edit-free when a window is added | abi.md |  |
-| R403 | 365 | the ramdisk pre-map is a `nr == MEM_PROC_NR` arm in `load_boot_server`, not `load_exec_image`, with no TLB and no cache maintenance | kernel.md |  |
-| R404 | 365 | every ramdisk mapping step `.expect()`s — a `let _ = map_page_in(..)` would turn a non-advancing loop into a 1-page ramdisk with 255 leaked frames | kernel.md |  |
-| R405 | 365 | `GET_RAMDISK = 64` returns `(va, len)` and is gated on `caller.nr == MEM_PROC_NR` → `EPERM`, since the VA is meaningless elsewhere | kernel.md |  |
-| R406 | 365 | `pack_mxbi` asserts `u32` range on offset and length — the latent unchecked-cast class `checked_add` exists to kill | build-and-boot.md |  |
-| R407 | 365 | the `memory` driver contains no `unsafe` block and never dereferences the mapping — transfers are `sys_safecopy`, the boot self-check is `sys_copy(SELF, …)` | servers-and-drivers.md |  |
-| R408 | 365 | `server-rt::sys_getinfo` is the shared `SYS_GETINFO` helper, with `sef_startup`'s inline `GET_WHOAMI` refactored onto it | servers-and-drivers.md |  |
-| R409 | 365 | the image is a fixed `ROOTFS_IMAGE_BLOCKS = 256`, never content-sized, or every size-derived marker becomes config-dependent; oversizing is a build failure | build-and-boot.md |  |
-| R410 | 365 | `/etc/pattern` at 40 KiB is mandatory, because it is what forces the single-indirect arm in every configuration | servers-and-drivers.md |  |
-| R411 | 365 | `MEM`'s init check is device-level, not format-level — a block driver must not depend on the filesystem format | servers-and-drivers.md |  |
-| R412 | 365 | mkfs writes a 32-byte image header into block 0's boot block (bytes `0..1024`, which MFS never reads) plus a 32-byte tail label, and MEM verifies both | servers-and-drivers.md |  |
-| R413 | 365 | that header ABI lives in `kernel-shared::rootfs`, because mkfs writes it and MEM and VFS read it and none may depend on the others | abi.md |  |
-| R414 | 365 | the tail label is not decoration — a copy loop that failed to advance passes every header check and only `ramdisk FAIL tail label` moves | testing-and-markers.md |  |
-| R415 | 365 | format-level facts are verified by a client through a real `BDEV_READ` round trip, not by the driver | servers-and-drivers.md |  |
-| R416 | 365 | `fs/mfs`'s read path is I/O-free by construction — every reader takes bytes the caller already fetched, which is what makes it host-testable | servers-and-drivers.md |  |
-| R417 | 365 | `zone_for_offset` distinguishes a `Hole` (reads as zeroes) from `OutOfRange` (past the single-indirect span) — explicit, never silent zeroes | servers-and-drivers.md |  |
-| R418 | 365 | VFS's boot demo runs last in `main`'s prologue so a hang localizes — do not tidy the prologue into alphabetical order | servers-and-drivers.md |  |
-| R419 | 365 | a granted demo buffer is a 32-byte local, not a `.rodata` static and not a whole block — do not grow VFS's one-page stack for a demo | servers-and-drivers.md |  |
-| R420 | 365 | `module_by_name` is a namespace shared by ELFs and blobs, so a path→module resolution must not be able to name `rootfs` | servers-and-drivers.md |  |
-| R421 | 365 | slice 5.7 record: double-indirect is justified out arithmetically — `7 + 1024` zones is 4.03 MiB, which is also why the VA window is 4 MiB | phase-5-musl-fs.md |  |
-| R422 | 367 | the SDK flavor is one command: `clang --target=aarch64-unknown-minixrs hello.c -o hello`, with the patched driver supplying `-static` and `--image-base=0x100000` | build-and-boot.md |  |
-| R423 | 367 | flavor selection is three-way `HelloFlavor::{Sdk, Musl, Worker}`, and `Musl` is `qemu-smoke`'s real dependency rather than a fallback | build-and-boot.md |  |
-| R424 | 367 | once an SDK is usable every failure is a `panic!`, never a demotion, because the boot markers are byte-identical across flavors | build-and-boot.md |  |
-| R425 | 367 | the panic carries prefix, stamp, a `clang -###` reproduce line and the `MINIXRS_SDK=/nonexistent` escape hatch | build-and-boot.md |  |
-| R426 | 367 | `usable_sdk` probes exactly three files — `bin/clang`, `sysroot/.stamp`, `sysroot/usr/lib/libc.a` — and deliberately not the crt objects or resource dir | build-and-boot.md |  |
-| R427 | 367 | nothing here may hard-code the clang resource-dir version `22`; a sysroot missing the driver-named files is a broken SDK that must fail loudly | build-and-boot.md |  |
-| R428 | 367 | both stamps are watched with `rerun-if-changed` unconditionally, because a declared-but-missing path is what makes cargo notice a stamp appearing | build-and-boot.md |  |
-| R429 | 367 | `clang_command` scrubs `CPATH`, `*_INCLUDE_PATH`, `LIBRARY_PATH` and `SDKROOT` from every clang site, including the `.S` loop | build-and-boot.md |  |
-| R430 | 367 | `-nostdinc` does not suppress those env-derived include paths, which clang folds ahead of the sysroot — a foreign `errno.h` would shadow musl's | build-and-boot.md |  |
-| R431 | 367 | do not "fix" the surviving `/usr/local/include` with `-nostdlibinc`, which would drop the sysroot too | build-and-boot.md |  |
-| R432 | 367 | there is no pack-time ELF/loader gate — an `--image-base` regression is already loud, and a gate would duplicate a private kernel const | build-and-boot.md |  |
-| R433 | 367 | loader rules stay tooling's `verify/check-image.sh`, run by hand | build-and-boot.md |  |
-| R434 | 367 | both flavors share `target/hello/`, so read it only after a successful build of the flavor you mean | build-and-boot.md |  |
-| R435 | 367 | the SDK links its own musl and the stamp's `musl=<sha>` is a merge commit, so an equality check is impossible — re-run tooling's `build-sysroot.sh` after a fork rebase | ci.md |  |
-| R436 | 367 | the stamp's `minixrs=<sha>` is a snapshot of the installed headers, tolerable only under D8, so any `kernel-shared` ABI change requires re-running `build-sysroot.sh` | ci.md |  |
-| R437 | 367 | P3c record: SDK `hello` measures 46,664 B over 4 PT_LOADs against musl's 200,152 B over 3, both entry `0x101000` and both a megabyte clear of `SERVER_STACK_VA` | phase-5-musl-fs.md |  |
-| R438 | 369 | `FS_RQ_BASE = 0x900` was the last reserved slot, so `0x700..0xC00` is fully allocated and a tenth band needs a home outside that span | abi.md |  |
-| R439 | 369 | the FS request set is `FS_READSUPER` + `FS_LOOKUP` + `FS_READ` and nothing else — a request without a consumer is better absent than stubbed | abi.md |  |
-| R440 | 369 | MFS keeps no per-open state, so there is no PUTNODE and `VFS_CLOSE` sends the FS nothing | servers-and-drivers.md |  |
-| R441 | 369 | an FS path travels inline at `FS_PATH_OFF`, NUL-padded to `FS_PATH_MAX = 64`, so the longest path is 63 bytes | abi.md |  |
-| R442 | 369 | a path field with no NUL is `ENAMETOOLONG`, never a truncation that could resolve to another file | servers-and-drivers.md |  |
-| R443 | 369 | `FS_READ` data travels by grant with no granter field and no grant-offset field — VFS issues a fresh grant over exactly the round's bytes | abi.md |  |
-| R444 | 369 | an over-long `FS_READ` is clamped — a short read, not `EINVAL` — because the client is VFS, whose job is hiding staging from POSIX | servers-and-drivers.md |  |
-| R445 | 369 | an `FS_READ` is two copies, not one: device → MFS's block buffer → the granted buffer, because a read is rarely block-aligned and a hole has no device block | servers-and-drivers.md |  |
-| R446 | 369 | `fs/mfs` puts every line with a decision in it in the lib, because `[[bin]] required-features = ["server"]` removes `main.rs` from every CI job | servers-and-drivers.md |  |
-| R447 | 369 | `ci.yml` carries an extra `cargo clippy -p minixrs-mfs --features server` step for that reason | ci.md |  |
-| R448 | 369 | `kernel/build.rs` threads `--features server` through the nested MFS build the way it threads PM's `--no-default-features` | build-and-boot.md |  |
-| R449 | 369 | `proto.rs` re-derives its own `rd_i32`/`rd_u64` because `server-rt` is an optional dep — the trade `userland/init` already makes | servers-and-drivers.md |  |
-| R450 | 369 | MFS's 4 KiB block buffer is a `.bss` static, not a `main`-frame local, because a server stack is exactly one page | servers-and-drivers.md |  |
-| R451 | 369 | that does not contradict TTY's stage-in-`main`'s-frame rule: the load-bearing half is that the buffer outlives every call that names it | servers-and-drivers.md |  |
-| R452 | 369 | the block buffer is reached only through the `Blocks` capability token, whose `read(&mut self)` makes holding a block across the next fetch a borrow-check error | servers-and-drivers.md |  |
-| R453 | 369 | `uspace::SERVER_STACK_BYTES` exists to carry `fs/mfs`'s `const _` stack tripwire, and `userland.rs` const-asserts its own stack mapping against it | abi.md |  |
-| R454 | 369 | a `BDEV_READ` failure becomes `EIO` because MFS's client addressed a file, while a `SYS_SAFECOPY` failure against VFS's grant is relayed verbatim | servers-and-drivers.md |  |
-| R455 | 369 | MFS is degraded, never fatal and never a panic past `sef_startup` — a failed mount means `ENODEV` to everything | servers-and-drivers.md |  |
-| R456 | 369 | every device-derived loop bound has a cap (`MAX_DIR_BYTES`, `size < 0 → EIO`, `zone_ok` before every read), or a corrupt size spins MFS | servers-and-drivers.md |  |
-| R457 | 369 | `VFS_OPEN 0x801` / `VFS_READ 0x802` / `VFS_CLOSE 0x803`, and `VFS_READ` reuses `VFS_WRITE`'s payload verbatim | abi.md |  |
-| R458 | 369 | `rw.rs`'s `advance` rules are direction-agnostic — a peer reporting 0 is EOF — with `open.rs` holding what differs | servers-and-drivers.md |  |
-| R459 | 369 | VFS reads the path with `sys_copy(caller_e, …)`: `SYS_COPY` has no per-target authorization, so a payload-supplied source would let any client read any process | servers-and-drivers.md |  |
-| R460 | 369 | VFS does not loop on read — POSIX allows a short `read()` — while it loops on write because it may not | servers-and-drivers.md |  |
-| R461 | 369 | `Fd::File { ino, pos }` caches no size; EOF is `n == 0`, one source of truth | servers-and-drivers.md |  |
-| R462 | 369 | `alloc_in` scans upwards from fd 3, because a `.rposition()` returns the last slot and passes every "did I get a descriptor" check | servers-and-drivers.md |  |
-| R463 | 369 | the `UnsafeCell<[FdRow; N]>` rule is never hold a table borrow across a SENDREC; `Fd` is `Copy` so the borrow dies at the destructuring `let` | servers-and-drivers.md |  |
-| R464 | 369 | `do_write` answers `Ok(Fd::File { .. }) => EROFS` — defined and refused rather than folded into the unused case | servers-and-drivers.md |  |
-| R465 | 369 | DS ordering is a chain `ds < tty < memory < mfs < vfs`, satisfied only by array position in `kernel/build.rs`, with `boot_endpoint` fallbacks on both new lookups | servers-and-drivers.md |  |
-| R466 | 369 | `kernel-shared::rootfs` holds the image's contents so MFS's read proof is a check rather than a transcription | abi.md |  |
-| R467 | 369 | spell every unknown-request probe band-relative (`VFS_RQ_BASE + NR_VFS_MSGS as i32`) — a literal silently becomes a real request when the band grows | testing-and-markers.md |  |
-| R468 | 369 | slice 5.8 record: VFS's `bdev_demo`/`bdev_denials` were retired to `[diag mfs]` once MFS became the real BDEV client | phase-5-musl-fs.md |  |
-| R469 | 370 | `SYS_EXEC` carries a source selector at `EXEC_SRC_OFF` where 0 is invalid — the `SAFECOPY_*` convention — plus a grant triple | abi.md |  |
-| R470 | 370 | payload `4..20` stays `argv[0]` and the proc name in both exec forms; only where the bytes come from changes | abi.md |  |
-| R471 | 370 | `boot_image::elf::ElfSource` is an enum, not a `dyn` trait, so there is no vtable dispatch per header field | kernel.md |  |
-| R472 | 370 | the granted arm delegates to `copy_from_user_as`, so there is no new copy machinery and the per-page segment copy stays a single copy | kernel.md |  |
-| R473 | 370 | the exec grant is validated by `do_safecopy::verify_grant`, widened to `pub(super)`, not by a second copy of its eleven checks | kernel.md |  |
-| R474 | 370 | the granted read completes before the point of no return, so a buffer that is not an ELF leaves the target on its old image — `load_exec_image`'s invariant | kernel.md |  |
-| R475 | 370 | `load_exec_image` returns `Result<_, i32>`: `Map(OutOfMemory)` → `ENOMEM`, `Source` → `EFAULT`, else `ENOEXEC` — no more folding everything into `ENOMEM` | kernel.md |  |
-| R476 | 370 | `kernel/build.rs`'s pack-time `scan_brand` cannot reach a file, so the runtime scan is the only gate for a file-sourced ELF | kernel.md |  |
-| R477 | 370 | `brand::scan_note_segment` is split out pure and host-tested, and the loader stages each `PT_NOTE` through a bounded buffer — a brand past `MAX_NOTE_BYTES` is not found | abi.md |  |
-| R478 | 370 | `kernel-shared::execimage` carries `MAX_PHNUM`, a cumulative `PageBudget` and `segment_end` — the standing rule for predicates `kernel/src/` cannot test | abi.md |  |
-| R479 | 370 | `PageBudget` is cumulative because per-segment checking misses a hundred reasonable-looking segments | abi.md |  |
-| R480 | 370 | the boot-archive `hello` module is dropped, and `name=hello src=grant entry=` keeps `name=` and `src=` adjacent so one substring proves program and form | testing-and-markers.md |  |
-| R481 | 370 | `worker` stays boot-embedded as the name-form regression | testing-and-markers.md |  |
-| R482 | 370 | a leading `/` is `PM_EXEC`'s only discriminator — one field, because two can disagree | servers-and-drivers.md |  |
-| R483 | 370 | module names and paths are disjoint namespaces, so nothing resolving a path can name the `rootfs` blob | servers-and-drivers.md |  |
-| R484 | 370 | `argv[0]` is the path's basename, never the path, which is what left `EXEC_NAME_LEN`, `PROC_NAME_LEN` and `INITIAL_STACK_MAX` untouched | abi.md |  |
-| R485 | 370 | `server-rt::rd_name` cannot express a NUL-padded field's rules, so PM's `path::parse` takes the payload's whole fixed-width field as raw bytes | servers-and-drivers.md |  |
-| R486 | 370 | apply the raw-bytes rule to every fixed-width inline field — `ENAMETOOLONG` and `EINVAL` are different answers | servers-and-drivers.md |  |
-| R487 | 370 | VFS's 256 KiB staging buffer is a `.bss` static but needs no capability token and no borrow discipline, since VFS never dereferences the staged bytes | servers-and-drivers.md |  |
-| R488 | 370 | nothing releases the `VFS_EXEC_STAGE` grant: re-granting per request bumps the sequence and kills the previous id, and PM serialises exec | servers-and-drivers.md |  |
-| R489 | 370 | `VFS_EXEC_STAGE` carries the path inline, because its client is PM, which already holds it inline | abi.md |  |
-| R490 | 370 | a short stream to `VFS_EXEC_STAGE` is `EIO`, not a short stage — the one place in VFS where a partial transfer is not a legitimate answer | servers-and-drivers.md |  |
-| R491 | 370 | the `fd.rs` fd-table debt comment is re-pointed: the first thing that will force it is a program that opens a file after being exec'd | servers-and-drivers.md |  |
-| R492 | 370 | slice 5.9 record: init's `exec_denials` battery is safe because a failed exec leaves the caller on its old image, so the battery is the rollback proof | phase-5-musl-fs.md |  |
-| R493 | 420 | `FS_WRITE = FS_RQ_BASE + 3` reuses `FS_READ`'s payload field for field, so one wire codec and one clamp serve both directions | abi.md |  |
-| R494 | 420 | only the grant's direction bit differs — `CPF_READ` for a write, `CPF_WRITE` for a read — checked by the kernel's `verify_grant` and re-implemented by no server | servers-and-drivers.md |  |
-| R495 | 420 | a short `FS_WRITE` is normal, and that is not an inconsistency with `BDEV_READ`'s refuse-or-nothing: the clients differ | servers-and-drivers.md |  |
-| R496 | 420 | `FS_WRITE` still has no granter field and no grant-offset field, so VFS re-grants per round over exactly that round's bytes | abi.md |  |
-| R497 | 420 | do not add an offset field to `FS_WRITE` to buy the CDEV shape — re-granting is what keeps the confused-deputy surface at zero | abi.md |  |
-| R498 | 434 | MFS's single 4 KiB block buffer fixes `do_write`'s step order: read inode, clamp, compute grown size, place the zone, read-modify-write the block, write the inode back | servers-and-drivers.md |  |
-| R499 | 434 | nothing may hold a block across the next fetch, so every intermediate is a `Copy` scalar and `place_zone` must finish with the buffer free | servers-and-drivers.md |  |
-| R500 | 439 | `Blocks`' standing grant to the `memory` driver is `CPF_READ` + `CPF_WRITE` — one buffer, both directions, one static address, so `ensure_registered` never re-fires | servers-and-drivers.md |  |
-| R501 | 441 | widening those flags does not widen what any one call may do, but it re-arms anything using `blocks.gid` as a deliberately-insufficient grant | servers-and-drivers.md |  |
-| R502 | 443 | a denial probe relying on insufficient flags needs its own `CPF_WRITE`-only grant aimed at a spare block (`START_BLOCK = 2`) in the same change | testing-and-markers.md |  |
-| R503 | 447 | in `place_zone` a zone's bitmap bit is set before its number is stored, so a mid-write failure leaks a zone rather than letting two files share one | servers-and-drivers.md |  |
-| R504 | 450 | the inode write-back is keyed on "a zone was assigned OR the size grew", never on size alone — filling a hole assigns `zone[i]` without moving `size` | servers-and-drivers.md |  |
-| R505 | 454 | 5.10a record: dropping `dirty` from the write-back condition moved no marker — it has no boot probe, so treat it as unproven, not covered | phase-5-musl-fs.md |  |
-| R506 | 459 | `mkfs-mfs` ships `/etc/scratch` empty, so every zone the file ends up with, indirect block included, was allocated at runtime | servers-and-drivers.md |  |
-| R507 | 461 | init writes `ROOTFS_SCRATCH_LEN` = 32 KiB, closes, re-opens with a fresh `FS_LOOKUP`, and compares every byte | testing-and-markers.md |  |
-| R508 | 465 | `fs.write ok n=32768 v=32768` reports the write path's count and the verified count separately, so they fail independently | testing-and-markers.md |  |
-| R509 | 466 | verify the whole file, not windows — there is no `lseek`, and the windowed version left offsets 4096..28671 read but never compared | testing-and-markers.md |  |
-| R510 | 470 | both marker numbers are literals pinned to the constant by a `const _`, because init cannot format an integer | testing-and-markers.md |  |
-| R511 | 472 | 5.10a record: `open_denials`' `write-file` probe became a successful overwrite of `/etc/motd` the moment the write path became real | phase-5-musl-fs.md |  |
-| R512 | 475 | retire a probe by moving its count (`open.deny ok n=8` → `n=7`) so the retirement is a visible diff rather than a deletion nobody reviews | testing-and-markers.md |  |
-| R513 | 477 | write every denial probe so that a growing capability makes it fail loudly, not pass vacuously | testing-and-markers.md |  |
-| R514 | 478 | never aim a "must be refused" probe at a file or block whose accidental write would destroy something | testing-and-markers.md |  |
-| R515 | 481 | `FS_CREATE = FS_RQ_BASE + 4` and `FS_TRUNC = FS_RQ_BASE + 5`, with `FS_CREATE` reusing `FS_LOOKUP`'s wire codec verbatim, request and reply alike | abi.md |  |
-| R516 | 485 | `VFS_OPEN` gained `VFS_FLAGS_OFF` (an i32 of `fcntl` values) without moving `NR_VFS_MSGS` — a new field on an existing request, not a new request | abi.md |  |
-| R517 | 486 | `O_CREAT` on a lookup miss dispatches to `FS_CREATE`; `O_TRUNC` on a lookup hit dispatches to `FS_TRUNC` | servers-and-drivers.md |  |
-| R518 | 487 | `O_CREAT` with `O_TRUNC` on a miss takes the create arm and stops, because a fresh file is already empty | servers-and-drivers.md |  |
-| R519 | 488 | an `FS_TRUNC` runs before the descriptor is installed, so a failure never leaves a descriptor onto a half-truncated file | servers-and-drivers.md |  |
-| R520 | 491 | `do_write`'s create path copies the client's bytes into a second 4 KiB `.bss` staging buffer before anything is allocated | servers-and-drivers.md |  |
-| R521 | 493 | clearing the bitmap bit on `do_write`'s error path would be wrong for an indirect slot whose block already existed — freeing the bit hands one zone to two files | servers-and-drivers.md |  |
-| R522 | 498 | `find_free_slot` must let `Occupied` beat `Free` across every block of a directory, scanning every block for the name before reusing a free slot | servers-and-drivers.md |  |
-| R523 | 503 | 5.10b record: reversing `do_trunc`'s free-before-write-back order and inserting the dirent before `write_inode` both move no marker — named rather than omitted | phase-5-musl-fs.md |  |
-| R524 | 508 | `bitmap_clear`'s off-by-one moves no boot marker but is caught by two host tests in `fs/mfs/src/write.rs` — run `cargo test` under a mutation, not just a boot | testing-and-markers.md |  |
-| R525 | 511 | `/full` and `/etc/holey` exist because a full directory and a pre-existing hole below EOF are otherwise unreachable in both boot configurations | testing-and-markers.md |  |
-| R526 | 517 | a denial probe's flag must be spelled relative to `O_KNOWN` (`fcntl::O_UNKNOWN_BIT`), not as a literal, so a flag becoming real makes the probe fail loudly | testing-and-markers.md |  |
-| R527 | 521 | 5.10b record: the boot budget moved 240 s → 600 s on a 26.90% → 61.61% marker jump measured on the `musl` flavour; the 256-probe leak battery dominates | phase-5-musl-fs.md |  |
-| R528 | 526 | `MINIXRS_SDK` does not persist across separate shell invocations, so check the embedded `hello` size rather than trusting the build warning | build-and-boot.md |  |
-| R529 | 530 | 5.10b record: the image went to 128 inodes and `mkfs-mfs` learned sparse files via `Manifest::add_sparse` | phase-5-musl-fs.md |  |
-| R530 | 531 | `kernel/build.rs` asserts free-inode headroom against the built image beside the existing free-zone assert | build-and-boot.md |  |
-| R531 | 534 | `CDEV_READ = CDEV_RQ_BASE + 1` is `CDEV_WRITE`'s payload with the copy reversed — the grant carries `CPF_WRITE` and the driver pushes with `SAFECOPY_TO` | abi.md |  |
-| R532 | 536 | for `CDEV_READ`, `0` is EOF and a short read is legal, so VFS sends one request and never loops — the `FS_READ` stance | servers-and-drivers.md |  |
-| R533 | 539 | `/dev/null` and `/dev/zero` are CDEV minors 3 and 5 of the memory driver, MINIX 3's `NULL_DEV`/`ZERO_DEV` | abi.md |  |
-| R534 | 540 | minors are a per-driver namespace — the same driver's ramdisk is BDEV minor 0, and nothing asserts `CDEV_MINOR_*` against `BDEV_MINOR_*` | abi.md |  |
-| R535 | 542 | the memory driver never clamps, because `CDEV_MAX_IO` protects TTY's stack staging buffer and there is no staging here | servers-and-drivers.md |  |
-| R536 | 543 | a null or zero write answers the whole count with no copy at all, so an unmapped buffer succeeds — never aim a `bad-buf` probe at `/dev/null` | testing-and-markers.md |  |
-| R537 | 545 | a zero read fills the whole request from a 256-byte static in `CDEV_MAX_IO` steps, reporting partial progress on a mid-way failure | servers-and-drivers.md |  |
-| R538 | 547 | the four-field CDEV parse lives in `server-rt::cdev` now that two drivers decode it; validation stays per driver | servers-and-drivers.md |  |
-| R539 | 548 | `Fd::CharDev { dev: CharDriver, minor }` names its driver with an enum, not an `Endpoint`, because `DEFAULT_ROW` is a `const` | servers-and-drivers.md |  |
-| R540 | 549 | `servers/vfs/src/dev.rs` is a three-row device-node table consulted after the path copy and before the mount, since a device open needs no filesystem | servers-and-drivers.md |  |
-| R541 | 551 | on a device-node hit `O_CREAT`/`O_TRUNC` are ignored, the match is exact bytes, and `/dev/other` falls through to MFS's `ENOENT` | servers-and-drivers.md |  |
-| R542 | 552 | a console `read()` is a real `CDEV_READ` to TTY, answered `ENOSYS` by its unknown-request arm until Phase 6 adds one TTY arm and touches VFS not at all | servers-and-drivers.md |  |
-| R543 | 556 | the memory driver's validator is probed from VFS's prologue as `mem.deny ok n=5`, last, after `fs.deny` | testing-and-markers.md |  |
-| R544 | 558 | init's `dev.console ok` is written through the `/dev/console` descriptor, never fd 1 — that is the only thing that proves the table row points at TTY | testing-and-markers.md |  |
-| R545 | 560 | device paths are `callnr::DEV_*_PATH` so init and VFS cannot drift | abi.md |  |
-| R546 | 537 | 5.11 record: the 5.3 plan text saying 5.11 would be "minors, not requests" was wrong for reading zero — `CDEV_READ` exists; four copies corrected | phase-5-musl-fs.md |  |
-| R547 | 565 | canonical docs are an mdBook in `book/` with content under `book/src/` and the TOC in `book/src/SUMMARY.md` | docs-and-workflow.md |  |
-| R548 | 566 | the book is published to GitHub Pages on push to `main` via `.github/workflows/docs.yml`, path-filtered to `book/**`, mdBook pinned to 0.5.3 | docs-and-workflow.md |  |
-| R549 | 567 | the Pages actions are SHA-pinned like `ci.yml` | docs-and-workflow.md |  |
-| R550 | 568 | write new documentation in `book/`, derived from source — the `docs/*.md` files are legacy bootstrap notes being retired | docs-and-workflow.md |  |
-| R551 | 569 | the planning tree is the exception and stays: `docs/plan.md` is the lean live tracker and `docs/plans/` holds the per-phase slice histories | docs-and-workflow.md |  |
-| R552 | 574 | read `docs/plans/phase-5-musl-fs.md` (decisions D1–D13, slices 5.0–5.11) before starting any Phase 5 slice | docs-and-workflow.md |  |
-| R553 | 575 | build the book locally with `mdbook build book`; the output `book/book/` is gitignored | docs-and-workflow.md |  |
-| R554 | 578 | to install mdBook or preview the book locally, use the `mdbook-preview` skill | docs-and-workflow.md |  |
-| R555 | 580 | slices are built with the superpowers skills: `brainstorming`, then `writing-plans`, then `subagent-driven-development` | docs-and-workflow.md |  |
-| R556 | 583 | per-slice design and plan documents land in `docs/superpowers/specs/` and `docs/superpowers/plans/`, named `YYYY-MM-DD-<topic>-{design,plan}.md` | docs-and-workflow.md |  |
-| R557 | 584 | the superpowers tree is deliberately narrow: `book/` stays canonical for how the system works and `docs/plan.md` + `docs/plans/` for slice status | docs-and-workflow.md |  |
-| R558 | 587 | the phase tracker links to the spec by relative path rather than restating it, or the two drift and the tracker is the one people read | docs-and-workflow.md |  |
-| R559 | 592 | give a fresh reviewer the diff as a file and ask it to verify arithmetic by hand rather than confirming that tests exist | docs-and-workflow.md |  |
-| R560 | 594 | run the whole-branch review against `book/` — every task in a subagent run sees one crate, so nobody re-reads the published docs | docs-and-workflow.md |  |
-| R561 | 596 | `docs.yml` is path-filtered to `book/**`, so a slice that forgets the book ships a Pages site contradicting its own code, silently and indefinitely | docs-and-workflow.md |  |
-| R562 | 600 | the dominant defect class in a subagent-driven slice is a doc comment or test that a LATER TASK IN THE SAME BRANCH falsified | docs-and-workflow.md |  |
-| R563 | 609 | make it a whole-branch step: grep the touched crates for every `unreachable`, `nothing reaches this`, `there is no X yet` and `until slice N` claim | docs-and-workflow.md |  |
-| R564 | 611 | grep too for every `assert_eq!(fields.len(), N)` or similar count-the-fields tripwire and check each against what the branch actually added | docs-and-workflow.md |  |
-| R565 | 612 | a tripwire the adding branch does not grow is worse than none, because it reads as coverage | docs-and-workflow.md |  |
-| R566 | 615 | the same sweep is owed by a review-fix round, and a rename or moved path is its loudest trigger | docs-and-workflow.md |  |
-| R567 | 617 | the copies living in `book/`, `tests/qemu-boot.expected` and `docs/plans/` are exactly the ones nobody looks at | docs-and-workflow.md |  |
-| R568 | 621 | run `grep -rn '<old name>' --include='*.rs' --include='*.md' .` before committing, every time something is renamed or relocated | docs-and-workflow.md |  |
-| R569 | 624 | a review fix that rewords a claim owes the same sweep as a rename — grep the phrase across `tests/ book/ docs/ CLAUDE.md` before committing | docs-and-workflow.md |  |
-| R570 | 627 | read every `book/` chapter a slice touches end to end once, not diff-wise — 5.11's remaining defects were self-contradictions inside one chapter | docs-and-workflow.md |  |
-| R571 | 631 | `docs/plan.md` and `docs/plans/*` track status with three markers: `◀ next`, `◀ ready (branch ..., pending merge)`, `✓ shipped (PR #N, merged YYYY-MM-DD)` | docs-and-workflow.md |  |
-| R572 | 631 | flip the previous slice forward and slide `◀ next` ahead in both `plan.md`'s summary line and the corresponding `docs/plans/` detail file | docs-and-workflow.md |  |
-| R573 | 631 | when opening a new slice PR, reconcile older `◀ ready` markers against `git log` — stale "pending merge" labels accumulate otherwise | docs-and-workflow.md |  |
-| R574 | 633 | mutation tests apply, observe the named marker move, and revert — against an uncommitted working tree | testing-and-markers.md |  |
-| R575 | 633 | never revert a mutation with `git checkout <file>`: copy the files to the scratchpad first, restore from there, then `diff -q` each back | testing-and-markers.md |  |
-| R576 | 633 | prove nothing leaked into the PR with `grep -rn MUTATION` | testing-and-markers.md |  |
-| R577 | 633 | a mutation that fails to compile is indistinguishable from one that worked — `grep -a 'error\[E' <log>` or confirm unrelated markers still PASS before recording | testing-and-markers.md |  |
-| R578 | 633 | iterate and mutation-test in the `--no-default-features` config, judging the run by grepping the specific marker rather than the script's overall verdict | testing-and-markers.md |  |
-| R579 | 633 | not every mutation moves its predicted marker: reordering MXBI packing does not reliably break a DS lookup, since publish-before-retrieve is scheduler-dependent | testing-and-markers.md |  |
-| R580 | 633 | to exercise a DS fallback branch, remove the peer entirely or break the key — breaking MFS's `"memory"` key gave `bdev.ds FAIL rc=-3 fallback=3` | testing-and-markers.md |  |
-| R581 | 633 | some correct invariants have no mutation that moves anything — the honest record says so rather than omitting the row | testing-and-markers.md |  |
-| R582 | 633 | before recording a row as uncovered, run `cargo test` under the mutation too, not just a boot | testing-and-markers.md |  |
-| R583 | 633 | a guard's mutation moves the marker of the probe that exists for that guard, not one on a healthy path — 5.8's `!node.is_dir()` moved `fs.deny FAIL not-dir` | testing-and-markers.md |  |
-| R584 | 633 | never copy a count into a marker from a plan — recompute it from the constant (5.8's plan said `n=30` for a 31-byte `ROOTFS_MOTD`) | testing-and-markers.md |  |
-| R585 | 633 | the scratchpad snapshot must cover the files a slice adds, not just the ones it edits: `git checkout -- <untracked file>` errors rather than restoring | testing-and-markers.md |  |
-| R586 | 633 | let the final `grep -rn MUTATION` sweep, never the restore command's exit status, be what proves the tree clean | testing-and-markers.md |  |
-| R587 | 633 | IDE diagnostics appearing mid-run are usually residue of a mutated file — trust `cargo clippy … -D warnings` on the committed tree | testing-and-markers.md |  |
-| R588 | 633 | the boot-ratio `git checkout --detach <merge-base>` needs a clean tree: commit the marker edits first, detach, boot, then check out the branch again | testing-and-markers.md |  |
-| R589 | 633 | stage by explicit path — `git add $(git diff --name-only)` sweeps in a locally modified `.claude/settings.json` | git-and-prs.md |  |
-| R590 | 637 | code review happens in a live Hunk diff session driven with `hunk session …` — never `hunk diff`/`hunk show` directly, the TUI is the user's | docs-and-workflow.md |  |
-| R591 | 638 | the `hunk-review` skill at `hunk skill path hunk-review` has the full CLI | docs-and-workflow.md |  |
-| R592 | 641 | open every session with `--experimental` (`hunk diff --experimental origin/main...HEAD`) so notes can carry STML | docs-and-workflow.md |  |
-| R593 | 642 | a session without `stml` in `hunk session context --json`'s `experimentalFeatures` rejects markup and silently falls back to plain summaries | docs-and-workflow.md |  |
-| R594 | 644 | author notes in STML, not plain text — `hunk session comment apply … --stdin` with a `markup` field per item and `--summary` as a real one-line fallback | docs-and-workflow.md |  |
-| R595 | 645 | read `hunk markup guide` first and preview at the session's `noteMarkupWidth` with `hunk markup render - --width N` | docs-and-workflow.md |  |
-| R596 | 646 | `<code>` is a block tag — identifiers inline go in `<c fg="accent">…</c>`, and `&harr;` is not an entity, use the literal ↔ | docs-and-workflow.md |  |
-| R597 | 647 | a useful note shape is a severity `<badge>` plus bold title, a rounded `why` box, a rounded `fix` box, and a dim `see also` line | docs-and-workflow.md |  |
-| R598 | 649 | PR review comments get mirrored into the session as one `comment apply` batch, one note per thread anchored at the thread's `newLine`, `author` set to the reviewer | docs-and-workflow.md |  |
+| R115 | 308 | update the `2025-2026` copyright year as needed | rust-style.md |  |
+| R116 | 309 | the kernel ships `--release` only, so `debug_assert!` is compiled out | kernel.md |  |
+| R117 | 309 | use a hard `assert!` for invariants whose violation would silently corrupt; reserve `debug_assert!` for cheap can't-happen documentation | kernel.md |  |
+| R118 | 310 | offset/length arithmetic in `server-rt` and in any `servers/`, `drivers/`, `fs/`, `userland/` crate must use `checked_add`, not `+` | rust-style.md |  |
+| R119 | 310 | `[profile.release]` sets `overflow-checks = false`, so `off + 4` wraps in the shipped binary while panicking under `cargo test` | rust-style.md |  |
+| R120 | 310 | give every new payload accessor a `usize::MAX` unit test — `fs/mfs/src/proto.rs` shipped `off + 4` and only that test caught it | rust-style.md |  |
+| R121 | 311 | kernel `unsafe` blocks require a `// SAFETY:` comment documenting the invariant | kernel.md |  |
+| R122 | 312 | IPC linked lists use `Option<ProcNr>` indices into static arrays, not raw pointers | kernel.md |  |
+| R123 | 313 | `Message` types are defined in `kernel-shared` and shared across all crates | abi.md |  |
+| R124 | 314 | assembly is confined to `.S` files assembled via the `cc` crate in `build.rs`; `core::arch::asm!` only for single-instruction operations | kernel.md |  |
+| R125 | 315 | new `.S` files must be added to `kernel/build.rs`'s `sources` array | kernel.md |  |
+| R126 | 315 | offset blocks (`.equ REGS_*_OFFSET …`) are duplicated per-file since there is no cross-`.S` include | kernel.md |  |
+| R127 | 316 | to end a `&mut` borrow before an `unsafe` re-borrow of the same static, capture state into locals and rely on NLL — `drop(&mut x)` is a no-op | kernel.md |  |
+| R128 | 316 | hoisting a read-only loop into a shared-borrow helper is never a pure extraction: a live `&mut` plus the helper's `&` is aliasing UB | kernel.md |  |
+| R129 | 317 | run-queue admission is decoupled from boot: `IMAGE.runnable` marks IPC reachability, only `proc::sched::enqueue` enters the run queue | kernel.md |  |
+| R130 | 318 | static mutable tables use `UnsafeCell<[T; N]>` in a `#[repr(transparent)]` newtype with `unsafe impl Sync`, documenting the single-threaded-boot invariant | kernel.md |  |
+| R131 | 319 | custom `Display` impls honoring `{:<width$}` render through `arrayvec::ArrayString<N>` and call `f.pad(s)` | rust-style.md |  |
+| R132 | 320 | forward declarations for later slices get module-level `#![allow(dead_code)]` with a one-line comment naming the consuming slice | rust-style.md |  |
+| R133 | 321 | IPC primitives take an explicit `&mut [Proc; N_PROC_SLOTS]` (and `&mut [Priv; NR_SYS_PROCS]`) slice | kernel.md |  |
+| R134 | 321 | only `ipc::do_ipc` materializes those via `proc_table_mut_slice` / `priv_table_mut_slice`, dodging the two-`&mut`-from-one-`UnsafeCell` hazard | kernel.md |  |
+| R135 | 322 | every EL1 → EL0 transition calls `sched::schedule_next`, which flushes `Proc::deliver_msg` to `Proc::deliver_msg_vir` and clears `MF_DELIVERMSG` | kernel.md |  |
+| R136 | 323 | IPC blocking pairs with `sched::rts_set` / `rts_unset`, which capture `nr`, end the `&mut Proc` borrow, then `enqueue`/`dequeue` | kernel.md |  |
+| R137 | 324 | kernel-call handlers acting on a target proc take the whole `&mut [Proc; N_PROC_SLOTS]` slice + `caller_nr`; caller-only handlers get a single `&mut Proc` | kernel.md |  |
+| R138 | 324 | `system::kernel_call_dispatch` routes target-taking calls through a small `match` before `dispatch_caller_local` | kernel.md |  |
+| R139 | 324 | run-queue transitions on a target use the same `sched::rts_set` / `rts_unset` capture-then-borrow-end pattern the IPC primitives use | kernel.md |  |
+| R140 | 325 | kernel tasks and SCHED itself stay `scheduler == NONE` — a scheduler must not schedule itself | kernel.md |  |
+| R141 | 325 | `Proc::scheduler == NONE` means kernel-scheduled; a non-`NONE` endpoint means SCHED-scheduled and quantum exhaustion sends `SCHEDULING_NO_QUANTUM` | kernel.md |  |
+| R142 | 325 | a SCHED-scheduled proc stays off the run queue until the scheduler calls real `SYS_SCHEDULE`, which clears `RTS_NO_QUANTUM` | kernel.md |  |
+| R143 | 325 | `SCHED_RQ_BASE = 0xF00` — clear of VM `0xC00`, SEF `0xD00`, DS `0xE00`, below `NOTIFY_MESSAGE` | abi.md |  |
+| R144 | 325 | slice 4.3 record: `SYS_SCHEDCTL` claim/release, `mini_sched_no_quantum_send`, stub C pre-delegated in `userland.rs` as the live demo | phase-4-servers.md |  |
+| R145 | 326 | `Proc::alarm_at` holds an absolute uptime tick with 0 meaning disarmed | kernel.md |  |
+| R146 | 326 | `clock::EARLIEST_ALARM` is an O(1) gate so `tick()` only pays the O(N) `ipc::fire_expired_alarms` scan when an alarm is due | kernel.md |  |
+| R147 | 326 | alarm expiry delivers a kernel-originated `NOTIFY` from `CLOCK` via `ipc::notify::deliver_alarm` with no `ipc_to` check | kernel.md |  |
+| R148 | 326 | `SYS_SETALARM` takes a relative `delta` in payload `0..8` (0 cancels) and replies with the previous time-left, reusing `NOTIFY_MESSAGE` + `CLOCK` | abi.md |  |
+| R149 | 326 | slice 4.4 record: a user-space periodic alarm is a re-arm per fire; RS keys its alarm on `m_source == boot_endpoint(CLOCK)` | phase-4-servers.md |  |
+| R150 | 327 | `SYS_KILL` → `cause_sig` sets a bit in `Proc::sig_pending` plus `RTS_SIGNALED` and `RTS_SIG_PENDING`, then wakes PM with `ipc::notify::deliver_ksig` | kernel.md |  |
+| R151 | 327 | `SYS_GETKSIG` hands off the bitmap and PM disposes of every returned endpoint — `SYS_ENDKSIG` for survivors, `SYS_EXIT` with no ENDKSIG after for terminations | servers-and-drivers.md |  |
+| R152 | 327 | `SYS_EXIT` is a full teardown: `unblock_dependents`, leaf frames freed, `AddrSpace::destroy`, `free_asid`, then `free_slot` | kernel.md |  |
+| R153 | 327 | `free_slot` bumps the endpoint generation, which wraps to 1 and never to 0 | kernel.md |  |
+| R154 | 327 | every user-supplied-endpoint resolution goes through `table::okendpt`, returning `EDEADSRCDST` on stale generations | kernel.md |  |
+| R155 | 327 | `do_exit` rejects `SELF` and a caller-named-self target outright — tearing down the active TTBR0 mid-call is the hazard | kernel.md |  |
+| R156 | 327 | `PRIVCTL_SET_USER` requires the target frozen on `RTS_NO_PRIV` — the freeze is the authorization gate, EPERM on a live target | kernel.md |  |
+| R157 | 327 | `PM_RQ_BASE = 0x700`; `PM_GETPID` replies `m_type` = pid with ppid in payload `0..4` (MINIX result-is-pid, errors negative) | abi.md |  |
+| R158 | 327 | slice 4.5 record: the frozen-stub pattern, shared `table::USER_PRIV_ID` = 20, and VM's out-of-region arm raising `SYS_KILL(faulter, SIGSEGV)` | phase-4-servers.md |  |
+| R159 | 327 | `Proc::sig_pending` is a u32 bitmap zeroed on slot free and again on fork's child populate | kernel.md |  |
+| R160 | 327 | `ipc::notify::deliver_ksig` is a kernel-originated `NOTIFY` from `SYSTEM` with no `ipc_to` check — the `deliver_alarm` pattern | kernel.md |  |
+| R161 | 327 | `do_kill`'s deferred-notify write is why `kernel_call_dispatch` takes `&mut [Priv]` | kernel.md |  |
+| R162 | 327 | `SYS_GETKSIG`'s scan gates on `sig_pending != 0`, not the RTS bit alone, so a handed-off proc is not re-returned | kernel.md |  |
+| R163 | 327 | `unblock_dependents` purges dedicated-priv `notify_pending` bits and deliberately skips the shared `USER_PRIV_ID` | kernel.md |  |
+| R164 | 327 | `unblock_dependents` patches `EDEADSRCDST` into each blocked proc's parked `x0` — the MINIX `retreg` idiom | kernel.md |  |
+| R165 | 327 | ASIDs recycle through a free-list, so `asid::free_asid` returns one for reuse rather than burning it | kernel.md |  |
+| R166 | 327 | `system::resolve_target` short-circuits `SELF` first, before any `okendpt` lookup | kernel.md |  |
+| R167 | 328 | user procs drive the lifecycle entirely through PM — POSIX shape, user → PM, never user → kernel; the shared `USER_PRIV_ID` opened `ipc_to = {PM}` only | servers-and-drivers.md |  |
+| R168 | 328 | PM's `handle_fork` runs a fixed order the frozen-child invariant depends on: `SYS_FORK` → `VM_FORK` → `SCHEDULING_START` → `SYS_PRIVCTL` → reply to both halves | servers-and-drivers.md |  |
+| R169 | 328 | `do_fork` creates the child blocked on `RTS_RECEIVING` plus `RTS_NO_PRIV`, so only PM's reply makes it runnable | kernel.md |  |
+| R170 | 328 | on any mid-fork failure PM rolls back at every step — `SYS_EXIT` the child and `mproc::cleanup` the slot before returning the errno to the parent | servers-and-drivers.md |  |
+| R171 | 328 | `handle_exit` does `SCHEDULING_STOP` before `SYS_EXIT`, because `SYS_EXIT` bumps the generation and `okendpt` then rejects the endpoint | servers-and-drivers.md |  |
+| R172 | 328 | PM sends the dead child no reply; `handle_wait` reaps a zombie or suspends the parent with `MF_WAITING` until `handle_exit` wakes it | servers-and-drivers.md |  |
+| R173 | 328 | there is no async `SIGCHLD` — parent-notify is the zombie plus wait-reap handshake only | servers-and-drivers.md |  |
+| R174 | 328 | slice 4.6b record: `mproc` generation-aware endpoints, `W_EXITCODE`, VM `MAX_CLIENTS` widened 16 → 32, stub E as the live demo | phase-4-servers.md |  |
+| R175 | 328 | `sched::rts_unset` only enqueues on the last block bit clearing — the invariant the whole frozen-child ordering rests on | kernel.md |  |
+| R176 | 328 | the fork pool is `[FORK_POOL_BASE, NR_MPROCS = 32)` and a slot's index is the child's kernel proc-nr | servers-and-drivers.md |  |
+| R177 | 328 | `PM_FORK`/`PM_EXIT`/`PM_WAIT` are `PM_RQ_BASE + 1..3` | abi.md |  |
+| R178 | 328 | `VM_FORK` is `VM_RQ_BASE + 4 = 0xC04` | abi.md |  |
+| R179 | 328 | the post-`SCHEDULING_START` rollback does `SCHEDULING_STOP` first, while the endpoint is still valid, mirroring `handle_exit` | servers-and-drivers.md |  |
+| R180 | 328 | `region::fork(parent_nr, child_nr)` copies the whole `ClientRegions` as a `Copy` snapshot | servers-and-drivers.md |  |
+| R181 | 328 | fork needs no new priv wiring — PM↔VM and PM↔SCHED are boot-server `[0,n_active)` edges and child↔PM is the `USER_PRIV_ID` edge | servers-and-drivers.md |  |
+| R182 | 328 | `mproc`'s free-slot allocator, zombie and reap logic lives in pure host-tested `*_in` helpers | servers-and-drivers.md |  |
+| R183 | 329 | exec is done to the caller, so `SYS_EXEC` names the target and lives in the target-taking `match` in `kernel_call_dispatch` | kernel.md |  |
+| R184 | 329 | `do_exec` rejects `SELF`/self-target — the active-TTBR0 teardown hazard, the `do_exit` stance | kernel.md |  |
+| R185 | 329 | exec preserves pid/priv/scheduler; the target gets no reply on success and an errno reply on failure, so PM's `handle_exec` replies only on `rc != OK` | kernel.md |  |
+| R186 | 329 | `load_exec_image` is factored out of `load_boot_server` and cleans up on OOM — the `do_fork` copy_addrspace no-leak contract | kernel.md |  |
+| R187 | 329 | the boot loader skips any negative proc_nr, so a module packed under `com::EXEC_ONLY_PROC_NR = -1` is resolvable by name but never boot-loaded | servers-and-drivers.md |  |
+| R188 | 329 | `userland/**/src/main.rs` is in `sonar.coverage.exclusions` — freestanding entry points with no host-testable logic | ci.md |  |
+| R189 | 329 | slice 4.7 record: stub E's child branch flips `PM_EXIT` → `PM_EXEC` so a `[ksys SYS_EXEC]` sits between the `SYS_FORK`/`SYS_EXIT` twins | phase-4-servers.md |  |
+| R190 | 329 | `PM_EXEC` is `PM_RQ_BASE + 4 = 0x704`, bumping `NR_PM_MSGS` 4→5 | abi.md |  |
+| R191 | 329 | `EXEC_NAME_LEN` (16, in `callnr.rs`) must stay `<= PROC_NAME_LEN`, since the kernel MINIX-renames the proc to it | abi.md |  |
+| R192 | 330 | `init` is PID 1 at `INIT_PROC_NR = 10`, a real boot process loaded by the ordinary `userland.rs` load loop with no PM hand-release | servers-and-drivers.md |  |
+| R193 | 330 | `init_boot_image` special-cases `entry.nr == INIT_PROC_NR` to point its proc slot at the shared `USER_PRIV_ID` instead of a dedicated server slot | kernel.md |  |
+| R194 | 330 | init carries `USR_T` trap_mask and makes no kernel calls — exactly the forked-child profile | servers-and-drivers.md |  |
+| R195 | 330 | `MF_PRIV_PROC` stays set on init's `mproc` seed (unkillable PID 1); the flag gates only the kill path, so PM still serves init as a client | servers-and-drivers.md |  |
+| R196 | 330 | slice 4.8 record: stub E retired, A–D kept as the live regression battery, `NR_STUB_PROCS` 5→4 shifting `FORK_POOL_BASE` 16→15; Phase 4 complete | phase-4-servers.md |  |
+| R197 | 330 | the `userland/init` crate is freestanding — `minixrs-ipc` + `kernel-shared` only, no `server-rt`/SEF, a plain user program like `worker` | servers-and-drivers.md |  |
+| R198 | 330 | init's `_start` shim and panic handler are `not(test)`-gated, and its `user.ld` is `worker`'s verbatim | servers-and-drivers.md |  |
+| R199 | 331 | the `[ipc]` modulo sampler almost never catches low-rate callers, so zero sampled lines is NOT evidence a caller is stuck | testing-and-markers.md |  |
+| R200 | 331 | verify a low-rate caller via its downstream head-carved `[ksys …]` traces, or a temporary `[DBG]` trace in `ipc::do_ipc` removed before committing | testing-and-markers.md |  |
+| R201 | 332 | `kernel/Cargo.toml` sets `forced-target = "aarch64-unknown-none"` under `cargo-features = ["per-package-target"]`, so every cargo invocation cross-compiles | kernel.md |  |
+| R202 | 332 | `per-package-target` is unstable, so it needs the pinned nightly; workspace `default-members` omitting `"kernel"` is the fallback | kernel.md |  |
+| R203 | 332 | the kernel bin must keep `test = false`/`bench = false`, or `cargo check --all-targets` breaks with `E0463` on a phantom test harness | kernel.md |  |
+| R204 | 332 | Phase 8 must relax `forced-target` first | kernel.md |  |
+| R205 | 332 | no `#[cfg(target_os = "none")]` gates remain in `kernel/src/` — do not reintroduce them; a new kernel module is just `mod foo;` | kernel.md |  |
+| R206 | 332 | the `cfg_attr(target_os = "minixrs", …)` attributes in `servers/*`/`userland/*` are unrelated — those crates are host-built and host-tested | kernel.md |  |
+| R207 | 332 | phase-5-prep chunk 7 record: the two guards (`build.rs`'s `cargo::error=`, `main.rs`'s `compile_error!`) are now unreachable defense-in-depth | phase-5-prep.md |  |
+| R208 | 333 | the demo stubs A–D sit behind a default-on `boot-stubs` cargo feature; `--no-default-features` gives a clean stub-free boot | build-and-boot.md |  |
+| R209 | 333 | the feature lives on two crates — the kernel (`arch::aarch64::userland`) and PM (`mproc::seed`) — the only two that install or seed stubs | build-and-boot.md |  |
+| R210 | 333 | `kernel/build.rs` reads `CARGO_FEATURE_BOOT_STUBS` to drop `user_stub.S` and to thread `--no-default-features` into the nested PM build | build-and-boot.md |  |
+| R211 | 333 | the feature is deliberately not on `kernel-shared`: cargo feature unification would force it on, so `NR_STUB_PROCS` stays a constant `4` | build-and-boot.md |  |
+| R212 | 333 | `FORK_POOL_BASE` (= 15) is stable — disabling stubs leaves slots 11–14 unoccupied, it does not renumber the fork pool | build-and-boot.md |  |
+| R213 | 333 | phase-5-prep chunk-3 record: the `boot-stubs` feature exists so a stub-free boot can be debugged without the stub C kernel-call flood | phase-5-prep.md |  |
+| R214 | 334 | `kernel-shared::com::NR_SERVED_PROCS` (= 32) is the one shared proc-nr ceiling, and all three per-process server tables derive their size from it | abi.md |  |
+| R215 | 334 | never reintroduce independent capacity literals — each crate carries a `const _: () = assert!(… >= NR_SERVED_PROCS)` guard | abi.md |  |
+| R216 | 334 | VM `MAX_REGIONS` (= 16) is a separate knob, unrelated to the kernel frame allocator's like-named `MAX_REGIONS` in `mm/frame.rs` | abi.md |  |
+| R217 | 334 | phase-5-prep chunk-4 record: SCHED's `CAP = NR_SERVED_PROCS` is an associative count, so the constant over-covers the delegatable set | phase-5-prep.md |  |
+| R218 | 335 | when a `--no-default-features` build does not drop a feature, suspect cargo feature unification and diagnose with `cargo tree … -e features -i <shared-crate>` | build-and-boot.md |  |
+| R219 | 336 | check any "this adds a dependency/compile cost" claim with `cargo tree -p minixrs-kernel -e build`, which prints the build-script graph | build-and-boot.md |  |
+| R220 | 336 | decide such a dependency on where the constant belongs, not on compile cost — 5.10b moved a hole size into `kernel-shared::rootfs` for that reason | build-and-boot.md |  |
+| R221 | 337 | `kernel-shared` carries zero `unsafe` — keep it that way, since geiger measures per-package | abi.md |  |
+| R222 | 337 | byte-level ABI helpers there decode field-by-field, and tests tie the codec to the real layout via `offset_of!` rather than reading the memory image | abi.md |  |
+| R223 | 338 | `kernel-shared` is unconditionally `no_std`, but a `#[cfg(test)]` module may declare `extern crate std;` locally — `brand.rs` is the precedent | abi.md |  |
+| R224 | 339 | there is no `#[cfg(test)]` code under `kernel/src/` — `cargo test -p minixrs-kernel` does not run | kernel.md |  |
+| R225 | 339 | host-runnable logic belongs in `kernel-shared`; put new pure predicates over shared ABI types there | kernel.md |  |
+| R226 | 339 | keep raw-pointer/hardware behaviour (e.g. `copy_msg_from_user`) in the kernel; QEMU is the primary verification for kernel code | kernel.md |  |
+| R227 | 340 | a const-only `assert!(A > B)` trips `assertions_on_constants` — use a module-level `const _: () = assert!(…)` like `callnr.rs` | rust-style.md |  |
+| R228 | 340 | a bare `loop {}` present under `test` trips `empty_loop` — use `loop { core::hint::spin_loop() }`; the `#[cfg(not(test))]` panic handler is exempt | rust-style.md |  |
+| R229 | 340 | inside a `const _: () = { … }` block the const evaluator has no iterators — use `while` + slice indexing + `<[T]>::len()` | rust-style.md |  |
+| R230 | 340 | in a const block `assert!` takes a literal message only; `assert_eq!` and `assert!(c, "{x}")` are both rejected | rust-style.md |  |
+| R231 | 340 | in a `#[test]` fn use `assert_eq!` rather than a bare `assert!(CONST op CONST)`; for an ordering comparison write `assert_eq!(a.min(b), a)` | rust-style.md |  |
+| R232 | 340 | a `const _: () = assert!(…)` may not reference a `static` — name the capacity as a `const` first, the `vm/region.rs` `MAX_CLIENTS` shape | rust-style.md |  |
+| R233 | 340 | a `chunks_exact(N)` with a const `N` trips `chunks_exact_to_as_chunks` — use `as_chunks::<N>().0.iter()` | rust-style.md |  |
+| R234 | 340 | `free >= X + 1` trips `int_plus_one` — write `free > X` | rust-style.md |  |
+| R235 | 340 | `N % M == 0` trips `manual_is_multiple_of` — write `N.is_multiple_of(M)`, which fires inside a `const _` assert too | rust-style.md |  |
+| R236 | 341 | a doc-comment line starting with `+ ` (or `- `/`* `) parses as a markdown bullet and trips `doc_lazy_continuation` — reword the continuation | rust-style.md |  |
+| R237 | 342 | user-space servers build as freestanding `#![no_std]`/`#![no_main]` ELFs linked with their own `user.ld` (page-aligned PT_LOADs, base `0x10_0000`) | servers-and-drivers.md |  |
+| R238 | 342 | the kernel sets `sp_el0`, so a server's `_start` needs no stack setup | servers-and-drivers.md |  |
+| R239 | 342 | servers are built for the custom target `tools/targets/aarch64-unknown-minixrs.json`, regenerated on nightly bumps with the `"os": "minixrs"` line re-applied | servers-and-drivers.md |  |
+| R240 | 342 | the nested build uses `-Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem` into the shared `target/minixrs-user` | servers-and-drivers.md |  |
+| R241 | 342 | the `-T<user.ld>` link arg comes from each crate's own `build.rs`, cfg-gated on `target_os = "minixrs"`; `kernel/build.rs` injects no rustflags and scrubs inherited ones | servers-and-drivers.md |  |
+| R242 | 342 | the `[workspace.lints.rust] unexpected_cfgs` check-cfg shim keeps host clippy green on the `"minixrs"` cfg — delete it at M5 | servers-and-drivers.md |  |
+| R243 | 342 | `-Zjson-target-spec` must be passed explicitly at the call site — a global `~/.cargo/config.toml` can mask the gate locally while CI fails | servers-and-drivers.md |  |
+| R244 | 342 | reproduce a suspected config-masking failure with `CARGO_UNSTABLE_<FLAG>=false cargo …` | servers-and-drivers.md |  |
+| R245 | 343 | every user-space binary crate invokes `minixrs_abi_note::brand!()` at the crate root | servers-and-drivers.md |  |
+| R246 | 343 | the 28-byte note goes into `.note.minixrs.ident` via a dedicated PT_NOTE phdr at the start of the RO PT_LOAD, per the `user.ld` dual-assignment rule | servers-and-drivers.md |  |
+| R247 | 343 | `KEEP()` is mandatory and the note rule must stay ahead of the `/DISCARD/ *(.note.*)` line | servers-and-drivers.md |  |
+| R248 | 343 | the kernel refuses unbranded ELFs via `kernel-shared::brand::scan_brand`, and `kernel/build.rs` re-asserts at pack time so a forgotten `brand!()` fails the build | servers-and-drivers.md |  |
+| R249 | 343 | `[brand]` traces appear only on failure — a healthy boot has none | testing-and-markers.md |  |
+| R250 | 344 | when a boot server gains a new path dependency, add that crate's `src` dir to `kernel/build.rs`'s server `rerun-if-changed` list | servers-and-drivers.md |  |
+| R251 | 344 | that list covers shared inputs only; a newly added boot crate needs no entry — `build_server` already watches its `src`/`user.ld`/`Cargo.toml`/`build.rs` | servers-and-drivers.md |  |
+| R252 | 345 | ELF-only attributes on server crates must be `#[cfg_attr(target_os = "minixrs", ...)]`-gated, because `cargo check --workspace` also builds them for the Mach-O host | servers-and-drivers.md |  |
+| R253 | 345 | `#![forbid(unsafe_code)]` is unusable on a freestanding binary crate here — a crate with no `unsafe` block says so in its crate docs instead | servers-and-drivers.md |  |
+| R254 | 346 | user-space servers run at EL0 and cannot print; verify behaviour through kernel-side traces (`[pf]`, `[ksys …]`, `[ipc N]`), never server-side logging | servers-and-drivers.md |  |
+| R255 | 346 | trace sampling is asymmetric — `[ipc N]` head-traces the first ~12 calls plus every 100th, `[ksys N]` samples every 100th with no head carve-out | testing-and-markers.md |  |
+| R256 | 347 | system servers drive their receive loop through `server-rt`'s SEF: `sef_startup(SefConfig { … })` then a loop over `sef.receive` | servers-and-drivers.md |  |
+| R257 | 347 | callbacks pass via the config struct and ride in the returned `Sef` handle — no global `setcb`/static state, which keeps `server-rt` `#![forbid(unsafe_code)]` | servers-and-drivers.md |  |
+| R258 | 347 | `sef_startup` learns the server's endpoint/name via `SYS_GETINFO(GET_WHOAMI)` and announces it via `diag_print` | servers-and-drivers.md |  |
+| R259 | 347 | the pure classifier in `server-rt/src/classify.rs` gates each control event on `m_source`, not `m_type` alone, so a client cannot spoof a signal/init | servers-and-drivers.md |  |
+| R260 | 347 | `classify.rs` is host-tested; the IPC glue in `sef.rs` is coverage-excluded like the server `main.rs`es | servers-and-drivers.md |  |
+| R261 | 348 | `init_boot_image` fills a boot server's `ipc_to` only for active boot priv slots `[0, n_active)` | servers-and-drivers.md |  |
+| R262 | 348 | a hand-installed stub in a priv slot 16+ that a server must reply to needs the reverse `ipc_to` bit opened explicitly — see `install_stub_d_priv` | servers-and-drivers.md |  |
+| R263 | 349 | VM tracks per-process memory as a static `[ClientRegions; 16]` keyed by proc number, with no heap allocator — the kernel owns frames | servers-and-drivers.md |  |
+| R264 | 349 | a page fault is satisfied only when its address lies inside a half-open `[start, end)` region tagged `Kind::{Heap, Mmap, Unused}` | servers-and-drivers.md |  |
+| R265 | 349 | `VM_BRK`/`VM_MMAP`/`VM_MUNMAP` all ride the single D→VM SENDREC edge, so adding an mmap client needs no new priv wiring | servers-and-drivers.md |  |
+| R266 | 350 | `SYS_VMCTL(VMCTL_PT_UNMAP)` returns `EINVAL` with no panic and no frame freed when nothing is mapped at the target VA | kernel.md |  |
+| R267 | 350 | keep VM's `VMCTL_PT_UNMAP` sweep capped at the region's own `end` so an overstated `len` cannot reach a neighbor's frames | servers-and-drivers.md |  |
+| R268 | 351 | boot servers are packed into a single MXBI archive — a 16-byte header plus 32-byte `{proc_nr, offset, len, name}` records, all LE | servers-and-drivers.md |  |
+| R269 | 351 | to add a boot server, append a `(crate, dir, proc_nr)` row to `kernel/build.rs`'s `servers` array and watch its `src` dir | servers-and-drivers.md |  |
+| R270 | 351 | the `env!("BOOT_IMAGE_PATH")` `include_bytes!` lives only in `boot_image/mod.rs` — never reference `BOOT_IMAGE_PATH` from a host-compiled module | servers-and-drivers.md |  |
+| R271 | 351 | all servers share one `SERVER_STACK_VA` because each has its own TTBR0 | servers-and-drivers.md |  |
+| R272 | 351 | adding a boot server needs no new priv wiring — `init_boot_image` already grants every boot server `SRV_T` `ipc_to` over `[0, n_active)` | servers-and-drivers.md |  |
+| R273 | 352 | every server publishes its endpoint at SEF init via `server-rt::sef_publish_to_ds(endpoint, name)`, key = 16-byte NUL-padded name in payload `0..16` | servers-and-drivers.md |  |
+| R274 | 352 | DS is the exception — it seeds its own entry in-process in `ds_init`, because a SENDREC to itself before its receive loop would deadlock | servers-and-drivers.md |  |
+| R275 | 352 | `DS_RQ_BASE = 0xE00`, clear of VM `0xC00` and SEF `0xD00`, below `NOTIFY_MESSAGE` | abi.md |  |
+| R276 | 352 | the DS registry is a static `[Entry; 16]` `UnsafeCell` newtype like `vm/region.rs`, with `publish/retrieve/check` host-tested and `main.rs` coverage-excluded | servers-and-drivers.md |  |
+| R277 | 353 | adding a workspace crate means appending to `members` in the root `Cargo.toml` — there is no `default-members` | build-and-boot.md |  |
+| R278 | 353 | internal crates use literal manifest fields plus `publish = false`; only the hardcoded five-crate `release.yml` list inherits `[workspace.package]` | build-and-boot.md |  |
+| R279 | 353 | no CI edit is needed for a new crate — `fmt`, `clippy`, `geiger` and `coverage` sweep members automatically | build-and-boot.md |  |
+| R280 | 353 | a new crate must be clean under `clippy --workspace --all-targets -- -D warnings` from its first commit | build-and-boot.md |  |
+| R281 | 353 | if a crate's entry point is pure I/O with the logic in sibling modules, add its `main.rs` to `sonar.coverage.exclusions` — the `servers/ds` shape | build-and-boot.md |  |
+| R282 | 354 | `kernel-shared/src/error.rs` has two errno bands (D7): the POSIX block at magnitudes `1..=40`, identical to Linux/musl, and the MINIX IPC band at `>= 200` | abi.md |  |
+| R283 | 354 | nothing may land in the `41..=199` gap, where musl defines errnos minix.rs has not adopted | abi.md |  |
+| R284 | 354 | errno constants are stored negated, and the `errnos!` macro emits both the `pub const` and the `ALL` table | abi.md |  |
+| R285 | 354 | add an errno by adding one line to the `errnos!` invocation, never by hand-editing a second list — `ALL` is the single source of truth | abi.md |  |
+| R286 | 354 | the generated `include/minixrs/*.h` headers are a build artifact under `target/` and are never committed (D8); CI asserts nothing was written into the tree | abi.md |  |
+| R287 | 354 | generated C uses C11 keywords — `_Static_assert`, `_Alignas` on the struct's first member, `_Alignof` — never GNU attributes | abi.md |  |
+| R288 | 354 | `minixrs/ipc.h` includes nothing; `offsetof` comes from `__builtin_offsetof` under the private name `_MINIXRS_OFFSETOF` | abi.md |  |
+| R289 | 354 | every process gets both `<NAME>_PROC_NR` and `<NAME>_EP`, and the header `_Static_assert`s the C decode macro against the Rust-computed endpoints | abi.md |  |
+| R290 | 354 | `minixrs/errno.h` asserts but never defines the POSIX block, behind `#ifdef MINIXRS_ABI_CHECK_POSIX_ERRNO`; `tools/build-musl.sh` must define it | abi.md |  |
+| R291 | 354 | `abi-selftest.c` exists because a header is never a translation unit — without a `.c` file no `_Static_assert` would ever fire | abi.md |  |
+| R292 | 354 | adding a request number means editing `tools/gen-c-headers/src/callnr_h.rs` too — the per-band `members` lists in `bands()` are hand-maintained | abi.md |  |
+| R293 | 354 | run `cargo test -p minixrs-gen-c-headers` after any band change, not just `cargo gen-c-headers` — `every_band_member_list_matches_its_count` is the catch | abi.md |  |
+| R294 | 354 | `tools/gen-c-headers`'s `main.rs` is argv/IO only and is Sonar-coverage-excluded via `tools/**/src/main.rs` | ci.md |  |
+| R295 | 354 | slice 5.0 record: the POSIX-value identity is what lets musl's stock `bits/errno.h` and `syscall_ret.c` work unmodified | phase-5-musl-fs.md |  |
+| R296 | 355 | the kernel never dereferences a user VA, not even the active TTBR0's | kernel.md |  |
+| R297 | 355 | every byte in or out of a user address space goes through `kernel/src/mm/uaccess.rs` — `copy_from_user_as` / `copy_to_user_as` / `probe_user_range` | kernel.md |  |
+| R298 | 355 | `addrspace::walk_pt_in(ttbr0_pa, va)` is the walk primitive those use; `AddrSpace::walk_pt` delegates to it | kernel.md |  |
+| R299 | 355 | an unmapped page is a walk miss returning `EFAULT`, not an EL1 abort — so no exception-fixup table is needed or wanted (D5 rejected Linux's `extable`) | kernel.md |  |
+| R300 | 355 | the copy is address-space-independent, so `flush_deliver_msg` may write a receiver's buffer before its TTBR0 is installed | kernel.md |  |
+| R301 | 355 | `copy_to_user_as` must check `Prot::writable`, because the HHDM alias is a kernel mapping the MMU's EL0 permission bits do not police | kernel.md |  |
+| R302 | 355 | user writes are all-or-nothing, probing first, since a 104-byte `Message` is only 8-aligned and can straddle two pages | kernel.md |  |
+| R303 | 355 | `user_va_ok` stays the cheap range/alignment pre-gate; `page_chunks`/`PageChunk`/`USER_PAGE_SIZE` live in `kernel-shared/src/message.rs` | kernel.md |  |
+| R304 | 355 | `ipc/message.rs` carries zero `unsafe` — messages stage through a `[u8; 104]`, so all raw-pointer work is in `mm::uaccess` alone | kernel.md |  |
+| R305 | 355 | `EFAULT` routes to the caller's `x0` via `do_ipc`, and to a blocked receiver's parked `x0` for the deferred flush, setting/clearing `MF_MSGFAILED` | kernel.md |  |
+| R306 | 355 | the `[efault]` and `[efault deliver]` traces are uncounted, so they are stable boot markers unlike the sampled `[ipc {n}]` form | testing-and-markers.md |  |
+| R307 | 355 | `SYS_DIAGCTL` is the servers' debug channel (D2), riding text inline in the payload — `DIAG_TEXT_MAX = 88` bytes from `DIAG_TEXT_OFF = 8` | abi.md |  |
+| R308 | 355 | `do_diagctl` prints `[diag <name>] <text>` where `<name>` is the caller's kernel-known `Proc::name`, never payload data | kernel.md |  |
+| R309 | 355 | diag text is sanitized to printable ASCII so one call is always exactly one line — the `grep -aF` marker contract depends on it | kernel.md |  |
+| R310 | 355 | `server-rt::diag_print` is the client and is called from `sef_startup`, so every SEF server emits `[diag <name>] sef ready` at boot | servers-and-drivers.md |  |
+| R311 | 355 | adding a stub is discouraged — `NR_STUB_PROCS` feeds `FORK_POOL_BASE`, so a fifth stub shifts init's forked children and breaks checked-in markers | testing-and-markers.md |  |
+| R312 | 355 | slice 5.1 record: D5 rejected the Linux `extable` approach, and the TTBR0-before-flush ordering in `sched::schedule_next` is no longer load-bearing | phase-5-musl-fs.md |  |
+| R313 | 356 | a granting process keeps its `GrantEntry` table in its own address space and registers `(addr, entries)` with `SYS_SETGRANT` | kernel.md |  |
+| R314 | 356 | `SYS_SAFECOPY` re-reads the entry out of the granter's address space on every call, so a granter revokes by writing its own memory | kernel.md |  |
+| R315 | 356 | `GrantEntry` is a flat `#[repr(C)]` 32-byte struct whose layout is pinned by `offset_of!` asserts, because the kernel decodes it from raw bytes | abi.md |  |
+| R316 | 356 | grant ids pack via `GRANT_SHIFT = 20` into `grant_id`/`grant_idx`/`grant_seq` | abi.md |  |
+| R317 | 356 | `mm::uaccess::copy_between_as` probes both ranges then walks and memcpys per `dual_page_chunks`, all-or-nothing on the destination | kernel.md |  |
+| R318 | 356 | its `Prot::writable` check is load-bearing — a granter may lie about writability, and the HHDM alias is a kernel mapping | kernel.md |  |
+| R319 | 356 | `verify_grant` checks in MINIX's order: `okendpt`, table registered and idx in range, entry reads back, `CPF_USED` + `CPF_VALID`, seq, access, `who_to`, bounds | kernel.md |  |
+| R320 | 356 | a walk miss inside `verify_grant` is hidden as `EPERM`, not `EFAULT`, so a grantee cannot probe the granter's address space | kernel.md |  |
+| R321 | 356 | `CPF_DIRECT` resolves memory to the granter; `CPF_MAGIC` resolves to `who_from` and additionally requires the granter's `Priv::flags & SYS_PROC` | kernel.md |  |
+| R322 | 356 | `CPF_INDIRECT` is a documented `EINVAL` | kernel.md |  |
+| R323 | 356 | `SYS_COPY` is the same engine with no grant — `resolve_target` on both endpoints, `k_call_mask` the only gate, the `do_vmctl` trust stance | kernel.md |  |
+| R324 | 356 | `SYS_SETGRANT` rejects a shared priv slot (`proc_nr != Some(caller)` → `EPERM`) — one table address cannot describe several processes' memory | kernel.md |  |
+| R325 | 356 | both `do_exit` and `do_exec` clear a dedicated slot's grant registration, so a recycled slot cannot inherit a stale table address | kernel.md |  |
+| R326 | 356 | `server-rt::GrantPool<const N>` is a value the server owns — a `main`-frame local, never `init_fresh`'s frame — which keeps `server-rt` unsafe-free | servers-and-drivers.md |  |
+| R327 | 356 | `ensure_registered` compares the pool's live address against the last registered one and re-issues `SYS_SETGRANT` if they differ | servers-and-drivers.md |  |
+| R328 | 356 | byte buffers use `kernel-shared::message::user_range_ok` (no alignment requirement); `user_va_ok` stays right for the 8-aligned grant table | abi.md |  |
+| R329 | 356 | a server holding `SYS_COPY`/`SYS_SAFECOPY` takes the granter from the kernel-stamped `m_source`, never from the payload — the confused-deputy rule | servers-and-drivers.md |  |
+| R330 | 356 | apply that anti-spoof rule to every grant-id-carrying request, as `DS_PUBLISH` already relies on it | servers-and-drivers.md |  |
+| R331 | 356 | grant traces are head-carved at 6 like `do_vmctl`'s, because these are low-rate callers the `[ksys N]` sampler never catches | testing-and-markers.md |  |
+| R332 | 356 | slice 5.2 record: the VFS → PM `PM_GRANT_TEST` demo and its seven denial probes (`grant.deny ok n=7`) keep every validator boot-marked | phase-5-musl-fs.md |  |
+| R333 | 356 | all three grant calls are routed from the target-taking `match`, `SYS_SETGRANT` included, because it needs `&mut Priv` and `dispatch_caller_local` cannot hand one out | kernel.md |  |
+| R334 | 357 | device memory comes from reading `MAIR_EL1`, never writing it — writing byte i retroactively retypes every live mapping using that `AttrIndx` | kernel.md |  |
+| R335 | 357 | `mmu::init_device_attr_idx` runs once from `userland_bootstrap` before any device mapping and scans bytes `1..8` for `0x04` else `0x00` | kernel.md |  |
+| R336 | 357 | only `Device-nGnRE` and `nGnRnE` qualify — `nGRE` would gather two `DR` stores into one lost character and `GRE` would let a store pass the `FR` poll | kernel.md |  |
+| R337 | 357 | `[mair] device attr_idx=…` is forensic, not a boot marker, because it is firmware-dependent | testing-and-markers.md |  |
+| R338 | 357 | `Prot` carries a third field `device` (plus `Prot::DEVICE_RW`), which is a compile error at every struct literal — that is the point | kernel.md |  |
+| R339 | 357 | `do_vmctl`'s `pt_map` answers `device: false` permanently — D1 rejected a VM-mediated `VMCTL_MAP_PHYS` for Phase 5 | kernel.md |  |
+| R340 | 357 | `pte_prot` decodes `device` statelessly via `pte_attr_idx_of(pte) != ATTR_IDX_NORMAL`, sound because byte 0 is pinned Normal-WB by a `const _` assert | kernel.md |  |
+| R341 | 357 | `map_page_in` asserts the total invariant against `mm::is_usable_pa`: `prot.device` implies not-RAM, and not-device implies RAM | kernel.md |  |
+| R342 | 357 | that lemma is what makes `if !prot.device { free_frame(…) }` sound in all five leaf sweeps | kernel.md |  |
+| R343 | 357 | `free_frame` keeps its loud out-of-range assert — a silent skip would demote a forged-PA or double-free into an untraceable leak | kernel.md |  |
+| R344 | 357 | fork re-maps a device leaf rather than copying it — MMIO is shared, and a `memcpy` through the cacheable HHDM alias would read side-effecting registers | kernel.md |  |
+| R345 | 357 | `mm::uaccess::resolve_copyable` rejects a device leaf as copy source or destination with `EFAULT` | kernel.md |  |
+| R346 | 357 | `userland::device_teardown_selftest` runs unconditionally at boot and asserts both counts — `[devmap] selftest ok freed=0 devs=1` | testing-and-markers.md |  |
+| R347 | 357 | the device VA map lives in `kernel-shared/src/uspace.rs` — `USER_DEVICE_WINDOW_BASE`, `USER_DEVICE_WINDOW_SIZE`, `TTY_UART_VA` — and is not emitted in the C headers | abi.md |  |
+| R348 | 357 | a `const _` on the region bases is not enough: both the mmap bump cursor and the heap's end carry a runtime `region::REGION_LIMIT` check answering `ENOMEM` | servers-and-drivers.md |  |
+| R349 | 357 | the TTY device pre-map is a `nr == TTY_PROC_NR` arm in `load_boot_server`, deliberately not in `load_exec_image`, which `do_exec` shares | kernel.md |  |
+| R350 | 357 | the pre-map needs no TLB maintenance — the AS was just built and never installed in TTBR0, and `switch_ttbr0_with_asid` flushes on first schedule | kernel.md |  |
+| R351 | 357 | `CDEV_RQ_BASE = 0xB00`; `bands_are_in_ascending_numeric_order` enforces where each band goes, and only the ascending order is load-bearing | abi.md |  |
+| R352 | 357 | `CDEV_WRITE {minor, grant_id, len, offset}` has no payload `granter` — the driver takes it from the kernel-stamped `m_source` | abi.md |  |
+| R353 | 357 | a `CDEV_WRITE` reply `m_type` is the byte count, `>= 0`, and `0` is legal | abi.md |  |
+| R354 | 357 | a request longer than `CDEV_MAX_IO = 256` is a short write, not a failure — the client re-sends with `offset` advanced | servers-and-drivers.md |  |
+| R355 | 357 | a driver replies to an unknown `m_type` where DS may drop one, because a driver's clients all SENDREC and a dropped request blocks the caller forever | servers-and-drivers.md |  |
+| R356 | 357 | a negative `SYS_SAFECOPY` result is relayed verbatim — `EPERM` (bad grant) and `EFAULT` (unmapped buffer) are different client bugs | servers-and-drivers.md |  |
+| R357 | 357 | PL011 register offsets are duplicated in `kernel/src/arch/aarch64/uart.rs` and `drivers/tty/src/pl011.rs` and cannot be shared | servers-and-drivers.md |  |
+| R358 | 357 | `drivers/tty` deliberately does not depend on `minixrs-driver-rt`; Phase 6 makes that move plus the `kernel/build.rs` watch entry | servers-and-drivers.md |  |
+| R359 | 357 | DS publish-before-retrieve is not deterministic, so a DS lookup must fall back to `boot_endpoint(…)` and emit a distinguishable diag line | servers-and-drivers.md |  |
+| R360 | 357 | slice 5.3 record: the Device attribute, the `FR.TXFF` poll and LF→CRLF are not observable under TCG — they are proved by construction and assertion | phase-5-musl-fs.md |  |
+| R361 | 357 | `server-rt` absorbed the per-server copies — `payload.rs`, `kcall.rs`, `diag_fmt` and `sef_retrieve_from_ds` replace the PM/DS/VM/SCHED duplicates | servers-and-drivers.md |  |
+| R362 | 359 | `VFS_RQ_BASE = 0x800` with `VFS_WRITE {fd, len, buf}` carrying a raw buffer address, not a grant id, because VFS's client has no grant table | abi.md |  |
+| R363 | 359 | a `VFS_WRITE` reply `m_type` is the byte count, which is what musl's `write()` returns | abi.md |  |
+| R364 | 359 | VFS issues a `CPF_MAGIC` grant naming the caller's buffer with the driver as grantee, so the bytes move in one copy and VFS never touches them | servers-and-drivers.md |  |
+| R365 | 359 | the grant's owner is the kernel-stamped `m_source`, never a payload field, and there must never be a field for it | servers-and-drivers.md |  |
+| R366 | 359 | VFS absorbs short writes — `write_all` re-sends with `offset` advanced over the same grant until the buffer is out | servers-and-drivers.md |  |
+| R367 | 359 | `write_all` clamps `off` with `.min(len)` so an over-reporting driver cannot walk past the buffer, and breaks on `n == 0` rather than spinning | servers-and-drivers.md |  |
+| R368 | 359 | on an error after partial progress `write_all` reports the progress — POSIX, because those bytes really went out | servers-and-drivers.md |  |
+| R369 | 359 | VFS replies `ENOSYS` to an unknown `m_type`, TTY's rule, since its clients all SENDREC | servers-and-drivers.md |  |
+| R370 | 359 | `NR_FDS` is VFS-local, not ABI; fds 0/1/2 are pre-opened to `CDEV_MINOR_CONSOLE` in every row | servers-and-drivers.md |  |
+| R371 | 359 | `resolve_in` takes the fd rows as a borrowed slice precisely so it survives the switch to an `UnsafeCell<[FdRow; N]>` newtype untouched | servers-and-drivers.md |  |
+| R372 | 359 | `user_range_ok` in `do_write` is defence in depth, not the gate — the kernel's page-table walk answers `EFAULT` regardless (D5) | servers-and-drivers.md |  |
+| R373 | 359 | `populate_user_priv`'s `USER_IPC_TO` costs a pair of bits per entry: the reverse reply edge to `USER_PRIV_ID` must be opened explicitly | kernel.md |  |
+| R374 | 359 | init reports through the path under test, so a successful write's count needs its own marker (`vfs.long ok match=1`) beside the tail | testing-and-markers.md |  |
+| R375 | 359 | pure logic lives in `servers/vfs/src/write.rs` — a retry loop's rules for a misbehaving peer are unreachable while the peer works | servers-and-drivers.md |  |
+| R376 | 359 | lifting a loop body into a step function also keeps it Sonar-measured, since `main.rs` is coverage-excluded and a sibling module is not | ci.md |  |
+| R377 | 359 | slice 5.4 record: the generated C header emits `VFS_WRITE` but not its payload offsets, deferred to 5.6's `write()` wrapper | phase-5-musl-fs.md |  |
+| R378 | 361 | `SYS_EXEC` builds the Linux/SysV initial frame on the stack page so musl's crt, `__libc_start_main` and `__init_tls` run unpatched | kernel.md |  |
+| R379 | 361 | the frame's byte layout lives in `kernel-shared/src/execstack.rs` (`build_initial_stack`, pure, zero `unsafe`, host-tested) | abi.md |  |
+| R380 | 361 | `do_exec` stages the frame in a `[u8; INITIAL_STACK_MAX]` kernel-stack buffer and installs it with `copy_to_user_as` — no new copy machinery | kernel.md |  |
+| R381 | 361 | both frame failures — `None` → `E2BIG`, copy error → `ENOMEM` — tear down the fresh image and return before the point of no return | kernel.md |  |
+| R382 | 361 | `elf::load_into` returns `LoadedElf { entry, phdr_va, phnum, phentsize }`, with `phdr_va` from the first PT_LOAD whose file range covers the phdrs | kernel.md |  |
+| R383 | 361 | auxv order is fixed by the caller — `AT_PHDR`, `AT_PHNUM`, `AT_PHENT`, `AT_PAGESZ` — not Linux's incidental order, so traces and tests are deterministic | abi.md |  |
+| R384 | 361 | the `AT_*` values are the Linux/SysV ones and are deliberately not emitted by `gen-c-headers`, since musl defines them itself | abi.md |  |
+| R385 | 361 | `AT_PHDR` needs the `FILEHDR PHDRS` linker-script idiom, or lld's 64 KiB `max-page-size` leaves `e_phoff` in an unmapped prefix | servers-and-drivers.md |  |
+| R386 | 361 | any new exec'able binary that wants `AT_PHDR` must copy that idiom and be re-checked with `llvm-readobj --program-headers` | servers-and-drivers.md |  |
+| R387 | 361 | server `user.ld`s stay unchanged — boot-loaded images keep `sp = SERVER_STACK_VA + PAGE_SIZE` and never read an auxv | servers-and-drivers.md |  |
+| R388 | 361 | `worker`'s `_start` is `#[unsafe(naked)]` with `naked_asm!("mov x0, sp", "b {main}")`, because a prologue could perturb `sp` | servers-and-drivers.md |  |
+| R389 | 361 | the `#[cfg(all(not(test), target_arch = "aarch64"))]` split needs a plain `main(0)` fallback that still calls `main`, or it is dead code under `-D warnings` | servers-and-drivers.md |  |
+| R390 | 361 | key any reap-derived marker on the child's pid (`alloc_pid` never returns 0) — PM parents the stubs to init, so init's first reap is stub D's zombie | testing-and-markers.md |  |
+| R391 | 361 | a marker can be right in one feature config and prove nothing in the other — `--no-default-features` has no stubs, so mutation-test in the config that has them | testing-and-markers.md |  |
+| R392 | 361 | `mproc::handle_kill_in` zombifies a signalled process without touching `exit_status`, so a probe that died before reporting is reaped with status 0 | servers-and-drivers.md |  |
+| R393 | 361 | for any probe reporting through an exit status, encode the pass (`execstack::EXEC_STACK_PROBE_PASS`), never the absence of a failure | testing-and-markers.md |  |
+| R394 | 361 | slice 5.5 record: a bad enough frame faults the probe into VM's SIGSEGV arm, which prints no `!!! EL0 data abort` for the forbidden list to catch | phase-5-musl-fs.md |  |
+| R395 | 363 | the libc is a git submodule at `external/musl` tracking branch `minixrs` of `minixrs/musl-minixrs`, based on tag `v1.2.6` | build-and-boot.md |  |
+| R396 | 363 | the fork's whole delta is `arch/aarch64/syscall_arch.h`, `src/minixrs/`, a brand block in `crt/crt1.c` and `MINIXRS.md` — staying that small is the design goal | build-and-boot.md |  |
+| R397 | 363 | musl globs `src/*/`, so `src/minixrs/` needs no Makefile edit | build-and-boot.md |  |
+| R398 | 363 | every `__syscallN` calls `__minixrs_syscall`, which switches on the Linux number musl still emits, so musl's ~297 call sites stay untouched | build-and-boot.md |  |
+| R399 | 363 | `syscall_ret.c` is untouched because D7's magnitudes all sit inside its `> -4096UL` window | abi.md |  |
+| R400 | 363 | `ioctl` → `-ENOTTY` is load-bearing: it makes `__stdout_write` set `f->lbf = -1`, so stdout is fully buffered and `printf` flushes via `exit()` | build-and-boot.md |  |
+| R401 | 363 | the startup facts that let six syscalls suffice must be re-verified, never assumed, on any musl bump, and are recorded in the fork's `MINIXRS.md` | build-and-boot.md |  |
+| R402 | 363 | the auxv must stay `AT_NULL`-terminated, because `__init_tp` walks `libc.auxv` | abi.md |  |
+| R403 | 363 | `tools/build-musl.sh` builds out-of-tree so the submodule work tree stays pristine — the `c-headers` job asserts a clean `git status` | build-and-boot.md |  |
+| R404 | 363 | `RANLIB` is `llvm-ar s`, because the pinned toolchain ships `llvm-ar` but not `llvm-ranlib` | build-and-boot.md |  |
+| R405 | 363 | `userland/hello` is not a cargo crate — `hello.c` plus `hello.ld` compiled by clang and linked inside `kernel/build.rs`, packed under proc_nr `-1` | build-and-boot.md |  |
+| R406 | 363 | the fallback presence-checks the sysroot `.stamp`, not the submodule, so a fresh clone cannot trigger a multi-minute libc build from a build script | build-and-boot.md |  |
+| R407 | 363 | `worker`'s `ARGV0_NAMES` is the set `{worker, hello}`, because a missing sysroot otherwise prints the forbidden `worker: stack FAIL` | testing-and-markers.md |  |
+| R408 | 363 | boot the fallback config whenever you change the `worker`-as-`hello` substitution — two readings missed this and only running it caught it | testing-and-markers.md |  |
+| R409 | 363 | the binary128 soft-float builtins come from `compiler_builtins` as built by `-Zbuild-std` for `aarch64-unknown-minixrs` — glob the nested target dir, never the sysroot | build-and-boot.md |  |
+| R410 | 363 | `hello.ld` must carry `.init`/`.fini`, `.init_array`/`.fini_array` with bracketing symbols, `.got` and `.data.rel.ro`: an orphan section past the last PT_LOAD is a silent load failure | build-and-boot.md |  |
+| R411 | 363 | the `FILEHDR PHDRS` idiom is mandatory for the musl link because `__init_tls` dereferences `AT_PHDR` | build-and-boot.md |  |
+| R412 | 363 | the 4 KiB exec stack was measured sufficient and was NOT grown, but `fmt_fp`'s VLA (~7.4 KB for `%Lf`) would overflow it and no static frame scan predicts that | build-and-boot.md |  |
+| R413 | 363 | `PM_EXEC` gained a name payload at `PM_EXEC_NAME_OFF`, reusing `EXEC_NAME_LEN`, and PM's `EXEC_TARGET` is gone | abi.md |  |
+| R414 | 363 | init alternates `EXEC_TARGETS` `worker`/`hello` with worker first, and the target is chosen before the fork so both halves of the SENDREC agree | servers-and-drivers.md |  |
+| R415 | 363 | the C milestone marker is `name=hello entry=` with no `target=` slot, because init's fork pool gives `hello` a different slot per feature config | testing-and-markers.md |  |
+| R416 | 363 | ABI freeze (D8): `Message` layout, call numbers, endpoints and errnos change only via a deliberate ABI-bump PR touching both repos | abi.md |  |
+| R417 | 363 | the port branch is force-pushed on rebase, so a fork rebase and the `external/musl` bump must land in the same PR | git-and-prs.md |  |
+| R418 | 363 | slice 5.6 record: the six-syscall set is `writev`/`write` → `VFS_WRITE`, `exit`/`exit_group` → `PM_EXIT`, `set_tid_address` → 1, `ioctl` → `-ENOTTY`, else `-ENOSYS` | phase-5-musl-fs.md |  |
+| R419 | 363 | there is no `PT_TLS` — musl keeps `errno` in the pthread struct via `tpidr_el0`, so `libc.a` has no `.tdata`/`.tbss` | build-and-boot.md |  |
+| R420 | 365 | the MinixFS v3 root image is built at compile time by `tools/mkfs-mfs`, whose library `kernel/build.rs` calls directly as a `[build-dependencies]` path dep | build-and-boot.md |  |
+| R421 | 365 | cargo re-runs a build script when a build-dependency changes, so neither `mkfs-mfs` nor `fs/mfs` needs a `rerun-if-changed` entry | build-and-boot.md |  |
+| R422 | 365 | the image is packed into the MXBI archive as a non-ELF blob under `com::ROOTFS_MODULE_NAME = "rootfs"` with `EXEC_ONLY_PROC_NR` | servers-and-drivers.md |  |
+| R423 | 365 | `BDEV_RQ_BASE = 0xA00` with payload `{minor, grant, len, block}` — no granter field and no grant-offset field | abi.md |  |
+| R424 | 365 | a `BDEV_READ` reply `m_type` is the byte count | abi.md |  |
+| R425 | 365 | an over-long or out-of-range BDEV request is `EINVAL`, not a short read — a filesystem cannot interpret half a block | servers-and-drivers.md |  |
+| R426 | 365 | `EIO` stays reserved for Phase 6's real media errors, where the request was well-formed and the device failed | servers-and-drivers.md |  |
+| R427 | 365 | `BDEV_WRITE` was defined and answered `EROFS`, never `ENOSYS`, so "doesn't know about writes" and "knows and refuses" stay distinguishable | servers-and-drivers.md |  |
+| R428 | 365 | `uspace::RAMDISK_WINDOW_BASE = 0x8000_0000` sits above the device window, so `region::REGION_LIMIT` stays the base of the lowest kernel-owned window | abi.md |  |
+| R429 | 365 | the `assert!(USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE <= RAMDISK_WINDOW_BASE)` is what keeps VM edit-free when a window is added | abi.md |  |
+| R430 | 365 | the ramdisk pre-map is a `nr == MEM_PROC_NR` arm in `load_boot_server`, not `load_exec_image`, with no TLB and no cache maintenance | kernel.md |  |
+| R431 | 365 | every ramdisk mapping step `.expect()`s — a `let _ = map_page_in(..)` would turn a non-advancing loop into a 1-page ramdisk with 255 leaked frames | kernel.md |  |
+| R432 | 365 | `GET_RAMDISK = 64` returns `(va, len)` and is gated on `caller.nr == MEM_PROC_NR` → `EPERM`, since the VA is meaningless elsewhere | kernel.md |  |
+| R433 | 365 | `pack_mxbi` asserts `u32` range on offset and length — the latent unchecked-cast class `checked_add` exists to kill | build-and-boot.md |  |
+| R434 | 365 | the `memory` driver contains no `unsafe` block and never dereferences the mapping — transfers are `sys_safecopy`, the boot self-check is `sys_copy(SELF, …)` | servers-and-drivers.md |  |
+| R435 | 365 | `server-rt::sys_getinfo` is the shared `SYS_GETINFO` helper, with `sef_startup`'s inline `GET_WHOAMI` refactored onto it | servers-and-drivers.md |  |
+| R436 | 365 | the image is a fixed `ROOTFS_IMAGE_BLOCKS = 256`, never content-sized, or every size-derived marker becomes config-dependent; oversizing is a build failure | build-and-boot.md |  |
+| R437 | 365 | `/etc/pattern` at 40 KiB is mandatory, because it is what forces the single-indirect arm in every configuration | servers-and-drivers.md |  |
+| R438 | 365 | `MEM`'s init check is device-level, not format-level — a block driver must not depend on the filesystem format | servers-and-drivers.md |  |
+| R439 | 365 | mkfs writes a 32-byte image header into block 0's boot block (bytes `0..1024`, which MFS never reads) plus a 32-byte tail label, and MEM verifies both | servers-and-drivers.md |  |
+| R440 | 365 | that header ABI lives in `kernel-shared::rootfs`, because mkfs writes it and MEM and VFS read it and none may depend on the others | abi.md |  |
+| R441 | 365 | the tail label is not decoration — a copy loop that failed to advance passes every header check and only `ramdisk FAIL tail label` moves | testing-and-markers.md |  |
+| R442 | 365 | format-level facts are verified by a client through a real `BDEV_READ` round trip, not by the driver | servers-and-drivers.md |  |
+| R443 | 365 | `fs/mfs`'s read path is I/O-free by construction — every reader takes bytes the caller already fetched, which is what makes it host-testable | servers-and-drivers.md |  |
+| R444 | 365 | `zone_for_offset` distinguishes a `Hole` (reads as zeroes) from `OutOfRange` (past the single-indirect span) — explicit, never silent zeroes | servers-and-drivers.md |  |
+| R445 | 365 | VFS's boot demo runs last in `main`'s prologue so a hang localizes to `bdev.*` — do not tidy the prologue into alphabetical order | servers-and-drivers.md |  |
+| R446 | 365 | a granted demo buffer is a 32-byte local, not a `.rodata` static and not a whole block — do not grow VFS's one-page stack for a demo | servers-and-drivers.md |  |
+| R447 | 365 | `module_by_name` is a namespace shared by ELFs and blobs, so a path→module resolution must not be able to name `rootfs` | servers-and-drivers.md |  |
+| R448 | 365 | slice 5.7 record: double-indirect is justified out arithmetically — `7 + 1024` zones is 4.03 MiB, which is also why the VA window is 4 MiB | phase-5-musl-fs.md |  |
+| R449 | 367 | the SDK flavor is one command: `clang --target=aarch64-unknown-minixrs hello.c -o hello`, with the patched driver supplying `-static` and `--image-base=0x100000` | build-and-boot.md |  |
+| R450 | 367 | flavor selection is three-way `HelloFlavor::{Sdk, Musl, Worker}`, and `Musl` is `qemu-smoke`'s real dependency rather than a fallback | build-and-boot.md |  |
+| R451 | 367 | once an SDK is usable every failure is a `panic!`, never a demotion, because the boot markers are byte-identical across flavors | build-and-boot.md |  |
+| R452 | 367 | the panic carries prefix, stamp, a `clang -###` reproduce line and the `MINIXRS_SDK=/nonexistent` escape hatch | build-and-boot.md |  |
+| R453 | 367 | `usable_sdk` probes exactly three files — `bin/clang`, `sysroot/.stamp`, `sysroot/usr/lib/libc.a` — and deliberately not the crt objects or resource dir | build-and-boot.md |  |
+| R454 | 367 | nothing here may hard-code the clang resource-dir version `22`; a sysroot missing the driver-named files is a broken SDK that must fail loudly | build-and-boot.md |  |
+| R455 | 367 | both stamps are watched with `rerun-if-changed` unconditionally, because a declared-but-missing path is what makes cargo notice a stamp appearing | build-and-boot.md |  |
+| R456 | 367 | `clang_command` scrubs `CPATH`, `*_INCLUDE_PATH`, `LIBRARY_PATH` and `SDKROOT` from every clang site, including the `.S` loop | build-and-boot.md |  |
+| R457 | 367 | `-nostdinc` does not suppress those env-derived include paths, which clang folds ahead of the sysroot — a foreign `errno.h` would shadow musl's | build-and-boot.md |  |
+| R458 | 367 | do not "fix" the surviving `/usr/local/include` with `-nostdlibinc`, which would drop the sysroot too | build-and-boot.md |  |
+| R459 | 367 | there is no pack-time ELF/loader gate — an `--image-base` regression is already loud, and a gate would duplicate a private kernel const | build-and-boot.md |  |
+| R460 | 367 | loader rules stay tooling's `verify/check-image.sh`, run by hand | build-and-boot.md |  |
+| R461 | 367 | both flavors share `target/hello/`, so read it only after a successful build of the flavor you mean | build-and-boot.md |  |
+| R462 | 367 | the SDK links its own musl and the stamp's `musl=<sha>` is a merge commit, so an equality check is impossible — re-run tooling's `build-sysroot.sh` after a fork rebase | ci.md |  |
+| R463 | 367 | the stamp's `minixrs=<sha>` is a snapshot of the installed headers, tolerable only under D8, so any `kernel-shared` ABI change requires re-running `build-sysroot.sh` | ci.md |  |
+| R464 | 367 | P3c record: SDK `hello` measures 46,664 B over 4 PT_LOADs against musl's 200,152 B over 3, both entry `0x101000` and both a megabyte clear of `SERVER_STACK_VA` | phase-5-musl-fs.md |  |
+| R465 | 369 | `FS_RQ_BASE = 0x900` was the last reserved slot, so `0x700..0xC00` is fully allocated and a tenth band needs a home outside that span | abi.md |  |
+| R466 | 369 | the FS request set is `FS_READSUPER` + `FS_LOOKUP` + `FS_READ` and nothing else — a request without a consumer is better absent than stubbed | abi.md |  |
+| R467 | 369 | MFS keeps no per-open state, so there is no PUTNODE and `VFS_CLOSE` sends the FS nothing | servers-and-drivers.md |  |
+| R468 | 369 | an FS path travels inline at `FS_PATH_OFF`, NUL-padded to `FS_PATH_MAX = 64`, so the longest path is 63 bytes | abi.md |  |
+| R469 | 369 | a path field with no NUL is `ENAMETOOLONG`, never a truncation that could resolve to another file | servers-and-drivers.md |  |
+| R470 | 369 | `FS_READ` data travels by grant with no granter field and no grant-offset field — VFS issues a fresh grant over exactly the round's bytes | abi.md |  |
+| R471 | 369 | an over-long `FS_READ` is clamped — a short read, not `EINVAL` — because the client is VFS, whose job is hiding staging from POSIX | servers-and-drivers.md |  |
+| R472 | 369 | an `FS_READ` is two copies, not one: device → MFS's block buffer → the granted buffer, because a read is rarely block-aligned and a hole has no device block | servers-and-drivers.md |  |
+| R473 | 369 | `fs/mfs` puts every line with a decision in it in the lib, because `[[bin]] required-features = ["server"]` removes `main.rs` from every CI job | servers-and-drivers.md |  |
+| R474 | 369 | `ci.yml` carries an extra `cargo clippy -p minixrs-mfs --features server` step for that reason | ci.md |  |
+| R475 | 369 | `kernel/build.rs` threads `--features server` through the nested MFS build the way it threads PM's `--no-default-features` | build-and-boot.md |  |
+| R476 | 369 | `proto.rs` re-derives its own `rd_i32`/`rd_u64` because `server-rt` is an optional dep — the trade `userland/init` already makes | servers-and-drivers.md |  |
+| R477 | 369 | MFS's 4 KiB block buffer is a `.bss` static, not a `main`-frame local, because a server stack is exactly one page | servers-and-drivers.md |  |
+| R478 | 369 | that does not contradict TTY's stage-in-`main`'s-frame rule: a static satisfies it better, so MFS's `ensure_registered` never re-fires | servers-and-drivers.md |  |
+| R479 | 369 | the block buffer is reached only through the `Blocks` capability token, whose `read(&mut self)` makes holding a block across the next fetch a borrow-check error | servers-and-drivers.md |  |
+| R480 | 369 | `uspace::SERVER_STACK_BYTES` exists to carry `fs/mfs`'s `const _` stack tripwire, and `userland.rs` const-asserts its own stack mapping against it | abi.md |  |
+| R481 | 369 | a `BDEV_READ` failure becomes `EIO` because MFS's client addressed a file, while a `SYS_SAFECOPY` failure against VFS's grant is relayed verbatim | servers-and-drivers.md |  |
+| R482 | 369 | MFS is degraded, never fatal and never a panic past `sef_startup` — a failed mount means `ENODEV` to everything | servers-and-drivers.md |  |
+| R483 | 369 | every device-derived loop bound has a cap (`MAX_DIR_BYTES`, `size < 0 → EIO`, `zone_ok` before every read), or a corrupt size spins MFS | servers-and-drivers.md |  |
+| R484 | 369 | `VFS_OPEN 0x801` / `VFS_READ 0x802` / `VFS_CLOSE 0x803`, and `VFS_READ` reuses `VFS_WRITE`'s payload verbatim | abi.md |  |
+| R485 | 369 | `rw.rs`'s `advance` rules are direction-agnostic — a peer reporting 0 is EOF — with `open.rs` holding what differs | servers-and-drivers.md |  |
+| R486 | 369 | VFS reads the path with `sys_copy(caller_e, …)`: `SYS_COPY` has no per-target authorization, so a payload-supplied source would let any client read any process | servers-and-drivers.md |  |
+| R487 | 369 | VFS does not loop on read — POSIX allows a short `read()` — while it loops on write because it may not | servers-and-drivers.md |  |
+| R488 | 369 | `Fd::File { ino, pos }` caches no size; EOF is `n == 0`, one source of truth | servers-and-drivers.md |  |
+| R489 | 369 | `alloc_in` scans upwards from fd 3, because a `.rposition()` returns the last slot and passes every "did I get a descriptor" check | servers-and-drivers.md |  |
+| R490 | 369 | the `UnsafeCell<[FdRow; N]>` rule is never hold a table borrow across a SENDREC; `Fd` is `Copy` so the borrow dies at the destructuring `let` | servers-and-drivers.md |  |
+| R491 | 369 | `do_write` answers `Ok(Fd::File { .. }) => EROFS` — defined and refused rather than folded into the unused case | servers-and-drivers.md |  |
+| R492 | 369 | DS ordering is a chain `ds < tty < memory < mfs < vfs`, satisfied only by array position in `kernel/build.rs`, with `boot_endpoint` fallbacks on both new lookups | servers-and-drivers.md |  |
+| R493 | 369 | `kernel-shared::rootfs` holds the image's contents so MFS's read proof is a check rather than a transcription | abi.md |  |
+| R494 | 369 | spell every unknown-request probe band-relative (`VFS_RQ_BASE + NR_VFS_MSGS as i32`) — a literal silently becomes a real request when the band grows | testing-and-markers.md |  |
+| R495 | 369 | slice 5.8 record: VFS's `bdev_demo`/`bdev_denials` were retired to `[diag mfs]` once MFS became the real BDEV client | phase-5-musl-fs.md |  |
+| R496 | 369 | `NR_FDS` goes 4→8 so that "lowest free" and "table full" are distinct tests | servers-and-drivers.md |  |
+| R497 | 369 | `the_server_band_space_below_vm_is_fully_allocated` replaces the test that recorded `0x900` as free | abi.md |  |
+| R498 | 370 | `SYS_EXEC` carries a source selector at `EXEC_SRC_OFF` where 0 is invalid — the `SAFECOPY_*` convention — plus a grant triple | abi.md |  |
+| R499 | 370 | payload `4..20` stays `argv[0]` and the proc name in both exec forms; only where the bytes come from changes | abi.md |  |
+| R500 | 370 | `boot_image::elf::ElfSource` is an enum, not a `dyn` trait, so there is no vtable dispatch per header field | kernel.md |  |
+| R501 | 370 | the granted arm delegates to `copy_from_user_as`, so there is no new copy machinery and the per-page segment copy stays a single copy | kernel.md |  |
+| R502 | 370 | the exec grant is validated by `do_safecopy::verify_grant`, widened to `pub(super)`, not by a second copy of its eleven checks | kernel.md |  |
+| R503 | 370 | the granted read completes before the point of no return, so a buffer that is not an ELF leaves the target on its old image — `load_exec_image`'s invariant | kernel.md |  |
+| R504 | 370 | `load_exec_image` returns `Result<_, i32>`: `Map(OutOfMemory)` → `ENOMEM`, `Source` → `EFAULT`, else `ENOEXEC` — no more folding everything into `ENOMEM` | kernel.md |  |
+| R505 | 370 | `kernel/build.rs`'s pack-time `scan_brand` cannot reach a file, so the runtime scan is the only gate for a file-sourced ELF | kernel.md |  |
+| R506 | 370 | `brand::scan_note_segment` is split out pure and host-tested, and the loader stages each `PT_NOTE` through a bounded buffer — a brand past `MAX_NOTE_BYTES` is not found | abi.md |  |
+| R507 | 370 | `kernel-shared::execimage` carries `MAX_PHNUM`, a cumulative `PageBudget` and `segment_end` — the standing rule for predicates `kernel/src/` cannot test | abi.md |  |
+| R508 | 370 | `PageBudget` is cumulative because per-segment checking misses a hundred reasonable-looking segments | abi.md |  |
+| R509 | 370 | the boot-archive `hello` module is dropped, and `name=hello src=grant entry=` keeps `name=` and `src=` adjacent so one substring proves program and form | testing-and-markers.md |  |
+| R510 | 370 | `worker` stays boot-embedded as the name-form regression | testing-and-markers.md |  |
+| R511 | 370 | a leading `/` is `PM_EXEC`'s only discriminator — one field, because two can disagree | servers-and-drivers.md |  |
+| R512 | 370 | module names and paths are disjoint namespaces, so nothing resolving a path can name the `rootfs` blob | servers-and-drivers.md |  |
+| R513 | 370 | `argv[0]` is the path's basename, never the path, which is what left `EXEC_NAME_LEN`, `PROC_NAME_LEN` and `INITIAL_STACK_MAX` untouched | abi.md |  |
+| R514 | 370 | `server-rt::rd_name` cannot express a NUL-padded field's rules, so PM's `path::parse` takes the payload's whole fixed-width field as raw bytes | servers-and-drivers.md |  |
+| R515 | 370 | apply the raw-bytes rule to every fixed-width inline field — `ENAMETOOLONG` and `EINVAL` are different answers | servers-and-drivers.md |  |
+| R516 | 370 | VFS's 256 KiB staging buffer is a `.bss` static but needs no capability token and no borrow discipline, since VFS never dereferences the staged bytes | servers-and-drivers.md |  |
+| R517 | 370 | nothing releases the `VFS_EXEC_STAGE` grant: re-granting per request bumps the sequence and kills the previous id, and PM serialises exec | servers-and-drivers.md |  |
+| R518 | 370 | `VFS_EXEC_STAGE` carries the path inline, because its client is PM, which already holds it inline | abi.md |  |
+| R519 | 370 | a short stream to `VFS_EXEC_STAGE` is `EIO`, not a short stage — the one place in VFS where a partial transfer is not a legitimate answer | servers-and-drivers.md |  |
+| R520 | 370 | the `fd.rs` fd-table debt comment is re-pointed: the first thing that will force it is a program that opens a file after being exec'd | servers-and-drivers.md |  |
+| R521 | 370 | slice 5.9 record: init's `exec_denials` battery is safe because a failed exec leaves the caller on its old image, so the battery is the rollback proof | phase-5-musl-fs.md |  |
+| R522 | 420 | `FS_WRITE = FS_RQ_BASE + 3` reuses `FS_READ`'s payload field for field, so one wire codec and one clamp serve both directions | abi.md |  |
+| R523 | 420 | only the grant's direction bit differs — `CPF_READ` for a write, `CPF_WRITE` for a read — checked by the kernel's `verify_grant` and re-implemented by no server | servers-and-drivers.md |  |
+| R524 | 420 | a short `FS_WRITE` is normal, and that is not an inconsistency with `BDEV_READ`'s refuse-or-nothing: the clients differ | servers-and-drivers.md |  |
+| R525 | 420 | `FS_WRITE` still has no granter field and no grant-offset field, so VFS re-grants per round over exactly that round's bytes | abi.md |  |
+| R526 | 420 | do not add an offset field to `FS_WRITE` to buy the CDEV shape — re-granting is what keeps the confused-deputy surface at zero | abi.md |  |
+| R527 | 434 | MFS's single 4 KiB block buffer fixes `do_write`'s step order: read inode, clamp, compute grown size, place the zone, read-modify-write the block, write the inode back | servers-and-drivers.md |  |
+| R528 | 434 | nothing may hold a block across the next fetch, so every intermediate is a `Copy` scalar and `place_zone` must finish with the buffer free | servers-and-drivers.md |  |
+| R529 | 439 | `Blocks`' standing grant to the `memory` driver is `CPF_READ` + `CPF_WRITE` — one buffer, both directions, one static address, so `ensure_registered` never re-fires | servers-and-drivers.md |  |
+| R530 | 441 | widening those flags does not widen what any one call may do, but it re-arms anything using `blocks.gid` as a deliberately-insufficient grant | servers-and-drivers.md |  |
+| R531 | 443 | a denial probe relying on insufficient flags needs its own `CPF_WRITE`-only grant aimed at a spare block (`START_BLOCK = 2`) in the same change | testing-and-markers.md |  |
+| R532 | 447 | in `place_zone` a zone's bitmap bit is set before its number is stored, so a mid-write failure leaks a zone rather than letting two files share one | servers-and-drivers.md |  |
+| R533 | 450 | the inode write-back is keyed on "a zone was assigned OR the size grew", never on size alone — filling a hole assigns `zone[i]` without moving `size` | servers-and-drivers.md |  |
+| R534 | 454 | 5.10a record: dropping `dirty` from the write-back condition moved no marker — it has no boot probe, so treat it as unproven, not covered | phase-5-musl-fs.md |  |
+| R535 | 459 | `mkfs-mfs` ships `/etc/scratch` empty, so every zone the file ends up with, indirect block included, was allocated at runtime | servers-and-drivers.md |  |
+| R536 | 461 | init writes `ROOTFS_SCRATCH_LEN` = 32 KiB, closes, re-opens with a fresh `FS_LOOKUP`, and compares every byte | testing-and-markers.md |  |
+| R537 | 465 | `fs.write ok n=32768 v=32768` reports the write path's count and the verified count separately, so they fail independently | testing-and-markers.md |  |
+| R538 | 466 | verify the whole file, not windows — there is no `lseek`, and the windowed version left offsets 4096..28671 read but never compared | testing-and-markers.md |  |
+| R539 | 470 | both marker numbers are literals pinned to the constant by a `const _`, because init cannot format an integer | testing-and-markers.md |  |
+| R540 | 472 | 5.10a record: `open_denials`' `write-file` probe became a successful overwrite of `/etc/motd` the moment the write path became real | phase-5-musl-fs.md |  |
+| R541 | 475 | retire a probe by moving its count (`open.deny ok n=8` → `n=7`) so the retirement is a visible diff rather than a deletion nobody reviews | testing-and-markers.md |  |
+| R542 | 477 | write every denial probe so that a growing capability makes it fail loudly, not pass vacuously | testing-and-markers.md |  |
+| R543 | 478 | never aim a "must be refused" probe at a file or block whose accidental write would destroy something | testing-and-markers.md |  |
+| R544 | 481 | `FS_CREATE = FS_RQ_BASE + 4` and `FS_TRUNC = FS_RQ_BASE + 5`, with `FS_CREATE` reusing `FS_LOOKUP`'s wire codec verbatim, request and reply alike | abi.md |  |
+| R545 | 485 | `VFS_OPEN` gained `VFS_FLAGS_OFF` (an i32 of `fcntl` values) without moving `NR_VFS_MSGS` — a new field on an existing request, not a new request | abi.md |  |
+| R546 | 486 | `O_CREAT` on a lookup miss dispatches to `FS_CREATE`; `O_TRUNC` on a lookup hit dispatches to `FS_TRUNC` | servers-and-drivers.md |  |
+| R547 | 487 | `O_CREAT` with `O_TRUNC` on a miss takes the create arm and stops, because a fresh file is already empty | servers-and-drivers.md |  |
+| R548 | 488 | an `FS_TRUNC` runs before the descriptor is installed, so a failure never leaves a descriptor onto a half-truncated file | servers-and-drivers.md |  |
+| R549 | 491 | `do_write`'s create path copies the client's bytes into a second 4 KiB `.bss` staging buffer before anything is allocated | servers-and-drivers.md |  |
+| R550 | 493 | clearing the bitmap bit on `do_write`'s error path would be wrong for an indirect slot whose block already existed — freeing the bit hands one zone to two files | servers-and-drivers.md |  |
+| R551 | 498 | `find_free_slot` must let `Occupied` beat `Free` across every block of a directory, scanning every block for the name before reusing a free slot | servers-and-drivers.md |  |
+| R552 | 503 | 5.10b record: reversing `do_trunc`'s free-before-write-back order and inserting the dirent before `write_inode` both move no marker — named rather than omitted | phase-5-musl-fs.md |  |
+| R553 | 508 | `bitmap_clear`'s off-by-one moves no boot marker but is caught by two host tests in `fs/mfs/src/write.rs` — run `cargo test` under a mutation, not just a boot | testing-and-markers.md |  |
+| R554 | 511 | `/full` and `/etc/holey` exist because a full directory and a pre-existing hole below EOF are otherwise unreachable in both boot configurations | testing-and-markers.md |  |
+| R555 | 517 | a denial probe's flag must be spelled relative to `O_KNOWN` (`fcntl::O_UNKNOWN_BIT`), not as a literal, so a flag becoming real makes the probe fail loudly | testing-and-markers.md |  |
+| R556 | 521 | 5.10b record: the boot budget moved 240 s → 600 s on a 26.90% → 61.61% marker jump measured on the `musl` flavour; the 256-probe leak battery dominates | phase-5-musl-fs.md |  |
+| R557 | 526 | `MINIXRS_SDK` does not persist across separate shell invocations, so check the embedded `hello` size rather than trusting the build warning | build-and-boot.md |  |
+| R558 | 530 | 5.10b record: the image went to 128 inodes and `mkfs-mfs` learned sparse files via `Manifest::add_sparse` | phase-5-musl-fs.md |  |
+| R559 | 531 | `kernel/build.rs` asserts free-inode headroom against the built image beside the existing free-zone assert | build-and-boot.md |  |
+| R560 | 534 | `CDEV_READ = CDEV_RQ_BASE + 1` is `CDEV_WRITE`'s payload with the copy reversed — the grant carries `CPF_WRITE` and the driver pushes with `SAFECOPY_TO` | abi.md |  |
+| R561 | 536 | for `CDEV_READ`, `0` is EOF and a short read is legal, so VFS sends one request and never loops — the `FS_READ` stance | servers-and-drivers.md |  |
+| R562 | 537 | 5.11 record: the 5.3 plan text saying 5.11 would be "minors, not requests" was wrong for reading zero — `CDEV_READ` exists; four copies corrected | phase-5-musl-fs.md |  |
+| R563 | 539 | `/dev/null` and `/dev/zero` are CDEV minors 3 and 5 of the memory driver, MINIX 3's `NULL_DEV`/`ZERO_DEV` | abi.md |  |
+| R564 | 540 | minors are a per-driver namespace — the same driver's ramdisk is BDEV minor 0, and nothing asserts `CDEV_MINOR_*` against `BDEV_MINOR_*` | abi.md |  |
+| R565 | 542 | the memory driver never clamps, because `CDEV_MAX_IO` protects TTY's stack staging buffer and there is no staging here | servers-and-drivers.md |  |
+| R566 | 543 | a null or zero write answers the whole count with no copy at all, so an unmapped buffer succeeds — never aim a `bad-buf` probe at `/dev/null` | testing-and-markers.md |  |
+| R567 | 545 | a zero read fills the whole request from a 256-byte static in `CDEV_MAX_IO` steps, reporting partial progress on a mid-way failure | servers-and-drivers.md |  |
+| R568 | 547 | the four-field CDEV parse lives in `server-rt::cdev` now that two drivers decode it; validation stays per driver | servers-and-drivers.md |  |
+| R569 | 548 | `Fd::CharDev { dev: CharDriver, minor }` names its driver with an enum, not an `Endpoint`, because `DEFAULT_ROW` is a `const` | servers-and-drivers.md |  |
+| R570 | 549 | `servers/vfs/src/dev.rs` is a three-row device-node table consulted after the path copy and before the mount, since a device open needs no filesystem | servers-and-drivers.md |  |
+| R571 | 551 | on a device-node hit `O_CREAT`/`O_TRUNC` are ignored, the match is exact bytes, and `/dev/other` falls through to MFS's `ENOENT` | servers-and-drivers.md |  |
+| R572 | 552 | a console `read()` is a real `CDEV_READ` to TTY, answered `ENOSYS` by its unknown-request arm until Phase 6 adds one TTY arm and touches VFS not at all | servers-and-drivers.md |  |
+| R573 | 556 | the memory driver's validator is probed from VFS's prologue as `mem.deny ok n=5`, last, after `fs.deny` | testing-and-markers.md |  |
+| R574 | 558 | init's `dev.console ok` is written through the `/dev/console` descriptor, never fd 1 — that is the only thing that proves the table row points at TTY | testing-and-markers.md |  |
+| R575 | 560 | device paths are `callnr::DEV_*_PATH` so init and VFS cannot drift | abi.md |  |
+| R576 | 565 | canonical docs are an mdBook in `book/` with content under `book/src/` and the TOC in `book/src/SUMMARY.md` | docs-and-workflow.md |  |
+| R577 | 566 | the book is published to GitHub Pages on push to `main` via `.github/workflows/docs.yml`, path-filtered to `book/**`, mdBook pinned to 0.5.3 | docs-and-workflow.md |  |
+| R578 | 567 | the Pages actions are SHA-pinned like `ci.yml` | docs-and-workflow.md |  |
+| R579 | 568 | write new documentation in `book/`, derived from source — the `docs/*.md` files are legacy bootstrap notes being retired | docs-and-workflow.md |  |
+| R580 | 569 | the planning tree is the exception and stays: `docs/plan.md` is the lean live tracker and `docs/plans/` holds the per-phase slice histories | docs-and-workflow.md |  |
+| R581 | 574 | read `docs/plans/phase-5-musl-fs.md` (decisions D1–D13, slices 5.0–5.11) before starting any Phase 5 slice | docs-and-workflow.md |  |
+| R582 | 575 | build the book locally with `mdbook build book`; the output `book/book/` is gitignored | docs-and-workflow.md |  |
+| R583 | 578 | to install mdBook or preview the book locally, use the `mdbook-preview` skill | docs-and-workflow.md |  |
+| R584 | 580 | slices are built with the superpowers skills: `brainstorming`, then `writing-plans`, then `subagent-driven-development` | docs-and-workflow.md |  |
+| R585 | 583 | per-slice design and plan documents land in `docs/superpowers/specs/` and `docs/superpowers/plans/`, named `YYYY-MM-DD-<topic>-{design,plan}.md` | docs-and-workflow.md |  |
+| R586 | 584 | the superpowers tree is deliberately narrow: `book/` stays canonical for how the system works and `docs/plan.md` + `docs/plans/` for slice status | docs-and-workflow.md |  |
+| R587 | 587 | the phase tracker links to the spec by relative path rather than restating it, or the two drift and the tracker is the one people read | docs-and-workflow.md |  |
+| R588 | 592 | give a fresh reviewer the diff as a file and ask it to verify arithmetic by hand rather than confirming that tests exist | docs-and-workflow.md |  |
+| R589 | 594 | run the whole-branch review against `book/` — every task in a subagent run sees one crate, so nobody re-reads the published docs | docs-and-workflow.md |  |
+| R590 | 596 | `docs.yml` is path-filtered to `book/**`, so a slice that forgets the book ships a Pages site contradicting its own code, silently and indefinitely | docs-and-workflow.md |  |
+| R591 | 600 | the dominant defect class in a subagent-driven slice is a doc comment or test that a LATER TASK IN THE SAME BRANCH falsified | docs-and-workflow.md |  |
+| R592 | 609 | make it a whole-branch step: grep the touched crates for every `unreachable`, `nothing reaches this`, `there is no X yet` and `until slice N` claim | docs-and-workflow.md |  |
+| R593 | 611 | grep too for every `assert_eq!(fields.len(), N)` or similar count-the-fields tripwire and check each against what the branch actually added | docs-and-workflow.md |  |
+| R594 | 612 | a tripwire the adding branch does not grow is worse than none, because it reads as coverage | docs-and-workflow.md |  |
+| R595 | 615 | the same sweep is owed by a review-fix round, and a rename or moved path is its loudest trigger | docs-and-workflow.md |  |
+| R596 | 617 | the copies living in `book/`, `tests/qemu-boot.expected` and `docs/plans/` are exactly the ones nobody looks at | docs-and-workflow.md |  |
+| R597 | 621 | run `grep -rn '<old name>' --include='*.rs' --include='*.md' .` before committing, every time something is renamed or relocated | docs-and-workflow.md |  |
+| R598 | 624 | a review fix that rewords a claim owes the same sweep as a rename — grep the phrase across `tests/ book/ docs/ CLAUDE.md` before committing | docs-and-workflow.md |  |
+| R599 | 627 | read every `book/` chapter a slice touches end to end once, not diff-wise — 5.11's remaining defects were self-contradictions inside one chapter | docs-and-workflow.md |  |
+| R600 | 631 | `docs/plan.md` and `docs/plans/*` track status with three markers: `◀ next`, `◀ ready (branch ..., pending merge)`, `✓ shipped (PR #N, merged YYYY-MM-DD)` | docs-and-workflow.md |  |
+| R601 | 631 | flip the previous slice forward and slide `◀ next` ahead in both `plan.md`'s summary line and the corresponding `docs/plans/` detail file | docs-and-workflow.md |  |
+| R602 | 631 | when opening a new slice PR, reconcile older `◀ ready` markers against `git log` — stale "pending merge" labels accumulate otherwise | docs-and-workflow.md |  |
+| R603 | 633 | mutation tests apply, observe the named marker move, and revert — against an uncommitted working tree | testing-and-markers.md |  |
+| R604 | 633 | never revert a mutation with `git checkout <file>`: copy the files to the scratchpad first, restore from there, then `diff -q` each back | testing-and-markers.md |  |
+| R605 | 633 | prove nothing leaked into the PR with `grep -rn MUTATION` | testing-and-markers.md |  |
+| R606 | 633 | a mutation that fails to compile is indistinguishable from one that worked — `grep -a 'error\[E' <log>` or confirm unrelated markers still PASS before recording | testing-and-markers.md |  |
+| R607 | 633 | iterate and mutation-test in the `--no-default-features` config, judging the run by grepping the specific marker rather than the script's overall verdict | testing-and-markers.md |  |
+| R608 | 633 | not every mutation moves its predicted marker: reordering MXBI packing does not reliably break a DS lookup, since publish-before-retrieve is scheduler-dependent | testing-and-markers.md |  |
+| R609 | 633 | to exercise a DS fallback branch, remove the peer entirely or break the key — breaking MFS's `"memory"` key gave `bdev.ds FAIL rc=-3 fallback=3` | testing-and-markers.md |  |
+| R610 | 633 | some correct invariants have no mutation that moves anything — the honest record says so rather than omitting the row | testing-and-markers.md |  |
+| R611 | 633 | before recording a row as uncovered, run `cargo test` under the mutation too, not just a boot | testing-and-markers.md |  |
+| R612 | 633 | a guard's mutation moves the marker of the probe that exists for that guard, not one on a healthy path — 5.8's `!node.is_dir()` moved `fs.deny FAIL not-dir` | testing-and-markers.md |  |
+| R613 | 633 | never copy a count into a marker from a plan — recompute it from the constant (5.8's plan said `n=30` for a 31-byte `ROOTFS_MOTD`) | testing-and-markers.md |  |
+| R614 | 633 | the scratchpad snapshot must cover the files a slice adds, not just the ones it edits: `git checkout -- <untracked file>` errors rather than restoring | testing-and-markers.md |  |
+| R615 | 633 | let the final `grep -rn MUTATION` sweep, never the restore command's exit status, be what proves the tree clean | testing-and-markers.md |  |
+| R616 | 633 | IDE diagnostics appearing mid-run are usually residue of a mutated file — trust `cargo clippy … -D warnings` on the committed tree | testing-and-markers.md |  |
+| R617 | 633 | the boot-ratio `git checkout --detach <merge-base>` needs a clean tree: commit the marker edits first, detach, boot, then check out the branch again | testing-and-markers.md |  |
+| R618 | 633 | stage by explicit path — `git add $(git diff --name-only)` sweeps in a locally modified `.claude/settings.json` | git-and-prs.md |  |
+| R619 | 637 | code review happens in a live Hunk diff session driven with `hunk session …` — never `hunk diff`/`hunk show` directly, the TUI is the user's | docs-and-workflow.md |  |
+| R620 | 638 | the `hunk-review` skill at `hunk skill path hunk-review` has the full CLI | docs-and-workflow.md |  |
+| R621 | 641 | open every session with `--experimental` (`hunk diff --experimental origin/main...HEAD`) so notes can carry STML | docs-and-workflow.md |  |
+| R622 | 642 | a session without `stml` in `hunk session context --json`'s `experimentalFeatures` rejects markup and silently falls back to plain summaries | docs-and-workflow.md |  |
+| R623 | 644 | author notes in STML, not plain text — `hunk session comment apply … --stdin` with a `markup` field per item and `--summary` as a real one-line fallback | docs-and-workflow.md |  |
+| R624 | 645 | read `hunk markup guide` first and preview at the session's `noteMarkupWidth` with `hunk markup render - --width N` | docs-and-workflow.md |  |
+| R625 | 646 | `<code>` is a block tag — identifiers inline go in `<c fg="accent">…</c>`, and `&harr;` is not an entity, use the literal ↔ | docs-and-workflow.md |  |
+| R626 | 647 | a useful note shape is a severity `<badge>` plus bold title, a rounded `why` box, a rounded `fix` box, and a dim `see also` line | docs-and-workflow.md |  |
+| R627 | 649 | PR review comments get mirrored into the session as one `comment apply` batch, one note per thread anchored at the thread's `newLine`, `author` set to the reviewer | docs-and-workflow.md |  |
