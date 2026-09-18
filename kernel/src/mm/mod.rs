@@ -38,8 +38,8 @@ pub fn phys_to_hhdm(pa: u64) -> *mut u8 {
 
 /// HHDM offset capture. Wrapped in the same `UnsafeCell` + `Sync` newtype
 /// pattern as `kernel/src/proc/table.rs` and `frame::AllocatorCell`, per
-/// CLAUDE.md's static-mutable-state convention — `static mut` would be
-/// inconsistent here and trips Rust 2024 lints.
+/// `docs/conventions/kernel.md`'s static-mutable-state convention —
+/// `static mut` would be inconsistent here and trips Rust 2024 lints.
 #[repr(transparent)]
 struct HhdmOffset(UnsafeCell<u64>);
 // SAFETY: written exactly once at boot before any reader, single-threaded.

@@ -140,8 +140,11 @@ gates, not `build`.)
 - Before accepting any "this adds a dependency/compile cost" claim — a review finding included —
   check it with `cargo tree -p minixrs-kernel -e build`, which prints the build-script graph.
 - Adding a workspace crate: append it to `members` in the root `Cargo.toml`, use literal manifest
-  fields plus `publish = false` for anything internal, and, if its entry point is pure I/O with the
-  testable logic in sibling modules, add its `main.rs` to `sonar.coverage.exclusions`.
+  fields plus `publish = false` for anything internal (`release.yml` publishes a hardcoded
+  five-crate list — `minixrs-kernel-shared`, `minixrs-ipc`, `minixrs-server-rt`,
+  `minixrs-driver-rt`, `minixrs` — and only those five inherit `[workspace.package]` and carry
+  crates.io metadata), and, if its entry point is pure I/O with the testable logic in sibling
+  modules, add its `main.rs` to `sonar.coverage.exclusions`.
 - The C `hello` program has three possible toolchains, in strict preference order: the minix.rs SDK
   at `$MINIXRS_SDK` → the in-tree musl sysroot → the `worker` ELF packed under the name `hello`.
   Never write inside `$MINIXRS_SDK`; all output this repo produces goes to `target/hello/`. A usable

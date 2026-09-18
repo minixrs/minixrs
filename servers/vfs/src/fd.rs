@@ -32,8 +32,8 @@
 //! [`Fd`] is `Copy` precisely so that is easy to obey: the borrow dies at the
 //! destructuring `let`, and the handler carries values.
 //!
-//! This is not a theoretical concern. CLAUDE.md records aliasing-through-an
-//! -`UnsafeCell`-newtype as a class of bug this repo has *shipped* (slice 5.3's
+//! This is not a theoretical concern. docs/conventions/kernel.md records
+//! aliasing-through-an-`UnsafeCell`-newtype as a class of bug this repo has *shipped* (slice 5.3's
 //! `free_frame` / `is_usable_pa`), caught in review rather than by a test. The
 //! pure `*_in` helpers below all take the rows as a borrowed slice, which is what
 //! keeps every decision testable without touching the static at all.
