@@ -66,14 +66,8 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release -
 #   tools/check-boot-log.sh <log>   (tests/qemu-boot.expected/.forbidden;
 # update those marker files in the same PR when trace formats or the boot
 # roster change, or the qemu-smoke CI job goes red)
-#
-# It works on a **partial** log: the marker files test first occurrences only, so
-# once it reports PASS on a still-growing log the verdict is final and the boot
-# can be stopped -- the 5.10b review round got all 97 markers well inside the
-# 600 s budget. Only qemu-smoke's exit-124 assertion needs the timeout to elapse.
-# Copy the log aside before checking; the live file grows underneath the script.
-# Its PASS total counts expected AND forbidden lines (5.11: 86 + 20 = 106), so a
-# slice that adds N expected and M forbidden lines moves the total by N + M.
+# For the marker-file contract itself (partial-log behavior, PASS-total counting,
+# etc.), see ./testing-and-markers.md.
 
 # (There is no `kernel-x86_64` alias: `forced-target` pins the kernel to
 # aarch64, so such an alias would silently build aarch64 instead of failing.
@@ -136,7 +130,9 @@ gates, not `build`.)
   has its own feature resolution, so the flag must be threaded through explicitly), keeping kernel
   and PM in lockstep. The feature is deliberately **not** on `kernel-shared`: a shared-crate default
   feature gets force-enabled by other dependents (`minixrs-ipc`, `server-rt`) via cargo **feature
-  unification**, which would make it impossible to turn off.
+  unification**, which would make it impossible to turn off — so `NR_STUB_PROCS` stays a constant
+  `4`, and `FORK_POOL_BASE` (= 15) is therefore stable: disabling stubs leaves slots 11–14
+  **unoccupied**, it does **not** renumber the fork pool.
 - When a `--no-default-features` build doesn't actually drop a feature, suspect cargo **feature
   unification** — diagnose with `cargo tree -p <crate> --no-default-features -e features -i
   <shared-crate>` (the inverted tree shows *who* still activates it) or `cargo tree -p <crate> -f

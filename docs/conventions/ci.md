@@ -94,6 +94,8 @@ whole-project picture.
 - `Cargo.lock` **is committed** (so audit/deny are reproducible) — do not re-add it to `.gitignore`
 - Third-party actions are pinned to full commit SHAs with `# vN` comments; keep that when editing
 - SonarCloud needs the `SONAR_TOKEN` repo secret and Automatic Analysis disabled (CI-based instead)
+- Add every new `userland/**/src/main.rs` to `sonar.coverage.exclusions` — they are freestanding
+  entry points with no host-testable logic (slice 4.7)
 - **Publishing:** see `RELEASING.md` — `release.yml` publishes the five library crates to crates.io
   on a `v*` tag push, bottom-up dependency order mandatory; verify locally with the five-crate
   `cargo package -p …` command documented there
