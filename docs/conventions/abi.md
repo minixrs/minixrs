@@ -50,10 +50,11 @@ tree.
 
 Preserve these when extending the generator:
 
-- Generated C uses **C11 keywords only** (`_Static_assert`, `_Alignas` on the struct's first member,
-  `_Alignof`) — never GNU attributes.
+- Generated C uses **C11 keywords only** (`_Static_assert`, `_Alignas` on the struct's **first
+  member** — C11 forbids `_Alignas` on a type declaration — and `_Alignof`) — never GNU attributes.
 - `minixrs/ipc.h` **includes nothing**; `offsetof` comes from `__builtin_offsetof` under the private
-  name `_MINIXRS_OFFSETOF`.
+  name `_MINIXRS_OFFSETOF`, because Apple's clang redirects `<stddef.h>` to the system header for
+  any `*-musl` triple, which would break the hermetic `-nostdlibinc -ffreestanding` CI check.
 - Every process gets **both** `<NAME>_PROC_NR` and `<NAME>_EP` — they differ for kernel tasks (e.g.
   `SYSTEM_PROC_NR` is −2, `SYSTEM_EP` is 32766) — and the header `_Static_assert`s the C decode
   macro against the Rust-computed endpoints.
@@ -94,6 +95,25 @@ band number against the constant's own definition, not against a neighboring com
 (slices 4.5, 4.3, 5.7, 5.4, 5.3, 5.8 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md) and
 [phase-4-servers.md](../plans/phase-4-servers.md))
 
+Phase-4 pinned several exact call numbers and payload shapes within these bands:
+
+- `SCHED_RQ_BASE = 0xF00` is clear of VM `0xC00`, SEF `0xD00`, and DS `0xE00`, and sits below
+  `NOTIFY_MESSAGE` (slice 4.3 — see [phase-4-servers.md](../plans/phase-4-servers.md)).
+- `PM_GETPID` replies with `m_type` = pid and ppid in payload `0..4` — MINIX's result-is-pid
+  convention, so errors are negative and PM's own pid 0 is indistinguishable from `OK` by design
+  (slice 4.5 — see [phase-4-servers.md](../plans/phase-4-servers.md)).
+- `PM_FORK`/`PM_EXIT`/`PM_WAIT` are `PM_RQ_BASE + 1..3` (slice 4.6b — see
+  [phase-4-servers.md](../plans/phase-4-servers.md)).
+- `VM_FORK` is `VM_RQ_BASE + 4 = 0xC04` (slice 4.6b — see
+  [phase-4-servers.md](../plans/phase-4-servers.md)).
+- `PM_EXEC` is `PM_RQ_BASE + 4 = 0x704`, bumping `NR_PM_MSGS` 4→5 (slice 4.7 — see
+  [phase-4-servers.md](../plans/phase-4-servers.md)).
+- `EXEC_NAME_LEN` (16, in `callnr.rs`) must stay `<= PROC_NAME_LEN`, since the kernel MINIX-renames
+  the exec target's proc to it (slice 4.7 — see [phase-4-servers.md](../plans/phase-4-servers.md)).
+- `SYS_SETALARM`'s payload is a relative `delta` in ticks `0..8` (0 cancels), replying with the
+  previous time-left; it needs no new `kernel-shared` constants, reusing `NOTIFY_MESSAGE` + `CLOCK`
+  (slice 4.4 — see [phase-4-servers.md](../plans/phase-4-servers.md)).
+
 ## Grant ABI (D4)
 
 `kernel-shared/src/grant.rs` defines the cross-address-space copy ABI: a flat `#[repr(C)]`
@@ -101,15 +121,9 @@ band number against the constant's own definition, not against a neighboring com
 because the kernel decodes it from raw bytes), MINIX's CPF flag values, and **`GRANT_SHIFT = 20`**
 id packing (`grant_id`/`grant_idx`/`grant_seq`).
 
-A granting process keeps its `GrantEntry` table in its **own** address space and registers `(addr,
-entries)` with `SYS_SETGRANT`; `SYS_SAFECOPY` reads the entry back out of the granter's address
-space on every call, so a granter revokes by writing its own memory and the kernel caches nothing
-that could go stale.
-
-A server that holds `SYS_COPY`/`SYS_SAFECOPY` and serves clients that do not must take the **granter
-from the kernel-stamped `m_source`, never from the payload** — a caller-supplied granter endpoint
-turns that server into a confused deputy, aiming a privileged cross-AS copy wherever the caller
-points. Apply this to every grant-id-carrying request.
+For the revocation model (a granter keeps its table in its own address space and the kernel re-reads
+it on every call), `verify_grant`'s check order, and the confused-deputy rule for a server that
+relays grants on clients' behalf, see [kernel.md](./kernel.md).
 
 (slice 5.2 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
 
