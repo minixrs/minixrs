@@ -15,6 +15,13 @@ Trace sampling is asymmetric between the two: `[ipc N]` head-traces the first ~1
 100th, but `[ksys N]` samples only every 100th (no head carve-out) — a server's first/rare kernel
 call (e.g. a startup `SYS_GETINFO`) shows on `[ipc]`, not `[ksys]`.
 
+The two `EFAULT` traces — `[efault] proc=… nr=… call=… va=…` and `[efault deliver] proc=… nr=… va=…`
+— are **uncounted**, unlike the sampled `[ipc {n}]` form, which is what makes them stable boot
+markers instead of ones that can fall out of a fixed-size sample window. The `do_ipc` one keys on
+`result == EFAULT`, which is unambiguous because nothing else in the kernel produces that errno.
+Keep that invariant in mind before changing `do_ipc`'s tracing — it's the thing that makes the
+`[efault]` marker unambiguous.
+
 ## Trace forensics
 
 The `[ipc]` modulo sampler almost never catches low-rate callers — a blocking SENDREC client (e.g. a
@@ -26,6 +33,24 @@ that flood starts, so its SEF handshake never lands in `TRACE_HEAD` either.
 head-carved `[ksys …]` traces instead (e.g. `[ksys SYS_FORK]`/`SYS_EXIT` are head-carved at 6, so
 raise the head const temporarily to count real cycles), or add a temporary unconditional `[DBG]`
 trace in `ipc::do_ipc` keyed on the caller nr — remove it before committing.
+
+## Exit-status probes
+
+A process that cannot print at all — not even through a driver, e.g. `worker`'s exec-frame validator
+running before a console exists — reports its verdict through its own exit status. **Encode the
+pass, never the absence of a failure.** `execstack::EXEC_STACK_PROBE_PASS` (`0x5A`) is the positive
+sentinel a passing probe returns; status `0` prints `FAIL no-verdict` rather than being read as
+success, because two other paths can produce a `0` that means nothing:
+
+- `mproc::handle_kill_in` zombifies a signalled process without touching `exit_status`, so a probe
+  that died before it could report is reaped with status `0`.
+- A frame bad enough to fault the probe lands it in VM's SIGSEGV arm, which prints no `!!! EL0 data
+  abort` for the forbidden-marker list to catch — a silent, verdict-free death.
+
+Companion rule: key any reap-derived marker on the child's **pid**, not on "the first reap" —
+`alloc_pid` never returns `0`, so `0` is the correct "not yet" sentinel, and pid-keying is what
+stops an unrelated zombie (reaped first, by the same parent) from being mistaken for the probe's own
+child.
 
 ## Markers
 
