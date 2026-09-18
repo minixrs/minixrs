@@ -1,0 +1,186 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "3c3b893fc4e3",
+  "session_id": "3a445ebe-79ad-43fe-bfa2-9481c8f696bc",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-18T06:50:02.999585Z",
+  "branch": "chore/claude-md-split",
+  "checkpoints_count": 2,
+  "save_step_count": 3,
+  "files_touched": [
+    "docs/plans/phase-4-servers.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "a4e16ee565fb",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 318,
+    "cache_creation_tokens": 471258,
+    "cache_read_tokens": 49717772,
+    "output_tokens": 232655,
+    "api_call_count": 159,
+    "subagent_tokens": {
+      "input_tokens": 60,
+      "cache_creation_tokens": 166883,
+      "cache_read_tokens": 4749822,
+      "output_tokens": 23437,
+      "api_call_count": 30
+    }
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_015EXf4Re5jdKM9rxm9fgykR",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "44f09e13c4fb",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 123,
+        "end": 124,
+        "entry_ids": [
+          "ba91b5b0-9a7a-4ea7-acf2-967a8d992832"
+        ],
+        "tool_use_id": "toolu_015EXf4Re5jdKM9rxm9fgykR"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_015EXf4Re5jdKM9rxm9fgykR"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_014eA3LbgLcZLzzswTTyy4yL",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:writing-plans"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "44f09e13c4fb",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 352,
+        "end": 353,
+        "entry_ids": [
+          "5c8495d3-9a40-4cd2-b66f-e9c29cc8e2a3"
+        ],
+        "tool_use_id": "toolu_014eA3LbgLcZLzzswTTyy4yL"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_014eA3LbgLcZLzzswTTyy4yL"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:writing-plans",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01HLUPByCNPCgaAB9kuAcePu",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:subagent-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "44f09e13c4fb",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 456,
+        "end": 457,
+        "entry_ids": [
+          "cfba17d1-8222-492b-ae20-70d9a32baab2"
+        ],
+        "tool_use_id": "toolu_01HLUPByCNPCgaAB9kuAcePu"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01HLUPByCNPCgaAB9kuAcePu"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:subagent-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 18
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-18T06:50:02.35512Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 523,
+    "human_removed": 5,
+    "total_committed": 0,
+    "total_lines_changed": 1056,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 617,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "PRE6-RECOMMEND.md": 343,
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 1134,
+      "user_lines_removed": 528,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "PRE6-RECOMMEND.md": 343,
+        "RECOMMEND.md": 274,
+        "docs/plan.md": 205,
+        "docs/plans/phase-2-ipc.md": 97,
+        "docs/plans/phase-3-vm.md": 191,
+        "docs/plans/phase-4-servers.md": 6,
+        "docs/plans/phase-5-musl-fs.md": 8,
+        "docs/plans/phase-5-prep.md": 10
+      },
+      "user_removed_per_file": {
+        "docs/plan.md": 145,
+        "docs/plans/phase-2-ipc.md": 127,
+        "docs/plans/phase-3-vm.md": 246,
+        "docs/plans/phase-5-musl-fs.md": 4,
+        "docs/plans/phase-5-prep.md": 6
+      }
+    }
+  ]
+}
