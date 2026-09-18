@@ -205,7 +205,7 @@ PM owns the whole tree, in this order and no other:
 
 1. allocate an `mproc` child slot from the fork pool `[FORK_POOL_BASE = NR_BOOT_PROCS +
    NR_STUB_PROCS, NR_MPROCS = 32)` — **the slot index *is* the child's kernel proc-nr**, so the
-   pool's base moves with the stub count (see [build-and-boot.md](./build-and-boot.md));
+   pool's base moves with `NR_STUB_PROCS` (see [build-and-boot.md](./build-and-boot.md));
 2. `SYS_FORK(parent_e, child_nr)`;
 3. `VM_FORK(parent_e, child_e)`;
 4. `SCHEDULING_START`;
@@ -213,10 +213,10 @@ PM owns the whole tree, in this order and no other:
 6. reply to **both** halves of the shared SENDREC — child `m_type = 0`, parent `m_type = child_pid`
    (MINIX fork-returns-twice).
 
-**Why the order is safe:** `do_fork` creates the child `RTS_RECEIVING | RTS_NO_PRIV` (frozen), and
-`sched::rts_unset` enqueues only when the *last* block bit clears — so steps 4 and 5 each leave the
-child a blocked receiver off the run queue, and **only PM's reply** (clearing `RTS_RECEIVING`) makes
-it runnable. The child therefore cannot run before its identity, memory and scheduling are built.
+**Why the order is safe:** the kernel's frozen-child rule — `do_fork`'s freeze plus
+`sched::rts_unset`'s enqueue-on-last-bit invariant, both in [kernel.md](./kernel.md) — means steps 4
+and 5 cannot make the child runnable, so **only step 6, PM's reply, can**. The child therefore
+cannot run before its identity, memory and scheduling are built.
 
 **PM rolls back at every step.** `SYS_FORK`, `VM_FORK`, `SCHEDULING_START` and `SYS_PRIVCTL` each
 check their result and, on error, `SYS_EXIT` the child plus `mproc::cleanup` the slot before
@@ -255,9 +255,9 @@ as a parameter — that is what makes them host-tested with no IPC (slice 4.6b �
 ### Draining kernel signals
 
 `SYS_GETKSIG` **hands off** the pending-signal bitmap, so PM must dispose of every returned
-endpoint: `SYS_ENDKSIG` for a survivor, `SYS_EXIT` with **no** `ENDKSIG` after for a termination. A
-full exit zeroes the signal state and frees the slot, so a post-exit acknowledge just bounces off
-`okendpt` with `EDEADSRCDST` (slices 4.5 and 4.6a — see
+endpoint: `SYS_ENDKSIG` for a survivor, `SYS_EXIT` with **no** `SYS_ENDKSIG` after for a
+termination. A full exit zeroes the signal state and frees the slot, so a post-exit acknowledge just
+bounces off `okendpt` with `EDEADSRCDST` (slices 4.5 and 4.6a — see
 [phase-4-servers.md](../plans/phase-4-servers.md)).
 
 ## init: PID 1
@@ -267,10 +267,10 @@ into the MXBI archive like any server and the ordinary `userland.rs` load loop l
 `RTS_NO_PRIV` and enqueues it — **no PM hand-release**, unlike a frozen stub's `PRIVCTL_SET_USER`.
 
 **It carries user-grade privilege, which is the point.** Its `BootEntry.trap_mask` is `USR_T`, not
-`SRV_T`, and `init_boot_image` special-cases `entry.nr == INIT_PROC_NR` to point its proc slot at
-the shared `USER_PRIV_ID` instead of populating a dedicated server-grade slot. So init SENDRECs its
-servers and **makes no kernel calls at all** — exactly the forked-child profile, which is what makes
-it a usable proof of the user-facing paths.
+`SRV_T`, and it is pointed at the shared user priv slot rather than a dedicated server-grade one
+(the `init_boot_image` special-case is in [kernel.md](./kernel.md)). So init SENDRECs its servers
+and **makes no kernel calls at all** — exactly the forked-child profile, which is what makes it a
+usable proof of the user-facing paths.
 
 `MF_PRIV_PROC` stays set on init's `mproc` seed (unkillable PID 1). That flag gates only the kill
 path — not fork, wait or getpid — so PM still serves init as an ordinary client.
@@ -431,10 +431,8 @@ Beyond the shared contracts above, two driver-specific rules:
   `sys_safecopy`, and the boot self-check is `sys_copy(SELF, …, SELF, …)`, so a page that failed to
   map is an `EFAULT` *return value* rather than an EL0 abort — hence no MMIO sibling module and no
   new Sonar exclusion.
-- Every step of the kernel's pre-map `.expect()`s: a `let _ = map_page_in(..)` would turn a
-  non-advancing loop into a one-page ramdisk with 255 leaked frames instead of an `AlreadyMapped`
-  panic. See [kernel.md](./kernel.md) for the pre-map itself (slice 5.7 — see
-  [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+- The kernel builds the ramdisk mapping this driver reads; that pre-map and its `.expect()` rule are
+  in [kernel.md](./kernel.md) (slice 5.7 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
 ### Minors are a per-driver namespace
 

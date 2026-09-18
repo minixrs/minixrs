@@ -75,8 +75,8 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
   `&mut Proc` borrow, then call `enqueue` / `dequeue` so RTS state and the run queue stay in sync.
   Same NLL-capture pattern slice 2.4 used in `clock::tick`
 - **`sched::rts_unset` enqueues only when the *last* block bit clears.** That is the invariant the
-  whole frozen-child ordering below rests on; do not weaken it to "enqueue on any unset" (slice 4.6b
-  — see [phase-4-servers.md](../plans/phase-4-servers.md))
+  frozen-child freeze below — and so PM's whole fork ordering — rests on; do not weaken it to
+  "enqueue on any unset" (slice 4.6b — see [phase-4-servers.md](../plans/phase-4-servers.md))
 - Kernel-call handlers that act on a *target* proc named in the message (e.g. `system::do_vmctl`,
   `system::do_schedule`'s `do_schedule`/`do_schedctl`) take the whole `&mut [Proc; N_PROC_SLOTS]`
   slice + `caller_nr`; caller-only handlers (e.g. `do_getinfo`) get a single `&mut Proc` / `&Priv`.
@@ -113,9 +113,8 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
   with **no `ipc_to` check** — kernel-originated, like `mini_pf_send`; `CLOCK`'s `ipc_to` is empty,
   so `mini_notify` would deny it. Delivery is immediate if the owner is `RECEIVE`-blocked, else
   deferred via `notify_pending` against CLOCK's priv slot
-- `SYS_SETALARM` is caller-local: the payload is a relative `delta` in ticks at `0..8` (0 cancels)
-  and the reply is the previous time-left. It reuses `NOTIFY_MESSAGE` + `CLOCK` and adds no
-  kernel-shared constants. A **periodic** alarm is a re-arm per fire, done in user space
+- `SYS_SETALARM` is **caller-local** — it dispatches through `dispatch_caller_local`, not the
+  target-taking `match`. Its payload shape is in [`abi.md`](./abi.md)
 
 ## Signals — the kernel half
 
@@ -129,11 +128,9 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
   check** — the `deliver_alarm` pattern
 - `do_kill`'s deferred-notify write is why `kernel_call_dispatch` takes `&mut [Priv]`; do not narrow
   that signature back
-- `SYS_GETKSIG`'s scan gates on **`sig_pending != 0`, not the RTS bit alone**, so a proc whose
-  bitmap has already been handed off is not returned twice
-- PM disposes of every endpoint `SYS_GETKSIG` returns: `SYS_ENDKSIG` for survivors, `SYS_EXIT` —
-  with **no** `SYS_ENDKSIG` after — for terminations, because the full exit zeroes signal state and
-  frees the slot, so a post-exit acknowledge just bounces off `okendpt` with `EDEADSRCDST`
+- `SYS_GETKSIG` **hands off** the bitmap, and its scan gates on **`sig_pending != 0`, not the RTS
+  bit alone**, so a proc whose bitmap has already been handed off is not returned twice. What PM
+  owes in return — the drain contract — is in [`servers-and-drivers.md`](./servers-and-drivers.md)
 
 ## Process lifetime: exit teardown, endpoint generations, fork
 
@@ -158,11 +155,9 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
 - `system::resolve_target` **short-circuits `SELF` first**, before any `okendpt` lookup
 - `do_exit` **rejects `SELF` and a caller-named-self target outright** — tearing down the active
   TTBR0 mid-call is the hazard
-- `do_fork` creates the child **`RTS_RECEIVING | RTS_NO_PRIV`** (frozen). Combined with
-  `rts_unset`'s enqueue-on-last-bit rule, both `SYS_SCHEDULE` (via `SCHEDULING_START`) and
-  `SYS_PRIVCTL` leave the child a blocked receiver off the run queue, so **only PM's reply** —
-  clearing `RTS_RECEIVING` — makes it runnable. The child therefore cannot run before its identity,
-  memory and scheduling are built; preserve the freeze
+- `do_fork` creates the child **`RTS_RECEIVING | RTS_NO_PRIV`** (frozen). Given `rts_unset`'s
+  enqueue-on-last-bit rule above, that is what makes PM's build order safe — see
+  [`servers-and-drivers.md`](./servers-and-drivers.md) for the order itself. Preserve the freeze
 
 ## Privilege slots
 
