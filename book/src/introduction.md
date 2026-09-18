@@ -35,5 +35,8 @@ kernel and server code. Chapters describe the system in the present tense only f
 forward-looking design is collected in the [Roadmap](roadmap.md).
 
 > **Note:** The repository's `docs/` directory once held hand-written bootstrap notes used to plan
-> the project; those have been ported into this book and retired. Only the planning tree remains
-> there — `docs/plan.md` (the live phase tracker) and `docs/plans/` (per-phase slice histories).
+> the project; those have been ported into this book and retired. What remains there is not
+> documentation of the system but of the work on it: `docs/plan.md` (the live phase tracker),
+> `docs/plans/` (per-phase slice histories), `docs/conventions/` (the working rules contributors and
+> agents follow, indexed from `CLAUDE.md`), and `docs/superpowers/` (per-slice design specs and
+> implementation plans).
