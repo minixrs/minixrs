@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "223c19475e12",
+  "strategy": "manual-commit",
+  "branch": "chore/claude-md-split",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "docs/conventions/abi.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/22/3c19475e12/0/metadata.json",
+      "transcript": "/22/3c19475e12/0/full.jsonl",
+      "compact_transcript": "/22/3c19475e12/0/transcript.jsonl",
+      "content_hash": "/22/3c19475e12/0/content_hash.txt",
+      "prompt": "/22/3c19475e12/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 198,
+    "cache_creation_tokens": 316519,
+    "cache_read_tokens": 22989525,
+    "output_tokens": 146438,
+    "api_call_count": 99
+  }
+}
