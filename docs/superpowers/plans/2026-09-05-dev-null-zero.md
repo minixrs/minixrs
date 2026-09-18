@@ -1,60 +1,89 @@
 # Slice 5.11 — `/dev/null`, `/dev/zero`, `CDEV_READ` Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
+> (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Two hardware-free character devices, served by the `memory` driver and reachable by path through VFS, with the CDEV band gaining the read request that `/dev/zero` needs.
+**Goal:** Two hardware-free character devices, served by the `memory` driver and reachable by path
+through VFS, with the CDEV band gaining the read request that `/dev/zero` needs.
 
-**Architecture:** `kernel-shared` defines `CDEV_READ` and two minors; `server-rt` gains the shared CDEV request codec; the `memory` driver serves both minors for both requests; VFS's `Fd::CharDev` learns which driver it names, and a static device-node table intercepts `/dev/console`, `/dev/null`, `/dev/zero` after the path copy and before the mount. init proves all three devices through the POSIX path and the marker files pin the proof.
+**Architecture:** `kernel-shared` defines `CDEV_READ` and two minors; `server-rt` gains the shared
+CDEV request codec; the `memory` driver serves both minors for both requests; VFS's `Fd::CharDev`
+learns which driver it names, and a static device-node table intercepts `/dev/console`, `/dev/null`,
+`/dev/zero` after the path copy and before the mount. init proves all three devices through the
+POSIX path and the marker files pin the proof.
 
-**Tech Stack:** Rust (pinned nightly in `rust-toolchain.toml`), `no_std` user-space crates, host unit tests via `cargo test -p <crate>`, QEMU boot verification via `tools/check-boot-log.sh`.
+**Tech Stack:** Rust (pinned nightly in `rust-toolchain.toml`), `no_std` user-space crates, host
+unit tests via `cargo test -p <crate>`, QEMU boot verification via `tools/check-boot-log.sh`.
 
-**Spec:** `docs/superpowers/specs/2026-09-05-dev-null-zero-design.md` — decisions `Z1…Z10` are cited by number below. Read it first.
+**Spec:** `docs/superpowers/specs/2026-09-05-dev-null-zero-design.md` — decisions `Z1…Z10` are cited
+by number below. Read it first.
 
 ## Global Constraints
 
-- Every new `.rs` file starts with the two-line SPDX + copyright header (`// SPDX-License-Identifier: BSD-3-Clause` / `// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors`).
-- Offset/length arithmetic in `server-rt`, `servers/`, `drivers/`, `userland/` uses `checked_add` / `saturating_*`, never bare `+` on a payload offset (release ships `overflow-checks = false`).
-- `server-rt` stays `#![forbid(unsafe_code)]`; `kernel-shared` carries zero `unsafe`; `drivers/memory` gains no `unsafe` block.
-- No new payload field may carry a granter. Every driver takes the granter from the kernel-stamped `m_source`.
-- Every commit: `git commit -s` (DCO sign-off) and GPG-signed (default). Never `--no-verify`, never `--no-gpg-sign`. Commit messages end with the `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` and `Claude-Session:` trailers the session header prescribes.
-- Before each commit: `cargo fmt --all` then `cargo clippy --workspace --all-targets -- -D warnings` on the touched crates must be clean (the pinned nightly's `-D warnings` gate).
-- Boot verification runs in the stub-free config for iteration (`--no-default-features`, `timeout 60`) and in the default config for the checked-in verdict (`timeout 300`). Copy the log aside before `tools/check-boot-log.sh`.
-- `MINIXRS_SDK=/nonexistent` on every boot that is meant to match CI (the musl flavour). It does not persist across shell invocations — set it on the same command line as the `cargo run`.
+- Every new `.rs` file starts with the two-line SPDX + copyright header (`//
+  SPDX-License-Identifier: BSD-3-Clause` / `// Copyright (c) 2025-2026 Kevin Barnard and minix.rs
+  Contributors`).
+- Offset/length arithmetic in `server-rt`, `servers/`, `drivers/`, `userland/` uses `checked_add` /
+  `saturating_*`, never bare `+` on a payload offset (release ships `overflow-checks = false`).
+- `server-rt` stays `#![forbid(unsafe_code)]`; `kernel-shared` carries zero `unsafe`;
+  `drivers/memory` gains no `unsafe` block.
+- No new payload field may carry a granter. Every driver takes the granter from the kernel-stamped
+  `m_source`.
+- Every commit: `git commit -s` (DCO sign-off) and GPG-signed (default). Never `--no-verify`, never
+  `--no-gpg-sign`. Commit messages end with the `Co-Authored-By: Claude Fable 5.1
+  <noreply@anthropic.com>` and `Claude-Session:` trailers the session header prescribes.
+- Before each commit: `cargo fmt --all` then `cargo clippy --workspace --all-targets -- -D warnings`
+  on the touched crates must be clean (the pinned nightly's `-D warnings` gate).
+- Boot verification runs in the stub-free config for iteration (`--no-default-features`, `timeout
+  60`) and in the default config for the checked-in verdict (`timeout 300`). Copy the log aside
+  before `tools/check-boot-log.sh`.
+- `MINIXRS_SDK=/nonexistent` on every boot that is meant to match CI (the musl flavour). It does not
+  persist across shell invocations — set it on the same command line as the `cargo run`.
 - Never push, never open a PR. Stop at the end of Task 9 and surface the branch.
 - Working branch: `feature/slice-5.11-dev-null-zero` (already created, carries the spec).
 
 ## File map
 
-| File | Responsibility | Task |
-|---|---|---|
-| `kernel-shared/src/callnr.rs` | `CDEV_READ`, `NR_CDEV_MSGS`, the two minors, the three device paths, doc rewrites, tripwire tests | 1 |
-| `tools/gen-c-headers/src/callnr_h.rs` | `CDEV_READ` row, minor defines, define-list test | 1 |
-| `server-rt/src/cdev.rs` (new), `server-rt/src/lib.rs` | shared CDEV request codec (Z9) | 2 |
-| `drivers/tty/src/cdev.rs`, `drivers/tty/src/main.rs` | use the shared codec; comments | 2 |
-| `drivers/memory/src/cdev.rs` (new), `drivers/memory/src/main.rs` | minor classification, validation, the two arms (Z3, Z4) | 3 |
-| `servers/vfs/src/fd.rs` | `CharDriver`, `Fd::CharDev { dev, minor }` (Z5) | 4 |
-| `servers/vfs/src/dev.rs` (new) | the device-node table and `lookup` (Z6) | 4 |
-| `servers/vfs/src/main.rs` | `mem` endpoint, `do_open` reorder, `do_read`/`do_write` routing, `cdev_read`, `mem_denials` (Z6, Z7, Z8) | 5 |
-| `userland/init/src/main.rs` | `dev_demo` (Z10), `dev-no-such`, `read-console` comment | 6 |
-| `tests/qemu-boot.expected`, `tests/qemu-boot.forbidden` | markers | 7 |
-| `book/src/drivers/overview.md`, `book/src/servers/overview.md`, `book/src/reference/syscalls.md`, `docs/plan.md`, `docs/plans/phase-5-musl-fs.md`, `CLAUDE.md` | docs, trackers, falsified-claim sweep | 8 |
+| File                                                                                                                                                           | Responsibility                                                                                           | Task |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---- |
+| `kernel-shared/src/callnr.rs`                                                                                                                                  | `CDEV_READ`, `NR_CDEV_MSGS`, the two minors, the three device paths, doc rewrites, tripwire tests        | 1    |
+| `tools/gen-c-headers/src/callnr_h.rs`                                                                                                                          | `CDEV_READ` row, minor defines, define-list test                                                         | 1    |
+| `server-rt/src/cdev.rs` (new), `server-rt/src/lib.rs`                                                                                                          | shared CDEV request codec (Z9)                                                                           | 2    |
+| `drivers/tty/src/cdev.rs`, `drivers/tty/src/main.rs`                                                                                                           | use the shared codec; comments                                                                           | 2    |
+| `drivers/memory/src/cdev.rs` (new), `drivers/memory/src/main.rs`                                                                                               | minor classification, validation, the two arms (Z3, Z4)                                                  | 3    |
+| `servers/vfs/src/fd.rs`                                                                                                                                        | `CharDriver`, `Fd::CharDev { dev, minor }` (Z5)                                                          | 4    |
+| `servers/vfs/src/dev.rs` (new)                                                                                                                                 | the device-node table and `lookup` (Z6)                                                                  | 4    |
+| `servers/vfs/src/main.rs`                                                                                                                                      | `mem` endpoint, `do_open` reorder, `do_read`/`do_write` routing, `cdev_read`, `mem_denials` (Z6, Z7, Z8) | 5    |
+| `userland/init/src/main.rs`                                                                                                                                    | `dev_demo` (Z10), `dev-no-such`, `read-console` comment                                                  | 6    |
+| `tests/qemu-boot.expected`, `tests/qemu-boot.forbidden`                                                                                                        | markers                                                                                                  | 7    |
+| `book/src/drivers/overview.md`, `book/src/servers/overview.md`, `book/src/reference/syscalls.md`, `docs/plan.md`, `docs/plans/phase-5-musl-fs.md`, `CLAUDE.md` | docs, trackers, falsified-claim sweep                                                                    | 8    |
 
 ---
 
 ### Task 1: The ABI — `CDEV_READ`, the minors, the paths, the headers
 
 **Files:**
-- Modify: `kernel-shared/src/callnr.rs:1064-1137` (CDEV band), plus its `#[cfg(test)]` module (`cdev_msgs_contiguous_from_base`, `cdev_msgs_distinct_from_other_ranges`, `cdev_max_io_fits_the_reply`, and every other band's "distinct from" list that names `CDEV_WRITE`)
+
+- Modify: `kernel-shared/src/callnr.rs:1064-1137` (CDEV band), plus its `#[cfg(test)]` module
+  (`cdev_msgs_contiguous_from_base`, `cdev_msgs_distinct_from_other_ranges`,
+  `cdev_max_io_fits_the_reply`, and every other band's "distinct from" list that names `CDEV_WRITE`)
 - Modify: `kernel-shared/src/callnr.rs:716` (the FS-band "`CDEV_READ` precedent" sentence)
-- Modify: `tools/gen-c-headers/src/callnr_h.rs:136-142` (band), `:345-361` (defines), `:540-551` (define-list test)
+- Modify: `tools/gen-c-headers/src/callnr_h.rs:136-142` (band), `:345-361` (defines), `:540-551`
+  (define-list test)
 - Test: the two crates' existing `#[cfg(test)]` modules
 
 **Interfaces:**
-- Produces: `callnr::CDEV_READ: i32 = 0xB01`, `callnr::NR_CDEV_MSGS: usize = 2`, `callnr::CDEV_MINOR_NULL: i32 = 3`, `callnr::CDEV_MINOR_ZERO: i32 = 5`, `callnr::DEV_CONSOLE_PATH: &str = "/dev/console"`, `callnr::DEV_NULL_PATH: &str = "/dev/null"`, `callnr::DEV_ZERO_PATH: &str = "/dev/zero"`.
+
+- Produces: `callnr::CDEV_READ: i32 = 0xB01`, `callnr::NR_CDEV_MSGS: usize = 2`,
+  `callnr::CDEV_MINOR_NULL: i32 = 3`, `callnr::CDEV_MINOR_ZERO: i32 = 5`, `callnr::DEV_CONSOLE_PATH:
+  &str = "/dev/console"`, `callnr::DEV_NULL_PATH: &str = "/dev/null"`, `callnr::DEV_ZERO_PATH:
+  &str = "/dev/zero"`.
 
 - [ ] **Step 1: Grow the band tripwires so they fail**
 
-In `kernel-shared/src/callnr.rs`'s test module, change `cdev_msgs_contiguous_from_base` and `cdev_msgs_distinct_from_other_ranges`:
+In `kernel-shared/src/callnr.rs`'s test module, change `cdev_msgs_contiguous_from_base` and
+`cdev_msgs_distinct_from_other_ranges`:
 
 ```rust
     #[test]
@@ -77,13 +106,15 @@ In `kernel-shared/src/callnr.rs`'s test module, change `cdev_msgs_contiguous_fro
         for m in [CDEV_WRITE, CDEV_READ] {
 ```
 
-(leave the rest of that test's body as it is). Then find every *other* test array in the same module that lists `CDEV_WRITE` as a foreign request and add `CDEV_READ` beside it:
+(leave the rest of that test's body as it is). Then find every *other* test array in the same module
+that lists `CDEV_WRITE` as a foreign request and add `CDEV_READ` beside it:
 
 ```bash
 grep -n 'CDEV_WRITE,' kernel-shared/src/callnr.rs
 ```
 
-Each hit inside a `for other in [` / `for m in [` list gets `CDEV_READ,` on the next line. Then replace the `cdev_max_io_fits_the_reply` test's last assertion and add a minor test:
+Each hit inside a `for other in [` / `for m in [` list gets `CDEV_READ,` on the next line. Then
+replace the `cdev_max_io_fits_the_reply` test's last assertion and add a minor test:
 
 ```rust
     #[test]
@@ -125,12 +156,13 @@ Each hit inside a `for other in [` / `for m in [` list gets `CDEV_READ,` on the 
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cargo test -p minixrs-kernel-shared cdev 2>&1 | tail -20`
-Expected: compile errors naming `CDEV_READ`, `CDEV_MINOR_NULL`, `CDEV_MINOR_ZERO`, `DEV_*_PATH` as unresolved.
+Run: `cargo test -p minixrs-kernel-shared cdev 2>&1 | tail -20` Expected: compile errors naming
+`CDEV_READ`, `CDEV_MINOR_NULL`, `CDEV_MINOR_ZERO`, `DEV_*_PATH` as unresolved.
 
 - [ ] **Step 3: Define the constants and rewrite the band docs**
 
-In `kernel-shared/src/callnr.rs`, replace the `CDEV_WRITE` doc paragraph that begins "There is deliberately no `CDEV_READ`" and the `NR_CDEV_MSGS` line, and the `CDEV_MINOR_CONSOLE` doc, with:
+In `kernel-shared/src/callnr.rs`, replace the `CDEV_WRITE` doc paragraph that begins "There is
+deliberately no `CDEV_READ`" and the `NR_CDEV_MSGS` line, and the `CDEV_MINOR_CONSOLE` doc, with:
 
 ```rust
 /// … (keep the existing `CDEV_WRITE` doc up to and including the "stage through a
@@ -201,74 +233,82 @@ pub const DEV_NULL_PATH: &str = "/dev/null";
 pub const DEV_ZERO_PATH: &str = "/dev/zero";
 ```
 
-Also at `callnr.rs:716`, reword the FS-band sentence so it no longer claims `CDEV_READ` is absent. Replace the clause "on the `CDEV_READ` precedent that a request absent until it has a consumer is better absent than stubbed" with "on the precedent `CDEV_READ` set from 5.3 to 5.11: a request without a consumer is better absent than stubbed, and gets defined the moment one exists".
+Also at `callnr.rs:716`, reword the FS-band sentence so it no longer claims `CDEV_READ` is absent.
+Replace the clause "on the `CDEV_READ` precedent that a request absent until it has a consumer is
+better absent than stubbed" with "on the precedent `CDEV_READ` set from 5.3 to 5.11: a request
+without a consumer is better absent than stubbed, and gets defined the moment one exists".
 
 - [ ] **Step 4: Run the kernel-shared tests**
 
-Run: `cargo test -p minixrs-kernel-shared 2>&1 | tail -5`
-Expected: `test result: ok.` with the new tests listed as passed.
+Run: `cargo test -p minixrs-kernel-shared 2>&1 | tail -5` Expected: `test result: ok.` with the new
+tests listed as passed.
 
 - [ ] **Step 5: Grow the header generator's tripwire, watch it fail, then add the row**
 
-In `tools/gen-c-headers/src/callnr_h.rs`, in the define-list test (around line 540) change the array to 13 entries:
+In `tools/gen-c-headers/src/callnr_h.rs`, in the define-list test (around line 540) change the array
+to 13 entries:
 
 ```rust
-        let offsets: [(&str, i64); 13] = [
-            ("VFS_FD_OFF", callnr::VFS_FD_OFF as i64),
-            ("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64),
-            ("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64),
-            ("PM_EXEC_PATH_OFF", callnr::PM_EXEC_PATH_OFF as i64),
-            ("PM_EXEC_PATH_MAX", callnr::PM_EXEC_PATH_MAX as i64),
-            ("CDEV_MINOR_OFF", callnr::CDEV_MINOR_OFF as i64),
-            ("CDEV_GRANT_OFF", callnr::CDEV_GRANT_OFF as i64),
-            ("CDEV_LEN_OFF", callnr::CDEV_LEN_OFF as i64),
-            ("CDEV_OFFSET_OFF", callnr::CDEV_OFFSET_OFF as i64),
-            ("CDEV_MAX_IO", callnr::CDEV_MAX_IO as i64),
-            ("CDEV_MINOR_CONSOLE", callnr::CDEV_MINOR_CONSOLE as i64),
-            ("CDEV_MINOR_NULL", callnr::CDEV_MINOR_NULL as i64),
-            ("CDEV_MINOR_ZERO", callnr::CDEV_MINOR_ZERO as i64),
-        ];
+let offsets: [(&str, i64); 13] = [
+    ("VFS_FD_OFF", callnr::VFS_FD_OFF as i64),
+    ("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64),
+    ("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64),
+    ("PM_EXEC_PATH_OFF", callnr::PM_EXEC_PATH_OFF as i64),
+    ("PM_EXEC_PATH_MAX", callnr::PM_EXEC_PATH_MAX as i64),
+    ("CDEV_MINOR_OFF", callnr::CDEV_MINOR_OFF as i64),
+    ("CDEV_GRANT_OFF", callnr::CDEV_GRANT_OFF as i64),
+    ("CDEV_LEN_OFF", callnr::CDEV_LEN_OFF as i64),
+    ("CDEV_OFFSET_OFF", callnr::CDEV_OFFSET_OFF as i64),
+    ("CDEV_MAX_IO", callnr::CDEV_MAX_IO as i64),
+    ("CDEV_MINOR_CONSOLE", callnr::CDEV_MINOR_CONSOLE as i64),
+    ("CDEV_MINOR_NULL", callnr::CDEV_MINOR_NULL as i64),
+    ("CDEV_MINOR_ZERO", callnr::CDEV_MINOR_ZERO as i64),
+];
 ```
 
-Run: `cargo test -p minixrs-gen-c-headers 2>&1 | grep -E 'FAILED|panicked|the character-device' | head`
-Expected: two failures — `every_band_member_list_matches_its_count` ("the character-device requests band lists 1 members but NR_CDEV_MSGS is 2") and the define-list test (`CDEV_MINOR_NULL` not emitted).
+Run: `cargo test -p minixrs-gen-c-headers 2>&1 | grep -E 'FAILED|panicked|the character-device' |
+head` Expected: two failures — `every_band_member_list_matches_its_count` ("the character-device
+requests band lists 1 members but NR_CDEV_MSGS is 2") and the define-list test (`CDEV_MINOR_NULL`
+not emitted).
 
 Then in `bands()`:
 
 ```rust
-        Band {
-            title: "character-device requests",
-            base_name: "CDEV_RQ_BASE",
-            base: callnr::CDEV_RQ_BASE,
-            count: Some(("NR_CDEV_MSGS", callnr::NR_CDEV_MSGS)),
-            members: vec![
-                ("CDEV_WRITE", callnr::CDEV_WRITE),
-                ("CDEV_READ", callnr::CDEV_READ),
-            ],
-        },
+Band {
+    title: "character-device requests",
+    base_name: "CDEV_RQ_BASE",
+    base: callnr::CDEV_RQ_BASE,
+    count: Some(("NR_CDEV_MSGS", callnr::NR_CDEV_MSGS)),
+    members: vec![
+        ("CDEV_WRITE", callnr::CDEV_WRITE),
+        ("CDEV_READ", callnr::CDEV_READ),
+    ],
+},
 ```
 
 and after the `CDEV_MINOR_CONSOLE` define:
 
 ```rust
-    f.define_dec("CDEV_MINOR_CONSOLE", callnr::CDEV_MINOR_CONSOLE.into());
-    f.define_dec("CDEV_MINOR_NULL", callnr::CDEV_MINOR_NULL.into());
-    f.define_dec("CDEV_MINOR_ZERO", callnr::CDEV_MINOR_ZERO.into());
+f.define_dec("CDEV_MINOR_CONSOLE", callnr::CDEV_MINOR_CONSOLE.into());
+f.define_dec("CDEV_MINOR_NULL", callnr::CDEV_MINOR_NULL.into());
+f.define_dec("CDEV_MINOR_ZERO", callnr::CDEV_MINOR_ZERO.into());
 ```
 
-and extend the block comment above the offsets (the one ending "musl's write() goes to VFS.") with two more lines:
+and extend the block comment above the offsets (the one ending "musl's write() goes to VFS.") with
+two more lines:
 
 ```rust
-        "",
-        "CDEV_READ (slice 5.11) is the same payload with the copy running the other",
-        "way: the grant carries CPF_WRITE and the driver fills the client's buffer.",
-        "CDEV_MINOR_NULL / CDEV_MINOR_ZERO are minors of the memory driver, not TTY:",
-        "minors are a per-driver namespace.",
+"",
+"CDEV_READ (slice 5.11) is the same payload with the copy running the other",
+"way: the grant carries CPF_WRITE and the driver fills the client's buffer.",
+"CDEV_MINOR_NULL / CDEV_MINOR_ZERO are minors of the memory driver, not TTY:",
+"minors are a per-driver namespace.",
 ```
 
 - [ ] **Step 6: Run the generator's tests and the hermetic C check**
 
 Run:
+
 ```bash
 cargo test -p minixrs-gen-c-headers 2>&1 | tail -3
 cargo gen-c-headers
@@ -277,6 +317,7 @@ clang -std=c11 -pedantic-errors -Wall -Wextra -Werror -fsyntax-only \
   -Itarget/gen-c-headers/include target/gen-c-headers/abi-selftest.c && echo C-OK
 grep -n 'CDEV_READ\|CDEV_MINOR_NULL\|CDEV_MINOR_ZERO' target/gen-c-headers/include/minixrs/callnr.h
 ```
+
 Expected: `test result: ok.`, `C-OK`, and three grep hits.
 
 - [ ] **Step 7: Format, lint, commit**
@@ -303,6 +344,7 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 ### Task 2: The shared CDEV codec in `server-rt`, and TTY on top of it
 
 **Files:**
+
 - Create: `server-rt/src/cdev.rs`
 - Modify: `server-rt/src/lib.rs` (add `pub mod cdev;`)
 - Modify: `drivers/tty/src/cdev.rs` (drop `WriteRequest`/`parse_write`, take `Request`)
@@ -310,8 +352,11 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 - Test: `server-rt/src/cdev.rs` (new tests), `drivers/tty/src/cdev.rs` (existing tests, retargeted)
 
 **Interfaces:**
+
 - Consumes: `callnr::CDEV_{MINOR,GRANT,LEN,OFFSET}_OFF` (unchanged), Task 1's docs.
-- Produces: `minixrs_server_rt::cdev::Request { minor: i32, gid: i32, len: i32, offset: u64 }` (`Copy + PartialEq + Debug`), `minixrs_server_rt::cdev::parse(&Message) -> Request`. TTY's `cdev::validate_write(Request) -> Result<usize, i32>` keeps its name and contract.
+- Produces: `minixrs_server_rt::cdev::Request { minor: i32, gid: i32, len: i32, offset: u64 }`
+  (`Copy + PartialEq + Debug`), `minixrs_server_rt::cdev::parse(&Message) -> Request`. TTY's
+  `cdev::validate_write(Request) -> Result<usize, i32>` keeps its name and contract.
 
 - [ ] **Step 1: Write the codec module with its tests**
 
@@ -440,12 +485,12 @@ mod tests {
 }
 ```
 
-In `server-rt/src/lib.rs`, after `mod classify;` add `pub mod cdev;` (public module, no re-export: callers write `minixrs_server_rt::cdev::parse`).
+In `server-rt/src/lib.rs`, after `mod classify;` add `pub mod cdev;` (public module, no re-export:
+callers write `minixrs_server_rt::cdev::parse`).
 
 - [ ] **Step 2: Run server-rt's tests**
 
-Run: `cargo test -p minixrs-server-rt cdev 2>&1 | tail -5`
-Expected: 3 tests pass.
+Run: `cargo test -p minixrs-server-rt cdev 2>&1 | tail -5` Expected: 3 tests pass.
 
 - [ ] **Step 3: Retarget TTY onto the codec**
 
@@ -468,16 +513,24 @@ In `drivers/tty/src/cdev.rs`:
    use minixrs_kernel_shared::grant::grant_valid;
    use minixrs_server_rt::cdev::Request;
    ```
-3. `pub fn validate_write(req: Request) -> Result<usize, i32>` — body unchanged. In its doc, replace bullet 1's second sentence ("Slice 5.11's `/dev/null` and `/dev/zero` become additional minors here.") with: "`/dev/null` and `/dev/zero` are minors of the *memory* driver, not of TTY, so this check stays an equality."
-4. In the tests: `use minixrs_server_rt::cdev::parse;` plus the `wr_*` imports it already has; replace every `parse_write(` with `parse(` and every `WriteRequest` with `Request`. Delete `parse_reads_every_field_from_its_own_offset` and `the_offset_is_passed_through_unvalidated` (both moved to `server-rt`). Keep `parse_of_a_zeroed_payload_yields_a_rejectable_request` — it is about `validate_write`.
+3. `pub fn validate_write(req: Request) -> Result<usize, i32>` — body unchanged. In its doc, replace
+   bullet 1's second sentence ("Slice 5.11's `/dev/null` and `/dev/zero` become additional minors
+   here.") with: "`/dev/null` and `/dev/zero` are minors of the *memory* driver, not of TTY, so this
+   check stays an equality."
+4. In the tests: `use minixrs_server_rt::cdev::parse;` plus the `wr_*` imports it already has;
+   replace every `parse_write(` with `parse(` and every `WriteRequest` with `Request`. Delete
+   `parse_reads_every_field_from_its_own_offset` and `the_offset_is_passed_through_unvalidated`
+   (both moved to `server-rt`). Keep `parse_of_a_zeroed_payload_yields_a_rejectable_request` — it is
+   about `validate_write`.
 
 In `drivers/tty/src/main.rs`, change the parse line in `do_write`:
 
 ```rust
-    let req = minixrs_server_rt::cdev::parse(msg);
+let req = minixrs_server_rt::cdev::parse(msg);
 ```
 
-and add to the module doc's "Three things that differ from a server" a fourth short paragraph after the safecopy one:
+and add to the module doc's "Three things that differ from a server" a fourth short paragraph after
+the safecopy one:
 
 ```rust
 //! **`CDEV_READ` lands in the unknown-request arm, on purpose.** Slice 5.11
@@ -490,11 +543,13 @@ and add to the module doc's "Three things that differ from a server" a fourth sh
 - [ ] **Step 4: Run TTY's tests, lint both crates**
 
 Run:
+
 ```bash
 cargo test -p minixrs-tty 2>&1 | tail -3
 cargo fmt --all
 cargo clippy -p minixrs-server-rt -p minixrs-tty --all-targets -- -D warnings
 ```
+
 Expected: TTY's 7 remaining tests pass; clippy clean.
 
 - [ ] **Step 5: Commit**
@@ -517,13 +572,21 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 ### Task 3: The memory driver serves the two minors
 
 **Files:**
+
 - Create: `drivers/memory/src/cdev.rs`
-- Modify: `drivers/memory/src/main.rs` (module doc, imports, `mod cdev;`, two dispatch arms, two handlers, the `ZEROS` static)
+- Modify: `drivers/memory/src/main.rs` (module doc, imports, `mod cdev;`, two dispatch arms, two
+  handlers, the `ZEROS` static)
 - Test: `drivers/memory/src/cdev.rs`
 
 **Interfaces:**
-- Consumes: `minixrs_server_rt::cdev::{Request, parse}` (Task 2); `callnr::{CDEV_READ, CDEV_WRITE, CDEV_MINOR_NULL, CDEV_MINOR_ZERO, CDEV_MAX_IO}` (Task 1); `sys_safecopy(direction, granter, gid, offset, addr, bytes) -> i32`.
-- Produces: `cdev::Minor { Null, Zero }`, `cdev::classify(i32) -> Result<Minor, i32>`, `cdev::validate(Request) -> Result<(Minor, usize), i32>`, `cdev::zero_chunk(len: usize, done: usize) -> usize`. The driver answers `CDEV_WRITE` with `len` for both minors, `CDEV_READ` with `0` (null) or `len` (zero).
+
+- Consumes: `minixrs_server_rt::cdev::{Request, parse}` (Task 2); `callnr::{CDEV_READ, CDEV_WRITE,
+  CDEV_MINOR_NULL, CDEV_MINOR_ZERO, CDEV_MAX_IO}` (Task 1); `sys_safecopy(direction, granter, gid,
+  offset, addr, bytes) -> i32`.
+- Produces: `cdev::Minor { Null, Zero }`, `cdev::classify(i32) -> Result<Minor, i32>`,
+  `cdev::validate(Request) -> Result<(Minor, usize), i32>`, `cdev::zero_chunk(len: usize, done:
+  usize) -> usize`. The driver answers `CDEV_WRITE` with `len` for both minors, `CDEV_READ` with `0`
+  (null) or `len` (zero).
 
 - [ ] **Step 1: Write the pure module with failing tests**
 
@@ -690,13 +753,14 @@ mod tests {
 
 - [ ] **Step 2: Run the driver's tests to see them fail to compile, then wire the module**
 
-Run: `cargo test -p minixrs-memory cdev 2>&1 | tail -3`
-Expected: fails — `mod cdev` is not declared yet (or, if you declared it first, passes; either way proceed).
+Run: `cargo test -p minixrs-memory cdev 2>&1 | tail -3` Expected: fails — `mod cdev` is not declared
+yet (or, if you declared it first, passes; either way proceed).
 
 In `drivers/memory/src/main.rs`:
 
 1. After `mod bdev;` add `mod cdev;`.
-2. Extend the `callnr` import list with `CDEV_MAX_IO, CDEV_READ, CDEV_WRITE` (keep it sorted; `cargo fmt` will not reorder identifiers inside braces, so put them in alphabetical position).
+2. Extend the `callnr` import list with `CDEV_MAX_IO, CDEV_READ, CDEV_WRITE` (keep it sorted; `cargo
+   fmt` will not reorder identifiers inside braces, so put them in alphabetical position).
 3. Rewrite the crate doc's first line and add a paragraph. First line becomes:
    ```rust
    //! minix.rs `memory` driver — the boot ramdisk (slice 5.7, decision D3), plus
@@ -715,17 +779,17 @@ In `drivers/memory/src/main.rs`:
    ```
 4. Add the two arms to the `match msg.m_type` in `main`, between `BDEV_WRITE` and `_`:
    ```rust
-            // Slice 5.11: the character minors. Same driver, different band —
-            // `cdev::classify` refuses the ramdisk's minor 0 here, because a minor
-            // is per band, not per driver.
-            CDEV_WRITE => {
-                let rc = do_cdev_write(&msg);
-                reply(caller_e, &mut msg, rc);
-            }
-            CDEV_READ => {
-                let rc = do_cdev_read(caller_e, &msg);
-                reply(caller_e, &mut msg, rc);
-            }
+   // Slice 5.11: the character minors. Same driver, different band —
+   // `cdev::classify` refuses the ramdisk's minor 0 here, because a minor
+   // is per band, not per driver.
+   CDEV_WRITE => {
+       let rc = do_cdev_write(&msg);
+       reply(caller_e, &mut msg, rc);
+   }
+   CDEV_READ => {
+       let rc = do_cdev_read(caller_e, &msg);
+       reply(caller_e, &mut msg, rc);
+   }
    ```
 5. Add the static and the two handlers before `reply`:
    ```rust
@@ -802,17 +866,21 @@ In `drivers/memory/src/main.rs`:
        }
    }
    ```
-   `EINVAL` needs adding to the `error` import list (`use minixrs_kernel_shared::error::{EINVAL, ENOSYS, OK};`). `len as i32` is lossless: `len` came in as a non-negative `i32`.
+   `EINVAL` needs adding to the `error` import list (`use minixrs_kernel_shared::error::{EINVAL,
+   ENOSYS, OK};`). `len as i32` is lossless: `len` came in as a non-negative `i32`.
 
 - [ ] **Step 3: Test, lint, and check the stack frame**
 
 Run:
+
 ```bash
 cargo test -p minixrs-memory 2>&1 | tail -3
 cargo fmt --all
 cargo clippy -p minixrs-memory --all-targets -- -D warnings
 ```
-Expected: all tests pass (the 6 new plus bdev's), clippy clean. Then build the kernel once so the driver ELF exists and check its largest frame is unchanged:
+
+Expected: all tests pass (the 6 new plus bdev's), clippy clean. Then build the kernel once so the
+driver ELF exists and check its largest frame is unchanged:
 
 ```bash
 MINIXRS_SDK=/nonexistent cargo kernel-aarch64 2>&1 | tail -2
@@ -821,6 +889,7 @@ MINIXRS_SDK=/nonexistent cargo kernel-aarch64 2>&1 | tail -2
   | grep -oE 'sub[[:space:]]+sp, sp, #0x[0-9a-f]+' | grep -oE '0x[0-9a-f]+' \
   | while read h; do printf '%d\n' "$h"; done | sort -n | tail -1
 ```
+
 Expected: a number well under 4096 (5.10b's driver was a few hundred bytes).
 
 - [ ] **Step 4: Commit**
@@ -843,14 +912,22 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 ### Task 4: VFS's fd table names its driver, and the device-node table
 
 **Files:**
-- Modify: `servers/vfs/src/fd.rs:70-125` (imports, `Fd`, `DEFAULT_ROW`), `:280-282` and `:389-393` (test fixtures)
+
+- Modify: `servers/vfs/src/fd.rs:70-125` (imports, `Fd`, `DEFAULT_ROW`), `:280-282` and `:389-393`
+  (test fixtures)
 - Create: `servers/vfs/src/dev.rs`
-- Modify: `servers/vfs/src/main.rs:120` (`mod dev;`) — **only** the module declaration and the `use fd::Fd;` line; the handler changes are Task 5. To keep the crate compiling at the end of this task, also apply the three mechanical pattern edits listed in Step 3.
+- Modify: `servers/vfs/src/main.rs:120` (`mod dev;`) — **only** the module declaration and the `use
+  fd::Fd;` line; the handler changes are Task 5. To keep the crate compiling at the end of this
+  task, also apply the three mechanical pattern edits listed in Step 3.
 - Test: `servers/vfs/src/fd.rs`, `servers/vfs/src/dev.rs`
 
 **Interfaces:**
-- Consumes: `callnr::{CDEV_MINOR_CONSOLE, CDEV_MINOR_NULL, CDEV_MINOR_ZERO, DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH}` (Task 1).
-- Produces: `fd::CharDriver { Tty, Memory }` (`Copy + PartialEq + Eq + Debug`); `fd::Fd::CharDev { dev: CharDriver, minor: i32 }`; `dev::NR_DEV_NODES: usize = 3`; `dev::lookup(path: &[u8]) -> Option<Fd>`.
+
+- Consumes: `callnr::{CDEV_MINOR_CONSOLE, CDEV_MINOR_NULL, CDEV_MINOR_ZERO, DEV_CONSOLE_PATH,
+  DEV_NULL_PATH, DEV_ZERO_PATH}` (Task 1).
+- Produces: `fd::CharDriver { Tty, Memory }` (`Copy + PartialEq + Eq + Debug`); `fd::Fd::CharDev {
+  dev: CharDriver, minor: i32 }`; `dev::NR_DEV_NODES: usize = 3`; `dev::lookup(path: &[u8]) ->
+  Option<Fd>`.
 
 - [ ] **Step 1: Change the variant and watch the fixtures fail**
 
@@ -874,26 +951,31 @@ pub enum CharDriver {
 and change the variant:
 
 ```rust
-    /// A character device: the console on TTY, or `/dev/null` / `/dev/zero` on
-    /// the memory driver, routed by `dev`.
-    CharDev {
-        /// The driver that owns `minor`. Minors are a per-driver namespace, so
-        /// this is half of the address, not decoration.
-        dev: CharDriver,
-        /// Device minor, e.g. [`CDEV_MINOR_CONSOLE`]. Passed through to the
-        /// driver, which is the one that decides whether it exists (`ENXIO`).
-        minor: i32,
-    },
+/// A character device: the console on TTY, or `/dev/null` / `/dev/zero` on
+/// the memory driver, routed by `dev`.
+CharDev {
+    /// The driver that owns `minor`. Minors are a per-driver namespace, so
+    /// this is half of the address, not decoration.
+    dev: CharDriver,
+    /// Device minor, e.g. [`CDEV_MINOR_CONSOLE`]. Passed through to the
+    /// driver, which is the one that decides whether it exists (`ENXIO`).
+    minor: i32,
+},
 ```
 
-`DEFAULT_ROW`'s three entries become `Fd::CharDev { dev: CharDriver::Tty, minor: CDEV_MINOR_CONSOLE }`. In the module note, rewrite "fds 0, 1, and 2 name the console character device in every row" to "fds 0, 1, and 2 name the console — TTY's `CDEV_MINOR_CONSOLE` — in every row" and the "**today only the console**" phrase in the `CharDev` doc is gone with the doc above.
+`DEFAULT_ROW`'s three entries become `Fd::CharDev { dev: CharDriver::Tty, minor: CDEV_MINOR_CONSOLE
+}`. In the module note, rewrite "fds 0, 1, and 2 name the console character device in every row" to
+"fds 0, 1, and 2 name the console — TTY's `CDEV_MINOR_CONSOLE` — in every row" and the "**today only
+the console**" phrase in the `CharDev` doc is gone with the doc above.
 
-Run: `cargo test -p minixrs-vfs 2>&1 | grep -E '^error' | head`
-Expected: errors at the two test fixtures (`CONSOLE`, and the `minor: 7` lines) and in `main.rs`'s three `Fd::CharDev { minor }` patterns.
+Run: `cargo test -p minixrs-vfs 2>&1 | grep -E '^error' | head` Expected: errors at the two test
+fixtures (`CONSOLE`, and the `minor: 7` lines) and in `main.rs`'s three `Fd::CharDev { minor }`
+patterns.
 
 - [ ] **Step 2: Fix the fixtures**
 
-In the tests: `const CONSOLE: Fd = Fd::CharDev { dev: CharDriver::Tty, minor: CDEV_MINOR_CONSOLE };` and at the `minor: 7` site use a memory-driver entry so the fixture exercises the new field:
+In the tests: `const CONSOLE: Fd = Fd::CharDev { dev: CharDriver::Tty, minor: CDEV_MINOR_CONSOLE };`
+and at the `minor: 7` site use a memory-driver entry so the fixture exercises the new field:
 
 ```rust
         r[1][3] = Fd::CharDev {
@@ -914,7 +996,8 @@ In the tests: `const CONSOLE: Fd = Fd::CharDev { dev: CharDriver::Tty, minor: CD
 
 - [ ] **Step 3: Mechanically patch `main.rs` so the crate compiles (routing is Task 5)**
 
-In `servers/vfs/src/main.rs`: leave `use fd::Fd;` as it is (Task 5 widens it) and add after `mod fd;`:
+In `servers/vfs/src/main.rs`: leave `use fd::Fd;` as it is (Task 5 widens it) and add after `mod
+fd;`:
 
 ```rust
 // Consumed by `do_open` in the next commit; the allow goes with it.
@@ -924,11 +1007,14 @@ mod dev;
 
 Then the three pattern sites:
 
-- `do_write`: `Ok(Fd::CharDev { minor }) => Fd::CharDev { minor },` → `Ok(Fd::CharDev { dev, minor }) => Fd::CharDev { dev, minor },` and the arm `Fd::CharDev { minor } => {` → `Fd::CharDev { dev: _, minor } => {` (Task 5 replaces the `_`).
+- `do_write`: `Ok(Fd::CharDev { minor }) => Fd::CharDev { minor },` → `Ok(Fd::CharDev { dev, minor
+  }) => Fd::CharDev { dev, minor },` and the arm `Fd::CharDev { minor } => {` → `Fd::CharDev { dev:
+  _, minor } => {` (Task 5 replaces the `_`).
 - `do_read`: `Ok(Fd::CharDev { .. }) => return ENOSYS,` stays as-is for now.
 - `do_open`'s `_ => return EINVAL,` arm stays.
 
-`CharDriver` will be an unused import until Task 5 — add it *in Task 5* instead if clippy's `-D warnings` flags it here; the point of this step is only that `cargo test -p minixrs-vfs` compiles.
+`CharDriver` will be an unused import until Task 5 — add it *in Task 5* instead if clippy's `-D
+warnings` flags it here; the point of this step is only that `cargo test -p minixrs-vfs` compiles.
 
 - [ ] **Step 4: Write the device table with failing tests**
 
@@ -1049,12 +1135,15 @@ mod tests {
 - [ ] **Step 5: Run VFS's tests, lint, commit**
 
 Run:
+
 ```bash
 cargo test -p minixrs-vfs 2>&1 | tail -3
 cargo fmt --all
 cargo clippy -p minixrs-vfs --all-targets -- -D warnings
 ```
-Expected: all pass and clippy clean (the module-level `allow` covers `dev::lookup` until Task 5 consumes it). Commit:
+
+Expected: all pass and clippy clean (the module-level `allow` covers `dev::lookup` until Task 5
+consumes it). Commit:
 
 ```bash
 git add servers/vfs/src/fd.rs servers/vfs/src/dev.rs servers/vfs/src/main.rs
@@ -1073,36 +1162,48 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 ### Task 5: VFS routes — open intercept, read to the driver, write by driver, the `mem` peer, `mem.deny`
 
 **Files:**
-- Modify: `servers/vfs/src/main.rs` — imports; `main` (peer resolution, dispatch, prologue); `do_write`; `write_all`; `do_open` (reorder + intercept + doc list); `do_read`; new `cdev_endpoint`, `mem_endpoint`, `cdev_request`/`cdev_read`, `mem_denials`; `cdev_write` becomes a wrapper
+
+- Modify: `servers/vfs/src/main.rs` — imports; `main` (peer resolution, dispatch, prologue);
+  `do_write`; `write_all`; `do_open` (reorder + intercept + doc list); `do_read`; new
+  `cdev_endpoint`, `mem_endpoint`, `cdev_request`/`cdev_read`, `mem_denials`; `cdev_write` becomes a
+  wrapper
 
 **Interfaces:**
-- Consumes: `dev::lookup`, `fd::CharDriver` (Task 4); `callnr::{CDEV_READ, CDEV_MINOR_ZERO}` (Task 1); `com::MEM_PROC_NR`; memory driver contract (Task 3).
-- Produces: diag lines `mem.ds ok ep=N` / `mem.ds FAIL rc=R fallback=E`, `mem.deny ok n=5` / `mem.deny FAIL <name> rc=R`; `VFS_READ` on a device descriptor returns the driver's count; `VFS_OPEN` of a `DEV_*_PATH` returns a descriptor without touching MFS.
+
+- Consumes: `dev::lookup`, `fd::CharDriver` (Task 4); `callnr::{CDEV_READ, CDEV_MINOR_ZERO}` (Task
+  1); `com::MEM_PROC_NR`; memory driver contract (Task 3).
+- Produces: diag lines `mem.ds ok ep=N` / `mem.ds FAIL rc=R fallback=E`, `mem.deny ok n=5` /
+  `mem.deny FAIL <name> rc=R`; `VFS_READ` on a device descriptor returns the driver's count;
+  `VFS_OPEN` of a `DEV_*_PATH` returns a descriptor without touching MFS.
 
 - [ ] **Step 1: Imports and peer resolution**
 
-In the `callnr` import add `CDEV_MINOR_ZERO, CDEV_READ`; in the `com` import add `MEM_PROC_NR`; change `use fd::Fd;` to `use fd::{CharDriver, Fd};` and delete the `#[allow(dead_code)]` (and its comment) Task 4 put on `mod dev;`. In `main`, after `let mfs = mfs_endpoint();`:
+In the `callnr` import add `CDEV_MINOR_ZERO, CDEV_READ`; in the `com` import add `MEM_PROC_NR`;
+change `use fd::Fd;` to `use fd::{CharDriver, Fd};` and delete the `#[allow(dead_code)]` (and its
+comment) Task 4 put on `mod dev;`. In `main`, after `let mfs = mfs_endpoint();`:
 
 ```rust
-    // Slice 5.11: the third peer. `/dev/null` and `/dev/zero` live on the memory
-    // driver, so a device read or write needs its endpoint — resolved once, like
-    // the other two, for the same reason.
-    let mem = mem_endpoint();
+// Slice 5.11: the third peer. `/dev/null` and `/dev/zero` live on the memory
+// driver, so a device read or write needs its endpoint — resolved once, like
+// the other two, for the same reason.
+let mem = mem_endpoint();
 ```
 
 and after `fs_denials(&mut grants, mfs, mount);`:
 
 ```rust
-    // Slice 5.11: the memory driver's CDEV refusals, last for the same reason.
-    mem_denials(&mut grants, mem);
+// Slice 5.11: the memory driver's CDEV refusals, last for the same reason.
+mem_denials(&mut grants, mem);
 ```
 
-Update the comment above `let tty = tty_endpoint();` ("Resolve the two peers once") to say three peers: "every `VFS_WRITE` targets TTY or the memory driver, every `VFS_OPEN`/`VFS_READ` targets MFS or a driver". Change the dispatch:
+Update the comment above `let tty = tty_endpoint();` ("Resolve the two peers once") to say three
+peers: "every `VFS_WRITE` targets TTY or the memory driver, every `VFS_OPEN`/`VFS_READ` targets MFS
+or a driver". Change the dispatch:
 
 ```rust
-            VFS_WRITE => do_write(caller_e, &msg, &mut grants, tty, mem, mfs),
-            VFS_OPEN => do_open(caller_e, &msg, &mut mount, mfs),
-            VFS_READ => do_read(caller_e, &msg, &mut grants, tty, mem, mfs),
+VFS_WRITE => do_write(caller_e, &msg, &mut grants, tty, mem, mfs),
+VFS_OPEN => do_open(caller_e, &msg, &mut mount, mfs),
+VFS_READ => do_read(caller_e, &msg, &mut grants, tty, mem, mfs),
 ```
 
 Add beside `mfs_endpoint`:
@@ -1138,29 +1239,31 @@ fn cdev_endpoint(dev: CharDriver, tty: Endpoint, mem: Endpoint) -> Endpoint {
 }
 ```
 
-(Check the memory driver's DS key: `grep -n 'copy_from_slice(b"memory")' fs/mfs/src/main.rs` — MFS looks it up the same way; match its spelling exactly.)
+(Check the memory driver's DS key: `grep -n 'copy_from_slice(b"memory")' fs/mfs/src/main.rs` — MFS
+looks it up the same way; match its spelling exactly.)
 
 - [ ] **Step 2: `do_write` and `write_all` route by driver**
 
 `do_write` signature gains `mem: Endpoint` between `tty` and `mfs`. Its `CharDev` arm:
 
 ```rust
-        Fd::CharDev { dev, minor } => {
-            // The single-copy hop: the grant names the *caller's* memory, so the
-            // kernel moves the bytes from the caller straight into the driver —
-            // TTY for the console, the memory driver for `/dev/null`/`/dev/zero`.
-            let driver = cdev_endpoint(dev, tty, mem);
-            let gid = match grants.grant_magic(driver, caller_e, req.buf, len as u64, CPF_READ) {
-                Ok(gid) => gid,
-                Err(e) => return e,
-            };
-            let written = write_all(driver, minor, gid, len);
-            let _ = grants.revoke(gid);
-            written
-        }
+Fd::CharDev { dev, minor } => {
+    // The single-copy hop: the grant names the *caller's* memory, so the
+    // kernel moves the bytes from the caller straight into the driver —
+    // TTY for the console, the memory driver for `/dev/null`/`/dev/zero`.
+    let driver = cdev_endpoint(dev, tty, mem);
+    let gid = match grants.grant_magic(driver, caller_e, req.buf, len as u64, CPF_READ) {
+        Ok(gid) => gid,
+        Err(e) => return e,
+    };
+    let written = write_all(driver, minor, gid, len);
+    let _ = grants.revoke(gid);
+    written
+}
 ```
 
-`write_all(driver: Endpoint, minor: i32, gid: i32, len: usize)` — rename the parameter and the call inside (`cdev_write(driver, …)`); in its doc, "through a working TTY" → "through a working driver".
+`write_all(driver: Endpoint, minor: i32, gid: i32, len: usize)` — rename the parameter and the call
+inside (`cdev_write(driver, …)`); in its doc, "through a working TTY" → "through a working driver".
 
 - [ ] **Step 3: `do_read` sends `CDEV_READ`**
 
@@ -1221,7 +1324,10 @@ Replace `do_read`'s resolve block and tail:
     }
 ```
 
-Signature: `fn do_read(caller_e, msg, grants, tty: Endpoint, mem: Endpoint, mfs: Endpoint) -> i32`. In its doc comment, replace the sentence about `CDEV_READ` not existing (if any) and add: "A device descriptor takes the same shape against its driver, with `CDEV_READ` in place of `FS_READ` and no position to advance."
+Signature: `fn do_read(caller_e, msg, grants, tty: Endpoint, mem: Endpoint, mfs: Endpoint) -> i32`.
+In its doc comment, replace the sentence about `CDEV_READ` not existing (if any) and add: "A device
+descriptor takes the same shape against its driver, with `CDEV_READ` in place of `FS_READ` and no
+position to advance."
 
 - [ ] **Step 4: `do_open` intercepts device paths after the copy, before the mount**
 
@@ -1264,7 +1370,11 @@ Reorder the body:
     }
 ```
 
-Update the doc comment's numbered list to the new order (1 validate, 2 flags, 3 copy, 4 device table, 5 mount, 6 MFS resolve, 7 lowest free fd, 8 `O_TRUNC` last) and reword the `_ => return EINVAL` arm's comment in the alloc match to: "No other variant is reachable — `classify` returns only `File` or an error, and the device arm lives above, before the mount — but routing it explicitly keeps a new `Fd` variant a compile error here rather than a silent `EINVAL`."
+Update the doc comment's numbered list to the new order (1 validate, 2 flags, 3 copy, 4 device
+table, 5 mount, 6 MFS resolve, 7 lowest free fd, 8 `O_TRUNC` last) and reword the `_ => return
+EINVAL` arm's comment in the alloc match to: "No other variant is reachable — `classify` returns
+only `File` or an error, and the device arm lives above, before the mount — but routing it
+explicitly keeps a new `Fd` variant a compile error here rather than a silent `EINVAL`."
 
 - [ ] **Step 5: `cdev_request`, `cdev_read`, `cdev_write`**
 
@@ -1374,7 +1484,10 @@ fn mem_denials(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) {
 }
 ```
 
-Also update the crate doc's write-path diagram caption: "TTY" → "the driver (TTY for the console, the memory driver for `/dev/null` and `/dev/zero`)", one sentence, and add to the read-path section a line: "A device descriptor reads through `CDEV_READ` against its driver instead of `FS_READ` against MFS, one round, no position (slice 5.11)."
+Also update the crate doc's write-path diagram caption: "TTY" → "the driver (TTY for the console,
+the memory driver for `/dev/null` and `/dev/zero`)", one sentence, and add to the read-path section
+a line: "A device descriptor reads through `CDEV_READ` against its driver instead of `FS_READ`
+against MFS, one round, no position (slice 5.11)."
 
 - [ ] **Step 7: Test, lint, boot the stub-free config**
 
@@ -1386,7 +1499,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 MINIXRS_SDK=/nonexistent timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features > /private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/d473a02b-2a5d-499a-b52d-798a03065536/scratchpad/t5.log 2>&1
 grep -a 'mem.ds\|mem.deny\|cdev.deny\|fs.deny\|open.deny\|read-console' /private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/d473a02b-2a5d-499a-b52d-798a03065536/scratchpad/t5.log
 ```
-Expected: `[diag vfs] mem.ds ok ep=…`, `[diag vfs] mem.deny ok n=5`, `cdev.deny ok n=2`, `fs.deny ok n=14`, and init's `open.deny ok n=11` still present (its `read-console` probe still hears `ENOSYS`, now from TTY). Check `grep -a 'error\[E' t5.log` is empty before trusting any absence.
+
+Expected: `[diag vfs] mem.ds ok ep=…`, `[diag vfs] mem.deny ok n=5`, `cdev.deny ok n=2`, `fs.deny ok
+n=14`, and init's `open.deny ok n=11` still present (its `read-console` probe still hears `ENOSYS`,
+now from TTY). Check `grep -a 'error\[E' t5.log` is empty before trusting any absence.
 
 - [ ] **Step 8: Commit**
 
@@ -1410,21 +1526,29 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 ### Task 6: init proves the three devices
 
 **Files:**
-- Modify: `userland/init/src/main.rs` — imports; `main` (call site after `fs_demo`); new `dev_demo`, `zero_demo`, `null_demo`, `console_demo` + consts; `open_denials` (`dev-no-such`, the `read-console` comment, count 12); `OPEN_DENIAL_PROBES`; the `open_denials` doc bullets
+
+- Modify: `userland/init/src/main.rs` — imports; `main` (call site after `fs_demo`); new `dev_demo`,
+  `zero_demo`, `null_demo`, `console_demo` + consts; `open_denials` (`dev-no-such`, the
+  `read-console` comment, count 12); `OPEN_DENIAL_PROBES`; the `open_denials` doc bullets
 
 **Interfaces:**
-- Consumes: `callnr::{DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH}` (Task 1); the existing `vfs_open`/`vfs_read`/`vfs_write`/`vfs_close`/`report_line`/`report_open_fail` helpers.
-- Produces: markers `minix.rs init: dev.zero ok n=64`, `minix.rs init: dev.null ok n=35`, `minix.rs init: dev.console ok` (written through the `/dev/console` fd), `minix.rs init: open.deny ok n=12`; failure spellings `minix.rs init: dev.{zero,null,console} FAIL <step>`.
+
+- Consumes: `callnr::{DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH}` (Task 1); the existing
+  `vfs_open`/`vfs_read`/`vfs_write`/`vfs_close`/`report_line`/`report_open_fail` helpers.
+- Produces: markers `minix.rs init: dev.zero ok n=64`, `minix.rs init: dev.null ok n=35`, `minix.rs
+  init: dev.console ok` (written through the `/dev/console` fd), `minix.rs init: open.deny ok n=12`;
+  failure spellings `minix.rs init: dev.{zero,null,console} FAIL <step>`.
 
 - [ ] **Step 1: The probes**
 
-Add to the `callnr` import: `DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH`. In `main`, after `fs_demo(vfs);` and its comment:
+Add to the `callnr` import: `DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH`. In `main`, after
+`fs_demo(vfs);` and its comment:
 
 ```rust
-    // Slice 5.11: the device nodes. After the read path (a device open goes
-    // through `VFS_OPEN` like any other) and before the write battery, so a hang
-    // here localizes to the `dev.*` markers. Cheap — no filesystem traffic.
-    dev_demo(vfs);
+// Slice 5.11: the device nodes. After the read path (a device open goes
+// through `VFS_OPEN` like any other) and before the write battery, so a hang
+// here localizes to the `dev.*` markers. Cheap — no filesystem traffic.
+dev_demo(vfs);
 ```
 
 Add a new section after `fd_demo`/`open_denials` (before the "Slice 5.10a: the write path" banner):
@@ -1546,29 +1670,34 @@ fn console_demo(vfs: Endpoint) {
 First array:
 
 ```rust
-    for (name, path, want) in [
-        ("no-such", "/no-such-file", ENOENT),
-        ("is-dir", "/etc", EISDIR),
-        // Slice 5.11: a `/dev` path the device table does not know. It must fall
-        // through to MFS — where there is no `/dev` at all — and answer `ENOENT`
-        // from the walk. A table that claimed the whole prefix would answer
-        // something else, and a table that matched by prefix would open null.
-        ("dev-no-such", "/dev/nope", ENOENT),
-    ] {
+for (name, path, want) in [
+    ("no-such", "/no-such-file", ENOENT),
+    ("is-dir", "/etc", EISDIR),
+    // Slice 5.11: a `/dev` path the device table does not know. It must fall
+    // through to MFS — where there is no `/dev` at all — and answer `ENOENT`
+    // from the walk. A table that claimed the whole prefix would answer
+    // something else, and a table that matched by prefix would open null.
+    ("dev-no-such", "/dev/nope", ENOENT),
+] {
 ```
 
 The console-read block:
 
 ```rust
-    // A console descriptor cannot be read from *yet*: since slice 5.11 VFS routes
-    // the read to TTY as a real `CDEV_READ`, and TTY answers `ENOSYS` from its
-    // unknown-request arm until Phase 6 gives it RX. Same errno as before the
-    // slice, now the driver's answer rather than VFS's guess about it.
-    let mut buf = [0u8; 8];
-    if vfs_read(vfs, STDOUT, &mut buf) == ENOSYS {
+// A console descriptor cannot be read from *yet*: since slice 5.11 VFS routes
+// the read to TTY as a real `CDEV_READ`, and TTY answers `ENOSYS` from its
+// unknown-request arm until Phase 6 gives it RX. Same errno as before the
+// slice, now the driver's answer rather than VFS's guess about it.
+let mut buf = [0u8; 8];
+if vfs_read(vfs, STDOUT, &mut buf) == ENOSYS {
 ```
 
-`OPEN_DENIAL_PROBES` 11 → 12, its `const _` assert to 12, the final line to `b"minix.rs init: open.deny ok n=12\n"`. In the doc comment above `open_denials`, replace the `read-console` bullet with "`read-console` — `read()` on fd 1. `ENOSYS`, not `EBADF`: the descriptor is good, and TTY does not serve `CDEV_READ` until Phase 6, answering it from its unknown-request arm (slice 5.11 made VFS send the request instead of guessing)." and add a bullet "`dev-no-such` — `/dev/nope`. `ENOENT` from MFS's walk: the device table does not claim the `/dev` prefix, only three exact paths."
+`OPEN_DENIAL_PROBES` 11 → 12, its `const _` assert to 12, the final line to `b"minix.rs init:
+open.deny ok n=12\n"`. In the doc comment above `open_denials`, replace the `read-console` bullet
+with "`read-console` — `read()` on fd 1. `ENOSYS`, not `EBADF`: the descriptor is good, and TTY does
+not serve `CDEV_READ` until Phase 6, answering it from its unknown-request arm (slice 5.11 made VFS
+send the request instead of guessing)." and add a bullet "`dev-no-such` — `/dev/nope`. `ENOENT` from
+MFS's walk: the device table does not claim the `/dev` prefix, only three exact paths."
 
 - [ ] **Step 3: Build, lint, boot stub-free, read the markers**
 
@@ -1579,7 +1708,9 @@ MINIXRS_SDK=/nonexistent timeout 60 cargo run -p minixrs-kernel --target aarch64
 grep -a 'error\[E' /private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/d473a02b-2a5d-499a-b52d-798a03065536/scratchpad/t6.log
 grep -a 'dev\.\|open.deny\|mem\.' /private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/d473a02b-2a5d-499a-b52d-798a03065536/scratchpad/t6.log
 ```
-Expected: no compile errors; `dev.zero ok n=64`, `dev.null ok n=35`, `dev.console ok`, `open.deny ok n=12`, `mem.ds ok`, `mem.deny ok n=5`; no `FAIL`.
+
+Expected: no compile errors; `dev.zero ok n=64`, `dev.null ok n=35`, `dev.console ok`, `open.deny ok
+n=12`, `mem.ds ok`, `mem.deny ok n=5`; no `FAIL`.
 
 - [ ] **Step 4: Commit**
 
@@ -1602,7 +1733,10 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 ### Task 7: Marker files and the default-config boot
 
 **Files:**
-- Modify: `tests/qemu-boot.expected` (after `[diag vfs] cdev.deny ok n=2` for the VFS prologue lines; after `fs.deny ok n=14`'s block for `mem.deny`; after `fs.fd ok match=1` for the three `dev.*` lines; `open.deny ok n=11` → `n=12` with its commentary)
+
+- Modify: `tests/qemu-boot.expected` (after `[diag vfs] cdev.deny ok n=2` for the VFS prologue
+  lines; after `fs.deny ok n=14`'s block for `mem.deny`; after `fs.fd ok match=1` for the three
+  `dev.*` lines; `open.deny ok n=11` → `n=12` with its commentary)
 - Modify: `tests/qemu-boot.forbidden`
 
 - [ ] **Step 1: Add the markers with commentary**
@@ -1700,7 +1834,9 @@ MINIXRS_SDK=/nonexistent timeout 300 cargo run -p minixrs-kernel --target aarch6
 cp $S/t7.log $S/t7.check.log
 tools/check-boot-log.sh $S/t7.check.log | tail -5
 ```
-Expected: `PASS` on every marker (the total grows from 97 to 102), `FORBIDDEN: none`. If a marker is MISSING, `grep -a 'error\[E'` first.
+
+Expected: `PASS` on every marker (the total grows from 97 to 102), `FORBIDDEN: none`. If a marker is
+MISSING, `grep -a 'error\[E'` first.
 
 - [ ] **Step 3: Measure the boot-budget ratio against the merge base**
 
@@ -1716,7 +1852,10 @@ MINIXRS_SDK=/nonexistent timeout 300 cargo run -p minixrs-kernel --target aarch6
 B=$(grep -abo 'minix.rs hello: errno ok' $S/base.log | head -1 | cut -d: -f1); TB=$(wc -c < $S/base.log); echo "before: $B / $TB = $(echo "scale=4; $B/$TB" | bc)"
 git checkout feature/slice-5.11-dev-null-zero
 ```
-Expected: the two fractions within a couple of percentage points of each other (the slice adds roughly a dozen IPC round trips). Record both numbers in the Task 9 ledger; if the ratio jumped by more than 1.1×, stop and report before continuing.
+
+Expected: the two fractions within a couple of percentage points of each other (the slice adds
+roughly a dozen IPC round trips). Record both numbers in the Task 9 ledger; if the ratio jumped by
+more than 1.1×, stop and report before continuing.
 
 - [ ] **Step 4: Commit**
 
@@ -1737,146 +1876,162 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 ### Task 8: Docs, trackers, and the falsified-claim sweep
 
 **Files:**
-- Modify: `book/src/drivers/overview.md:170-203` (CDEV protocol), `:205` (TTY intro), after `:345-368` (a new `### The character minors` under the memory section)
-- Modify: `book/src/servers/overview.md:210-227` (descriptor table), `:229` (read path — one sentence)
+
+- Modify: `book/src/drivers/overview.md:170-203` (CDEV protocol), `:205` (TTY intro), after
+  `:345-368` (a new `### The character minors` under the memory section)
+- Modify: `book/src/servers/overview.md:210-227` (descriptor table), `:229` (read path — one
+  sentence)
 - Modify: `book/src/reference/syscalls.md:211` (CDEV row; also fix the stale VFS row while there)
-- Modify: `docs/plan.md:537-538`, `docs/plans/phase-5-musl-fs.md:1483` (5.10b header), `:1555-1565` (5.11 entry), `:657` (5.3 text), `:307` (D11 line)
+- Modify: `docs/plan.md:537-538`, `docs/plans/phase-5-musl-fs.md:1483` (5.10b header), `:1555-1565`
+  (5.11 entry), `:657` (5.3 text), `:307` (D11 line)
 - Modify: `CLAUDE.md:355` (the 5.3 sentence) and a new 5.11 bullet after the 5.10b ones
 - Modify: any file the sweep in Step 4 finds
 
 - [ ] **Step 1: The book's driver chapter**
 
-In `book/src/drivers/overview.md`, CDEV section: change "Phase 5 defines one:" to "Phase 5 defines two, sharing one payload:", and in the table's grant-id row "names the client's source buffer" → "names the client's buffer (`CPF_READ` for a write, `CPF_WRITE` for a read)". Replace the final paragraph ("`CDEV_READ` is deliberately absent…") with:
+In `book/src/drivers/overview.md`, CDEV section: change "Phase 5 defines one:" to "Phase 5 defines
+two, sharing one payload:", and in the table's grant-id row "names the client's source buffer" →
+"names the client's buffer (`CPF_READ` for a write, `CPF_WRITE` for a read)". Replace the final
+paragraph ("`CDEV_READ` is deliberately absent…") with:
 
 ```markdown
-**`CDEV_READ` is the same payload, copy reversed** (slice 5.11). The reply is
-the byte count read, `0` is EOF, and a short read is legal — POSIX `read()`'s
-contract and the one VFS already assumes for `FS_READ`, so VFS sends one request
-and reports what came back. It existed only as a plan note until `/dev/zero`
-needed it: the 5.3 text said the two devices would be "new minors, not new
-requests", which is true of `/dev/null` and of writing `/dev/zero` and false of
-reading it. TTY does not serve it until Phase 6 gives it RX (`SYS_IRQCTL`), and
-answers it `ENOSYS` from its unknown-request arm until then — VFS routes a
-console `read()` there anyway, so Phase 6 changes TTY and nothing else.
+**`CDEV_READ` is the same payload, copy reversed** (slice 5.11). The reply is the byte count read,
+`0` is EOF, and a short read is legal — POSIX `read()`'s contract and the one VFS already assumes
+for `FS_READ`, so VFS sends one request and reports what came back. It existed only as a plan note
+until `/dev/zero` needed it: the 5.3 text said the two devices would be "new minors, not new
+requests", which is true of `/dev/null` and of writing `/dev/zero` and false of reading it. TTY does
+not serve it until Phase 6 gives it RX (`SYS_IRQCTL`), and answers it `ENOSYS` from its
+unknown-request arm until then — VFS routes a console `read()` there anyway, so Phase 6 changes TTY
+and nothing else.
 
-**Minors are a per-driver namespace.** TTY's console is 0; the memory driver's
-`/dev/null` and `/dev/zero` are CDEV minors 3 and 5 (MINIX 3's `NULL_DEV` and
-`ZERO_DEV`), on the same driver as BDEV minor 0's ramdisk. The request band, not
-the minor value, tells them apart.
+**Minors are a per-driver namespace.** TTY's console is 0; the memory driver's `/dev/null` and
+`/dev/zero` are CDEV minors 3 and 5 (MINIX 3's `NULL_DEV` and `ZERO_DEV`), on the same driver as
+BDEV minor 0's ramdisk. The request band, not the minor value, tells them apart.
 ```
 
-Under `## TTY`, in the `cdev.rs` bullet, "`parse_write` reads the four payload fields, `validate_write` applies…" → "`validate_write` applies… (the four-field parse moved to `server-rt::cdev` in 5.11, when the memory driver became its second user)".
+Under `## TTY`, in the `cdev.rs` bullet, "`parse_write` reads the four payload fields,
+`validate_write` applies…" → "`validate_write` applies… (the four-field parse moved to
+`server-rt::cdev` in 5.11, when the memory driver became its second user)".
 
 After the memory section's `### The driver has no `unsafe` block` subsection, add:
 
 ```markdown
 ### The character minors
 
-Since slice 5.11 the same driver serves `/dev/null` (CDEV minor 3) and
-`/dev/zero` (minor 5), as MINIX 3's memory driver does beside its ramdisks. They
-share the driver with the BDEV ramdisk but not a namespace — a minor is per
-request band — so `cdev::classify` refuses minor 0 here, which is TTY's console.
+Since slice 5.11 the same driver serves `/dev/null` (CDEV minor 3) and `/dev/zero` (minor 5), as
+MINIX 3's memory driver does beside its ramdisks. They share the driver with the BDEV ramdisk but
+not a namespace — a minor is per request band — so `cdev::classify` refuses minor 0 here, which is
+TTY's console.
 
-Both minors discard a `CDEV_WRITE` and answer the **whole** count with no copy
-at all; `/dev/null` answers a `CDEV_READ` with `0`, and `/dev/zero` fills the
-whole request from a 256-byte static, walking the grant in `CDEV_MAX_IO` steps.
-Nothing is clamped: `CDEV_MAX_IO` protects TTY's stack staging buffer, and there
-is no staging here. Two consequences worth knowing. A `/dev/null` write with an
-unmapped buffer *succeeds*, as it does on Linux, because nothing reads the
-buffer — so no bad-buffer probe may ever be aimed at it. And the driver still
-has no `unsafe` block: both arms are kernel calls.
+Both minors discard a `CDEV_WRITE` and answer the **whole** count with no copy at all; `/dev/null`
+answers a `CDEV_READ` with `0`, and `/dev/zero` fills the whole request from a 256-byte static,
+walking the grant in `CDEV_MAX_IO` steps. Nothing is clamped: `CDEV_MAX_IO` protects TTY's stack
+staging buffer, and there is no staging here. Two consequences worth knowing. A `/dev/null` write
+with an unmapped buffer *succeeds*, as it does on Linux, because nothing reads the buffer — so no
+bad-buffer probe may ever be aimed at it. And the driver still has no `unsafe` block: both arms are
+kernel calls.
 
-VFS probes the validator from its prologue (`[diag vfs] mem.deny ok n=5`),
-because VFS's own device table maps only minors that exist and could never send
-a bad one. One of those five is the first `CPF_WRITE`-required refusal any boot
-marker exercises: a `CDEV_READ` through a read-only grant, refused by the kernel's
-`verify_grant` and relayed as `EPERM`.
+VFS probes the validator from its prologue (`[diag vfs] mem.deny ok n=5`), because VFS's own device
+table maps only minors that exist and could never send a bad one. One of those five is the first
+`CPF_WRITE`-required refusal any boot marker exercises: a `CDEV_READ` through a read-only grant,
+refused by the kernel's `verify_grant` and relayed as `EPERM`.
 ```
 
 - [ ] **Step 2: The book's servers chapter and the syscalls reference**
 
-In `book/src/servers/overview.md`, `### The descriptor table`: after the sentence ending "lets init write before any filesystem exists.", add:
+In `book/src/servers/overview.md`, `### The descriptor table`: after the sentence ending "lets init
+write before any filesystem exists.", add:
 
 ```markdown
-Since slice 5.11 a character-device entry names its **driver** as well as its
-minor (`Fd::CharDev { dev: CharDriver, minor }`, with `CharDriver` an enum
-because the default row is a `const` and a DS-resolved endpoint is not) — minors
-are a per-driver namespace, so the driver is half the address. `open` consults a
-three-row **device-node table** (`servers/vfs/src/dev.rs`: `/dev/console`,
-`/dev/null`, `/dev/zero`, matched byte-for-byte) after copying the path in and
-*before* touching the mount, so a device open needs no filesystem; `O_CREAT` and
-`O_TRUNC` are ignored on a hit, Linux's behaviour for a device node. Everything
-else falls through to MFS, `/dev/other` included, and there is no `/dev` on the
-image at all. A device `read()` is one `CDEV_READ` against the descriptor's
-driver, no loop and no position; a console `read()` therefore reaches TTY and
-hears `ENOSYS` from its unknown-request arm until Phase 6.
+Since slice 5.11 a character-device entry names its **driver** as well as its minor (`Fd::CharDev {
+dev: CharDriver, minor }`, with `CharDriver` an enum because the default row is a `const` and a
+DS-resolved endpoint is not) — minors are a per-driver namespace, so the driver is half the address.
+`open` consults a three-row **device-node table** (`servers/vfs/src/dev.rs`: `/dev/console`,
+`/dev/null`, `/dev/zero`, matched byte-for-byte) after copying the path in and *before* touching the
+mount, so a device open needs no filesystem; `O_CREAT` and `O_TRUNC` are ignored on a hit, Linux's
+behaviour for a device node. Everything else falls through to MFS, `/dev/other` included, and there
+is no `/dev` on the image at all. A device `read()` is one `CDEV_READ` against the descriptor's
+driver, no loop and no position; a console `read()` therefore reaches TTY and hears `ENOSYS` from
+its unknown-request arm until Phase 6.
 ```
 
-In `book/src/reference/syscalls.md`'s band table: `CDEV_RQ_BASE` row → "character drivers: `WRITE` (slice 5.3) / `READ` (5.11)"; and while there, the `VFS_RQ_BASE` row says only `WRITE (slice 5.4)` — correct it to "VFS: `WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE`" and the `(reserved) 0x900` row to "`FS_RQ_BASE` | `0x900` | MFS: `READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC`" — stale since 5.8, caught by this sweep.
+In `book/src/reference/syscalls.md`'s band table: `CDEV_RQ_BASE` row → "character drivers: `WRITE`
+(slice 5.3) / `READ` (5.11)"; and while there, the `VFS_RQ_BASE` row says only `WRITE (slice 5.4)` —
+correct it to "VFS: `WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE`" and the `(reserved) 0x900`
+row to "`FS_RQ_BASE` | `0x900` | MFS: `READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` /
+`TRUNC`" — stale since 5.8, caught by this sweep.
 
 - [ ] **Step 3: Trackers and CLAUDE.md**
 
-`docs/plan.md`: the 5.10b line becomes `✓ shipped (PR #54, merged 2026-09-02)`; the 5.11 line becomes `◀ ready (branch `feature/slice-5.11-dev-null-zero`, pending merge)` and gains the correction: `- **5.11** stretch: `/dev/null` + `/dev/zero` on the memory driver + `CDEV_READ` ◀ ready (…)`.
+`docs/plan.md`: the 5.10b line becomes `✓ shipped (PR #54, merged 2026-09-02)`; the 5.11 line
+becomes `◀ ready (branch `feature/slice-5.11-dev-null-zero`, pending merge)` and gains the
+correction: `- **5.11** stretch: `/dev/null`+`/dev/zero`on the memory driver +`CDEV_READ` ◀ ready
+(…)`.
 
-`docs/plans/phase-5-musl-fs.md`: the 5.10b `####` header (line 1483) → `✓ shipped (PR #54, merged 2026-09-02)`. Replace the 5.11 entry (`### Slice 5.11 (stretch) …` through its `**Proof:**` paragraph) with:
+`docs/plans/phase-5-musl-fs.md`: the 5.10b `####` header (line 1483) → `✓ shipped (PR #54, merged
+2026-09-02)`. Replace the 5.11 entry (`### Slice 5.11 (stretch) …` through its `**Proof:**`
+paragraph) with:
 
 ```markdown
 #### Slice 5.11 (stretch): `/dev/null` + `/dev/zero` + `CDEV_READ` ◀ ready (branch `feature/slice-5.11-dev-null-zero`, pending merge)
 
-Full design — decisions `Z1…Z10`, the per-component breakdown, the error
-taxonomy, and the mutation plan — lives in
+Full design — decisions `Z1…Z10`, the per-component breakdown, the error taxonomy, and the mutation
+plan — lives in
 [`docs/superpowers/specs/2026-09-05-dev-null-zero-design.md`](../superpowers/specs/2026-09-05-dev-null-zero-design.md)
 and is not duplicated here.
 
-**Scope, as shipped:** `CDEV_READ` (`CDEV_RQ_BASE + 1`, `NR_CDEV_MSGS` 1 → 2;
-`CDEV_WRITE`'s payload with the copy reversed, `0` is EOF, short reads legal);
-`CDEV_MINOR_NULL = 3` / `CDEV_MINOR_ZERO = 5` (MINIX 3's values) served by the
-memory driver with no clamp; the CDEV request codec lifted into `server-rt`;
-VFS's `Fd::CharDev` names its driver and a three-row device-node table
-intercepts `/dev/console`, `/dev/null`, `/dev/zero` after the path copy and
-before the mount; a console `read()` now reaches TTY and hears `ENOSYS` from its
-unknown-request arm. **The 5.3 note that 5.11 would be "new minors, not new
-requests" was wrong for reading `/dev/zero`**, and is corrected wherever it was
-copied.
+**Scope, as shipped:** `CDEV_READ` (`CDEV_RQ_BASE + 1`, `NR_CDEV_MSGS` 1 → 2; `CDEV_WRITE`'s payload
+with the copy reversed, `0` is EOF, short reads legal); `CDEV_MINOR_NULL = 3` / `CDEV_MINOR_ZERO =
+5` (MINIX 3's values) served by the memory driver with no clamp; the CDEV request codec lifted into
+`server-rt`; VFS's `Fd::CharDev` names its driver and a three-row device-node table intercepts
+`/dev/console`, `/dev/null`, `/dev/zero` after the path copy and before the mount; a console
+`read()` now reaches TTY and hears `ENOSYS` from its unknown-request arm. **The 5.3 note that 5.11
+would be "new minors, not new requests" was wrong for reading `/dev/zero`**, and is corrected
+wherever it was copied.
 
-**Proof:** `dev.zero ok n=64` (64 bytes, all zero, a second read not EOF),
-`dev.null ok n=35` (whole count accepted, read is EOF and touches nothing),
-`dev.console ok` (written *through* the `/dev/console` descriptor), `mem.ds ok`,
-`mem.deny ok n=5`, `open.deny` 11 → 12 (`/dev/nope` → `ENOENT`).
+**Proof:** `dev.zero ok n=64` (64 bytes, all zero, a second read not EOF), `dev.null ok n=35` (whole
+count accepted, read is EOF and touches nothing), `dev.console ok` (written *through* the
+`/dev/console` descriptor), `mem.ds ok`, `mem.deny ok n=5`, `open.deny` 11 → 12 (`/dev/nope` →
+`ENOENT`).
 ```
 
-At line 657 (`5.3`'s "`CDEV_READ` is deliberately absent (Phase 6).") → "`CDEV_READ` was absent until 5.11 defined it for `/dev/zero`; TTY serves it in Phase 6." At the D11 line: "`/dev/null` + `/dev/zero` via the memory driver's CDEV minors (5.11)" → "`/dev/null` + `/dev/zero` via the memory driver's CDEV minors, plus the `CDEV_READ` request reading zero needs (5.11)".
+At line 657 (`5.3`'s "`CDEV_READ` is deliberately absent (Phase 6).") → "`CDEV_READ` was absent
+until 5.11 defined it for `/dev/zero`; TTY serves it in Phase 6." At the D11 line: "`/dev/null` +
+`/dev/zero` via the memory driver's CDEV minors (5.11)" → "`/dev/null` + `/dev/zero` via the memory
+driver's CDEV minors, plus the `CDEV_READ` request reading zero needs (5.11)".
 
-`CLAUDE.md` line 355: replace "`CDEV_READ` is absent until Phase 6 (RX needs `SYS_IRQCTL`); 5.11's `/dev/null`/`/dev/zero` are new **minors**, not new requests." with "`CDEV_READ` was absent until slice 5.11 defined it (reading `/dev/zero` needs it; TTY serves it in Phase 6, when RX gets `SYS_IRQCTL`)." Then add, after the last 5.10b bullet in the Code Conventions list:
+`CLAUDE.md` line 355: replace "`CDEV_READ` is absent until Phase 6 (RX needs `SYS_IRQCTL`); 5.11's
+`/dev/null`/`/dev/zero` are new **minors**, not new requests." with "`CDEV_READ` was absent until
+slice 5.11 defined it (reading `/dev/zero` needs it; TTY serves it in Phase 6, when RX gets
+`SYS_IRQCTL`)." Then add, after the last 5.10b bullet in the Code Conventions list:
 
 ```markdown
 - **`/dev/null`, `/dev/zero`, and `CDEV_READ` (slice 5.11):** `CDEV_READ = CDEV_RQ_BASE + 1`
   (`NR_CDEV_MSGS` 1 → 2) is `CDEV_WRITE`'s payload with the copy reversed — the grant carries
   `CPF_WRITE`, the driver pushes with `SAFECOPY_TO`, **`0` is EOF and a short read is legal**, so
-  VFS sends one request and never loops (the `FS_READ` stance). The 5.3 plan text saying 5.11
-  would be "minors, not requests" was wrong for *reading* zero; four in-tree copies of it were
-  corrected. `/dev/null` and `/dev/zero` are **CDEV minors 3 and 5 of the memory driver**
-  (MINIX 3's `NULL_DEV`/`ZERO_DEV`), and **minors are a per-driver namespace**: the same driver's
-  ramdisk is BDEV minor 0, the request band tells them apart, and nothing asserts `CDEV_MINOR_*`
-  against `BDEV_MINOR_*`. The memory driver **never clamps** — `CDEV_MAX_IO` protects TTY's
-  stack staging buffer and there is no staging here — so a null/zero write answers the whole
-  count with **no copy at all** (an unmapped buffer *succeeds*, Linux's behaviour: never aim a
-  `bad-buf` probe at `/dev/null`), and a zero read fills the whole request from a 256-byte
-  static in `CDEV_MAX_IO` steps, reporting partial progress on a mid-way failure (5.4's rule).
-  The four-field CDEV parse lives in **`server-rt::cdev`** now that two drivers decode it;
-  validation stays per driver. VFS's `Fd::CharDev { dev: CharDriver, minor }` names its driver
-  (an enum, not an `Endpoint`, because `DEFAULT_ROW` is a `const`), and `servers/vfs/src/dev.rs`
-  is a three-row **device-node table** consulted **after the path copy and before the mount**
-  (a device open needs no filesystem; `O_CREAT`/`O_TRUNC` ignored on a hit; exact byte match, no
-  `/dev` on the image, `/dev/other` falls through to MFS's `ENOENT`). **A console `read()` is
-  now a real `CDEV_READ` to TTY**, which answers `ENOSYS` from its unknown-request arm until
-  Phase 6 — same errno init's `read-console` probe always expected, now the driver's answer
-  rather than VFS's guess, so Phase 6 adds one TTY arm and touches VFS not at all. The memory
-  driver's validator is probed from VFS's prologue (`mem.deny ok n=5`, last, after `fs.deny`),
-  including the first `CPF_WRITE`-required kernel refusal any marker exercises. init's
-  `dev.console ok` is written **through** the `/dev/console` descriptor, never fd 1: that is the
-  only thing that proves the table row points at TTY. Paths are `callnr::DEV_*_PATH` so init and
-  VFS cannot drift.
+  VFS sends one request and never loops (the `FS_READ` stance). The 5.3 plan text saying 5.11 would
+  be "minors, not requests" was wrong for *reading* zero; four in-tree copies of it were corrected.
+  `/dev/null` and `/dev/zero` are **CDEV minors 3 and 5 of the memory driver** (MINIX 3's
+  `NULL_DEV`/`ZERO_DEV`), and **minors are a per-driver namespace**: the same driver's ramdisk is
+  BDEV minor 0, the request band tells them apart, and nothing asserts `CDEV_MINOR_*` against
+  `BDEV_MINOR_*`. The memory driver **never clamps** — `CDEV_MAX_IO` protects TTY's stack staging
+  buffer and there is no staging here — so a null/zero write answers the whole count with **no copy
+  at all** (an unmapped buffer *succeeds*, Linux's behaviour: never aim a `bad-buf` probe at
+  `/dev/null`), and a zero read fills the whole request from a 256-byte static in `CDEV_MAX_IO`
+  steps, reporting partial progress on a mid-way failure (5.4's rule). The four-field CDEV parse
+  lives in **`server-rt::cdev`** now that two drivers decode it; validation stays per driver. VFS's
+  `Fd::CharDev { dev: CharDriver, minor }` names its driver (an enum, not an `Endpoint`, because
+  `DEFAULT_ROW` is a `const`), and `servers/vfs/src/dev.rs` is a three-row **device-node table**
+  consulted **after the path copy and before the mount** (a device open needs no filesystem;
+  `O_CREAT`/`O_TRUNC` ignored on a hit; exact byte match, no `/dev` on the image, `/dev/other` falls
+  through to MFS's `ENOENT`). **A console `read()` is now a real `CDEV_READ` to TTY**, which answers
+  `ENOSYS` from its unknown-request arm until Phase 6 — same errno init's `read-console` probe
+  always expected, now the driver's answer rather than VFS's guess, so Phase 6 adds one TTY arm and
+  touches VFS not at all. The memory driver's validator is probed from VFS's prologue (`mem.deny ok
+  n=5`, last, after `fs.deny`), including the first `CPF_WRITE`-required kernel refusal any marker
+  exercises. init's `dev.console ok` is written **through** the `/dev/console` descriptor, never fd
+  1: that is the only thing that proves the table row points at TTY. Paths are `callnr::DEV_*_PATH`
+  so init and VFS cannot drift.
 ```
 
 - [ ] **Step 4: The falsified-claim sweep**
@@ -1886,14 +2041,24 @@ grep -rn 'no .CDEV_READ\|CDEV_READ. is deliberately absent\|CDEV_READ. is absent
   --include='*.rs' --include='*.md' . | grep -v '^./target' | grep -v '^./external' | grep -v 'docs/superpowers/'
 ```
 
-Every hit is either already rewritten above or must be rewritten now. Known sites at branch time: `servers/vfs/src/main.rs:694` (deleted by Task 5 — confirm), `servers/vfs/src/fd.rs` module note (Task 4 — confirm), `docs/plans/phase-5-musl-fs.md:657` and the D11 line (Step 3), `book/src/drivers/overview.md` (Step 1), `CLAUDE.md:355` (Step 3), `drivers/tty/src/cdev.rs` (Task 2 — confirm), `kernel-shared/src/callnr.rs:716,1104-1106,1124-1125` (Task 1 — confirm), `userland/init/src/main.rs:499` (Task 6 — confirm). `fs/mfs/src/walk.rs:18`'s "on the `CDEV_READ` precedent that a request without a consumer is better absent than stubbed" stays true as a statement about the precedent — reword only if it claims the request is *still* absent. `PRE6-RECOMMEND.md` is untracked and not part of this branch; leave it.
+Every hit is either already rewritten above or must be rewritten now. Known sites at branch time:
+`servers/vfs/src/main.rs:694` (deleted by Task 5 — confirm), `servers/vfs/src/fd.rs` module note
+(Task 4 — confirm), `docs/plans/phase-5-musl-fs.md:657` and the D11 line (Step 3),
+`book/src/drivers/overview.md` (Step 1), `CLAUDE.md:355` (Step 3), `drivers/tty/src/cdev.rs` (Task 2
+— confirm), `kernel-shared/src/callnr.rs:716,1104-1106,1124-1125` (Task 1 — confirm),
+`userland/init/src/main.rs:499` (Task 6 — confirm). `fs/mfs/src/walk.rs:18`'s "on the `CDEV_READ`
+precedent that a request without a consumer is better absent than stubbed" stays true as a statement
+about the precedent — reword only if it claims the request is *still* absent. `PRE6-RECOMMEND.md` is
+untracked and not part of this branch; leave it.
 
 Then the count-tripwire sweep:
 
 ```bash
 grep -rn 'assert_eq!(.*\.len(), [0-9]' kernel-shared/src/callnr.rs tools/gen-c-headers/src/callnr_h.rs servers/vfs/src userland/init/src drivers/memory/src drivers/tty/src | grep -v NR_
 ```
-Every literal count must have been grown by the task that added the thing it counts (`OPEN_DENIAL_PROBES`, the 13-entry define list, `NR_DEV_NODES`).
+
+Every literal count must have been grown by the task that added the thing it counts
+(`OPEN_DENIAL_PROBES`, the 13-entry define list, `NR_DEV_NODES`).
 
 - [ ] **Step 5: Build the book, commit**
 
@@ -1917,6 +2082,7 @@ Claude-Session: https://claude.ai/code/session_017HuYDtsgEsaK3EitFNiaZP"
 ### Task 9: Mutation matrix, whole-branch review, final gates
 
 **Files:**
+
 - Read-only over the whole branch; the ledger in the scratchpad (`$S/ledger.md`)
 
 - [ ] **Step 1: Snapshot every file the matrix mutates**
@@ -1928,19 +2094,22 @@ for f in servers/vfs/src/dev.rs servers/vfs/src/main.rs drivers/memory/src/cdev.
 git status --short   # must show nothing but the untracked PRE6-RECOMMEND.md / .gemini / .claude edits that predate the branch
 ```
 
-- [ ] **Step 2: Run each mutation stub-free, record the marker that moved, restore from the snapshot**
+- [ ] **Step 2: Run each mutation stub-free, record the marker that moved, restore from the
+      snapshot**
 
-For each row, apply the edit with a `// MUTATION` comment, boot with `MINIXRS_SDK=/nonexistent timeout 60 cargo run … --no-default-features > $S/m<N>.log 2>&1`, `grep -a 'error\[E' $S/m<N>.log` (must be empty), grep the named marker, then `cp $S/snap/<file> <file>`.
+For each row, apply the edit with a `// MUTATION` comment, boot with `MINIXRS_SDK=/nonexistent
+timeout 60 cargo run … --no-default-features > $S/m<N>.log 2>&1`, `grep -a 'error\[E' $S/m<N>.log`
+(must be empty), grep the named marker, then `cp $S/snap/<file> <file>`.
 
-| # | Mutation | Grep | Expected |
-|---|---|---|---|
-| 1 | `dev.rs`: delete the `DEV_ZERO_PATH` row (and drop `NR_DEV_NODES` to 2) | `dev.zero` | `dev.zero FAIL open` |
-| 2 | `dev.rs`: swap the minors on the null and zero rows | `dev.zero\|dev.null` | `dev.zero FAIL short` and `dev.null FAIL write` or `FAIL read` |
-| 3 | `memory/cdev.rs` `zero_chunk`: `.min(16)` and `main.rs` `do_cdev_read`: `return 16` after the first chunk (a 64-byte probe cannot see a 256 clamp) | `dev.zero` | `dev.zero FAIL short` |
-| 4 | `memory/cdev.rs` `classify`: `_ => Ok(Minor::Null)` | `mem.deny` | `mem.deny FAIL bad-minor-w` |
-| 5 | `dev.rs`: console row → `CharDriver::Memory` | `dev.console` | line absent (and possibly `dev.console FAIL write` on fd 2 if ENXIO) |
-| 6 | `vfs/main.rs` `do_open`: move the `dev::lookup` block below `ensure_mounted` | all `dev.*` | **no marker moves** — record as unproven |
-| 7 | `vfs/main.rs` `do_read`: restore `Ok(Fd::CharDev { dev: CharDriver::Tty, .. }) => return ENOSYS` before routing | `open.deny` | **no marker moves** — record as unproven |
+| # | Mutation                                                                                                                                           | Grep                 | Expected                                                             |
+| - | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | -------------------------------------------------------------------- |
+| 1 | `dev.rs`: delete the `DEV_ZERO_PATH` row (and drop `NR_DEV_NODES` to 2)                                                                            | `dev.zero`           | `dev.zero FAIL open`                                                 |
+| 2 | `dev.rs`: swap the minors on the null and zero rows                                                                                                | `dev.zero\|dev.null` | `dev.zero FAIL short` and `dev.null FAIL write` or `FAIL read`       |
+| 3 | `memory/cdev.rs` `zero_chunk`: `.min(16)` and `main.rs` `do_cdev_read`: `return 16` after the first chunk (a 64-byte probe cannot see a 256 clamp) | `dev.zero`           | `dev.zero FAIL short`                                                |
+| 4 | `memory/cdev.rs` `classify`: `_ => Ok(Minor::Null)`                                                                                                | `mem.deny`           | `mem.deny FAIL bad-minor-w`                                          |
+| 5 | `dev.rs`: console row → `CharDriver::Memory`                                                                                                       | `dev.console`        | line absent (and possibly `dev.console FAIL write` on fd 2 if ENXIO) |
+| 6 | `vfs/main.rs` `do_open`: move the `dev::lookup` block below `ensure_mounted`                                                                       | all `dev.*`          | **no marker moves** — record as unproven                             |
+| 7 | `vfs/main.rs` `do_read`: restore `Ok(Fd::CharDev { dev: CharDriver::Tty, .. }) => return ENOSYS` before routing                                    | `open.deny`          | **no marker moves** — record as unproven                             |
 
 After the last restore:
 
@@ -1949,6 +2118,7 @@ for f in servers/vfs/src/dev.rs servers/vfs/src/main.rs drivers/memory/src/cdev.
 grep -rn MUTATION --include='*.rs' . | grep -v '^./target'
 git status --short
 ```
+
 Expected: no diffs, no `MUTATION` hits, a clean tree.
 
 - [ ] **Step 3: Host and lint gates, the full matrix**
@@ -1963,31 +2133,45 @@ cargo test --workspace 2>&1 | grep -E 'test result|FAILED'
 cargo gen-c-headers && clang -std=c11 -pedantic-errors -Wall -Wextra -Werror -fsyntax-only -ffreestanding -nostdlibinc --target=aarch64-unknown-linux-musl -Itarget/gen-c-headers/include target/gen-c-headers/abi-selftest.c && echo C-OK
 tools/check-dco.sh
 ```
+
 Expected: all clean, every `test result: ok`, `C-OK`, DCO passes on every branch commit.
 
 - [ ] **Step 4: Whole-branch review**
 
-Write the diff to a file and hand it to a fresh reviewer (subagent) with three explicit asks: verify the arithmetic in `do_cdev_read`'s loop and `zero_chunk` by hand; check every doc comment and test the branch touched against what a *later* task in the branch added (the 5.10b defect class); and re-read `book/src/drivers/overview.md` and `book/src/servers/overview.md` against the code.
+Write the diff to a file and hand it to a fresh reviewer (subagent) with three explicit asks: verify
+the arithmetic in `do_cdev_read`'s loop and `zero_chunk` by hand; check every doc comment and test
+the branch touched against what a *later* task in the branch added (the 5.10b defect class); and
+re-read `book/src/drivers/overview.md` and `book/src/servers/overview.md` against the code.
 
 ```bash
 git diff $(git merge-base HEAD origin/main)..HEAD > $S/branch.diff
 wc -l $S/branch.diff
 ```
 
-Fix every confirmed finding in a `fix(5.11): review findings — …` commit, re-running Steps 2–3 for anything the fix touches.
+Fix every confirmed finding in a `fix(5.11): review findings — …` commit, re-running Steps 2–3 for
+anything the fix touches.
 
 - [ ] **Step 5: Pre-PR checklist — then stop**
 
-Run `/claude-md-management:revise-claude-md` (the 5.11 bullet was written in Task 8; this pass checks whether the *conventions* sections need anything from this session). Then **stop**: do not push, do not open a PR. Report the branch, the ledger (every ruling made on the user's behalf, with what it costs if wrong), the boot-ratio numbers from Task 7, the mutation table with its two unproven rows, and the review findings.
+Run `/claude-md-management:revise-claude-md` (the 5.11 bullet was written in Task 8; this pass
+checks whether the *conventions* sections need anything from this session). Then **stop**: do not
+push, do not open a PR. Report the branch, the ledger (every ruling made on the user's behalf, with
+what it costs if wrong), the boot-ratio numbers from Task 7, the mutation table with its two
+unproven rows, and the review findings.
 
 ---
 
 ## Self-review against the spec
 
 - §4.1 band + docs + tripwires → Task 1. §4.2 headers → Task 1. §4.3 codec → Task 2.
-- §5.1 TTY → Task 2. §5.2 memory driver → Task 3 (`classify`, `validate`, `zero_chunk`, `ZEROS`, both arms, partial-progress rule, `checked_add`).
-- §5.3 fd → Task 4. §5.4 dev table → Task 4 (paths moved to `kernel-shared` — a plan-level refinement of the spec's `&[u8]` literals, recorded in Task 1's `DEV_*_PATH` doc; the spec's "exact byte match" contract is unchanged).
-- §5.5 do_open → Task 5 step 4. §5.6 do_read/do_write/endpoints → Task 5 steps 1–3, 5. §5.7 mem_denials → Task 5 step 6.
+- §5.1 TTY → Task 2. §5.2 memory driver → Task 3 (`classify`, `validate`, `zero_chunk`, `ZEROS`,
+  both arms, partial-progress rule, `checked_add`).
+- §5.3 fd → Task 4. §5.4 dev table → Task 4 (paths moved to `kernel-shared` — a plan-level
+  refinement of the spec's `&[u8]` literals, recorded in Task 1's `DEV_*_PATH` doc; the spec's
+  "exact byte match" contract is unchanged).
+- §5.5 do_open → Task 5 step 4. §5.6 do_read/do_write/endpoints → Task 5 steps 1–3, 5. §5.7
+  mem_denials → Task 5 step 6.
 - §5.8 dev_demo → Task 6 step 1. §5.9 open_denials → Task 6 step 2.
-- §8.1 host → Tasks 1–6 + Task 9 step 3. §8.2 boot → Task 7. §8.3 mutations → Task 9 step 2. §8.4 sweep → Task 8 step 4.
+- §8.1 host → Tasks 1–6 + Task 9 step 3. §8.2 boot → Task 7. §8.3 mutations → Task 9 step 2. §8.4
+  sweep → Task 8 step 4.
 - §10 needs no task. Spec Z1–Z10 each cited at its implementing step.
