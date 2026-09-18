@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "e0856cd76f89",
+  "strategy": "manual-commit",
+  "branch": "chore/claude-md-split",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "docs/conventions/testing-and-markers.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e0/856cd76f89/0/metadata.json",
+      "transcript": "/e0/856cd76f89/0/full.jsonl",
+      "compact_transcript": "/e0/856cd76f89/0/transcript.jsonl",
+      "content_hash": "/e0/856cd76f89/0/content_hash.txt",
+      "prompt": "/e0/856cd76f89/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 262,
+    "cache_creation_tokens": 409900,
+    "cache_read_tokens": 36110624,
+    "output_tokens": 197344,
+    "api_call_count": 131
+  }
+}
