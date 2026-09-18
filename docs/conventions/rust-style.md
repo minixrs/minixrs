@@ -85,3 +85,15 @@ Both found in slice 5.10a: `int_plus_one` and `manual_is_multiple_of`.
 The blocking `clippy --workspace` gate runs `-D warnings`: a doc-comment line starting with `+ ` (or
 `- `/`* `) parses as a markdown bullet and trips `doc_lazy_continuation` on the following lines —
 reword so continuation lines don't begin with a list marker.
+
+## Naked `_start` and the cross-architecture clippy fallback
+
+A freestanding binary that needs to prove something about the *real* `SP_EL0` at entry (not a value
+passed through a register, which a normal prologue could perturb before it's read) makes `_start` a
+naked function: `worker`'s is `#[unsafe(naked)]` with `naked_asm!("mov x0, sp", "b {main}")` —
+taking the value in `x0` from the kernel would prove nothing about `SP_EL0`.
+
+Guard the naked body with `#[cfg(all(not(test), target_arch = "aarch64"))]` and provide a plain
+`main(0)` fallback for everything else — `minixrs-ipc`'s exact pattern. The fallback is mandatory,
+not decoration: CI's blocking clippy runs on x86_64, and the fallback must still *call* `main`, or
+it is dead code under `-D warnings`.
