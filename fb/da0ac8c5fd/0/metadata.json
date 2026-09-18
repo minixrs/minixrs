@@ -1,0 +1,207 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "fbda0ac8c5fd",
+  "session_id": "3a445ebe-79ad-43fe-bfa2-9481c8f696bc",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-18T05:54:49.755382Z",
+  "branch": "chore/claude-md-split",
+  "checkpoints_count": 5,
+  "save_step_count": 5,
+  "files_touched": [
+    "docs/superpowers/plans/2026-09-17-routing-checklist.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "44f09e13c4fb",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 196,
+    "cache_creation_tokens": 314929,
+    "cache_read_tokens": 22635453,
+    "output_tokens": 144127,
+    "api_call_count": 98,
+    "subagent_tokens": {
+      "input_tokens": 466,
+      "cache_creation_tokens": 1720441,
+      "cache_read_tokens": 26687611,
+      "output_tokens": 258348,
+      "api_call_count": 203
+    }
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_015EXf4Re5jdKM9rxm9fgykR",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "44f09e13c4fb",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 123,
+        "end": 124,
+        "entry_ids": [
+          "ba91b5b0-9a7a-4ea7-acf2-967a8d992832"
+        ],
+        "tool_use_id": "toolu_015EXf4Re5jdKM9rxm9fgykR"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_015EXf4Re5jdKM9rxm9fgykR"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_014eA3LbgLcZLzzswTTyy4yL",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:writing-plans"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "44f09e13c4fb",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 352,
+        "end": 353,
+        "entry_ids": [
+          "5c8495d3-9a40-4cd2-b66f-e9c29cc8e2a3"
+        ],
+        "tool_use_id": "toolu_014eA3LbgLcZLzzswTTyy4yL"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_014eA3LbgLcZLzzswTTyy4yL"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:writing-plans",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01HLUPByCNPCgaAB9kuAcePu",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:subagent-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "44f09e13c4fb",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 456,
+        "end": 457,
+        "entry_ids": [
+          "cfba17d1-8222-492b-ae20-70d9a32baab2"
+        ],
+        "tool_use_id": "toolu_01HLUPByCNPCgaAB9kuAcePu"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01HLUPByCNPCgaAB9kuAcePu"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:subagent-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 5
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-18T05:54:49.657631Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 33,
+    "human_modified": 521,
+    "human_removed": 0,
+    "total_committed": 33,
+    "total_lines_changed": 554,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 1050,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "PRE6-RECOMMEND.md": 343,
+        "RECOMMEND.md": 274,
+        "docs/conventions/build-and-boot.md": 152,
+        "docs/conventions/ci.md": 114,
+        "docs/conventions/git-and-prs.md": 80,
+        "docs/conventions/rust-style.md": 87
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 624,
+      "user_lines_removed": 0,
+      "agent_lines_added": 776,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274,
+        "docs/conventions/abi.md": 133,
+        "docs/conventions/docs-and-workflow.md": 122,
+        "docs/conventions/testing-and-markers.md": 95
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 560,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1126,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274,
+        "docs/conventions/kernel.md": 286
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 274,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1951,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274
+      }
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 799,
+      "user_lines_removed": 492,
+      "agent_lines_added": 1951,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "RECOMMEND.md": 274,
+        "docs/superpowers/plans/2026-09-17-routing-checklist.md": 525
+      },
+      "user_removed_per_file": {
+        "docs/superpowers/plans/2026-09-17-routing-checklist.md": 492
+      }
+    }
+  ]
+}
