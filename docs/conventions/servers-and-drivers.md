@@ -1,10 +1,11 @@
 # Servers and Drivers
 
 Conventions for the user-space half of minix.rs: how a server or driver crate is built and branded,
-how it reaches its receive loop, how it finds its peers, and the request/reply contracts that bind
-every band. The kernel-side halves of these rules live in [kernel.md](./kernel.md); request numbers,
-band bases, payload offsets and the ABI freeze live in [abi.md](./abi.md); the lint and arithmetic
-traps that bite server code live in [rust-style.md](./rust-style.md). Link across, never duplicate.
+how it reaches its receive loop, how it finds its peers, how PM drives the process lifecycle, and
+the request/reply contracts that bind every band. The kernel-side halves of these rules live in
+[kernel.md](./kernel.md); request numbers, band bases, payload offsets and the ABI freeze live in
+[abi.md](./abi.md); the lint and arithmetic traps that bite server code live in
+[rust-style.md](./rust-style.md). Link across, never duplicate.
 
 ## Building a user-space server
 
@@ -16,8 +17,8 @@ plus `"os": "minixrs"`; regenerate on nightly bumps with `rustc -Zunstable-optio
 target-spec-json --target aarch64-unknown-none` and re-apply the `"os"` line) via
 `-Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem`, all into
 **one shared** nested `CARGO_TARGET_DIR` (`target/minixrs-user` — separate from the outer `target/`
-root, so nested cargo can't deadlock on the kernel build's lock, but shared across the crates so
-build-std compiles core/alloc once, not once per crate).
+root, so nested cargo can't deadlock on the kernel build's lock, but shared across the 9 crates so
+build-std compiles core/alloc once, not 9×).
 
 The `-T<user.ld>` link arg comes from **each crate's own `build.rs`**, cfg-gated on `target_os =
 "minixrs"` (host `check`/`clippy` stay linker-flag-free); `kernel/build.rs` injects no rustflags and
@@ -128,6 +129,12 @@ its own TTBR0.
 No new boot priv wiring is needed — `init_boot_image` already grants every boot server `SRV_T`
 `ipc_to` over `[0, n_active)`.
 
+**A negative `proc_nr` is the exec-only sentinel.** The `userland.rs` load loop skips any negative
+`proc_nr`, so a module packed under `com::EXEC_ONLY_PROC_NR = -1` is resolvable by name through
+`BootImage::module_by_name` but **never boot-loaded** — no `[as]` line, no proc slot, no priv slot.
+That is how `userland/worker` gets into the archive as an exec target only (slice 4.7 — see
+[phase-4-servers.md](../plans/phase-4-servers.md)).
+
 **Array position is load-bearing.** DS ordering is a chain — `ds < tty < memory < mfs < vfs` — and
 it is satisfied only by array position in `kernel/build.rs`, so that a server is in its receive loop
 before its first client looks it up (slice 5.8 — see
@@ -184,6 +191,107 @@ heap's end via `set_brk`), so **both** carry a runtime `region::REGION_LIMIT` ch
 it). `REGION_LIMIT` is the base of the lowest kernel-owned VA window, which is why adding a window
 above it needs no VM edit — see [kernel.md](./kernel.md).
 
+## PM: the process lifecycle
+
+**A user process drives its whole lifecycle through PM, never through the kernel.** That is the
+POSIX shape — user → PM for `PM_FORK`/`PM_EXIT`/`PM_WAIT`/`PM_EXEC`, and PM issues the kernel calls
+on the caller's behalf. The shared `USER_PRIV_ID` was opened `ipc_to = {PM}` alone for exactly that
+reason (widened to `{PM, VFS}` in slice 5.4) (slice 4.6b — see
+[phase-4-servers.md](../plans/phase-4-servers.md)).
+
+### `handle_fork`: a fixed order the frozen-child invariant depends on
+
+PM owns the whole tree, in this order and no other:
+
+1. allocate an `mproc` child slot from the fork pool `[FORK_POOL_BASE = NR_BOOT_PROCS +
+   NR_STUB_PROCS, NR_MPROCS = 32)` — **the slot index *is* the child's kernel proc-nr**, so the
+   pool's base moves with the stub count (see [build-and-boot.md](./build-and-boot.md));
+2. `SYS_FORK(parent_e, child_nr)`;
+3. `VM_FORK(parent_e, child_e)`;
+4. `SCHEDULING_START`;
+5. `SYS_PRIVCTL(PRIVCTL_SET_USER)` release;
+6. reply to **both** halves of the shared SENDREC — child `m_type = 0`, parent `m_type = child_pid`
+   (MINIX fork-returns-twice).
+
+**Why the order is safe:** `do_fork` creates the child `RTS_RECEIVING | RTS_NO_PRIV` (frozen), and
+`sched::rts_unset` enqueues only when the *last* block bit clears — so steps 4 and 5 each leave the
+child a blocked receiver off the run queue, and **only PM's reply** (clearing `RTS_RECEIVING`) makes
+it runnable. The child therefore cannot run before its identity, memory and scheduling are built.
+
+**PM rolls back at every step.** `SYS_FORK`, `VM_FORK`, `SCHEDULING_START` and `SYS_PRIVCTL` each
+check their result and, on error, `SYS_EXIT` the child plus `mproc::cleanup` the slot before
+returning the errno to the parent. The post-`SCHEDULING_START` rollback does `SCHEDULING_STOP`
+**first**, while the endpoint is still valid — mirroring `handle_exit`. The last two steps are
+boot-server-backed and cannot fail with correct wiring, so their guards are defence in depth against
+ever recording an unrunnable child, which would hang the parent's `wait()` forever.
+
+Fork needs **no new priv wiring**: PM↔VM and PM↔SCHED are boot-server `[0, n_active)` edges, and
+child↔PM is the `USER_PRIV_ID` edge.
+
+VM's half is `region::fork(parent_nr, child_nr)`, which copies the **whole `ClientRegions`** as a
+`Copy` snapshot (slice 4.6b — see [phase-4-servers.md](../plans/phase-4-servers.md)).
+
+### `handle_exit` and `handle_wait`
+
+- **`SCHEDULING_STOP` before `SYS_EXIT`, always** — once `SYS_EXIT` bumps the endpoint generation,
+  `okendpt` rejects the endpoint and the stop can no longer be issued.
+- PM then marks the `mproc` slot a zombie holding the encoded status (`W_EXITCODE = (status & 0xff)
+  << 8`), and **sends the dead child no reply**.
+- `handle_wait` either reaps a zombie child (reply pid + status, then `cleanup` the slot) or, with a
+  live child, sets `MF_WAITING` and **suspends** the parent with no reply until `handle_exit` wakes
+  it directly.
+- **There is no async `SIGCHLD`.** The kernel signal path default-*terminates*, which would kill a
+  handler-less parent, so parent-notify is the zombie plus wait-reap handshake and nothing else
+  (slice 4.6b — see [phase-4-servers.md](../plans/phase-4-servers.md)).
+
+### `mproc` keeps its logic host-testable
+
+`servers/pm/src/mproc.rs` stores a generation-aware `endpoint` per slot (`boot_endpoint(slot)` for
+seeded procs, the `SYS_FORK` reply for children) plus `exit_status` and `MF_WAITING`. Put the
+free-slot allocator, the zombie marking and the reap in pure `*_in` helpers that take the slot table
+as a parameter — that is what makes them host-tested with no IPC (slice 4.6b — see
+[phase-4-servers.md](../plans/phase-4-servers.md)).
+
+### Draining kernel signals
+
+`SYS_GETKSIG` **hands off** the pending-signal bitmap, so PM must dispose of every returned
+endpoint: `SYS_ENDKSIG` for a survivor, `SYS_EXIT` with **no** `ENDKSIG` after for a termination. A
+full exit zeroes the signal state and frees the slot, so a post-exit acknowledge just bounces off
+`okendpt` with `EDEADSRCDST` (slices 4.5 and 4.6a — see
+[phase-4-servers.md](../plans/phase-4-servers.md)).
+
+## init: PID 1
+
+`init` (`INIT_PROC_NR = 10`) is a **real boot process**, not a hand-installed stub: it is packed
+into the MXBI archive like any server and the ordinary `userland.rs` load loop loads it, clears
+`RTS_NO_PRIV` and enqueues it — **no PM hand-release**, unlike a frozen stub's `PRIVCTL_SET_USER`.
+
+**It carries user-grade privilege, which is the point.** Its `BootEntry.trap_mask` is `USR_T`, not
+`SRV_T`, and `init_boot_image` special-cases `entry.nr == INIT_PROC_NR` to point its proc slot at
+the shared `USER_PRIV_ID` instead of populating a dedicated server-grade slot. So init SENDRECs its
+servers and **makes no kernel calls at all** — exactly the forked-child profile, which is what makes
+it a usable proof of the user-facing paths.
+
+`MF_PRIV_PROC` stays set on init's `mproc` seed (unkillable PID 1). That flag gates only the kill
+path — not fork, wait or getpid — so PM still serves init as an ordinary client.
+
+The `userland/init` crate is **freestanding, like `worker` and not like a server**: dependencies are
+`minixrs-ipc` and `kernel-shared` only, with **no `server-rt` and no SEF**, its `_start` shim and
+panic handler are `not(test)`-gated, and its `user.ld` is `worker`'s verbatim (slice 4.8 — see
+[phase-4-servers.md](../plans/phase-4-servers.md)).
+
+## The grant pool: the client side
+
+`server-rt::GrantPool<const N>` is **a value the server owns** — a `main`-frame local, never
+`init_fresh`'s frame. That ownership is what keeps `server-rt` `#![forbid(unsafe_code)]`: there is
+no static to hand out and no interior mutability to justify.
+
+`ensure_registered` compares the pool's live address against the last registered one and re-issues
+`SYS_SETGRANT` if they differ, so a pool that moved is re-registered rather than silently describing
+the wrong memory. The kernel half of the grant contract is in [kernel.md](./kernel.md); the
+`GrantEntry` ABI is in [abi.md](./abi.md) (slice 5.2 — see
+[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+
 ## Request and reply contracts
 
 These bind every band. The band bases and request numbers themselves are in [abi.md](./abi.md).
@@ -207,9 +315,8 @@ the real implementation (slices 5.7, 5.8 and 5.10a — see
 ### The granter is `m_source`, never a payload field
 
 No request in the CDEV, BDEV or FS bands carries a `granter` field: the server takes it from the
-kernel-stamped `m_source`. A caller-supplied granter turns a server holding
-`SYS_COPY`/`SYS_SAFECOPY` into a confused deputy, aiming a privileged cross-address-space copy
-wherever the caller points.
+kernel-stamped `m_source`. The general confused-deputy rule this follows from is in
+[abi.md](./abi.md).
 
 The rule binds the *granting* side too: when VFS issues a `CPF_MAGIC` grant naming a caller's
 buffer, the owner is the kernel-stamped `m_source`, never a payload field — VFS holds `SYS_PROC`, so
@@ -292,21 +399,6 @@ SIGSEGV arm, which prints nothing `tests/qemu-boot.forbidden` catches, so the fa
 
 Check the largest stack frame in a built server whenever a handler grows a buffer — the
 `llvm-objdump` recipe is in [build-and-boot.md](./build-and-boot.md) (slices 5.7 and 5.8 — see
-[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
-
-## Capability tokens: the `Blocks` shape
-
-MFS's single block buffer is reached only through the **`Blocks` capability token**, whose
-`read(&mut self) -> Result<&[u8; N], i32>` makes "hold a directory block across the next fetch" a
-**borrow-check error** rather than a comment. `Blocks` also carries `buf_mut` and `write`, and its
-standing grant to the `memory` driver is **`CPF_READ | CPF_WRITE`** — one buffer, both directions,
-one static address, so `ensure_registered` still never re-fires.
-
-Widening those flags does **not** widen what any one call may do (the kernel checks the direction
-per call), but it *does* re-arm anything that used the pool's grant id as a
-deliberately-insufficient grant: a denial probe leaning on the narrow flags needs its own narrower
-grant, aimed at a spare block (`START_BLOCK = 2` leaves block 1 free), in the same change — or the
-probe writes the block buffer over the superblock (slices 5.8 and 5.10a — see
 [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
 ## Drivers
@@ -403,16 +495,21 @@ because the kernel's page-table walk answers `EFAULT` regardless (slice 5.4 — 
 
 `servers/vfs/src/fd.rs`:
 
-- `NR_FDS` is **VFS-local, not ABI**; it was raised 4 → 8 so that "lowest free" and "table full" are
-  distinct tests. Rows are sized from `com::NR_SERVED_PROCS` with the usual `const _` guard, and fds
-  0/1/2 are pre-opened to `CDEV_MINOR_CONSOLE` in every row.
+- `NR_FDS` is **VFS-local, not ABI**. Both of its sizings were chosen to keep a failure mode
+  distinguishable: at `4`, the 4th slot made "past the end" and "not open" distinct; raised 4 → 8,
+  it makes "lowest free" and "table full" distinct tests. Rows are sized from `com::NR_SERVED_PROCS`
+  with the usual `const _` guard, and fds 0/1/2 are pre-opened to `CDEV_MINOR_CONSOLE` in every row.
 - `Fd::File { ino, pos }` carries **no cached size** — EOF is `n == 0`, one source of truth, and a
   cached size is exactly what a write path would invalidate.
 - `Fd::CharDev { dev: CharDriver, minor }` names its driver with an **enum, not an `Endpoint`**,
   because `DEFAULT_ROW` is a `const`.
 - Storage is an interior-mutable `UnsafeCell<[FdRow; N]>` newtype (the `vm/region.rs` shape),
   **whose rule is never hold a table borrow across a SENDREC**. `Fd` is `Copy`, so the borrow dies
-  at the destructuring `let`. `resolve_in` takes the rows as a borrowed slice for the same reason.
+  at the destructuring `let`.
+- **`resolve_in` takes the rows as a borrowed slice, and that is design-for-change, not style.** The
+  table was an immutable `static` while nothing mutated it (which is how VFS kept zero `unsafe`);
+  taking a borrowed slice is precisely what let it survive the switch to the `UnsafeCell<[FdRow;
+  N]>` newtype untouched. Write a pure table helper that way from the start.
 - **`alloc_in` scans upwards** from fd 3. A `.rposition()` returns 7 and passes every "did I get a
   descriptor" check (slices 5.4 and 5.8 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
@@ -459,6 +556,10 @@ the nested build the way it threads PM's `--no-default-features`.
 `proto.rs` re-derives its own `rd_i32`/`rd_u64` because `server-rt` is an *optional* dependency —
 the trade `userland/init` already makes.
 
+The crate is `no_std`, `#![forbid(unsafe_code)]` and has **one dependency** — keep all three: an
+`unsafe`-free filesystem with a single dep is what lets its decisions be host-tested and
+geiger-clean while the server half is invisible to CI.
+
 The read path (`superblock`/`inode`/`dirent`/`layout`/`read`) is **I/O-free by construction**: every
 reader takes bytes the caller already fetched. That is both what makes it host-testable with no fake
 device and the shape the server needs. `zone_for_offset` distinguishes a `Hole` (reads as zeroes)
@@ -480,6 +581,21 @@ VFS, blocking init. VFS's probes cannot reach that class, which is why it needs 
 A `FS_READ` is **two copies** — device → MFS's block buffer → the caller's granted buffer — unlike
 the write path's single caller-to-driver copy. A MinixFS read is rarely block-aligned at both ends,
 and a *hole* has no device block to copy from at all. This is MINIX 3's own shape (slice 5.8 — see
+[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+
+### Capability tokens: the `Blocks` shape
+
+MFS's single block buffer is reached only through the **`Blocks` capability token**, whose
+`read(&mut self) -> Result<&[u8; N], i32>` makes "hold a directory block across the next fetch" a
+**borrow-check error** rather than a comment. `Blocks` also carries `buf_mut` and `write`, and its
+standing grant to the `memory` driver is **`CPF_READ | CPF_WRITE`** — one buffer, both directions,
+one static address, so `ensure_registered` still never re-fires.
+
+Widening those flags does **not** widen what any one call may do (the kernel checks the direction
+per call), but it *does* re-arm anything that used the pool's grant id as a
+deliberately-insufficient grant: a denial probe leaning on the narrow flags needs its own narrower
+grant, aimed at a spare block (`START_BLOCK = 2` leaves block 1 free), in the same change — or the
+probe writes the block buffer over the superblock (slices 5.8 and 5.10a — see
 [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
 ### What the single block buffer forces
