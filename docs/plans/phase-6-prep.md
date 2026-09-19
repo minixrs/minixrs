@@ -47,8 +47,9 @@ documentation pass, and "what is next" is read off the first unchecked box inste
 somebody has to remember to move. The retired-form `✓ shipped` lines on the Phase 2–5 slices stay as
 history; no new one is ever written.
 
-Nothing further is owed here. The Phase 6 checkboxes already exist, unchecked, in
-[`../plan.md`](../plan.md).
+Nothing further is owed here. Matching checkboxes live under Pre-Phase-6 cleanup in
+[`../plan.md`](../plan.md); chunk 1 is recorded as done there too, so the first unchecked box is
+chunk 2 rather than virtio transport.
 
 ## Chunk 2: User VA map — high stack, larger stack, image-relative brk
 
@@ -136,7 +137,7 @@ milestone is a disk root under real completion interrupts.
 ## Chunk 4: Phase 6 tracker + slicing session
 
 **Goal:** [`../plan.md`](../plan.md)'s Phase 6 is five checkboxes and one milestone, and there is no
-`docs/plans/phase-6-*.md`. That is exactly how Phase 5 looked before `phase-5-prep.md` chunk 6
+`docs/plans/phase-6-virtio.md`. That is exactly how Phase 5 looked before `phase-5-prep.md` chunk 6
 produced [`phase-5-musl-fs.md`](phase-5-musl-fs.md). **This chunk gates starting Phase 6 proper.**
 
 **Scope:** add `docs/plans/phase-6-virtio.md` with locked decisions and a per-slice scope/proof

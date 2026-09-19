@@ -601,11 +601,20 @@ Aggregate scope:
 - **Milestone:** C "Hello World" compiled against musl, exec'd from the MFS root image, prints to
   serial through VFS→TTY
 
-### Phase 6: VirtIO Drivers
+### Pre-Phase-6 cleanup
 
-Prep first: [`plans/phase-6-prep.md`](plans/phase-6-prep.md) holds the pre-Phase-6 cleanup chunks —
-the user VA map (high stack, image-relative brk) should land before any virtio code, and the Phase 6
-slicing session gates starting the phase proper.
+Phase 5's close-out review identified PR-sized cleanup/prep chunks to land before Phase 6 starts,
+tracked in [`docs/plans/phase-6-prep.md`](plans/phase-6-prep.md). Chunk 2 (the user VA map) must land
+before any virtio code; chunk 4 gates starting Phase 6 proper.
+
+- [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
+- [ ] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
+- [ ] **Chunk 3** — `SYS_IRQCTL` design note
+- [ ] **Chunk 4** — Phase 6 tracker + slicing session
+- [ ] **Chunk 5** — musl syscall surface
+- [ ] **Chunk 6** — SDK flavor CI coverage
+
+### Phase 6: VirtIO Drivers
 
 - [ ] `drivers/driver-rt/`: VirtIO MMIO transport (aarch64), virtqueue management, BDEV/CDEV
       protocol
