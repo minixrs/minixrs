@@ -188,3 +188,11 @@ merge it once CI is green
 <status>completed</status>
 <summary>Background command "Poll QEMU smoke with correct JSON parsing" completed (exit code 0)</summary>
 </task-notification>
+
+---
+
+Go ahead with another clean up round with 4 items.  Add the dprint gate, fix the 6 follow ups, handle the failure to verify rule has 1 home, and land @P
+
+---
+
+Go ahead with another clean up round with 4 items.  Add the dprint gate, fix the 6 follow ups, handle the failure to verify rule has 1 home, and land @PRE6-RECOMMEND.md.  On landing the recommend, leave this out of the repo, but instead create a pre phase 6 plan that takes into account the items that are still valid.  One that stands out is the marker update is now complete.
