@@ -17,9 +17,19 @@ whole-project picture.
   `tools/check-md-links.py` (every relative markdown link resolves to a file, and every `#fragment`
   to a heading that really renders to that anchor). All three block. They live in one job because
   none of them needs a build, and the job keeps the CI name `rustfmt` because that is the name
-  branch protection requires — rename it only together with the protection rule. dprint's **CLI
-  version is pinned** in the workflow as well as the plugin's checksum in `dprint.json`: the plugin
-  checksum does not constrain how a floating CLI resolves config
+  branch protection requires — rename it only together with the protection rule.
+- **dprint is installed by checksum-verified download, never `curl … | sh`.** The workflow pins the
+  CLI version *and* the SHA-256 of the release asset, alongside the plugin checksum already pinned
+  in `dprint.json` — the plugin checksum does not constrain how a floating CLI resolves config.
+  `DPRINT_SHA256` was computed from the downloaded bytes, not copied from the publisher's
+  `SHASUMS256.txt`: taking the digest from the same server as the artifact verifies nothing. Bump
+  the two together, and keep `--proto '=https' --proto-redir '=https'` on the `curl` — a release
+  asset redirects to an object store, and only `--proto-redir` constrains the redirect
+- **The link checker self-tests before it runs.** `tools/check-md-links.py --self-test` asserts the
+  check *fails* on each breakage it exists to catch — missing file, missing anchor,
+  underscore-bearing anchors, a link reflowed across two lines, headings inside fences. A gate
+  nobody has watched fail reads as coverage without being any, so the assertion is that it breaks,
+  not that it passes
 - Only `geiger` and `miri` are **advisory** (`continue-on-error`); the other nine block. miri only
   covers the host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm`) —
   `minixrs-ipc` has inline asm. `geiger`'s per-package sweep filters out `minixrs-kernel` (it can't

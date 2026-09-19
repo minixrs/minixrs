@@ -604,8 +604,8 @@ Aggregate scope:
 ### Pre-Phase-6 cleanup
 
 Phase 5's close-out review identified PR-sized cleanup/prep chunks to land before Phase 6 starts,
-tracked in [`docs/plans/phase-6-prep.md`](plans/phase-6-prep.md). Chunk 2 (the user VA map) must land
-before any virtio code; chunk 4 gates starting Phase 6 proper.
+tracked in [`docs/plans/phase-6-prep.md`](plans/phase-6-prep.md). Chunk 2 (the user VA map) must
+land before any virtio code; chunk 4 gates starting Phase 6 proper.
 
 - [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
 - [ ] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk

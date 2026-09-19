@@ -30,15 +30,35 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo fmt --all --check
-      # Pinned to the exact CLI version, the way every other tool here is:
-      # dprint.json already pins the markdown plugin by checksum, but the CLI
-      # itself decides how config is resolved, so a floating CLI could still
-      # move the output from under a checksum-pinned plugin. `dprint/check-action`
-      # would do the same thing at the cost of another third-party action to
-      # SHA-pin.
-      - name: Install dprint (pinned)
+      # dprint is fetched as a pinned release asset and checksum-verified
+      # before it runs. Never `curl | sh`: that executes whatever the server
+      # serves, with no way to notice it changed. The version is pinned the way
+      # every other tool here is -- dprint.json already pins the markdown plugin
+      # by checksum, but the CLI decides how config is resolved, so a floating
+      # CLI could still move the output from under a checksum-pinned plugin.
+      #
+      # DPRINT_SHA256 was computed from the downloaded bytes, not copied from
+      # the publisher's SHASUMS256.txt -- taking the digest from the same server
+      # as the artifact would verify nothing. Bump the two together.
+      #
+      # `dprint/check-action` would install it too, at the cost of another
+      # third-party action to SHA-pin, and it would still fetch the binary the
+      # same way.
+      - name: Install dprint (pinned + checksum-verified)
+        env:
+          DPRINT_VERSION: 0.57.4
+          DPRINT_SHA256: 1d26357d8bc66898d4ecc7dafca3d2971cfe222ba487228bd2ce5c3b3a309c33
         run: |
-          curl -fsSL https://dprint.dev/install.sh | sh -s 0.57.4
+          set -euo pipefail
+          # --proto/--proto-redir pin both the initial request and every
+          # redirect to https; a release asset redirects to the object store.
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 -sSfL \
+            -o /tmp/dprint.zip \
+            "https://github.com/dprint/dprint/releases/download/${DPRINT_VERSION}/dprint-x86_64-unknown-linux-gnu.zip"
+          echo "${DPRINT_SHA256}  /tmp/dprint.zip" | sha256sum -c -
+          mkdir -p "$HOME/.dprint/bin"
+          unzip -q -o /tmp/dprint.zip -d "$HOME/.dprint/bin"
+          chmod +x "$HOME/.dprint/bin/dprint"
           echo "$HOME/.dprint/bin" >> "$GITHUB_PATH"
       - name: Check markdown formatting
         run: dprint check
@@ -46,6 +66,12 @@ jobs:
       # home is only reachable while the pointers at it resolve. This checks that
       # every relative markdown link names a file that exists and, when it carries
       # a fragment, a heading that really renders to that anchor.
+      #
+      # The self-test runs first and on purpose: it asserts the check FAILS on
+      # each breakage it exists to catch. A gate nobody has watched fail reads as
+      # coverage without being any.
+      - name: Self-test the markdown link checker
+        run: python3 tools/check-md-links.py --self-test
       - name: Check markdown links and anchors
         run: python3 tools/check-md-links.py
 

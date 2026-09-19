@@ -172,11 +172,11 @@ client hangs mid-SENDREC and takes the rest of its cycle's markers with it (slic
 VM (`servers/vm/`) tracks per-process memory as a static `[ClientRegions; MAX_CLIENTS]` keyed by
 proc number. `MAX_CLIENTS = NR_SERVED_PROCS` (32), so the table covers PM's whole fork pool; each
 client holds up to `MAX_REGIONS = 16` regions — the two are not the same number. VM owns no heap
-allocator (the kernel owns frames). Each region is a half-open `[start, end)` tagged
-`Kind::{Heap, Mmap, Unused}`. A page fault is satisfied only when its address lies inside a region;
-out-of-region faults are a silent SIGSEGV (faulter left blocked on `RTS_PAGEFAULT` — real signals
-are Phase 4). `VM_BRK`/`VM_MMAP`/`VM_MUNMAP` all ride the single D→VM SENDREC edge, so adding an
-mmap client needs no new priv wiring beyond the brk one.
+allocator (the kernel owns frames). Each region is a half-open `[start, end)` tagged `Kind::{Heap,
+Mmap, Unused}`. A page fault is satisfied only when its address lies inside a region; out-of-region
+faults are a silent SIGSEGV (faulter left blocked on `RTS_PAGEFAULT` — real signals are Phase 4).
+`VM_BRK`/`VM_MMAP`/`VM_MUNMAP` all ride the single D→VM SENDREC edge, so adding an mmap client needs
+no new priv wiring beyond the brk one.
 
 `SYS_VMCTL(VMCTL_PT_UNMAP)` returns `EINVAL` (no panic, no frame freed) when nothing is mapped at
 the target VA — so VM's `munmap` can sweep a region page-by-page with `VMCTL_PT_UNMAP` and ignore

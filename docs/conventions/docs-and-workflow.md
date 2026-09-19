@@ -122,7 +122,8 @@ names a file that exists, and every `#fragment` names a heading that really rend
 It runs in CI's `fmt` job and blocks. Run it locally after any move, rename, or dedupe:
 
 ```bash
-python3 tools/check-md-links.py
+python3 tools/check-md-links.py             # check the tree
+python3 tools/check-md-links.py --self-test # prove the check still fails on breakage
 ```
 
 **Do not hand-roll an anchor slugger instead.** Three separate attempts in this repository got
