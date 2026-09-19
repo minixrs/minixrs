@@ -53,6 +53,11 @@ chunk 2 rather than virtio transport.
 
 ## Chunk 2: User VA map — high stack, larger stack, image-relative brk
 
+**Design:**
+[`2026-09-19-user-va-map-design.md`](../superpowers/specs/2026-09-19-user-va-map-design.md) —
+decisions `V1…V12`, including the two this file did not anticipate: VM is never told that an exec
+happened, and the clang `--image-base` pin is dropped rather than kept.
+
 **Do this before any virtio code.** Phase 5 kept a greenfield *low* map that is not borrowed from
 32-bit MINIX 3 (which puts `USR_STACKTOP` near `0xF0000000`). Verified on `main`:
 
