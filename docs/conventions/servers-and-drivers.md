@@ -71,16 +71,11 @@ asserting it with the attribute.
 
 ## Verifying server behaviour
 
-User-space servers run at EL0 with no console access — they cannot print. Verify server behaviour
-through kernel-side traces (`[pf]` from `do_page_fault`, `[ksys …]` from `do_vmctl`/`system`, `[ipc
-N]` from `ipc::dispatch`), never server-side logging.
-
-Trace sampling is asymmetric: `[ipc N]` head-traces the first ~12 calls *plus* every 100th, but
-`[ksys N]` samples only every 100th (no head carve-out) — a server's first or rare kernel call (e.g.
-a startup `SYS_GETINFO`) shows on `[ipc]`, not `[ksys]`.
-
-Since slice 5.1 a server can also use `SYS_DIAGCTL` through `server-rt::diag_print`; see
-[kernel.md](./kernel.md) for the debug channel's kernel half.
+A server runs at EL0 and cannot print, so its behaviour is verified from kernel-side traces, not
+from server-side logging. The traces, the two samplers' different sampling rules, and the
+`SYS_DIAGCTL` diagnostic channel are documented once, in
+[`testing-and-markers.md`](./testing-and-markers.md#verifying-server-behaviour) — this file does not
+restate them.
 
 ## SEF: the receive loop
 
@@ -174,12 +169,14 @@ client hangs mid-SENDREC and takes the rest of its cycle's markers with it (slic
 
 ## VM: regions and unmapping
 
-VM (`servers/vm/`) tracks per-process memory as a static `[ClientRegions; 16]` keyed by proc number
-(no heap allocator — the kernel owns frames), each region a half-open `[start, end)` tagged
-`Kind::{Heap, Mmap, Unused}`. A page fault is satisfied only when its address lies inside a region;
-out-of-region faults are a silent SIGSEGV (faulter left blocked on `RTS_PAGEFAULT` — real signals
-are Phase 4). `VM_BRK`/`VM_MMAP`/`VM_MUNMAP` all ride the single D→VM SENDREC edge, so adding an
-mmap client needs no new priv wiring beyond the brk one.
+VM (`servers/vm/`) tracks per-process memory as a static `[ClientRegions; MAX_CLIENTS]` keyed by
+proc number. `MAX_CLIENTS = NR_SERVED_PROCS` (32), so the table covers PM's whole fork pool; each
+client holds up to `MAX_REGIONS = 16` regions — the two are not the same number. VM owns no heap
+allocator (the kernel owns frames). Each region is a half-open `[start, end)` tagged `Kind::{Heap,
+Mmap, Unused}`. A page fault is satisfied only when its address lies inside a region; out-of-region
+faults are a silent SIGSEGV (faulter left blocked on `RTS_PAGEFAULT` — real signals are Phase 4).
+`VM_BRK`/`VM_MMAP`/`VM_MUNMAP` all ride the single D→VM SENDREC edge, so adding an mmap client needs
+no new priv wiring beyond the brk one.
 
 `SYS_VMCTL(VMCTL_PT_UNMAP)` returns `EINVAL` (no panic, no frame freed) when nothing is mapped at
 the target VA — so VM's `munmap` can sweep a region page-by-page with `VMCTL_PT_UNMAP` and ignore

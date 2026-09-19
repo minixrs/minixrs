@@ -12,6 +12,24 @@ SonarQube Cloud (org `minixrs`, project `minixrs_minixrs`, config in `sonar-proj
 The Sonar scan auto-detects PR vs branch: PRs get decoration, `main` pushes refresh the
 whole-project picture.
 
+- The `fmt` job is **three** gates, not one: `cargo fmt --all --check`, `dprint check` (markdown
+  formatting — see [`docs-and-workflow.md`](./docs-and-workflow.md#markdown-formatting)), and
+  `tools/check-md-links.py` (every relative markdown link resolves to a file, and every `#fragment`
+  to a heading that really renders to that anchor). All three block. They live in one job because
+  none of them needs a build, and the job keeps the CI name `rustfmt` because that is the name
+  branch protection requires — rename it only together with the protection rule.
+- **dprint is installed by checksum-verified download, never `curl … | sh`.** The workflow pins the
+  CLI version *and* the SHA-256 of the release asset, alongside the plugin checksum already pinned
+  in `dprint.json` — the plugin checksum does not constrain how a floating CLI resolves config.
+  `DPRINT_SHA256` was computed from the downloaded bytes, not copied from the publisher's
+  `SHASUMS256.txt`: taking the digest from the same server as the artifact verifies nothing. Bump
+  the two together, and keep `--proto '=https' --proto-redir '=https'` on the `curl` — a release
+  asset redirects to an object store, and only `--proto-redir` constrains the redirect
+- **The link checker self-tests before it runs.** `tools/check-md-links.py --self-test` asserts the
+  check *fails* on each breakage it exists to catch — missing file, missing anchor,
+  underscore-bearing anchors, a link reflowed across two lines, headings inside fences. A gate
+  nobody has watched fail reads as coverage without being any, so the assertion is that it breaks,
+  not that it passes
 - Only `geiger` and `miri` are **advisory** (`continue-on-error`); the other nine block. miri only
   covers the host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm`) —
   `minixrs-ipc` has inline asm. `geiger`'s per-package sweep filters out `minixrs-kernel` (it can't
@@ -36,23 +54,18 @@ whole-project picture.
   commit + `rust-toolchain.toml`/`build-musl.sh` — keyed on the *commit*, not a tracked file,
   because the port branch is force-pushed on rebase and `external/musl/VERSION` would not move.
   Without the recursive checkout the job silently tests the `worker`-as-`hello` fallback
-- **No CI job installs the minix.rs SDK** (an LLVM build is hours), so `$MINIXRS_SDK` is never set
-  on a runner and the `hello` flavor is decided by whether a job builds the musl sysroot:
+- **Which `hello` flavor a job builds is decided by whether it builds the musl sysroot**:
   `qemu-smoke` does, so it builds **`musl`** — which is why that flavor is a real dependency rather
   than a fallback, since `tests/qemu-boot.expected` requires the five C markers. `clippy-kernel`
-  does not, so it builds **`worker`**. Consequence to respect: the **SDK flavor has zero CI
-  coverage**, and a bug reachable only when `MINIXRS_SDK` is set ships green. Until an SDK-cached
-  job exists, the mitigation is local — run the three-boot matrix (SDK, forced musl, moved-aside
-  sysroot) when touching `build_hello*`, and run at least one `clippy-kernel` invocation with
-  `MINIXRS_SDK=/nonexistent` so the path CI compiles is the one you linted. **The
-  moved-aside-sysroot row needs `MINIXRS_SDK=/nonexistent` as well**: on a machine that has a usable
-  SDK the flavor selector never reaches the sysroot, so moving it aside alone re-runs the SDK row
-  and tests nothing (5.10a nearly recorded that as a passing fourth row)
+  does not, so it builds **`worker`**. No job builds the SDK flavor at all — see
+  [The SDK flavor has zero CI coverage](#the-sdk-flavor-has-zero-ci-coverage) below for what that
+  costs and the local mitigation
 - `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner: boots the kernel for 600 s wall clock via
   the cargo runner (asserting exit 124, the timeout status a healthy run must produce), then
-  `tools/check-boot-log.sh` greps the serial log (`grep -aF`) against `tests/qemu-boot.expected` /
-  `tests/qemu-boot.forbidden`. Keep expectations timing-robust — first occurrences only, never
-  counts (CI TCG is slower than local). **Blocking** as of phase-5-prep chunk 7
+  `tools/check-boot-log.sh` greps the serial log against the two marker files. **Blocking** as of
+  phase-5-prep chunk 7. The marker-file contract itself — what the script matches, and why
+  expectations must be first-occurrence-only — lives in
+  [`testing-and-markers.md`](./testing-and-markers.md#markers)
 - **A slice can break the boot-timing budget, and "it passes locally" is not the check.** The budget
   was 45 s until slice 5.9, 120 s until 5.10a, and 240 s until 5.10b; **every raise has had the same
   cause and the same evidence**, and the number will move again. 5.9: `hello` stopped being a memcpy
@@ -116,13 +129,18 @@ whole-project picture.
 
 No CI job installs the minix.rs SDK (an LLVM build is hours), so `$MINIXRS_SDK` is never set on a
 runner and the SDK `hello` flavor is never exercised — a regression in the patched clang driver
-ships green. The mitigation is local: run the three-boot matrix (SDK, forced musl, moved-aside
-sysroot) when touching `build_hello*`, and run at least one `clippy-kernel` invocation with
-`MINIXRS_SDK=/nonexistent` so the path CI compiles is the one you linted.
+ships green.
 
-## Deferred: a markdown format gate
+The mitigation is local, and has three parts:
 
-`dprint check` is not yet a CI gate. When it becomes one, add it to the **existing** `fmt` job
-rather than creating a twelfth blocking gate — two steps, `curl -fsSL https://dprint.dev/install.sh
-| sh` followed by `~/.dprint/bin/dprint check`. `dprint/check-action` would work too, but it is
-another third-party action to SHA-pin for no gain.
+- Run the **three-boot matrix** (SDK, forced musl, moved-aside sysroot) when touching
+  `build_hello*`.
+- Run at least one `clippy-kernel` invocation with `MINIXRS_SDK=/nonexistent`, so the path CI
+  compiles is the one you linted.
+- **The moved-aside-sysroot row needs `MINIXRS_SDK=/nonexistent` as well.** On a machine that has a
+  usable SDK the flavor selector never reaches the sysroot, so moving it aside alone re-runs the SDK
+  row and tests nothing — 5.10a nearly recorded that as a passing fourth row.
+
+Treat an image-base or stack move as a **mandatory** matrix run. `$MINIXRS_SDK` does not persist
+across separate shell invocations, which is how a matrix row silently measures the wrong flavour —
+the boot-timing bullet above states that trap and how to confirm the flavour you actually built.

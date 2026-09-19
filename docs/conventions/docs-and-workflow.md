@@ -14,10 +14,13 @@ bootstrap notes being retired. Two trees under `docs/` are not leftovers and sta
 indexed from `CLAUDE.md`. It documents not the system but the work on it, which is why it is not in
 `book/`. The second is the planning tree: `docs/plan.md` is the lean live tracker (phase status +
 slice summaries), and `docs/plans/` holds the full per-phase slice histories (`phase-2-ipc.md` /
-`phase-3-vm.md` / `phase-4-servers.md`), the pre-Phase-5 cleanup tracker (`phase-5-prep.md` — one
-PR-sized chunk per session, same markers), and the Phase 5 design + slice plan (`phase-5-musl-fs.md`
-— locked decisions D1–D13 and slices 5.0–5.11 with per-slice scope/proof; read it before starting
-any Phase 5 slice). Build locally with `mdbook build book`; output `book/book/` is gitignored.
+`phase-3-vm.md` / `phase-4-servers.md`), the two inter-phase cleanup trackers (`phase-5-prep.md` and
+`phase-6-prep.md` — one PR-sized chunk per session), and the Phase 5 design + slice plan
+(`phase-5-musl-fs.md` — locked decisions D1–D13 and slices 5.0–5.11 with per-slice scope/proof; read
+it before starting any Phase 5 slice). A pre-phase review belongs **in that tracker**, not in a
+loose `*-RECOMMEND.md` at the repo root: those drafts go stale silently because nothing links them
+and no PR is obliged to update them. Build locally with `mdbook build book`; output `book/book/` is
+gitignored.
 
 To install mdBook or preview the book locally, use the `mdbook-preview` skill.
 
@@ -97,9 +100,49 @@ at `hunk skill path hunk-review` has the full CLI). Two standing rules:
 - PR review comments (Grok, a reviewer) get mirrored into the session as one `comment apply` batch,
   one note per thread anchored at the thread's `newLine`, `author` set to the reviewer's name.
 
+## One home is not enough: the pointers have to land
+
+Every rule in this tree has exactly **one** home, and every other file that needs it links there
+instead of restating it. Deduplicating is only half of that contract, and it is the half that is
+easy to check. The other half is that the links still arrive at the section holding the rule — and a
+dedupe pass that verifies only single-ownership will pass a tree full of pointers into nothing.
+
+This has now failed twice in the same week, both times found by a reviewer rather than by the sweep
+that had just declared the tree clean: a confused-deputy link into `abi.md` that resolved to a file
+with no such rule in it, and slice 5.9's back-link that resolved to the right file but the wrong
+section. In both cases the rule *did* have one home. Nothing pointed at it.
+
+So the check is two questions, not one:
+
+1. Does this rule appear in exactly one place?
+2. Does every reference to it resolve to **that place** — right file, right section?
+
+Question 2 is mechanical and `tools/check-md-links.py` answers it: every relative markdown link
+names a file that exists, and every `#fragment` names a heading that really renders to that anchor.
+It runs in CI's `fmt` job and blocks. Run it locally after any move, rename, or dedupe:
+
+```bash
+python3 tools/check-md-links.py             # check the tree
+python3 tools/check-md-links.py --self-test # prove the check still fails on breakage
+```
+
+**Do not hand-roll an anchor slugger instead.** Three separate attempts in this repository got
+GitHub's rules wrong and reported working links as broken — collapsing runs of whitespace (GitHub
+emits one hyphen per space), stripping `_` (GitHub keeps it, so `#…sys_diagctl` and `#naked-_start…`
+are correct), and scanning line by line (dprint reflows prose, so a link's `[label]` and its
+`(target)` routinely land on different lines). Acting on any of those first runs would have
+"repaired" links that already worked. The script encodes all three corrections.
+
+Question 1 stays manual, and the trap there is the fix itself: consolidating a rule into one section
+and then *summarising it* at the old site recreates the duplicate under a different wording, which
+drifts faster than a verbatim copy would. The old site gets a sentence naming the rule and a link —
+never a paraphrase of what the rule says.
+
 ## Markdown formatting
 
 All markdown in this repository wraps prose at **100 columns**. This is mechanical, not a habit.
+**`dprint check` blocks in CI** as a step of the `fmt` job (see [`ci.md`](./ci.md)), so unformatted
+markdown fails the PR the same way unformatted Rust does.
 
 Configuration is `dprint.json` at the repo root, pinning dprint-plugin-markdown by checksum. Tables,
 fenced code blocks, and bare URLs are exempt — dprint leaves them alone. `<!-- dprint-ignore -->`
@@ -134,7 +177,7 @@ Rust doc comments are out of scope — rustfmt does not reflow them and there is
 
 ```bash
 dprint fmt          # format everything
-dprint check        # verify, as CI will
+dprint check        # verify, exactly as the fmt job does
 ```
 
 ## Plan status

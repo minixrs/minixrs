@@ -7,13 +7,18 @@ a log) — this file covers how to read one.
 
 ## Verifying server behaviour
 
-User-space servers run at EL0 with no console access — they cannot print. Verify server behavior
+User-space servers run at EL0 with no console access — they cannot print. Verify server behaviour
 through kernel-side traces (`[pf]` from `do_page_fault`, `[ksys …]` from `do_vmctl`/`system`, `[ipc
 N]` from `ipc::dispatch`), never server-side logging.
 
 Trace sampling is asymmetric between the two: `[ipc N]` head-traces the first ~12 calls *plus* every
 100th, but `[ksys N]` samples only every 100th (no head carve-out) — a server's first/rare kernel
 call (e.g. a startup `SYS_GETINFO`) shows on `[ipc]`, not `[ksys]`.
+
+Since slice 5.1 a server can also print through `SYS_DIAGCTL` via `server-rt::diag_print`; see
+[`kernel.md`](./kernel.md) for the debug channel's kernel half. That is a channel for deliberate
+diagnostics, not a replacement for the traces above — nothing routes a server's ordinary execution
+through it.
 
 The two `EFAULT` traces — `[efault] proc=… nr=… call=… va=…` and `[efault deliver] proc=… nr=… va=…`
 — are **uncounted**, unlike the sampled `[ipc {n}]` form, which is what makes them stable boot

@@ -60,8 +60,10 @@ Branching, signing, sign-off, and what a PR owes the plan trackers.
 A PR is atomic: it contains the work **and** the record that the work is done. The PR that
 implements a slice checks that slice's box in `docs/plan.md` and, **when that file exists**, in the
 matching `docs/plans/phase-N-*.md`, in the same PR, as part of the same change. Not every phase has
-a detail file — there is no `docs/plans/phase-6-*.md` today, so a Phase 6 slice checks its box in
-`docs/plan.md` alone rather than inventing one.
+a slice tracker. `docs/plans/phase-6-prep.md` is the pre-Phase-6 chunk tracker (like
+`phase-5-prep.md`); a Phase 6 *slice* still checks its box in `docs/plan.md` only until chunk 4
+lands `docs/plans/phase-6-virtio.md`. Do not treat `phase-6-prep.md` as the Phase 6 slice file, and
+do not invent a `phase-6-*.md` just to hold crate-path boxes.
 
 Marking completion is never a follow-up commit, never a separate PR, and never a cleanup task
 inherited by the next slice. Those are the shapes that go stale — the tracker carried a wrong status

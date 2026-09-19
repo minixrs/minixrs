@@ -345,10 +345,11 @@ check in this slice).
 - Four headers plus two check artifacts: `include/minix/{ipc,com,callnr,errno}.h`, a CI-only
   `abi-check/errno.h`, and `abi-selftest.c` — a header is never a translation unit, so without the
   selftest none of the `_Static_assert`s would ever fire.
-- `minix/ipc.h` includes **nothing**: `offsetof` comes from `__builtin_offsetof` under the private
-  name `_MINIX_OFFSETOF`. Apple's clang redirects `<stddef.h>` to the system header for any `*-musl`
-  triple, which breaks a hermetic sysroot-less check; and an ABI header should be includable from
-  freestanding C anyway.
+- `minix/ipc.h` includes **nothing**: `offsetof` comes from `__builtin_offsetof` under a private
+  name — spelled `_MINIX_OFFSETOF` here in 5.0, renamed to **`_MINIXRS_OFFSETOF`** by the 5.6 brand
+  sweep, which is what the generator emits today. Apple's clang redirects `<stddef.h>` to the system
+  header for any `*-musl` triple, which breaks a hermetic sysroot-less check; and an ABI header
+  should be includable from freestanding C anyway.
 - **Errno verification is genuinely deferred to 5.6.** `minix/errno.h` defines only the MINIX
   200-band and puts the forty POSIX assertions behind `#ifdef MINIX_ABI_CHECK_POSIX_ERRNO`, because
   CI has no musl sysroot and a host `<errno.h>` has different values (Darwin `EDEADLK` is 11). CI

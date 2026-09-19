@@ -62,7 +62,8 @@ These bind every task regardless of area. Everything else lives in
 - **A PR marks its own work complete** — check the slice/chunk box in the same PR that implements
   it, in `docs/plan.md` and in the matching `docs/plans/` detail file when one exists.
 - **Markdown prose wraps at 100 columns**; run `~/.dprint/bin/dprint fmt` (and `check`) on anything
-  you edit.
+  you edit. Both `dprint check` and `tools/check-md-links.py` **block in CI** — a broken relative
+  link or `#anchor` fails the PR.
 - **The D8 ABI freeze:** `Message` layout, call numbers, endpoints and errnos change only via a
   deliberate ABI-bump PR touching both repos — there is C in another repository depending on all
   four.
@@ -90,9 +91,9 @@ Working rules — read the area file before touching that area:
 
 Everything else:
 
-| Tree                                                    | Holds                                                                                                                                    |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| [`book/`](book/src/SUMMARY.md)                          | **Canonical** how-the-system-works documentation (mdBook, published to GitHub Pages). Write new documentation here, derived from source. |
-| [`docs/plan.md`](docs/plan.md)                          | The lean live tracker: phase status plus one summary line per slice.                                                                     |
-| [`docs/plans/`](docs/plans/phase-5-musl-fs.md)          | Full per-phase slice histories and the phase design documents. Read the phase file before starting a slice in it.                        |
-| `docs/superpowers/specs/` and `docs/superpowers/plans/` | The reasoning behind one slice — decisions considered and rejected, per-task steps, verification plan.                                   |
+| Tree                                                    | Holds                                                                                                                                             |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`book/`](book/src/SUMMARY.md)                          | **Canonical** how-the-system-works documentation (mdBook, published to GitHub Pages). Write new documentation here, derived from source.          |
+| [`docs/plan.md`](docs/plan.md)                          | The lean live tracker: phase status plus one summary line per slice.                                                                              |
+| [`docs/plans/`](docs/plans/phase-6-prep.md)             | Full per-phase slice histories, the phase design documents, and the inter-phase prep trackers. Read the phase file before starting a slice in it. |
+| `docs/superpowers/specs/` and `docs/superpowers/plans/` | The reasoning behind one slice — decisions considered and rejected, per-task steps, verification plan.                                            |
