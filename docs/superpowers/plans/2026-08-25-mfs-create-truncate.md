@@ -1,70 +1,107 @@
 # Slice 5.10b — MFS create/truncate + `VFS_OPEN` flags: Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
+> (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make a MinixFS file *exist* — `FS_CREATE` and `FS_TRUNC` in the FS band, honoured from `VFS_OPEN` as `O_CREAT` / `O_TRUNC` — and close slice 5.10a's mid-write zone leak by staging the client's bytes before anything is allocated.
+**Goal:** Make a MinixFS file *exist* — `FS_CREATE` and `FS_TRUNC` in the FS band, honoured from
+`VFS_OPEN` as `O_CREAT` / `O_TRUNC` — and close slice 5.10a's mid-write zone leak by staging the
+client's bytes before anything is allocated.
 
-**Architecture:** Two new FS-band requests reusing `FS_LOOKUP`'s wire codec verbatim; an inode allocator and directory-entry insertion in MFS that grow a directory through the same `place_zone` a file uses; a zone-freeing path whose ordering is the allocator's read backwards; a second 4 KiB `.bss` staging buffer in MFS behind its own capability token; and a `flags` field on `VFS_OPEN` whose policy lives in `open.rs` as total functions. Five new init boot probes prove it, including one that issues 256 failing writes and then a good one.
+**Architecture:** Two new FS-band requests reusing `FS_LOOKUP`'s wire codec verbatim; an inode
+allocator and directory-entry insertion in MFS that grow a directory through the same `place_zone` a
+file uses; a zone-freeing path whose ordering is the allocator's read backwards; a second 4 KiB
+`.bss` staging buffer in MFS behind its own capability token; and a `flags` field on `VFS_OPEN`
+whose policy lives in `open.rs` as total functions. Five new init boot probes prove it, including
+one that issues 256 failing writes and then a good one.
 
-**Tech Stack:** Rust (`no_std` freestanding EL0 servers + host-tested `no_std` libraries), MinixFS v3 on a compile-time RAM image, QEMU aarch64 boot markers as the integration test.
+**Tech Stack:** Rust (`no_std` freestanding EL0 servers + host-tested `no_std` libraries), MinixFS
+v3 on a compile-time RAM image, QEMU aarch64 boot markers as the integration test.
 
-**Spec:** `docs/superpowers/specs/2026-08-25-mfs-create-truncate-design.md` — decisions `C1`…`C11` are referenced by name throughout. Read it before Task 1.
+**Spec:** `docs/superpowers/specs/2026-08-25-mfs-create-truncate-design.md` — decisions `C1`…`C11`
+are referenced by name throughout. Read it before Task 1.
 
 ## Global Constraints
 
-Copied verbatim from the spec and from `CLAUDE.md`. **Every task's requirements implicitly include this section.**
+Copied verbatim from the spec and from `CLAUDE.md`. **Every task's requirements implicitly include
+this section.**
 
-- **SPDX header first.** Every new `.rs` file begins with `// SPDX-License-Identifier: BSD-3-Clause` then `// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors`, before any other content.
-- **`checked_add`, never `+`, for offset/length arithmetic** in `servers/`, `drivers/`, `fs/`, `userland/`. `[profile.release]` sets `overflow-checks = false`, so `off + 4` *wraps* in the shipped binary while panicking under `cargo test`. Give every new accessor a `usize::MAX` test.
-- **`fs/mfs` is `#![forbid(unsafe_code)]` unconditionally** — the library. The server's `main.rs` is where the two `.bss` buffers' `unsafe` lives, each with a `// SAFETY:` comment.
-- **Nothing is held across a block fetch.** `Blocks::read` takes `&mut self` and returns a borrow tied to it. Every intermediate in the new paths is a `Copy` scalar.
-- **Every device-derived loop has a cap.** A corrupt inode must not spin MFS, which would block VFS, which would block init.
-- **A server stack is exactly one page** (`uspace::SERVER_STACK_BYTES`). A 4 KiB local faults into VM's SIGSEGV arm, which prints nothing `tests/qemu-boot.forbidden` catches. Buffers this size are `.bss` statics.
-- **No granter field and no grant-offset field** anywhere in the FS band. The granter is the kernel-stamped `m_source`; VFS re-grants per round.
-- **Errno relay rules:** a `BDEV_*` failure becomes `EIO` (the client addressed a *file*); a `SYS_SAFECOPY` failure is relayed **verbatim** (`EPERM` and `EFAULT` are different caller bugs).
+- **SPDX header first.** Every new `.rs` file begins with `// SPDX-License-Identifier: BSD-3-Clause`
+  then `// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors`, before any other
+  content.
+- **`checked_add`, never `+`, for offset/length arithmetic** in `servers/`, `drivers/`, `fs/`,
+  `userland/`. `[profile.release]` sets `overflow-checks = false`, so `off + 4` *wraps* in the
+  shipped binary while panicking under `cargo test`. Give every new accessor a `usize::MAX` test.
+- **`fs/mfs` is `#![forbid(unsafe_code)]` unconditionally** — the library. The server's `main.rs` is
+  where the two `.bss` buffers' `unsafe` lives, each with a `// SAFETY:` comment.
+- **Nothing is held across a block fetch.** `Blocks::read` takes `&mut self` and returns a borrow
+  tied to it. Every intermediate in the new paths is a `Copy` scalar.
+- **Every device-derived loop has a cap.** A corrupt inode must not spin MFS, which would block VFS,
+  which would block init.
+- **A server stack is exactly one page** (`uspace::SERVER_STACK_BYTES`). A 4 KiB local faults into
+  VM's SIGSEGV arm, which prints nothing `tests/qemu-boot.forbidden` catches. Buffers this size are
+  `.bss` statics.
+- **No granter field and no grant-offset field** anywhere in the FS band. The granter is the
+  kernel-stamped `m_source`; VFS re-grants per round.
+- **Errno relay rules:** a `BDEV_*` failure becomes `EIO` (the client addressed a *file*); a
+  `SYS_SAFECOPY` failure is relayed **verbatim** (`EPERM` and `EFAULT` are different caller bugs).
 - **MFS is degraded, never fatal and never a panic** past `sef_startup`.
-- **Commits:** `git commit -s` (DCO sign-off, mandatory), GPG signing on (never `--no-gpg-sign`), never `--no-verify`. Work on branch `feature/slice-5.10b-mfs-create-truncate`. **A subagent may commit; it may never push, never open a PR, never `--force`.**
-- **Blocking gates before any push:** `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings` and the same with `--no-default-features`; **and `cargo clippy -p minixrs-mfs --features server -- -D warnings`**, which is the only invocation that compiles MFS's `main.rs` at all.
-- **`fs/mfs/src/main.rs` is behind `[[bin]] required-features = ["server"]`**, so no CI job compiles it. **Every line with a decision in it belongs in the library.**
-- **Boot verification:** `timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > /tmp/boot.log 2>&1` (exit 124 is the healthy status), then `tools/check-boot-log.sh /tmp/boot.log`. Budget ~5 s for rebuild + UEFI before the kernel's first byte. Grep with `grep -a`.
+- **Commits:** `git commit -s` (DCO sign-off, mandatory), GPG signing on (never `--no-gpg-sign`),
+  never `--no-verify`. Work on branch `feature/slice-5.10b-mfs-create-truncate`. **A subagent may
+  commit; it may never push, never open a PR, never `--force`.**
+- **Blocking gates before any push:** `cargo fmt --all --check`; `cargo clippy --workspace
+  --all-targets -- -D warnings`; `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D
+  warnings` and the same with `--no-default-features`; **and `cargo clippy -p minixrs-mfs --features
+  server -- -D warnings`**, which is the only invocation that compiles MFS's `main.rs` at all.
+- **`fs/mfs/src/main.rs` is behind `[[bin]] required-features = ["server"]`**, so no CI job compiles
+  it. **Every line with a decision in it belongs in the library.**
+- **Boot verification:** `timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none
+  --release > /tmp/boot.log 2>&1` (exit 124 is the healthy status), then `tools/check-boot-log.sh
+  /tmp/boot.log`. Budget ~5 s for rebuild + UEFI before the kernel's first byte. Grep with `grep
+  -a`.
 
 ---
 
 ## File Structure
 
-| File | Responsibility after this slice |
-|---|---|
-| `kernel-shared/src/callnr.rs` | `FS_CREATE`, `FS_TRUNC`, `NR_FS_MSGS = 6`, `VFS_FLAGS_OFF` |
-| `kernel-shared/src/fcntl.rs` *(new)* | `open(2)` flag values and the "which bits are honoured" mask |
-| `kernel-shared/src/rootfs.rs` | image contents ABI: `ROOTFS_NINODES = 128` + the six new paths and their bytes |
-| `tools/gen-c-headers/src/callnr_h.rs` | the hand-maintained `bands()` list gains two rows |
-| `tools/mkfs-mfs/src/manifest.rs` | `Entry::hole` + `Manifest::add_sparse` |
-| `tools/mkfs-mfs/src/image.rs` | hole validation, hole-aware `blocks_for` / `write_data` |
-| `tools/mkfs-mfs/src/verify.rs` | `free_inodes` |
-| `kernel/build.rs` | manifest gains `/full`, `/etc/holey`, `/etc/deny`; headroom checks widen |
-| `fs/mfs/src/write.rs` | `bitmap_clear`, `DirentSlot`/`dirent_slot`, `dir_append_offset`, `indirect_slots_used` |
-| `fs/mfs/src/walk.rs` | `split_basename` |
-| `fs/mfs/src/proto.rs` | `parse_trunc` |
-| `fs/mfs/src/main.rs` | `Stage`, restaged `do_write`, `alloc_inode`, `do_create`, `free_zone`, `do_trunc` |
-| `servers/vfs/src/open.rs` | `OpenRequest::flags`, `OpenFlags`, `validate_flags` |
-| `servers/vfs/src/main.rs` | `do_open` routing, `fs_path_request`/`fs_create`/`fs_trunc`, `fs_denials` 10 → 14 |
-| `userland/init/src/main.rs` | five new probes, `open_denials` 7 → 11 |
-| `tests/qemu-boot.{expected,forbidden}` | the new markers and their FAIL spellings |
-| `book/`, `docs/plan.md`, `docs/plans/phase-5-musl-fs.md` | documentation and slice status |
+| File                                                     | Responsibility after this slice                                                        |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `kernel-shared/src/callnr.rs`                            | `FS_CREATE`, `FS_TRUNC`, `NR_FS_MSGS = 6`, `VFS_FLAGS_OFF`                             |
+| `kernel-shared/src/fcntl.rs` *(new)*                     | `open(2)` flag values and the "which bits are honoured" mask                           |
+| `kernel-shared/src/rootfs.rs`                            | image contents ABI: `ROOTFS_NINODES = 128` + the six new paths and their bytes         |
+| `tools/gen-c-headers/src/callnr_h.rs`                    | the hand-maintained `bands()` list gains two rows                                      |
+| `tools/mkfs-mfs/src/manifest.rs`                         | `Entry::hole` + `Manifest::add_sparse`                                                 |
+| `tools/mkfs-mfs/src/image.rs`                            | hole validation, hole-aware `blocks_for` / `write_data`                                |
+| `tools/mkfs-mfs/src/verify.rs`                           | `free_inodes`                                                                          |
+| `kernel/build.rs`                                        | manifest gains `/full`, `/etc/holey`, `/etc/deny`; headroom checks widen               |
+| `fs/mfs/src/write.rs`                                    | `bitmap_clear`, `DirentSlot`/`dirent_slot`, `dir_append_offset`, `indirect_slots_used` |
+| `fs/mfs/src/walk.rs`                                     | `split_basename`                                                                       |
+| `fs/mfs/src/proto.rs`                                    | `parse_trunc`                                                                          |
+| `fs/mfs/src/main.rs`                                     | `Stage`, restaged `do_write`, `alloc_inode`, `do_create`, `free_zone`, `do_trunc`      |
+| `servers/vfs/src/open.rs`                                | `OpenRequest::flags`, `OpenFlags`, `validate_flags`                                    |
+| `servers/vfs/src/main.rs`                                | `do_open` routing, `fs_path_request`/`fs_create`/`fs_trunc`, `fs_denials` 10 → 14      |
+| `userland/init/src/main.rs`                              | five new probes, `open_denials` 7 → 11                                                 |
+| `tests/qemu-boot.{expected,forbidden}`                   | the new markers and their FAIL spellings                                               |
+| `book/`, `docs/plan.md`, `docs/plans/phase-5-musl-fs.md` | documentation and slice status                                                         |
 
 ---
 
 ## Task 1: The ABI — FS band, `VFS_OPEN` flags, `fcntl.rs`, C headers
 
 **Files:**
+
 - Create: `kernel-shared/src/fcntl.rs`
 - Modify: `kernel-shared/src/lib.rs` (add `pub mod fcntl;` in alphabetical position)
-- Modify: `kernel-shared/src/callnr.rs` (the FS band near `FS_WRITE`; the VFS payload offsets near `VFS_PATH_LEN_OFF`)
+- Modify: `kernel-shared/src/callnr.rs` (the FS band near `FS_WRITE`; the VFS payload offsets near
+  `VFS_PATH_LEN_OFF`)
 - Modify: `tools/gen-c-headers/src/callnr_h.rs` (`bands()`, the "file-system requests" entry)
 
 **Interfaces:**
+
 - Consumes: nothing from earlier tasks.
-- Produces: `callnr::{FS_CREATE, FS_TRUNC, VFS_FLAGS_OFF}` (`NR_FS_MSGS` becomes `6`); `fcntl::{O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_KNOWN, O_UNKNOWN_BIT}`, all `i32`.
+- Produces: `callnr::{FS_CREATE, FS_TRUNC, VFS_FLAGS_OFF}` (`NR_FS_MSGS` becomes `6`);
+  `fcntl::{O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_KNOWN, O_UNKNOWN_BIT}`, all
+  `i32`.
 
 - [ ] **Step 1: Write `kernel-shared/src/fcntl.rs`**
 
@@ -166,7 +203,9 @@ mod tests {
 
 - [ ] **Step 2: Register the module**
 
-In `kernel-shared/src/lib.rs`, add `pub mod fcntl;` next to the other `pub mod` lines, keeping alphabetical order (it lands between `execstack`/`execimage` and `grant` — check the file and match).
+In `kernel-shared/src/lib.rs`, add `pub mod fcntl;` next to the other `pub mod` lines, keeping
+alphabetical order (it lands between `execstack`/`execimage` and `grant` — check the file and
+match).
 
 - [ ] **Step 3: Add the two FS requests**
 
@@ -247,17 +286,20 @@ Also update `VFS_OPEN`'s own doc comment (around line 542) so it names the third
 In `tools/gen-c-headers/src/callnr_h.rs`, in the "file-system requests" `Band`, extend `members`:
 
 ```rust
-            members: vec![
-                ("FS_READSUPER", callnr::FS_READSUPER),
-                ("FS_LOOKUP", callnr::FS_LOOKUP),
-                ("FS_READ", callnr::FS_READ),
-                ("FS_WRITE", callnr::FS_WRITE),
-                ("FS_CREATE", callnr::FS_CREATE),
-                ("FS_TRUNC", callnr::FS_TRUNC),
-            ],
+members: vec![
+    ("FS_READSUPER", callnr::FS_READSUPER),
+    ("FS_LOOKUP", callnr::FS_LOOKUP),
+    ("FS_READ", callnr::FS_READ),
+    ("FS_WRITE", callnr::FS_WRITE),
+    ("FS_CREATE", callnr::FS_CREATE),
+    ("FS_TRUNC", callnr::FS_TRUNC),
+],
 ```
 
-This list is **hand-maintained**: bumping `NR_FS_MSGS` without adding the rows leaves the constants silently absent from the generated header and the `c-headers` CI gate still passes, because it compiles a header that simply never mentions them. `every_band_member_list_matches_its_count` is what catches it — and it caught exactly this in slice 5.10a.
+This list is **hand-maintained**: bumping `NR_FS_MSGS` without adding the rows leaves the constants
+silently absent from the generated header and the `c-headers` CI gate still passes, because it
+compiles a header that simply never mentions them. `every_band_member_list_matches_its_count` is
+what catches it — and it caught exactly this in slice 5.10a.
 
 Do **not** add `O_CREAT`/`O_TRUNC` anywhere in `gen-c-headers`; see `fcntl.rs`'s module docs.
 
@@ -268,7 +310,8 @@ cargo test -p minixrs-kernel-shared
 cargo test -p minixrs-gen-c-headers
 ```
 
-Expected: PASS. If `every_band_member_list_matches_its_count` fails, Step 5 was skipped or miscounted.
+Expected: PASS. If `every_band_member_list_matches_its_count` fails, Step 5 was skipped or
+miscounted.
 
 - [ ] **Step 7: Regenerate and compile the C headers**
 
@@ -280,7 +323,8 @@ clang -std=c11 -pedantic-errors -Wall -Wextra -Werror -fsyntax-only \
 grep -n 'FS_CREATE\|FS_TRUNC' target/gen-c-headers/include/minixrs/callnr.h
 ```
 
-Expected: the clang invocation exits 0 and the grep prints both constants. The headers are a build artifact under `target/` and are **never committed**.
+Expected: the clang invocation exits 0 and the grep prints both constants. The headers are a build
+artifact under `target/` and are **never committed**.
 
 - [ ] **Step 8: Lint and commit**
 
@@ -313,6 +357,7 @@ mentions the constants and passes anyway."
 ## Task 2: The image — `rootfs.rs` contents, sparse files, `/full`, 128 inodes
 
 **Files:**
+
 - Modify: `kernel-shared/src/rootfs.rs`
 - Modify: `tools/mkfs-mfs/src/manifest.rs`
 - Modify: `tools/mkfs-mfs/src/image.rs`
@@ -320,13 +365,28 @@ mentions the constants and passes anyway."
 - Modify: `kernel/build.rs` (`build_rootfs`)
 
 **Interfaces:**
+
 - Consumes: nothing from Task 1.
-- Produces: `rootfs::{ROOTFS_NINODES, ROOTFS_DIRENT_SIZE, ROOTFS_HOLEY_PATH, ROOTFS_HOLEY_LEN, rootfs_holey_byte, ROOTFS_HOLEY_TEXT, ROOTFS_DENY_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES, ROOTFS_FULL_NEW_PATH, ROOTFS_DIRGROW_TEXT, ROOTFS_CREATE_PATH, ROOTFS_CREATE_TEXT, ROOTFS_LEAK_PATH, ROOTFS_LEAK_TEXT, ROOTFS_LEAK_PROBES, ROOTFS_RUNTIME_ZONES, ROOTFS_RUNTIME_INODES}`; `manifest::Entry::hole` and `Manifest::add_sparse(path, bytes, hole)`; `verify::free_inodes(img) -> Option<usize>`.
+- Produces: `rootfs::{ROOTFS_NINODES, ROOTFS_DIRENT_SIZE, ROOTFS_HOLEY_PATH, ROOTFS_HOLEY_LEN,
+  rootfs_holey_byte, ROOTFS_HOLEY_TEXT, ROOTFS_DENY_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES,
+  ROOTFS_FULL_NEW_PATH, ROOTFS_DIRGROW_TEXT, ROOTFS_CREATE_PATH, ROOTFS_CREATE_TEXT,
+  ROOTFS_LEAK_PATH, ROOTFS_LEAK_TEXT, ROOTFS_LEAK_PROBES, ROOTFS_RUNTIME_ZONES,
+  ROOTFS_RUNTIME_INODES}`; `manifest::Entry::hole` and `Manifest::add_sparse(path, bytes, hole)`;
+  `verify::free_inodes(img) -> Option<usize>`.
 
-**Why `/full` and `/etc/holey` exist at all (C9, C10).** Two arms this slice adds are otherwise unreachable in *both* boot configurations, which is the failure mode `/etc/pattern` (5.7) and `device_teardown_selftest` (5.3) exist to prevent:
+**Why `/full` and `/etc/holey` exist at all (C9, C10).** Two arms this slice adds are otherwise
+unreachable in *both* boot configurations, which is the failure mode `/etc/pattern` (5.7) and
+`device_teardown_selftest` (5.3) exist to prevent:
 
-- Directory growth: `/` holds 4 entries and `/etc` holds 5, against 64 slots in a block. `/full` ships 62 empty files so its single block holds exactly 64 used slots, and **one** create at boot must allocate a directory zone. Forcing it from init instead would cost ~60 creates and several hundred device round trips.
-- The `dirty` half of the inode write-back condition: with no `lseek`, every write starts at a descriptor's position and runs forward, so a write that assigns a zone **always** extends the file. The case needs a *hole below EOF*, which can only come from a sparse write (needs seek), an extending truncate (ruled out by C4), or the image. Slice 5.10a's hand-off claims `FS_TRUNC` makes it reachable; that is wrong, and this is the correction.
+- Directory growth: `/` holds 4 entries and `/etc` holds 5, against 64 slots in a block. `/full`
+  ships 62 empty files so its single block holds exactly 64 used slots, and **one** create at boot
+  must allocate a directory zone. Forcing it from init instead would cost ~60 creates and several
+  hundred device round trips.
+- The `dirty` half of the inode write-back condition: with no `lseek`, every write starts at a
+  descriptor's position and runs forward, so a write that assigns a zone **always** extends the
+  file. The case needs a *hole below EOF*, which can only come from a sparse write (needs seek), an
+  extending truncate (ruled out by C4), or the image. Slice 5.10a's hand-off claims `FS_TRUNC` makes
+  it reachable; that is wrong, and this is the correction.
 
 - [ ] **Step 1: Write the failing mkfs tests for the sparse entry**
 
@@ -404,7 +464,8 @@ Append to `tools/mkfs-mfs/src/image.rs`'s `mod tests`:
 cargo test -p minixrs-mkfs-mfs
 ```
 
-Expected: FAIL — `add_sparse` and `MkfsError::BadHole` do not exist, and `ROOTFS_DIRENT_SIZE` / `ROOTFS_FULL_ENTRIES` are undefined.
+Expected: FAIL — `add_sparse` and `MkfsError::BadHole` do not exist, and `ROOTFS_DIRENT_SIZE` /
+`ROOTFS_FULL_ENTRIES` are undefined.
 
 - [ ] **Step 3: Add the image-contents constants to `kernel-shared/src/rootfs.rs`**
 
@@ -581,20 +642,20 @@ pub struct Entry {
 `add` sets `hole: 0`; add beside it:
 
 ```rust
-    /// Add a file with a leading hole. See [`Entry::hole`].
-    pub fn add_sparse(
-        &mut self,
-        path: impl Into<String>,
-        bytes: impl Into<Vec<u8>>,
-        hole: usize,
-    ) -> &mut Self {
-        self.entries.push(Entry {
-            path: path.into(),
-            bytes: bytes.into(),
-            hole,
-        });
-        self
-    }
+/// Add a file with a leading hole. See [`Entry::hole`].
+pub fn add_sparse(
+    &mut self,
+    path: impl Into<String>,
+    bytes: impl Into<Vec<u8>>,
+    hole: usize,
+) -> &mut Self {
+    self.entries.push(Entry {
+        path: path.into(),
+        bytes: bytes.into(),
+        hole,
+    });
+    self
+}
 ```
 
 Fix `a_manifest_keeps_insertion_order_and_sums_its_bytes` if it constructs `Entry` literally.
@@ -606,32 +667,32 @@ In `tools/mkfs-mfs/src/image.rs`:
 Add the error variant next to `Duplicate`:
 
 ```rust
-    /// An entry's hole is not a whole number of blocks, covers the whole file, or
-    /// names a prefix of the contents that is not already zero.
-    BadHole(String),
+/// An entry's hole is not a whole number of blocks, covers the whole file, or
+/// names a prefix of the contents that is not already zero.
+BadHole(String),
 ```
 
 and its `Display` arm:
 
 ```rust
-            Self::BadHole(p) => write!(
-                f,
-                "{p:?} has a hole that is not whole blocks of zeroes inside the file"
-            ),
+Self::BadHole(p) => write!(
+    f,
+    "{p:?} has a hole that is not whole blocks of zeroes inside the file"
+),
 ```
 
 In `Tree::plan`'s validation loop (right after `split_path`), add:
 
 ```rust
-            if entry.hole != 0 {
-                let bad = || MkfsError::BadHole(entry.path.clone());
-                if !entry.hole.is_multiple_of(MFS_BLOCK_SIZE) || entry.hole >= entry.bytes.len() {
-                    return Err(bad());
-                }
-                if entry.bytes[..entry.hole].iter().any(|&b| b != 0) {
-                    return Err(bad());
-                }
-            }
+if entry.hole != 0 {
+    let bad = || MkfsError::BadHole(entry.path.clone());
+    if !entry.hole.is_multiple_of(MFS_BLOCK_SIZE) || entry.hole >= entry.bytes.len() {
+        return Err(bad());
+    }
+    if entry.bytes[..entry.hole].iter().any(|&b| b != 0) {
+        return Err(bad());
+    }
+}
 ```
 
 Make `blocks_for` take the hole:
@@ -651,36 +712,37 @@ fn blocks_for(len: usize, hole: usize) -> u32 {
 }
 ```
 
-`check_block_budget` currently chains directory bytes and file bytes through one iterator; split it so each side passes its own hole (directories are never sparse, so they pass `0`):
+`check_block_budget` currently chains directory bytes and file bytes through one iterator; split it
+so each side passes its own hole (directories are never sparse, so they pass `0`):
 
 ```rust
-    fn check_block_budget(&self) -> Result<(), MkfsError> {
-        let have = self.available_zones();
-        let mut needed = 0u32;
-        let sized = self
-            .dir_blocks
-            .iter()
-            .map(|(_, b)| (b.as_slice(), 0usize))
-            .chain(
-                self.manifest
-                    .entries
-                    .iter()
-                    .map(|e| (e.bytes.as_slice(), e.hole)),
-            );
-        for (bytes, hole) in sized {
-            if bytes.len() > max_file_bytes() {
-                return Err(MkfsError::TooBig {
-                    needed: blocks_for(bytes.len(), hole),
-                    have,
-                });
-            }
-            needed += blocks_for(bytes.len(), hole);
+fn check_block_budget(&self) -> Result<(), MkfsError> {
+    let have = self.available_zones();
+    let mut needed = 0u32;
+    let sized = self
+        .dir_blocks
+        .iter()
+        .map(|(_, b)| (b.as_slice(), 0usize))
+        .chain(
+            self.manifest
+                .entries
+                .iter()
+                .map(|e| (e.bytes.as_slice(), e.hole)),
+        );
+    for (bytes, hole) in sized {
+        if bytes.len() > max_file_bytes() {
+            return Err(MkfsError::TooBig {
+                needed: blocks_for(bytes.len(), hole),
+                have,
+            });
         }
-        if needed > have {
-            return Err(MkfsError::TooBig { needed, have });
-        }
-        Ok(())
+        needed += blocks_for(bytes.len(), hole);
     }
+    if needed > have {
+        return Err(MkfsError::TooBig { needed, have });
+    }
+    Ok(())
+}
 ```
 
 Make `write_data` skip the hole's blocks:
@@ -743,12 +805,12 @@ Import `imap_bit` alongside the existing `zmap_bit`.
 In `kernel/build.rs`'s `build_rootfs`, extend the imports and the manifest:
 
 ```rust
-    use minixrs_kernel_shared::rootfs::{
-        ROOTFS_CREATE_PATH, ROOTFS_DENY_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES,
-        ROOTFS_HELLO_PATH, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH,
-        ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH, ROOTFS_RUNTIME_INODES, ROOTFS_RUNTIME_ZONES,
-        ROOTFS_SCRATCH_PATH, rootfs_holey_byte, rootfs_pattern_byte,
-    };
+use minixrs_kernel_shared::rootfs::{
+    ROOTFS_CREATE_PATH, ROOTFS_DENY_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES,
+    ROOTFS_HELLO_PATH, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH,
+    ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH, ROOTFS_RUNTIME_INODES, ROOTFS_RUNTIME_ZONES,
+    ROOTFS_SCRATCH_PATH, rootfs_holey_byte, rootfs_pattern_byte,
+};
 ```
 
 (`ROOTFS_CREATE_PATH` is imported only for the assertion message; drop it if unused.)
@@ -810,7 +872,11 @@ Widen the headroom check and add its inode twin:
 cargo test -p minixrs-mkfs-mfs -p minixrs-mfs -p minixrs-kernel-shared
 ```
 
-Expected: the four new tests PASS. **`ROOTFS_NINODES` 64 → 128 adds an inode-table block, so `first_data_zone` moves by one and every hard-coded zone number in `mkfs`'s and `layout.rs`'s fixtures moves with it.** That is R2 in the spec: the failures are red tests rather than a corrupt image, but the diff is wider than it looks. Update each expected number from the new `layout(...)` values rather than by trial and error.
+Expected: the four new tests PASS. **`ROOTFS_NINODES` 64 → 128 adds an inode-table block, so
+`first_data_zone` moves by one and every hard-coded zone number in `mkfs`'s and `layout.rs`'s
+fixtures moves with it.** That is R2 in the spec: the failures are red tests rather than a corrupt
+image, but the diff is wider than it looks. Update each expected number from the new `layout(...)`
+values rather than by trial and error.
 
 - [ ] **Step 9: Build the kernel, which runs `build_rootfs`**
 
@@ -818,7 +884,8 @@ Expected: the four new tests PASS. **`ROOTFS_NINODES` 64 → 128 adds an inode-t
 MINIXRS_SDK=/nonexistent cargo kernel-aarch64
 ```
 
-Expected: success. A `TooManyInodes` / `TooBig` panic names the constant to raise; the two `assert!`s above name the headroom that ran out.
+Expected: success. A `TooManyInodes` / `TooBig` panic names the constant to raise; the two
+`assert!`s above name the headroom that ran out.
 
 - [ ] **Step 10: Boot, and confirm nothing regressed**
 
@@ -827,7 +894,8 @@ timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release 
 tools/check-boot-log.sh /tmp/boot-t2.log
 ```
 
-Expected: every existing marker still PASS. The image grew and `first_data_zone` moved, so `fs.selfcheck`, `fs.indirect`, `bdev.tail` and `fs.write` are the ones that would notice.
+Expected: every existing marker still PASS. The image grew and `first_data_zone` moved, so
+`fs.selfcheck`, `fs.indirect`, `bdev.tail` and `fs.write` are the ones that would notice.
 
 - [ ] **Step 11: Lint and commit**
 
@@ -860,12 +928,14 @@ inode twin, since the probes now create files as well as grow them."
 ## Task 3: MFS library policy — `bitmap_clear`, `dirent_slot`, `dir_append_offset`, `split_basename`, `parse_trunc`
 
 **Files:**
+
 - Modify: `fs/mfs/src/write.rs`
 - Modify: `fs/mfs/src/walk.rs`
 - Modify: `fs/mfs/src/proto.rs`
 - Test: the `mod tests` in each of those three files
 
 **Interfaces:**
+
 - Consumes: nothing.
 - Produces, all pure and host-tested:
   - `write::bitmap_clear(block: &mut [u8], bit: u32) -> Option<()>`
@@ -876,7 +946,8 @@ inode twin, since the probes now create files as well as grow them."
   - `walk::split_basename(path: &str) -> Result<(&str, &str), i32>`
   - `proto::parse_trunc(msg: &Message) -> i32`
 
-Everything with a decision in it goes here because `fs/mfs/src/main.rs` is behind `required-features = ["server"]` and is compiled by no CI job.
+Everything with a decision in it goes here because `fs/mfs/src/main.rs` is behind
+`required-features = ["server"]` and is compiled by no CI job.
 
 - [ ] **Step 1: Write the failing tests in `fs/mfs/src/write.rs`**
 
@@ -1237,7 +1308,8 @@ Add to the module's imports: `use crate::dirent::{DIRENT_SIZE, DirEntry};`.
     }
 ```
 
-The `format!` calls need `String`; `walk.rs`'s test module may declare `extern crate std;` locally, the precedent `brand.rs` set. Check whether it already does and add it if not.
+The `format!` calls need `String`; `walk.rs`'s test module may declare `extern crate std;` locally,
+the precedent `brand.rs` set. Check whether it already does and add it if not.
 
 - [ ] **Step 5: Implement `split_basename` in `fs/mfs/src/walk.rs`**
 
@@ -1301,16 +1373,16 @@ pub fn parse_trunc(msg: &Message) -> i32 {
 and its test:
 
 ```rust
-    #[test]
-    fn parse_trunc_reads_the_inode_and_ignores_everything_else() {
-        let mut m = empty();
-        wr_i32(&mut m, FS_INO_OFF, 7);
-        wr_i32(&mut m, FS_GRANT_OFF, 0x1234);
-        wr_i32(&mut m, FS_LEN_OFF, 512);
-        assert_eq!(parse_trunc(&m), 7);
-        // A zeroed payload reads as inode 0, which the server refuses as EINVAL.
-        assert_eq!(parse_trunc(&empty()), 0);
-    }
+#[test]
+fn parse_trunc_reads_the_inode_and_ignores_everything_else() {
+    let mut m = empty();
+    wr_i32(&mut m, FS_INO_OFF, 7);
+    wr_i32(&mut m, FS_GRANT_OFF, 0x1234);
+    wr_i32(&mut m, FS_LEN_OFF, 512);
+    assert_eq!(parse_trunc(&m), 7);
+    // A zeroed payload reads as inode 0, which the server refuses as EINVAL.
+    assert_eq!(parse_trunc(&empty()), 0);
+}
 ```
 
 - [ ] **Step 7: Run the tests to verify they pass**
@@ -1351,17 +1423,36 @@ required-features = \"server\" and is compiled by no CI job."
 ## Task 4: The leak fix — a second staging buffer, and `do_write` restaged
 
 **Files:**
+
 - Modify: `fs/mfs/src/main.rs` (the buffer section near `BlockBuf`/`Blocks`; `main`; `do_write`)
 
 **Interfaces:**
+
 - Consumes: nothing from Tasks 1–3.
-- Produces: `struct Stage` with `Stage::addr() -> u64` and `fill(&mut self, granter: Endpoint, gid: i32, len: usize) -> Result<&[u8], i32>`; `do_write` gains a `stage: &mut Stage` parameter.
+- Produces: `struct Stage` with `Stage::addr() -> u64` and `fill(&mut self, granter: Endpoint, gid:
+  i32, len: usize) -> Result<&[u8], i32>`; `do_write` gains a `stage: &mut Stage` parameter.
 
-**What this closes.** Slice 5.10a's `do_write` allocates the zone (step 3) *before* it copies the client's bytes (step 4), and that copy is **client-controlled**: VFS range-checks the caller's buffer but cannot check that it is mapped — the kernel's page-table walk is the gate (D5) — so `write(fd, unmapped_va, 4096)` reaches MFS with a well-formed magic grant and fails at the safecopy, leaving the bitmap bit set and the inode never written back. Looping it exhausts the image's free zones (185 in the musl flavour, so 93–185 calls) and every later write, legitimate ones included, answers `ENOSPC` for the rest of the boot.
+**What this closes.** Slice 5.10a's `do_write` allocates the zone (step 3) *before* it copies the
+client's bytes (step 4), and that copy is **client-controlled**: VFS range-checks the caller's
+buffer but cannot check that it is mapped — the kernel's page-table walk is the gate (D5) — so
+`write(fd, unmapped_va, 4096)` reaches MFS with a well-formed magic grant and fails at the safecopy,
+leaving the bitmap bit set and the inode never written back. Looping it exhausts the image's free
+zones (185 in the musl flavour, so 93–185 calls) and every later write, legitimate ones included,
+answers `ENOSPC` for the rest of the boot.
 
-**And why the fix is not a rollback.** Clearing the bit on the error path is *wrong* in one of the three cases 5.10a enumerated: an indirect slot whose indirect block already existed does not leak, because the block on disk still names the zone — so freeing the bit there would hand out a zone two files share, the exact corruption the allocation ordering exists to prevent. Staging the bytes *before* the allocation removes the question, and turns a three-case table into one sentence: **no client-controlled failure occurs after an allocation.**
+**And why the fix is not a rollback.** Clearing the bit on the error path is *wrong* in one of the
+three cases 5.10a enumerated: an indirect slot whose indirect block already existed does not leak,
+because the block on disk still names the zone — so freeing the bit there would hand out a zone two
+files share, the exact corruption the allocation ordering exists to prevent. Staging the bytes
+*before* the allocation removes the question, and turns a three-case table into one sentence: **no
+client-controlled failure occurs after an allocation.**
 
-**Why a second static and not a `main`-frame local.** A server stack is exactly one page; a 4 KiB local would put the frame base below the mapping, and VM turns that fault into a SIGSEGV that prints nothing `tests/qemu-boot.forbidden` catches. `.bss` is not the constrained resource here — the stack is. This does not relax `Blocks`'s discipline: `Stage` is a second capability token with a single purpose, and truncate deliberately does not borrow it (C8 removes the need), so the invariant stays one sentence rather than becoming a shared-buffer discipline.
+**Why a second static and not a `main`-frame local.** A server stack is exactly one page; a 4 KiB
+local would put the frame base below the mapping, and VM turns that fault into a SIGSEGV that prints
+nothing `tests/qemu-boot.forbidden` catches. `.bss` is not the constrained resource here — the stack
+is. This does not relax `Blocks`'s discipline: `Stage` is a second capability token with a single
+purpose, and truncate deliberately does not borrow it (C8 removes the need), so the invariant stays
+one sentence rather than becoming a shared-buffer discipline.
 
 - [ ] **Step 1: Add the buffer and its capability**
 
@@ -1456,20 +1547,22 @@ impl Stage {
 Beside `let mut blocks = device(&mut grants, mem_endpoint());`:
 
 ```rust
-    let mut stage = Stage;
+let mut stage = Stage;
 ```
 
 and in the dispatch `match`:
 
 ```rust
-            FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mut stage, &mount),
+FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mut stage, &mount),
 ```
 
 - [ ] **Step 3: Restage `do_write`**
 
-Change the signature to `fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, stage: &mut Stage, mount: &Option<Mount>) -> i32`.
+Change the signature to `fn do_write(msg: &Message, granter: Endpoint, blocks: &mut Blocks, stage:
+&mut Stage, mount: &Option<Mount>) -> i32`.
 
-Replace everything from the `let (zone, mut dirty) = …` line down to the `sys_safecopy` / `blocks.write` pair with:
+Replace everything from the `let (zone, mut dirty) = …` line down to the `sys_safecopy` /
+`blocks.write` pair with:
 
 ```rust
     // Step 3 (new in slice 5.10b). The client's bytes are staged **before**
@@ -1517,13 +1610,17 @@ Replace everything from the `let (zone, mut dirty) = …` line down to the `sys_
     }
 ```
 
-`staged` borrows `stage` while `window` borrows `blocks` — different objects, so both borrows coexist.
+`staged` borrows `stage` while `window` borrows `blocks` — different objects, so both borrows
+coexist.
 
-Renumber the trailing write-back comment to "Step 6" and leave its text alone: the condition is still **"a zone was assigned *or* the size grew"**, and Task 8's `fs.hole` probe is what finally proves the first half.
+Renumber the trailing write-back comment to "Step 6" and leave its text alone: the condition is
+still **"a zone was assigned *or* the size grew"**, and Task 8's `fs.hole` probe is what finally
+proves the first half.
 
 - [ ] **Step 4: Rewrite `do_write`'s docstring**
 
-Replace the two long paragraphs beginning "**A failure mid-write leaks a zone…**" and "**Whoever fixes this must not simply clear the bit…**" with:
+Replace the two long paragraphs beginning "**A failure mid-write leaks a zone…**" and "**Whoever
+fixes this must not simply clear the bit…**" with:
 
 ```rust
 /// **No client-controlled failure occurs after an allocation** (slice 5.10b).
@@ -1550,7 +1647,9 @@ Replace the two long paragraphs beginning "**A failure mid-write leaks a zone…
 /// the ramdisk itself to fail.
 ```
 
-Also update the numbered step list at the top of the docstring so it names the staging step, and update the module-level "Four things worth knowing" note to mention that there are now two buffers with two capabilities and why.
+Also update the numbered step list at the top of the docstring so it names the staging step, and
+update the module-level "Four things worth knowing" note to mention that there are now two buffers
+with two capabilities and why.
 
 - [ ] **Step 5: Compile and lint**
 
@@ -1570,7 +1669,10 @@ timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release 
 tools/check-boot-log.sh /tmp/boot-t4.log
 ```
 
-Expected: every marker still PASS, `minix.rs init: fs.write ok n=32768 v=32768` included. **There is no new marker yet** — the fix's own proof arrives with init's `leak_probe` in Task 8. What this step establishes is that restaging did not break the happy path, which is 64 write rounds' worth of evidence.
+Expected: every marker still PASS, `minix.rs init: fs.write ok n=32768 v=32768` included. **There is
+no new marker yet** — the fix's own proof arrives with init's `leak_probe` in Task 8. What this step
+establishes is that restaging did not break the happy path, which is 64 write rounds' worth of
+evidence.
 
 - [ ] **Step 7: Commit**
 
@@ -1603,11 +1705,15 @@ stays single-purpose and Blocks's borrow discipline is untouched."
 ## Task 5: MFS — `alloc_inode`, `do_create`, and directory growth
 
 **Files:**
+
 - Modify: `fs/mfs/src/main.rs` (`Mount`, `read_super`, the dispatch, and a new handler section)
 
 **Interfaces:**
-- Consumes: `callnr::FS_CREATE` (Task 1); `write::{dirent_slot, DirentSlot, dir_append_offset}` and `walk::split_basename` (Task 3).
-- Produces: `do_create`, `create`, `find_free_slot`, `insert_entry`, `alloc_inode`; `Mount` gains `ninodes: u32`.
+
+- Consumes: `callnr::FS_CREATE` (Task 1); `write::{dirent_slot, DirentSlot, dir_append_offset}` and
+  `walk::split_basename` (Task 3).
+- Produces: `do_create`, `create`, `find_free_slot`, `insert_entry`, `alloc_inode`; `Mount` gains
+  `ninodes: u32`.
 
 - [ ] **Step 1: Give `Mount` the superblock's inode count**
 
@@ -1705,7 +1811,8 @@ Beside the other module constants:
 const NEW_FILE_MODE: u16 = I_REGULAR | 0o644;
 ```
 
-Import `I_REGULAR` from `minixrs_mfs::inode` and `DIRENT_SIZE`, `DirEntry` from `minixrs_mfs::dirent`.
+Import `I_REGULAR` from `minixrs_mfs::inode` and `DIRENT_SIZE`, `DirEntry` from
+`minixrs_mfs::dirent`.
 
 - [ ] **Step 4: Add the handler and its three helpers**
 
@@ -1868,7 +1975,8 @@ fn insert_entry(
 
 - [ ] **Step 5: Route it**
 
-Add `FS_CREATE => do_create(&mut msg, &mut blocks, &mount),` to the dispatch `match`, and `FS_CREATE` plus `EEXIST` to the imports.
+Add `FS_CREATE => do_create(&mut msg, &mut blocks, &mount),` to the dispatch `match`, and
+`FS_CREATE` plus `EEXIST` to the imports.
 
 - [ ] **Step 6: Compile and lint**
 
@@ -1886,7 +1994,9 @@ timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release 
 tools/check-boot-log.sh /tmp/boot-t5.log
 ```
 
-Expected: every existing marker still PASS. **Nothing sends `FS_CREATE` yet** — VFS gains that in Task 7 and init proves it in Task 8. What this step establishes is that adding a dispatch arm and a `Mount` field broke nothing.
+Expected: every existing marker still PASS. **Nothing sends `FS_CREATE` yet** — VFS gains that in
+Task 7 and init proves it in Task 8. What this step establishes is that adding a dispatch arm and a
+`Mount` field broke nothing.
 
 - [ ] **Step 8: Commit**
 
@@ -1918,13 +2028,20 @@ there is no second path to diverge."
 ## Task 6: MFS — `do_trunc` and `free_zone`
 
 **Files:**
+
 - Modify: `fs/mfs/src/main.rs`
 
 **Interfaces:**
-- Consumes: `callnr::FS_TRUNC` (Task 1); `write::{bitmap_clear, indirect_slots_used}` and `proto::parse_trunc` (Task 3).
+
+- Consumes: `callnr::FS_TRUNC` (Task 1); `write::{bitmap_clear, indirect_slots_used}` and
+  `proto::parse_trunc` (Task 3).
 - Produces: `do_trunc`, `free_zones_of`, `free_zone`.
 
-**A correction to the spec's §5.5 step 4.** It says bitmap blocks are "visited in order and each is read once". With a single block buffer that is not achievable while the *indirect* block also has to be consulted: reading a bitmap block evicts the indirect block, so each indirect slot costs a re-read. The implementation below does exactly that and says so. The cost is bounded by C8's slot count (two, for a 32 KiB file), which is the whole reason that bound exists.
+**A correction to the spec's §5.5 step 4.** It says bitmap blocks are "visited in order and each is
+read once". With a single block buffer that is not achievable while the *indirect* block also has to
+be consulted: reading a bitmap block evicts the indirect block, so each indirect slot costs a
+re-read. The implementation below does exactly that and says so. The cost is bounded by C8's slot
+count (two, for a 32 KiB file), which is the whole reason that bound exists.
 
 - [ ] **Step 1: Add `free_zone`**
 
@@ -2087,7 +2204,8 @@ fn do_trunc(msg: &Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
 
 - [ ] **Step 4: Route it**
 
-Add `FS_TRUNC => do_trunc(&msg, &mut blocks, &mount),` to the dispatch, and `FS_TRUNC` to the imports.
+Add `FS_TRUNC => do_trunc(&msg, &mut blocks, &mount),` to the dispatch, and `FS_TRUNC` to the
+imports.
 
 - [ ] **Step 5: Compile, lint, boot**
 
@@ -2132,13 +2250,19 @@ across a bitmap read-modify-write, which one buffer cannot do."
 ## Task 7: VFS — the flags field, `O_CREAT` / `O_TRUNC` routing, and four denial probes
 
 **Files:**
+
 - Modify: `servers/vfs/src/open.rs`
 - Modify: `servers/vfs/src/main.rs` (`do_open`, `fs_lookup`, `fs_denials`, `FS_DENIAL_PROBES`)
 - Test: `servers/vfs/src/open.rs`'s `mod tests`
 
 **Interfaces:**
-- Consumes: `callnr::{FS_CREATE, FS_TRUNC, VFS_FLAGS_OFF}` and `fcntl::{O_ACCMODE, O_RDWR, O_CREAT, O_TRUNC, O_KNOWN}` (Task 1); MFS serving both requests (Tasks 5, 6); `rootfs::ROOTFS_DENY_PATH` (Task 2).
-- Produces: `open::OpenRequest::flags`, `open::OpenFlags { create, truncate }`, `open::validate_flags(flags: i32) -> Result<OpenFlags, i32>`; `fs_path_request`, `fs_create`, `fs_trunc` in `main.rs`; `FS_DENIAL_PROBES = 14`.
+
+- Consumes: `callnr::{FS_CREATE, FS_TRUNC, VFS_FLAGS_OFF}` and `fcntl::{O_ACCMODE, O_RDWR, O_CREAT,
+  O_TRUNC, O_KNOWN}` (Task 1); MFS serving both requests (Tasks 5, 6); `rootfs::ROOTFS_DENY_PATH`
+  (Task 2).
+- Produces: `open::OpenRequest::flags`, `open::OpenFlags { create, truncate }`,
+  `open::validate_flags(flags: i32) -> Result<OpenFlags, i32>`; `fs_path_request`, `fs_create`,
+  `fs_trunc` in `main.rs`; `FS_DENIAL_PROBES = 14`.
 
 - [ ] **Step 1: Write the failing `validate_flags` tests**
 
@@ -2216,7 +2340,8 @@ Append to `servers/vfs/src/open.rs`'s `mod tests`:
     }
 ```
 
-Add `use minixrs_kernel_shared::callnr::VFS_FLAGS_OFF;` and the `fcntl` imports to the test module (or the file, as the compiler asks).
+Add `use minixrs_kernel_shared::callnr::VFS_FLAGS_OFF;` and the `fcntl` imports to the test module
+(or the file, as the compiler asks).
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -2363,7 +2488,9 @@ Replace `servers/vfs/src/main.rs`'s `do_open` body from `let req = open::parse(m
     }
 ```
 
-**`Fd::File` gains no flags.** The access mode is ignored, `O_CREAT` and `O_TRUNC` are consumed at open time by definition, and every other bit is refused — so there is nothing left for a descriptor to remember. Update `do_open`'s docstring to say so.
+**`Fd::File` gains no flags.** The access mode is ignored, `O_CREAT` and `O_TRUNC` are consumed at
+open time by definition, and every other bit is refused — so there is nothing left for a descriptor
+to remember. Update `do_open`'s docstring to say so.
 
 - [ ] **Step 5: Add the two wire helpers, sharing `fs_lookup`'s marshaller**
 
@@ -2442,7 +2569,9 @@ Every existing `fs.*` marker staying green is what proves the `fs_lookup` refact
 
 - [ ] **Step 6: Extend `fs_denials` by four**
 
-These are direct FS requests, so this is the **only** place `EEXIST` and MFS's own `EISDIR` can be probed: VFS's `open` answers `EISDIR` from `classify` before either new request is ever sent. Insert before the `if denied == FS_DENIAL_PROBES` line:
+These are direct FS requests, so this is the **only** place `EEXIST` and MFS's own `EISDIR` can be
+probed: VFS's `open` answers `EISDIR` from `classify` before either new request is ever sent. Insert
+before the `if denied == FS_DENIAL_PROBES` line:
 
 ```rust
     // Slice 5.10b: `FS_CREATE` on an existing name is `EEXIST` — **and the target
@@ -2492,7 +2621,8 @@ These are direct FS requests, so this is the **only** place `EEXIST` and MFS's o
     }
 ```
 
-Change `const FS_DENIAL_PROBES: usize = 10;` to `= 14;` and extend its docstring with the four bullets. Add `EEXIST` and `ROOTFS_DENY_PATH` to the imports.
+Change `const FS_DENIAL_PROBES: usize = 10;` to `= 14;` and extend its docstring with the four
+bullets. Add `EEXIST` and `ROOTFS_DENY_PATH` to the imports.
 
 - [ ] **Step 7: Test, lint, and boot**
 
@@ -2505,7 +2635,8 @@ timeout 120 cargo run -p minixrs-kernel --target aarch64-unknown-none --release 
 grep -a 'fs\.deny' /tmp/boot-t7.log
 ```
 
-Expected: `[diag vfs] fs.deny ok n=14`. `tools/check-boot-log.sh` will still report `fs.deny ok n=10` MISSING — that marker file is updated in Task 9. Every *other* marker must PASS.
+Expected: `[diag vfs] fs.deny ok n=14`. `tools/check-boot-log.sh` will still report `fs.deny ok
+n=10` MISSING — that marker file is updated in Task 9. Every *other* marker must PASS.
 
 - [ ] **Step 8: Commit**
 
@@ -2540,13 +2671,19 @@ duplicate entry shadowing the first with every other marker still green."
 ## Task 8: init — five new probes, and `open.deny` 7 → 11
 
 **Files:**
+
 - Modify: `userland/init/src/main.rs`
 
 **Interfaces:**
-- Consumes: everything above. `fcntl::{O_RDWR, O_CREAT, O_TRUNC, O_UNKNOWN_BIT}`, `callnr::VFS_FLAGS_OFF`, and the `rootfs::ROOTFS_*` constants from Task 2.
+
+- Consumes: everything above. `fcntl::{O_RDWR, O_CREAT, O_TRUNC, O_UNKNOWN_BIT}`,
+  `callnr::VFS_FLAGS_OFF`, and the `rootfs::ROOTFS_*` constants from Task 2.
 - Produces: the five boot markers Task 9 pins.
 
-init reports **through the path under test** — it has no `SYS_DIAGCTL`, being user-grade — so `ok` lines go to fd 1 and every `FAIL` to fd 2, both through VFS. Every count in a marker is a **literal**, because init has no way to format an integer; a `const _` beside each is what makes the constant moving underneath it loud at compile time.
+init reports **through the path under test** — it has no `SYS_DIAGCTL`, being user-grade — so `ok`
+lines go to fd 1 and every `FAIL` to fd 2, both through VFS. Every count in a marker is a
+**literal**, because init has no way to format an integer; a `const _` beside each is what makes the
+constant moving underneath it loud at compile time.
 
 - [ ] **Step 1: Give `open_request` a flags argument**
 
@@ -2684,7 +2821,8 @@ fn report_step(vfs: Endpoint, marker: &[u8], what: &[u8]) {
 }
 ```
 
-Note `text.len() <= FS_MAX_IO` for both callers, which `rootfs.rs`'s `const _`s pin, so the single `vfs_read` cannot be short for any reason but a defect.
+Note `text.len() <= FS_MAX_IO` for both callers, which `rootfs.rs`'s `const _`s pin, so the single
+`vfs_read` cannot be short for any reason but a defect.
 
 - [ ] **Step 4: Add `create_demo` and `dirgrow_demo`**
 
@@ -2957,27 +3095,28 @@ const LEAK_WRITE_LEN: usize = 64;
 const _: () = assert!(LEAK_WRITE_LEN > 0);
 ```
 
-Check `vfs_request`'s existing signature and match it; it is what `vfs_read`/`vfs_close` already go through.
+Check `vfs_request`'s existing signature and match it; it is what `vfs_read`/`vfs_close` already go
+through.
 
 - [ ] **Step 8: Order them in `main`'s prologue**
 
 ```rust
-    announce(vfs);
-    fs_demo(vfs);
-    write_demo(vfs);
-    // Slice 5.10b. `trunc_demo` runs **immediately after** `write_demo`: it
-    // truncates what that probe wrote, and running it first would truncate an
-    // empty file and prove nothing.
-    trunc_demo(vfs);
-    create_demo(vfs);
-    dirgrow_demo(vfs);
-    hole_demo(vfs);
-    // The leak probe issues 256 deliberately failing writes, so it goes last
-    // among the filesystem probes — the standing rule that a battery of
-    // malformed requests must not be able to take the proofs before it down with
-    // it if a peer wedges on one.
-    leak_probe(vfs);
-    exec_denials(pm, vfs);
+announce(vfs);
+fs_demo(vfs);
+write_demo(vfs);
+// Slice 5.10b. `trunc_demo` runs **immediately after** `write_demo`: it
+// truncates what that probe wrote, and running it first would truncate an
+// empty file and prove nothing.
+trunc_demo(vfs);
+create_demo(vfs);
+dirgrow_demo(vfs);
+hole_demo(vfs);
+// The leak probe issues 256 deliberately failing writes, so it goes last
+// among the filesystem probes — the standing rule that a battery of
+// malformed requests must not be able to take the proofs before it down with
+// it if a peer wedges on one.
+leak_probe(vfs);
+exec_denials(pm, vfs);
 ```
 
 - [ ] **Step 9: Extend `open_denials` by four**
@@ -3018,7 +3157,8 @@ Insert before the `close-twice` block, and change the marker and constant to 11:
     }
 ```
 
-Change the final line to `b"minix.rs init: open.deny ok n=11\n"`, set `const OPEN_DENIAL_PROBES: usize = 11;`, and extend `open_denials`' docstring with the four bullets.
+Change the final line to `b"minix.rs init: open.deny ok n=11\n"`, set `const OPEN_DENIAL_PROBES:
+usize = 11;`, and extend `open_denials`' docstring with the four bullets.
 
 - [ ] **Step 10: Lint and boot**
 
@@ -3042,7 +3182,11 @@ minix.rs init: fs.leak ok n=256
 [diag vfs] fs.deny ok n=14
 ```
 
-**The timeout is 180 s here, not 120.** The leak probe adds 256 round trips and this is the first boot that runs them; Task 9 measures the real cost and decides the CI budget. If a marker is missing, its `FAIL` spelling names the failing step — and before diagnosing anything, `grep -a 'error\[E' /tmp/boot-t8.log` to rule out a build failure, which produces a log with no kernel output at all and reports every marker MISSING.
+**The timeout is 180 s here, not 120.** The leak probe adds 256 round trips and this is the first
+boot that runs them; Task 9 measures the real cost and decides the CI budget. If a marker is
+missing, its `FAIL` spelling names the failing step — and before diagnosing anything, `grep -a
+'error\[E' /tmp/boot-t8.log` to rule out a build failure, which produces a log with no kernel output
+at all and reports every marker MISSING.
 
 - [ ] **Step 11: Commit**
 
@@ -3080,6 +3224,7 @@ loudly instead of passing vacuously."
 ## Task 9: Markers, the boot budget, mutation matrix, and the docs
 
 **Files:**
+
 - Modify: `tests/qemu-boot.expected`, `tests/qemu-boot.forbidden`
 - Modify: `.github/workflows/ci.yml` (only if the measurement in Step 3 says so)
 - Modify: `book/` — the filesystem and VFS chapters
@@ -3088,7 +3233,10 @@ loudly instead of passing vacuously."
 
 - [ ] **Step 1: Update the marker files**
 
-In `tests/qemu-boot.expected`, change `[diag vfs] fs.deny ok n=10` to `n=14` and `minix.rs init: open.deny ok n=7` to `n=11`, each with a comment naming what the four new probes are (mirroring how the existing counts are annotated). Then add the five new lines **in prologue order**, each with the comment style the file already uses — what the marker asserts, and what its absence would mean:
+In `tests/qemu-boot.expected`, change `[diag vfs] fs.deny ok n=10` to `n=14` and `minix.rs init:
+open.deny ok n=7` to `n=11`, each with a comment naming what the four new probes are (mirroring how
+the existing counts are annotated). Then add the five new lines **in prologue order**, each with the
+comment style the file already uses — what the marker asserts, and what its absence would mean:
 
 ```
 minix.rs init: fs.trunc ok n=0
@@ -3120,11 +3268,16 @@ Then:
 tools/check-boot-log.sh /tmp/boot-t8.log
 ```
 
-Expected: every marker PASS, nothing forbidden found. **Do not** hand-copy the counts from this plan — recompute `n=25` from `ROOTFS_CREATE_TEXT.len()`; slice 5.8's plan said `n=30` for a 31-byte constant.
+Expected: every marker PASS, nothing forbidden found. **Do not** hand-copy the counts from this plan
+— recompute `n=25` from `ROOTFS_CREATE_TEXT.len()`; slice 5.8's plan said `n=30` for a 31-byte
+constant.
 
 - [ ] **Step 2: Measure the boot cost against the merge base**
 
-The leak probe's 256 extra round trips are the dominant new cost, and a slice can break the timing budget with "it passes locally" being no check at all. Measure the **last required marker's position as a fraction of a fixed-timeout log**, on the **musl** flavour — the one CI builds — against the same number at the merge base.
+The leak probe's 256 extra round trips are the dominant new cost, and a slice can break the timing
+budget with "it passes locally" being no check at all. Measure the **last required marker's position
+as a fraction of a fixed-timeout log**, on the **musl** flavour — the one CI builds — against the
+same number at the merge base.
 
 ```bash
 # After (current branch). Build first, so the rebuild does not land inside the
@@ -3134,7 +3287,9 @@ timeout 240 cargo run -p minixrs-kernel --target aarch64-unknown-none --release 
 echo "after: $(grep -abo 'hello: errno ok' /tmp/after.log | head -1 | cut -d: -f1) of $(wc -c < /tmp/after.log)"
 ```
 
-Then the merge base. **`git stash` does not give you the "before" once the slice is committed on a branch** — detach to the merge base, and stash only any uncommitted doc edits so `target/` and `target/musl-sysroot` survive and the two boots differ in nothing but the code:
+Then the merge base. **`git stash` does not give you the "before" once the slice is committed on a
+branch** — detach to the merge base, and stash only any uncommitted doc edits so `target/` and
+`target/musl-sysroot` survive and the two boots differ in nothing but the code:
 
 ```bash
 git checkout --detach $(git merge-base main HEAD)
@@ -3144,11 +3299,20 @@ echo "before: $(grep -abo 'hello: errno ok' /tmp/before.log | head -1 | cut -d: 
 git checkout feature/slice-5.10b-mfs-create-truncate
 ```
 
-Record both fractions in the PR description. **If the ratio climbs materially, raise `qemu-smoke`'s budget in `.github/workflows/ci.yml` with real headroom** — CI's TCG is slower than local, so think in the *ratio*, not in local wall-clock seconds. Both previous raises (45 → 120 → 240 s) came from exactly this measurement. The spec's R4 fallback, if the cost is unacceptable: derive the leak probe's count from the image's real free-zone count instead of from `ROOTFS_IMAGE_BLOCKS` — **but only if that number can be made config-independent**, which is why it is the fallback and not the design.
+Record both fractions in the PR description. **If the ratio climbs materially, raise `qemu-smoke`'s
+budget in `.github/workflows/ci.yml` with real headroom** — CI's TCG is slower than local, so think
+in the *ratio*, not in local wall-clock seconds. Both previous raises (45 → 120 → 240 s) came from
+exactly this measurement. The spec's R4 fallback, if the cost is unacceptable: derive the leak
+probe's count from the image's real free-zone count instead of from `ROOTFS_IMAGE_BLOCKS` — **but
+only if that number can be made config-independent**, which is why it is the fallback and not the
+design.
 
 - [ ] **Step 3: Run the mutation matrix**
 
-Apply, observe the named marker move, revert. **Against an uncommitted tree**, with every file you will mutate copied to the scratchpad *first* — including files this slice **adds**, since `git checkout -- <untracked file>` does not restore, it *errors*, and behind a `|| true` it leaves the mutation in the tree (slice 5.9 did exactly this).
+Apply, observe the named marker move, revert. **Against an uncommitted tree**, with every file you
+will mutate copied to the scratchpad *first* — including files this slice **adds**, since `git
+checkout -- <untracked file>` does not restore, it *errors*, and behind a `|| true` it leaves the
+mutation in the tree (slice 5.9 did exactly this).
 
 ```bash
 SCRATCH=/private/tmp/claude-501/-Users-kevinbarnard-src-minixrs/76546612-6807-4160-80ee-2f57c79353aa/scratchpad
@@ -3159,20 +3323,23 @@ for f in fs/mfs/src/main.rs fs/mfs/src/write.rs servers/vfs/src/main.rs \
 done
 ```
 
-| # | Mutation | Expected |
-|---|---|---|
-| 1 | Move the `stage.fill` call back to after `place_zone` in `do_write` | `fs.leak FAIL enospc` |
-| 2 | Drop `dirty` from `do_write`'s write-back condition (`if dirty \|\| grown != …` → size only) | `fs.hole FAIL verify off=0` |
-| 3 | In `create`, insert the dirent **before** `write_inode` | `fs.create FAIL verify` — the read-back is garbage |
-| 4 | Free the bits before writing the inode in `do_trunc` (C7 reversed) | **no marker moves.** Record as *unproven*: it needs a failure between the two steps that nothing can induce |
-| 5 | Delete `do_create`'s `EEXIST` arm (make `find_free_slot` ignore `Occupied`) | `fs.deny FAIL create-exists` — and the inode comparison is what catches it, not the errno alone |
-| 6 | In `insert_entry`, return `ENOSPC` instead of appending when `free.is_none()` | `fs.dirgrow FAIL open` |
-| 7 | `bitmap_clear` clears `bit + 1` | `fs.trunc` or a later write FAILs |
-| 8 | `validate_flags` ignores unknown bits instead of `EINVAL` | `open.deny FAIL bad-flag` |
+| # | Mutation                                                                                     | Expected                                                                                                    |
+| - | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 1 | Move the `stage.fill` call back to after `place_zone` in `do_write`                          | `fs.leak FAIL enospc`                                                                                       |
+| 2 | Drop `dirty` from `do_write`'s write-back condition (`if dirty \|\| grown != …` → size only) | `fs.hole FAIL verify off=0`                                                                                 |
+| 3 | In `create`, insert the dirent **before** `write_inode`                                      | `fs.create FAIL verify` — the read-back is garbage                                                          |
+| 4 | Free the bits before writing the inode in `do_trunc` (C7 reversed)                           | **no marker moves.** Record as *unproven*: it needs a failure between the two steps that nothing can induce |
+| 5 | Delete `do_create`'s `EEXIST` arm (make `find_free_slot` ignore `Occupied`)                  | `fs.deny FAIL create-exists` — and the inode comparison is what catches it, not the errno alone             |
+| 6 | In `insert_entry`, return `ENOSPC` instead of appending when `free.is_none()`                | `fs.dirgrow FAIL open`                                                                                      |
+| 7 | `bitmap_clear` clears `bit + 1`                                                              | `fs.trunc` or a later write FAILs                                                                           |
+| 8 | `validate_flags` ignores unknown bits instead of `EINVAL`                                    | `open.deny FAIL bad-flag`                                                                                   |
 
-Row 4 is stated rather than hidden: it is a correct invariant this slice cannot probe, and saying so is the 5.10a `dirty` lesson applied to a new rule rather than repeated by omission.
+Row 4 is stated rather than hidden: it is a correct invariant this slice cannot probe, and saying so
+is the 5.10a `dirty` lesson applied to a new rule rather than repeated by omission.
 
-Before recording **any** observation, rule out a build failure — `kernel/build.rs` panics on the nested server build, the log then holds no kernel output at all, and `check-boot-log.sh` reports every marker MISSING, which is indistinguishable from a mutation that worked:
+Before recording **any** observation, rule out a build failure — `kernel/build.rs` panics on the
+nested server build, the log then holds no kernel output at all, and `check-boot-log.sh` reports
+every marker MISSING, which is indistinguishable from a mutation that worked:
 
 ```bash
 grep -a 'error\[E' /tmp/mut.log || echo "no compile errors"
@@ -3185,11 +3352,13 @@ for f in ...; do cp "$SCRATCH/mutation/$(echo "$f" | tr / _)" "$f"; diff -q "$SC
 grep -rn MUTATION --include='*.rs' . || echo "clean"
 ```
 
-The final `grep -rn MUTATION` sweep — never a restore command's exit status — is what proves the tree clean.
+The final `grep -rn MUTATION` sweep — never a restore command's exit status — is what proves the
+tree clean.
 
 - [ ] **Step 4: Run the three-boot flavour matrix**
 
-The **SDK flavour has zero CI coverage**, so this is local-only and mandatory whenever the image changes — and the image changed a lot here.
+The **SDK flavour has zero CI coverage**, so this is local-only and mandatory whenever the image
+changes — and the image changed a lot here.
 
 ```bash
 # 1. SDK, if one is installed.
@@ -3212,7 +3381,10 @@ MINIXRS_SDK=/nonexistent cargo kernel-aarch64 && \
 mv target/musl-sysroot.aside target/musl-sysroot
 ```
 
-Rows 1 and 3 lose the five C markers by design; every `fs.*`, `open.deny` and `fs.deny` marker must PASS in **all three**, which is the point — no number in a new marker may differ between flavours. The image's free-zone and free-inode headroom is what row 1 and row 3 are really testing (spec R1): `/bin/hello` is ~46 KB with the SDK and ~15 KB in the fallback, so the margins differ.
+Rows 1 and 3 lose the five C markers by design; every `fs.*`, `open.deny` and `fs.deny` marker must
+PASS in **all three**, which is the point — no number in a new marker may differ between flavours.
+The image's free-zone and free-inode headroom is what row 1 and row 3 are really testing (spec R1):
+`/bin/hello` is ~46 KB with the SDK and ~15 KB in the fallback, so the margins differ.
 
 - [ ] **Step 5: Also run the stub-free configuration**
 
@@ -3222,28 +3394,43 @@ timeout 240 cargo run -p minixrs-kernel --target aarch64-unknown-none --release 
 grep -a 'fs\.' /tmp/nostub.log
 ```
 
-`--no-default-features` reaches the markers several times faster (stub C's kernel-call flood dominates a default boot), and it is the configuration where init's *first* reap really is a child it forked — the trap slice 5.5 recorded. Nothing this slice adds is keyed on a reap, but confirming the `fs.*` markers appear in both configurations is what makes them non-vacuous.
+`--no-default-features` reaches the markers several times faster (stub C's kernel-call flood
+dominates a default boot), and it is the configuration where init's *first* reap really is a child
+it forked — the trap slice 5.5 recorded. Nothing this slice adds is keyed on a reap, but confirming
+the `fs.*` markers appear in both configurations is what makes them non-vacuous.
 
 - [ ] **Step 6: Update the book**
 
-`docs.yml` is path-filtered to `book/**`, so a slice that forgets the book ships a Pages site contradicting its own code, silently and indefinitely — slice 5.10a reached its final gate with the mdBook still asserting `BDEV_WRITE` answers `EROFS`. Every task in a subagent run sees one crate, so nobody re-reads the published docs; this step is where that gets caught.
+`docs.yml` is path-filtered to `book/**`, so a slice that forgets the book ships a Pages site
+contradicting its own code, silently and indefinitely — slice 5.10a reached its final gate with the
+mdBook still asserting `BDEV_WRITE` answers `EROFS`. Every task in a subagent run sees one crate, so
+nobody re-reads the published docs; this step is where that gets caught.
 
 ```bash
 grep -rn 'FS_LOOKUP\|FS_WRITE\|NR_FS_MSGS\|VFS_OPEN\|O_CREAT\|create\|truncate\|read-only\|read only' book/src/ | head -40
 mdbook build book
 ```
 
-Update at minimum: the FS-band request table (now six requests), the `VFS_OPEN` payload description (three fields), any sentence describing the filesystem as read-only or describing `open` as lookup-only, and the write path's description of what happens on a failed write (the leak is fixed; the docstring's three-case table is gone).
+Update at minimum: the FS-band request table (now six requests), the `VFS_OPEN` payload description
+(three fields), any sentence describing the filesystem as read-only or describing `open` as
+lookup-only, and the write path's description of what happens on a failed write (the leak is fixed;
+the docstring's three-case table is gone).
 
 - [ ] **Step 7: Update the plan trackers**
 
 In **both** `docs/plan.md` and `docs/plans/phase-5-musl-fs.md`:
 
-- Flip **5.10a**'s stale `◀ ready (branch …, pending merge)` to `✓ shipped (PR #53, merged 2026-08-24)`. It is merged; the marker was never reconciled. Confirm the PR number and date from `git log` rather than from this plan.
+- Flip **5.10a**'s stale `◀ ready (branch …, pending merge)` to `✓ shipped (PR #53, merged
+  2026-08-24)`. It is merged; the marker was never reconciled. Confirm the PR number and date from
+  `git log` rather than from this plan.
 - Mark **5.10b** `◀ ready (branch feature/slice-5.10b-mfs-create-truncate, pending merge)`.
 - Slide `◀ next` to **5.11**.
-- Reconcile any *other* older `◀ ready` markers against `git log` — stale "pending merge" labels accumulate otherwise.
-- In `phase-5-musl-fs.md`'s 5.10b section, link the spec by relative path rather than restating it, and record the two corrections this slice made to 5.10a's hand-off: `FS_TRUNC` does **not** make the `dirty` case reachable (only a hole below EOF does), and the C7 truncate ordering is **unproven** for the same class of reason the `dirty` condition was.
+- Reconcile any *other* older `◀ ready` markers against `git log` — stale "pending merge" labels
+  accumulate otherwise.
+- In `phase-5-musl-fs.md`'s 5.10b section, link the spec by relative path rather than restating it,
+  and record the two corrections this slice made to 5.10a's hand-off: `FS_TRUNC` does **not** make
+  the `dirty` case reachable (only a hole below EOF does), and the C7 truncate ordering is
+  **unproven** for the same class of reason the `dirty` condition was.
 
 - [ ] **Step 8: Revise CLAUDE.md**
 
@@ -3251,7 +3438,11 @@ In **both** `docs/plan.md` and `docs/plans/phase-5-musl-fs.md`:
 /claude-md-management:revise-claude-md
 ```
 
-The slice bullet should carry what a future slice cannot re-derive: the staging-buffer invariant and why it is not a rollback; that `Occupied` must win over `Free` across *all* blocks, not just within one; that the C7 ordering has no probe; that `/full` and `/etc/holey` exist because two arms are otherwise unreachable in both boot configurations; and that a denial probe's flag must be spelled relative to `O_KNOWN`.
+The slice bullet should carry what a future slice cannot re-derive: the staging-buffer invariant and
+why it is not a rollback; that `Occupied` must win over `Free` across *all* blocks, not just within
+one; that the C7 ordering has no probe; that `/full` and `/etc/holey` exist because two arms are
+otherwise unreachable in both boot configurations; and that a denial probe's flag must be spelled
+relative to `O_KNOWN`.
 
 - [ ] **Step 9: Final gates**
 
@@ -3288,7 +3479,9 @@ forward, so only a hole below EOF does, which is why the image now ships one --
 and the truncate ordering is itself unproven, for the same class of reason."
 ```
 
-**Then stop.** Pushing, opening a PR, and triggering CI all require the user's explicit approval. Surface the branch, the boot-timing measurement from Step 2, the mutation matrix results from Step 3 (row 4 included, as unproven), and the three-flavour matrix from Step 4, and ask.
+**Then stop.** Pushing, opening a PR, and triggering CI all require the user's explicit approval.
+Surface the branch, the boot-timing measurement from Step 2, the mutation matrix results from Step 3
+(row 4 included, as unproven), and the three-flavour matrix from Step 4, and ask.
 
 ---
 
@@ -3296,19 +3489,45 @@ and the truncate ordering is itself unproven, for the same class of reason."
 
 Checked against the spec, section by section.
 
-**Coverage.** §4.1 → Task 1; §4.2 → Task 1; §4.3 → Task 1; §4.4 → Task 2; §5.1 → Task 3; §5.2 → Task 5; §5.3 → Task 5; §5.4 → Task 4; §5.5 → Task 6; §5.6 → Task 7; §5.7 → Task 2; §5.8 → Task 8; §5.9 → Tasks 7 (`fs.deny`) and 8 (`open.deny`); §6 error taxonomy → Tasks 5–7 inline; §7 invariants → the docstrings each task specifies; §8 verification → Task 9. Every `C1`…`C11` has a task: C1/C2 Task 1+7, C3 Task 5, C4 Task 1+6, C5 Task 5, C6 Task 5, C7 Task 6, C8 Tasks 3+6, C9 Tasks 2+8, C10 Tasks 2+8, C11 Task 4.
+**Coverage.** §4.1 → Task 1; §4.2 → Task 1; §4.3 → Task 1; §4.4 → Task 2; §5.1 → Task 3; §5.2 → Task
+5; §5.3 → Task 5; §5.4 → Task 4; §5.5 → Task 6; §5.6 → Task 7; §5.7 → Task 2; §5.8 → Task 8; §5.9 →
+Tasks 7 (`fs.deny`) and 8 (`open.deny`); §6 error taxonomy → Tasks 5–7 inline; §7 invariants → the
+docstrings each task specifies; §8 verification → Task 9. Every `C1`…`C11` has a task: C1/C2 Task
+1+7, C3 Task 5, C4 Task 1+6, C5 Task 5, C6 Task 5, C7 Task 6, C8 Tasks 3+6, C9 Tasks 2+8, C10 Tasks
+2+8, C11 Task 4.
 
 **Two deviations from the spec, both deliberate and both stated at the point of use:**
 
-1. **§5.5 step 4's batched bitmap walk is not implementable with one block buffer** — reading a bitmap block evicts the indirect block, so each slot costs a re-read. Task 6 says so in the code comment and in the docstring; the cost is bounded by C8's slot count, which is the reason that bound exists.
-2. `Stage::addr()` is written but unused, carrying an `#[allow(dead_code)]` and a comment. It sits beside `Blocks::addr()` because a request that grants over the staging buffer is the obvious next use and a wrong answer there would be a wild copy rather than a compile error. If a reviewer prefers, deleting it is a one-line change with no consequence.
+1. **§5.5 step 4's batched bitmap walk is not implementable with one block buffer** — reading a
+   bitmap block evicts the indirect block, so each slot costs a re-read. Task 6 says so in the code
+   comment and in the docstring; the cost is bounded by C8's slot count, which is the reason that
+   bound exists.
+2. `Stage::addr()` is written but unused, carrying an `#[allow(dead_code)]` and a comment. It sits
+   beside `Blocks::addr()` because a request that grants over the staging buffer is the obvious next
+   use and a wrong answer there would be a wild copy rather than a compile error. If a reviewer
+   prefers, deleting it is a one-line change with no consequence.
 
-**Type consistency.** `Stage::fill` returns `Result<&[u8], i32>` and `do_write` calls it before `place_zone`; `find_free_slot` returns `Result<Option<(u64, usize)>, i32>` and `insert_entry` consumes exactly that; `fs_path_request` returns `Result<(u32, i32, i32), i32>` and `fs_lookup`/`fs_create` both delegate to it, so `do_open`'s two arms destructure the same shape; `validate_flags` returns `Result<OpenFlags, i32>` with the two bool fields `do_open` reads; `create_write_verify` returns `Result<(), &'static [u8]>` whose error feeds `report_step`; `report_at` gained a leading `marker` argument and all three existing call sites are updated in Task 8 Step 2.
+**Type consistency.** `Stage::fill` returns `Result<&[u8], i32>` and `do_write` calls it before
+`place_zone`; `find_free_slot` returns `Result<Option<(u64, usize)>, i32>` and `insert_entry`
+consumes exactly that; `fs_path_request` returns `Result<(u32, i32, i32), i32>` and
+`fs_lookup`/`fs_create` both delegate to it, so `do_open`'s two arms destructure the same shape;
+`validate_flags` returns `Result<OpenFlags, i32>` with the two bool fields `do_open` reads;
+`create_write_verify` returns `Result<(), &'static [u8]>` whose error feeds `report_step`;
+`report_at` gained a leading `marker` argument and all three existing call sites are updated in Task
+8 Step 2.
 
-**Arithmetic worth re-checking during implementation** (verify each against the code, do not take it from here):
+**Arithmetic worth re-checking during implementation** (verify each against the code, do not take it
+from here):
 
-- `/full`: `.` + `..` + 62 = 64 entries × 64 bytes = 4096 = one block exactly. `rootfs.rs`'s `const _` is what enforces it.
-- Inodes: root + 3 directories + 6 `/etc`-and-`/bin` files + 62 filler = 72 shipped, + 3 created at boot = 75, against 128. The *sufficient* check is `kernel/build.rs`'s `free_inodes` assert against the built image.
-- Runtime zones: 9 (`/etc/scratch`) + 1 (`/etc/new`) + 2 (`/full/new` and `/full`'s second block) + 1 (`/etc/holey`'s filled hole) + 1 (`/etc/leak`) = 14. Same: the build asserts it against the image.
-- `O_KNOWN` = 3 | 64 | 512 = 579; `O_UNKNOWN_BIT` = 580 & !579 = 4, which is outside `O_KNOWN`. Two `const _`s pin both properties rather than the value.
-- `ROOTFS_LEAK_PROBES` = 256 must exceed the free-zone count in **every** flavour: ~182 (musl), ~219 (SDK), ~227 (fallback). It does, and Task 9 Step 4 is what confirms it.
+- `/full`: `.` + `..` + 62 = 64 entries × 64 bytes = 4096 = one block exactly. `rootfs.rs`'s `const
+  _` is what enforces it.
+- Inodes: root + 3 directories + 6 `/etc`-and-`/bin` files + 62 filler = 72 shipped, + 3 created at
+  boot = 75, against 128. The *sufficient* check is `kernel/build.rs`'s `free_inodes` assert against
+  the built image.
+- Runtime zones: 9 (`/etc/scratch`) + 1 (`/etc/new`) + 2 (`/full/new` and `/full`'s second block) +
+  1 (`/etc/holey`'s filled hole) + 1 (`/etc/leak`) = 14. Same: the build asserts it against the
+  image.
+- `O_KNOWN` = 3 | 64 | 512 = 579; `O_UNKNOWN_BIT` = 580 & !579 = 4, which is outside `O_KNOWN`. Two
+  `const _`s pin both properties rather than the value.
+- `ROOTFS_LEAK_PROBES` = 256 must exceed the free-zone count in **every** flavour: ~182 (musl), ~219
+  (SDK), ~227 (fallback). It does, and Task 9 Step 4 is what confirms it.

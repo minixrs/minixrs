@@ -8,7 +8,8 @@
 //! `:1795` (`pick_proc`), with two simplifications:
 //!
 //! - Queue linkage is a [`ProcNr`] index (`Proc::next_ready`) rather than a
-//!   raw `struct proc *` — the project-wide convention from `CLAUDE.md`.
+//!   raw `struct proc *` — the project-wide convention from
+//!   `docs/conventions/kernel.md`.
 //! - No per-CPU run queues. Slice 2.4 is single-CPU.
 //!
 //! Concurrency model: the kernel runs DAIF-masked, so neither EL1 code nor

@@ -146,8 +146,8 @@ pub fn mini_pf_send(
     // Both lookups are boot-time invariants: `do_page_fault` has already
     // blocked the faulter on RTS_PAGEFAULT before calling us, so a silent
     // bailout here would strand it blocked forever with no diagnostic. Halt
-    // loudly instead (CLAUDE.md: hard assert for invariants that would
-    // otherwise silently corrupt — here, liveness).
+    // loudly instead (docs/conventions/kernel.md: hard assert for invariants
+    // that would otherwise silently corrupt — here, liveness).
     let fault_idx = proc_index(faulting_nr).expect("mini_pf_send: faulter not in proc table");
     let vm_idx = proc_index(VM_PROC_NR).expect("mini_pf_send: VM server not in proc table");
 
@@ -219,7 +219,8 @@ pub fn mini_sched_no_quantum_send(
     // `scheduler` is a live endpoint (set by boot pre-delegation or
     // `SYS_SCHEDCTL`), and it has already blocked the preempted proc off the run
     // queue. A silent bailout would strand it not-runnable with no diagnostic,
-    // so halt loudly instead (CLAUDE.md: hard assert for a liveness invariant).
+    // so halt loudly instead (docs/conventions/kernel.md: hard assert for a
+    // liveness invariant).
     let preempted_idx =
         proc_index(preempted_nr).expect("mini_sched_no_quantum_send: preempted proc not in table");
     let sched_nr = endpoint_proc(scheduler_e);

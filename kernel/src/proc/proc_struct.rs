@@ -6,7 +6,7 @@
 //! no SMP fields (no `p_cpu_mask`, no `p_stale_tlb`), no profiling counters,
 //! no syscall-trace bookkeeping, no live-update bookkeeping. The IPC
 //! linked-list links use [`Option<ProcNr>`] indices rather than raw pointers
-//! per the convention in `CLAUDE.md`.
+//! per the convention in `docs/conventions/kernel.md`.
 
 use core::sync::atomic::AtomicU32;
 
@@ -122,7 +122,7 @@ pub struct Proc {
     // ----- Run-queue state -------------------------------------------------
     /// Next process in the same priority-band run queue, or `None` if last.
     /// Mirrors MINIX 3's `p_nextready` but as a [`ProcNr`] index per the
-    /// no-raw-pointers convention in `CLAUDE.md`.
+    /// no-raw-pointers convention in `docs/conventions/kernel.md`.
     pub next_ready: Option<ProcNr>,
 
     /// ASCII process name, NUL-padded; first 0 byte terminates.

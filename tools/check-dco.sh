@@ -14,7 +14,8 @@
 # while names get typo'd, transliterated, and reformatted by tooling.
 #
 # Merge commits are skipped -- GitHub's UI writes them and cannot sign them
-# off, which is expected and documented in CLAUDE.md's "Commits" section.
+# off, which is expected and documented in docs/conventions/git-and-prs.md's
+# "Commits" section.
 #
 # An empty range is a FAILURE, not a vacuous pass: the only caller is a PR gate
 # where zero authored commits means the range was computed wrong, and a gate

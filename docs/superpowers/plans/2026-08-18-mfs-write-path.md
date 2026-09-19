@@ -1,25 +1,48 @@
 # Slice 5.10a — MFS Write Path Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
+> (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `write()` reach a real file on the MinixFS root image — `VFS_WRITE` on a file descriptor travels to MFS, which allocates zones and stores bytes through `BDEV_WRITE` on the `memory` ramdisk driver.
+**Goal:** Make `write()` reach a real file on the MinixFS root image — `VFS_WRITE` on a file
+descriptor travels to MFS, which allocates zones and stores bytes through `BDEV_WRITE` on the
+`memory` ramdisk driver.
 
-**Architecture:** One new FS-band request (`FS_WRITE`, reusing `FS_READ`'s payload), a zone allocator in `fs/mfs` covering direct and single-indirect zones, and a real store in `drivers/memory`. Every decision that can be made without a device lives in a pure, host-tested library module; the servers hold only IPC glue and ordering. Nothing new is allocated on any stack: MFS's single 4 KiB block buffer is reused in both directions.
+**Architecture:** One new FS-band request (`FS_WRITE`, reusing `FS_READ`'s payload), a zone
+allocator in `fs/mfs` covering direct and single-indirect zones, and a real store in
+`drivers/memory`. Every decision that can be made without a device lives in a pure, host-tested
+library module; the servers hold only IPC glue and ordering. Nothing new is allocated on any stack:
+MFS's single 4 KiB block buffer is reused in both directions.
 
-**Tech Stack:** Rust `no_std` (nightly, pinned in `rust-toolchain.toml`), aarch64 QEMU, MinixFS v3 on-disk format, MINIX-style grants.
+**Tech Stack:** Rust `no_std` (nightly, pinned in `rust-toolchain.toml`), aarch64 QEMU, MinixFS v3
+on-disk format, MINIX-style grants.
 
-**Spec:** [`docs/superpowers/specs/2026-08-18-mfs-write-path-design.md`](../specs/2026-08-18-mfs-write-path-design.md) — decisions are cited below as **W1**–**W9**.
+**Spec:**
+[`docs/superpowers/specs/2026-08-18-mfs-write-path-design.md`](../specs/2026-08-18-mfs-write-path-design.md)
+— decisions are cited below as **W1**–**W9**.
 
 ## Global Constraints
 
 These apply to **every** task. They are project rules from `CLAUDE.md`, not preferences.
 
-- **SPDX header first.** Every new `.rs` file begins with `// SPDX-License-Identifier: BSD-3-Clause` then `// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors`, before anything else including `//!` docs.
-- **`checked_add`, never `+`, for offsets and lengths** in `servers/`, `drivers/`, `fs/`, `userland/`. `[profile.release]` sets `overflow-checks = false`, so `off + 4` *wraps* in the shipped binary while panicking under `cargo test`. Every new payload accessor gets a `usize::MAX` unit test.
-- **Every commit is `git commit -s`** (DCO sign-off) and GPG-signed. Never `--no-gpg-sign`, never `--no-verify`. Verify with `git log -1 --format='%(trailers:key=Signed-off-by)'`.
-- **Blocking gates before any push:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D warnings`, the same with `--no-default-features`, and `cargo clippy -p minixrs-mfs --features server -- -D warnings`.
-- **`fs/mfs`'s `main.rs` is behind `required-features = ["server"]`**, so no CI job except that one extra clippy step compiles it. Anything with a decision in it belongs in the lib, not `main.rs`.
-- **No new stack buffers.** A server stack is exactly one page (`uspace::SERVER_STACK_BYTES` = 4096). Overrunning it faults into VM's SIGSEGV arm, which prints *nothing* `tests/qemu-boot.forbidden` catches. Check the largest frame with:
+- **SPDX header first.** Every new `.rs` file begins with `// SPDX-License-Identifier: BSD-3-Clause`
+  then `// Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors`, before anything else
+  including `//!` docs.
+- **`checked_add`, never `+`, for offsets and lengths** in `servers/`, `drivers/`, `fs/`,
+  `userland/`. `[profile.release]` sets `overflow-checks = false`, so `off + 4` *wraps* in the
+  shipped binary while panicking under `cargo test`. Every new payload accessor gets a `usize::MAX`
+  unit test.
+- **Every commit is `git commit -s`** (DCO sign-off) and GPG-signed. Never `--no-gpg-sign`, never
+  `--no-verify`. Verify with `git log -1 --format='%(trailers:key=Signed-off-by)'`.
+- **Blocking gates before any push:** `cargo fmt --all --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo clippy -p minixrs-kernel --target aarch64-unknown-none -- -D
+  warnings`, the same with `--no-default-features`, and `cargo clippy -p minixrs-mfs --features
+  server -- -D warnings`.
+- **`fs/mfs`'s `main.rs` is behind `required-features = ["server"]`**, so no CI job except that one
+  extra clippy step compiles it. Anything with a decision in it belongs in the lib, not `main.rs`.
+- **No new stack buffers.** A server stack is exactly one page (`uspace::SERVER_STACK_BYTES` =
+  4096). Overrunning it faults into VM's SIGSEGV arm, which prints *nothing*
+  `tests/qemu-boot.forbidden` catches. Check the largest frame with:
   ```sh
   "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objdump -d \
     target/minixrs-user/aarch64-unknown-minixrs/release/minixrs-mfs \
@@ -32,25 +55,35 @@ These apply to **every** task. They are project rules from `CLAUDE.md`, not pref
   tools/check-boot-log.sh /tmp/boot.log
   ```
   Budget ~5 s for rebuild + UEFI before the first kernel byte. Grep the log with `grep -a`.
-- **Bitmap bit order is fixed:** `byte = bit / 8`, `mask = 1 << (bit % 8)`. It matches `tools/mkfs-mfs`'s `Image::set_bit` and `verify.rs`'s `bit_set`; diverging silently corrupts every image.
-- **The granter is always the kernel-stamped `m_source`,** never a payload field. No message in this slice grows a granter or a grant-offset field.
+- **Bitmap bit order is fixed:** `byte = bit / 8`, `mask = 1 << (bit % 8)`. It matches
+  `tools/mkfs-mfs`'s `Image::set_bit` and `verify.rs`'s `bit_set`; diverging silently corrupts every
+  image.
+- **The granter is always the kernel-stamped `m_source`,** never a payload field. No message in this
+  slice grows a granter or a grant-offset field.
 
 ---
 
 ### Task 1: ABI — `FS_WRITE` and the scratch-file constants
 
 **Files:**
-- Modify: `kernel-shared/src/callnr.rs` (add `FS_WRITE` after `FS_READ` at ~line 782; `NR_FS_MSGS` at line 786; band tests from ~line 1500)
+
+- Modify: `kernel-shared/src/callnr.rs` (add `FS_WRITE` after `FS_READ` at ~line 782; `NR_FS_MSGS`
+  at line 786; band tests from ~line 1500)
 - Modify: `kernel-shared/src/rootfs.rs` (append after `rootfs_pattern_byte`, ~line 120)
 - Test: inline `#[cfg(test)]` modules in both files
 
 **Interfaces:**
+
 - Consumes: nothing.
-- Produces: `FS_WRITE: i32` (= `FS_RQ_BASE + 3` = `0x903`), `NR_FS_MSGS: usize = 4`, `ROOTFS_SCRATCH_PATH: &str`, `ROOTFS_SCRATCH_LEN: usize`, `ROOTFS_SCRATCH_PERIOD: usize`, `rootfs_scratch_byte(usize) -> u8`. The payload offsets are **unchanged** — `FS_WRITE` reuses `FS_INO_OFF` (0), `FS_GRANT_OFF` (4), `FS_LEN_OFF` (8), `FS_POS_OFF` (16).
+- Produces: `FS_WRITE: i32` (= `FS_RQ_BASE + 3` = `0x903`), `NR_FS_MSGS: usize = 4`,
+  `ROOTFS_SCRATCH_PATH: &str`, `ROOTFS_SCRATCH_LEN: usize`, `ROOTFS_SCRATCH_PERIOD: usize`,
+  `rootfs_scratch_byte(usize) -> u8`. The payload offsets are **unchanged** — `FS_WRITE` reuses
+  `FS_INO_OFF` (0), `FS_GRANT_OFF` (4), `FS_LEN_OFF` (8), `FS_POS_OFF` (16).
 
 - [ ] **Step 1: Write the failing tests**
 
-In `kernel-shared/src/callnr.rs`, extend the existing FS-band test (search for `fn` containing `let msgs = [FS_READSUPER, FS_LOOKUP, FS_READ];`) and add a new one:
+In `kernel-shared/src/callnr.rs`, extend the existing FS-band test (search for `fn` containing `let
+msgs = [FS_READSUPER, FS_LOOKUP, FS_READ];`) and add a new one:
 
 ```rust
 #[test]
@@ -105,8 +138,8 @@ fn the_scratch_generator_is_position_dependent_and_skewed_off_the_pattern() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p minixrs-kernel-shared`
-Expected: FAIL — `cannot find value FS_WRITE in this scope`, `cannot find value ROOTFS_SCRATCH_LEN in this scope`.
+Run: `cargo test -p minixrs-kernel-shared` Expected: FAIL — `cannot find value FS_WRITE in this
+scope`, `cannot find value ROOTFS_SCRATCH_LEN in this scope`.
 
 - [ ] **Step 3: Add the constants**
 
@@ -139,7 +172,10 @@ pub const NR_FS_MSGS: usize = 4;
 
 Delete the old `pub const NR_FS_MSGS: usize = 3;` line.
 
-Then update **every** existing enumeration of the FS band in the test module — search for `FS_READ,` and add `FS_WRITE,` beside it in each list. There are eight such lists (the cross-band distinctness sweeps, the `assert_ne!` loops, the contiguity check `let msgs = [FS_READSUPER, FS_LOOKUP, FS_READ];`, and the band-ordering tests). The contiguity check must become:
+Then update **every** existing enumeration of the FS band in the test module — search for `FS_READ,`
+and add `FS_WRITE,` beside it in each list. There are eight such lists (the cross-band distinctness
+sweeps, the `assert_ne!` loops, the contiguity check `let msgs = [FS_READSUPER, FS_LOOKUP,
+FS_READ];`, and the band-ordering tests). The contiguity check must become:
 
 ```rust
 let msgs = [FS_READSUPER, FS_LOOKUP, FS_READ, FS_WRITE];
@@ -198,21 +234,24 @@ const _: () = assert!(ROOTFS_SCRATCH_LEN / BDEV_BLOCK_SIZE + 1 < ROOTFS_IMAGE_BL
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p minixrs-kernel-shared`
-Expected: PASS, all tests.
+Run: `cargo test -p minixrs-kernel-shared` Expected: PASS, all tests.
 
 - [ ] **Step 5: Regenerate and syntax-check the C headers**
 
-`FS_WRITE` flows into the generated `minixrs/callnr.h`; the blocking `c-headers` CI gate compiles it hermetically.
+`FS_WRITE` flows into the generated `minixrs/callnr.h`; the blocking `c-headers` CI gate compiles it
+hermetically.
 
 Run:
+
 ```sh
 cargo gen-c-headers
 clang -std=c11 -pedantic-errors -Wall -Wextra -Werror -fsyntax-only \
   -ffreestanding -nostdlibinc --target=aarch64-unknown-linux-musl \
   -Itarget/gen-c-headers/include target/gen-c-headers/abi-selftest.c
 ```
-Expected: both succeed, no output. Confirm nothing was written into the tree: `git status --short` shows no files under `include/`.
+
+Expected: both succeed, no output. Confirm nothing was written into the tree: `git status --short`
+shows no files under `include/`.
 
 - [ ] **Step 6: Commit**
 
@@ -226,12 +265,15 @@ git commit -s -m "feat(abi): FS_WRITE and the scratch-file constants (slice 5.10
 ### Task 2: `drivers/memory` — `BDEV_WRITE` performs the store
 
 **Files:**
+
 - Modify: `drivers/memory/src/main.rs` (`do_write` at ~line 288-312; module docs at ~line 35)
 - Modify: `drivers/memory/src/bdev.rs` (docs at ~line 40-58; tests from ~line 164)
 - Test: inline `#[cfg(test)]` in `bdev.rs`
 
 **Interfaces:**
-- Consumes: `bdev::parse_read(&Message) -> ReadRequest`, `bdev::validate_read(ReadRequest, u64) -> Result<(u64, usize), i32>` — both already exist and are direction-agnostic.
+
+- Consumes: `bdev::parse_read(&Message) -> ReadRequest`, `bdev::validate_read(ReadRequest, u64) ->
+  Result<(u64, usize), i32>` — both already exist and are direction-agnostic.
 - Produces: a `BDEV_WRITE` that returns the byte count stored (`>= 0`) instead of `EROFS`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -268,12 +310,16 @@ fn a_write_past_the_device_is_einval() {
 }
 ```
 
-If `request`, `BDEV_MINOR_RAMDISK`, or `EINVAL` are not already in scope in that test module, add them to its `use super::*;` block — check the existing tests at line 164-178 for the exact helper signature (`fn request(minor: i32, gid: i32, len: i32, block: u64) -> Message`).
+If `request`, `BDEV_MINOR_RAMDISK`, or `EINVAL` are not already in scope in that test module, add
+them to its `use super::*;` block — check the existing tests at line 164-178 for the exact helper
+signature (`fn request(minor: i32, gid: i32, len: i32, block: u64) -> Message`).
 
 - [ ] **Step 2: Run to verify they fail or pass**
 
-Run: `cargo test -p minixrs-memory`
-Expected: these three PASS immediately — `validate_read` is already direction-agnostic, which is the point. They are regression pins for the behaviour Step 3 starts depending on, not a red-to-green cycle. **If any fails, stop**: the shared-validation premise is wrong and `do_write` needs its own checks.
+Run: `cargo test -p minixrs-memory` Expected: these three PASS immediately — `validate_read` is
+already direction-agnostic, which is the point. They are regression pins for the behaviour Step 3
+starts depending on, not a red-to-green cycle. **If any fails, stop**: the shared-validation premise
+is wrong and `do_write` needs its own checks.
 
 - [ ] **Step 3: Make the write real**
 
@@ -322,15 +368,17 @@ fn do_write(caller_e: Endpoint, msg: &Message, va: u64, blocks: u64) -> i32 {
 Update the call site in `main`'s dispatch loop (~line 127) — `do_write` now takes the caller:
 
 ```rust
-            BDEV_WRITE => {
-                let rc = do_write(caller_e, &msg, va, blocks);
-                reply(caller_e, &mut msg, rc);
-            }
+BDEV_WRITE => {
+    let rc = do_write(caller_e, &msg, va, blocks);
+    reply(caller_e, &mut msg, rc);
+}
 ```
 
-Fix imports: add `SAFECOPY_FROM` to the `minixrs_server_rt` import list, and **remove `EROFS`** from the `minixrs_kernel_shared::error` import (it becomes unused and `-D warnings` will reject it).
+Fix imports: add `SAFECOPY_FROM` to the `minixrs_server_rt` import list, and **remove `EROFS`** from
+the `minixrs_kernel_shared::error` import (it becomes unused and `-D warnings` will reject it).
 
-Rewrite the module-doc paragraph at ~line 35 that begins **`//! **`BDEV_WRITE` answers `EROFS`, not `ENOSYS`.**`** as:
+Rewrite the module-doc paragraph at ~line 35 that begins **`//! **`BDEV_WRITE`answers`EROFS`,
+not `ENOSYS`.**`** as:
 
 ```rust
 //! **`BDEV_WRITE` stores, as of slice 5.10a.** It was defined and answering
@@ -344,13 +392,17 @@ Rewrite the module-doc paragraph at ~line 35 that begins **`//! **`BDEV_WRITE` a
 - [ ] **Step 4: Verify it builds and boots**
 
 Run:
+
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p minixrs-memory
 timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > /tmp/t2.log 2>&1
 tools/check-boot-log.sh /tmp/t2.log
 ```
-Expected: clippy clean, tests pass, **all markers still PASS**. Nothing writes yet, so the boot is unchanged — except MFS's `BDEV_WRITE → EROFS` denial probe, which now fails. Note its marker name from the output; Task 4 re-points it.
+
+Expected: clippy clean, tests pass, **all markers still PASS**. Nothing writes yet, so the boot is
+unchanged — except MFS's `BDEV_WRITE → EROFS` denial probe, which now fails. Note its marker name
+from the output; Task 4 re-points it.
 
 - [ ] **Step 5: Commit**
 
@@ -364,12 +416,16 @@ git commit -s -m "feat(memory): BDEV_WRITE stores instead of refusing (slice 5.1
 ### Task 3: `fs/mfs` — the pure write policy and allocator
 
 **Files:**
+
 - Create: `fs/mfs/src/write.rs`
 - Modify: `fs/mfs/src/lib.rs` (add `pub mod write;` beside `pub mod read;`)
 - Test: inline `#[cfg(test)]` in `write.rs`
 
 **Interfaces:**
-- Consumes: `crate::walk::Chunk { len: usize, off_in_block: usize }`, `crate::inode::{NR_DIRECT_ZONES, SINGLE_INDIRECT_SLOT}`, `crate::read::ptrs_per_block`, `minixrs_kernel_shared::callnr::FS_MAX_IO`, `minixrs_kernel_shared::error::{EFBIG, EINVAL, EIO}`.
+
+- Consumes: `crate::walk::Chunk { len: usize, off_in_block: usize }`,
+  `crate::inode::{NR_DIRECT_ZONES, SINGLE_INDIRECT_SLOT}`, `crate::read::ptrs_per_block`,
+  `minixrs_kernel_shared::callnr::FS_MAX_IO`, `minixrs_kernel_shared::error::{EFBIG, EINVAL, EIO}`.
 - Produces, for Task 4:
   - `pub enum ZoneSlot { Direct(usize), Indirect(usize), OutOfRange }`
   - `pub fn zone_slot_for_offset(off: u64, bs: usize) -> ZoneSlot`
@@ -380,7 +436,8 @@ git commit -s -m "feat(memory): BDEV_WRITE stores instead of refusing (slice 5.1
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `fs/mfs/src/write.rs` containing **only** the SPDX header, the module docs, the `use` block, and this test module. The functions come in Step 3.
+Create `fs/mfs/src/write.rs` containing **only** the SPDX header, the module docs, the `use` block,
+and this test module. The functions come in Step 3.
 
 ```rust
 #[cfg(test)]
@@ -557,12 +614,13 @@ mod tests {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p minixrs-mfs`
-Expected: FAIL to compile — `cannot find function zone_slot_for_offset`, etc.
+Run: `cargo test -p minixrs-mfs` Expected: FAIL to compile — `cannot find function
+zone_slot_for_offset`, etc.
 
 - [ ] **Step 3: Implement**
 
-Prepend the SPDX header and docs, then the implementation, above the test module in `fs/mfs/src/write.rs`:
+Prepend the SPDX header and docs, then the implementation, above the test module in
+`fs/mfs/src/write.rs`:
 
 ```rust
 // SPDX-License-Identifier: BSD-3-Clause
@@ -722,10 +780,12 @@ pub mod write;
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run:
+
 ```sh
 cargo test -p minixrs-mfs
 cargo clippy -p minixrs-mfs --all-targets -- -D warnings
 ```
+
 Expected: all PASS, clippy clean.
 
 - [ ] **Step 5: Commit**
@@ -740,29 +800,37 @@ git commit -s -m "feat(mfs): the pure write policy and zone allocator (slice 5.1
 ### Task 4: `fs/mfs` server — `FS_WRITE`
 
 **Files:**
-- Modify: `fs/mfs/src/main.rs` (`Blocks` impl ~line 142-195; dispatch `match` ~line 269-274; add `do_write` after `do_read` ~line 425; `bdev_denials` ~line 809)
+
+- Modify: `fs/mfs/src/main.rs` (`Blocks` impl ~line 142-195; dispatch `match` ~line 269-274; add
+  `do_write` after `do_read` ~line 425; `bdev_denials` ~line 809)
 - Modify: `fs/mfs/src/proto.rs` (`ReadRequest` doc ~line 38-56)
 
 **Interfaces:**
-- Consumes: Task 3's `write::{ZoneSlot, zone_slot_for_offset, clamp_write, bitmap_find_free, bitmap_set, grow_size}`; Task 1's `FS_WRITE`; Task 2's real `BDEV_WRITE`. Existing: `proto::parse_read`, `read_inode`, `Blocks::read`, `Blocks::zeroed`, `bdev_request`, `walk::zone_ok`, `read::{inode_location, inode_at}`.
+
+- Consumes: Task 3's `write::{ZoneSlot, zone_slot_for_offset, clamp_write, bitmap_find_free,
+  bitmap_set, grow_size}`; Task 1's `FS_WRITE`; Task 2's real `BDEV_WRITE`. Existing:
+  `proto::parse_read`, `read_inode`, `Blocks::read`, `Blocks::zeroed`, `bdev_request`,
+  `walk::zone_ok`, `read::{inode_location, inode_at}`.
 - Produces: an `FS_WRITE` arm. No new public API — this is the server binary.
 
 - [ ] **Step 1: Widen the block grant and add the write primitives**
 
 `Blocks` is the only path to the buffer, and it now needs both directions.
 
-In `fs/mfs/src/main.rs`, find where the block grant is issued (in `fn device`, ~line 646) and change the access flags from `CPF_WRITE` to `CPF_READ | CPF_WRITE`. Add to that grant field's doc comment on the `gid` member:
+In `fs/mfs/src/main.rs`, find where the block grant is issued (in `fn device`, ~line 646) and change
+the access flags from `CPF_WRITE` to `CPF_READ | CPF_WRITE`. Add to that grant field's doc comment
+on the `gid` member:
 
 ```rust
-    /// Grant naming [`BLOCK`] with the driver as grantee, `CPF_READ | CPF_WRITE`.
-    /// Issued once at boot: the buffer is a static, so its address never changes
-    /// and `GrantPool::ensure_registered` never re-fires.
-    ///
-    /// **Both directions on one grant** (W5): the driver writes into this buffer
-    /// on a `BDEV_READ` and reads out of it on a `BDEV_WRITE`, and the grantee is
-    /// the same driver either way. A second grant would name the same bytes to
-    /// the same peer. The kernel checks the direction bit per call, so widening
-    /// the flags does not widen what any single call may do.
+/// Grant naming [`BLOCK`] with the driver as grantee, `CPF_READ | CPF_WRITE`.
+/// Issued once at boot: the buffer is a static, so its address never changes
+/// and `GrantPool::ensure_registered` never re-fires.
+///
+/// **Both directions on one grant** (W5): the driver writes into this buffer
+/// on a `BDEV_READ` and reads out of it on a `BDEV_WRITE`, and the grantee is
+/// the same driver either way. A second grant would name the same bytes to
+/// the same peer. The kernel checks the direction bit per call, so widening
+/// the flags does not widen what any single call may do.
 ```
 
 Then add two methods to `impl Blocks`, after `zeroed`:
@@ -1070,51 +1138,63 @@ fn write_inode(blocks: &mut Blocks, mount: &Mount, ino: u32, node: &Inode) -> Re
 Add the dispatch arm in `main`'s `match msg.m_type`, after `FS_READ`:
 
 ```rust
-            FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mount),
+FS_WRITE => do_write(&msg, caller_e, &mut blocks, &mount),
 ```
 
-Imports to add: `FS_WRITE` and `ENOSPC` (from `error`), `SAFECOPY_FROM` (from `server-rt`), `INODE_SIZE` and `SINGLE_INDIRECT_SLOT` (from `minixrs_mfs::inode`), `inode_location` (from `minixrs_mfs::read`), and `write` (the new module). Check the existing import block for the exact paths already in use.
+Imports to add: `FS_WRITE` and `ENOSPC` (from `error`), `SAFECOPY_FROM` (from `server-rt`),
+`INODE_SIZE` and `SINGLE_INDIRECT_SLOT` (from `minixrs_mfs::inode`), `inode_location` (from
+`minixrs_mfs::read`), and `write` (the new module). Check the existing import block for the exact
+paths already in use.
 
 - [ ] **Step 3: Re-point the `BDEV_WRITE` denial probe**
 
-In `bdev_denials` (~line 809), find the probe expecting `EROFS` from a `BDEV_WRITE`. It now *succeeds* and would store the block buffer's contents over a real block. Replace it with a probe the kernel refuses, keeping the count identical:
+In `bdev_denials` (~line 809), find the probe expecting `EROFS` from a `BDEV_WRITE`. It now
+*succeeds* and would store the block buffer's contents over a real block. Replace it with a probe
+the kernel refuses, keeping the count identical:
 
 ```rust
-    // A `BDEV_WRITE` whose grant carries only `CPF_WRITE`. The driver's
-    // geometry checks all pass; what refuses it is the kernel's grant check,
-    // which is exactly the guard that stops a client reading a device buffer
-    // through a write-shaped request. Before slice 5.10a this probe expected
-    // `EROFS` from the driver itself -- when the write became real, that
-    // expectation would have become a *successful store*, so the probe had to
-    // move to something still denied rather than quietly retire.
-    Probe {
-        name: "wr-dir",
-        m_type: BDEV_WRITE,
-        minor: BDEV_MINOR_RAMDISK,
-        gid: write_only_gid,
-        len: MFS_BLOCK_SIZE as i32,
-        block: 1,
-        want: EPERM,
-    },
+// A `BDEV_WRITE` whose grant carries only `CPF_WRITE`. The driver's
+// geometry checks all pass; what refuses it is the kernel's grant check,
+// which is exactly the guard that stops a client reading a device buffer
+// through a write-shaped request. Before slice 5.10a this probe expected
+// `EROFS` from the driver itself -- when the write became real, that
+// expectation would have become a *successful store*, so the probe had to
+// move to something still denied rather than quietly retire.
+Probe {
+    name: "wr-dir",
+    m_type: BDEV_WRITE,
+    minor: BDEV_MINOR_RAMDISK,
+    gid: write_only_gid,
+    len: MFS_BLOCK_SIZE as i32,
+    block: 1,
+    want: EPERM,
+},
 ```
 
-Match the surrounding `Probe` struct's exact field names and the existing grant-construction idiom — read lines 758-810 before editing. `write_only_gid` is a grant over `BLOCK` with `CPF_WRITE` only; issue it beside the other malformed grants the battery already builds. Keep the battery's total unchanged so its marker string does not move.
+Match the surrounding `Probe` struct's exact field names and the existing grant-construction idiom —
+read lines 758-810 before editing. `write_only_gid` is a grant over `BLOCK` with `CPF_WRITE` only;
+issue it beside the other malformed grants the battery already builds. Keep the battery's total
+unchanged so its marker string does not move.
 
 - [ ] **Step 4: Build and boot**
 
 Run:
+
 ```sh
 cargo clippy -p minixrs-mfs --features server -- -D warnings
 cargo clippy --workspace --all-targets -- -D warnings
 timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > /tmp/t4.log 2>&1
 tools/check-boot-log.sh /tmp/t4.log
 ```
-Expected: clippy clean, **all markers PASS** including MFS's denial battery. Nothing calls `FS_WRITE` yet.
+
+Expected: clippy clean, **all markers PASS** including MFS's denial battery. Nothing calls
+`FS_WRITE` yet.
 
 - [ ] **Step 5: Check the stack frame**
 
-Run the `llvm-objdump` command from Global Constraints against `minixrs-mfs`.
-Expected: the largest frame is well under 4096. **If it is above ~3000, stop and report** — `do_write` and `place_zone` must not put a buffer on the stack.
+Run the `llvm-objdump` command from Global Constraints against `minixrs-mfs`. Expected: the largest
+frame is well under 4096. **If it is above ~3000, stop and report** — `do_write` and `place_zone`
+must not put a buffer on the stack.
 
 - [ ] **Step 6: Commit**
 
@@ -1128,10 +1208,14 @@ git commit -s -m "feat(mfs): serve FS_WRITE with zone allocation (slice 5.10a)"
 ### Task 5: VFS — route file writes to MFS
 
 **Files:**
-- Modify: `servers/vfs/src/main.rs` (`do_write` ~line 377-421; add `fs_write` beside `fs_read` ~line 888)
+
+- Modify: `servers/vfs/src/main.rs` (`do_write` ~line 377-421; add `fs_write` beside `fs_read`
+  ~line 888)
 
 **Interfaces:**
-- Consumes: Task 1's `FS_WRITE`; existing `rw::{parse, validate, advance, Step}`, `fd::{resolve, advance}`, `Fd::File { ino, pos }`, `GrantPool::grant_magic`.
+
+- Consumes: Task 1's `FS_WRITE`; existing `rw::{parse, validate, advance, Step}`, `fd::{resolve,
+  advance}`, `Fd::File { ino, pos }`, `GrantPool::grant_magic`.
 - Produces: nothing new for later tasks — this closes the path.
 
 - [ ] **Step 1: Add the `FS_WRITE` marshaller**
@@ -1212,7 +1296,9 @@ Add `FS_WRITE` to the `callnr` import list.
 
 - [ ] **Step 2: Route the descriptor**
 
-Replace `do_write`'s `Fd::File` arm. The function needs the MFS endpoint and the grant pool, which it already has, plus the caller — also already a parameter. Change the `match` to bind both variants and dispatch after validation:
+Replace `do_write`'s `Fd::File` arm. The function needs the MFS endpoint and the grant pool, which
+it already has, plus the caller — also already a parameter. Change the `match` to bind both variants
+and dispatch after validation:
 
 ```rust
 fn do_write(
@@ -1274,23 +1360,28 @@ fn do_write(
 }
 ```
 
-Update `do_write`'s call site in `main`'s dispatch to pass `mfs`. Remove `EROFS` from the `error` import if nothing else in the file uses it (grep first — `-D warnings` rejects an unused import).
+Update `do_write`'s call site in `main`'s dispatch to pass `mfs`. Remove `EROFS` from the `error`
+import if nothing else in the file uses it (grep first — `-D warnings` rejects an unused import).
 
 - [ ] **Step 3: Build and boot**
 
 Run:
+
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p minixrs-vfs
 timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > /tmp/t5.log 2>&1
 tools/check-boot-log.sh /tmp/t5.log
 ```
-Expected: clippy clean, tests pass. **`open.deny` now FAILS** — its `write-file` probe expected `EROFS` and got a byte count. That is the landmine the design predicted; Task 7 retires the probe. Every other marker must still PASS. Confirm with `grep -a 'open.deny' /tmp/t5.log`.
+
+Expected: clippy clean, tests pass. **`open.deny` now FAILS** — its `write-file` probe expected
+`EROFS` and got a byte count. That is the landmine the design predicted; Task 7 retires the probe.
+Every other marker must still PASS. Confirm with `grep -a 'open.deny' /tmp/t5.log`.
 
 - [ ] **Step 4: Check the stack frame**
 
-Run the `llvm-objdump` command from Global Constraints against `minixrs-vfs`.
-Expected: well under 4096.
+Run the `llvm-objdump` command from Global Constraints against `minixrs-vfs`. Expected: well
+under 4096.
 
 - [ ] **Step 5: Commit**
 
@@ -1304,12 +1395,15 @@ git commit -s -m "feat(vfs): route VFS_WRITE on a file descriptor to MFS (slice 
 ### Task 6: The image gains an empty `/etc/scratch`
 
 **Files:**
+
 - Modify: `kernel/build.rs` (`build_rootfs` ~line 382-399)
 - Modify: `tools/mkfs-mfs/src/verify.rs` (tests from ~line 155)
 - Test: `tools/mkfs-mfs/src/image.rs` and `verify.rs` inline test modules
 
 **Interfaces:**
-- Consumes: Task 1's `ROOTFS_SCRATCH_PATH`. Existing `Manifest::add`, `build_image`, `verify::{lookup, read_file, zmap_bit_set, image_layout}`.
+
+- Consumes: Task 1's `ROOTFS_SCRATCH_PATH`. Existing `Manifest::add`, `build_image`,
+  `verify::{lookup, read_file, zmap_bit_set, image_layout}`.
 - Produces: a root image containing `/etc/scratch`, regular, size 0, no zones.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1350,33 +1444,37 @@ fn the_image_leaves_room_for_the_scratch_file_to_grow() {
 }
 ```
 
-Add `ROOTFS_SCRATCH_LEN` and `NR_TZONES` to the test module's imports (`NR_TZONES` comes from `minixrs_mfs::inode`, which the module already imports from).
+Add `ROOTFS_SCRATCH_LEN` and `NR_TZONES` to the test module's imports (`NR_TZONES` comes from
+`minixrs_mfs::inode`, which the module already imports from).
 
 - [ ] **Step 2: Run to verify**
 
-Run: `cargo test -p minixrs-mkfs-mfs`
-Expected: `a_zero_length_file_...` may PASS (the writer may already handle it) or FAIL. Either is informative. `the_image_leaves_room...` should PASS. **If the zero-length test fails, fix `image.rs`** — most likely in `write_data` (an empty `chunks()` iterator leaves the zone array zeroed, which is correct) or in `blocks_for` (`blocks_for(0)` must be 0). Do not add special-casing that is not needed; run and see.
+Run: `cargo test -p minixrs-mkfs-mfs` Expected: `a_zero_length_file_...` may PASS (the writer may
+already handle it) or FAIL. Either is informative. `the_image_leaves_room...` should PASS. **If the
+zero-length test fails, fix `image.rs`** — most likely in `write_data` (an empty `chunks()` iterator
+leaves the zone array zeroed, which is correct) or in `blocks_for` (`blocks_for(0)` must be 0). Do
+not add special-casing that is not needed; run and see.
 
 - [ ] **Step 3: Add the file to the boot image**
 
 In `kernel/build.rs`'s `build_rootfs`:
 
 ```rust
-    use minixrs_kernel_shared::rootfs::{
-        ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
-        ROOTFS_SCRATCH_PATH, rootfs_pattern_byte,
-    };
+use minixrs_kernel_shared::rootfs::{
+    ROOTFS_HELLO_PATH, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
+    ROOTFS_SCRATCH_PATH, rootfs_pattern_byte,
+};
 ```
 
 and, after the `.add(ROOTFS_PATTERN_PATH, pattern)` line:
 
 ```rust
-        // Slice 5.10a's write target: shipped **empty** on purpose. Create does
-        // not exist until 5.10b, so the write path needs a file that is already
-        // here — and starting at zero makes growth-from-nothing the ordinary
-        // path, and keeps the read proofs (`/etc/motd`, `/etc/pattern`) out of
-        // reach of a probe that writes.
-        .add(ROOTFS_SCRATCH_PATH, Vec::new());
+// Slice 5.10a's write target: shipped **empty** on purpose. Create does
+// not exist until 5.10b, so the write path needs a file that is already
+// here — and starting at zero makes growth-from-nothing the ordinary
+// path, and keeps the read proofs (`/etc/motd`, `/etc/pattern`) out of
+// reach of a probe that writes.
+.add(ROOTFS_SCRATCH_PATH, Vec::new());
 ```
 
 (Move the `;` off the `pattern` line onto this one.)
@@ -1384,12 +1482,16 @@ and, after the `.add(ROOTFS_PATTERN_PATH, pattern)` line:
 - [ ] **Step 4: Verify**
 
 Run:
+
 ```sh
 cargo test -p minixrs-mkfs-mfs
 timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > /tmp/t6.log 2>&1
 tools/check-boot-log.sh /tmp/t6.log
 ```
-Expected: tests pass; boot unchanged except `open.deny` (still failing from Task 5). In particular `fs.mount ok root=1 bs=4096 blocks=256` and `fs.selfcheck`/`fs.indirect` must still PASS — the new entry must not have shifted any inode or zone the existing proofs depend on.
+
+Expected: tests pass; boot unchanged except `open.deny` (still failing from Task 5). In particular
+`fs.mount ok root=1 bs=4096 blocks=256` and `fs.selfcheck`/`fs.indirect` must still PASS — the new
+entry must not have shifted any inode or zone the existing proofs depend on.
 
 - [ ] **Step 5: Commit**
 
@@ -1403,51 +1505,57 @@ git commit -s -m "feat(mkfs): ship an empty /etc/scratch for the write proof (sl
 ### Task 7: init writes, reads back, and reports
 
 **Files:**
-- Modify: `userland/init/src/main.rs` (`main`'s prologue ~line 194-204; `open_denials` ~line 486-543; `OPEN_DENIAL_PROBES` ~line 689; add `write_demo` after `fs_demo` ~line 438)
+
+- Modify: `userland/init/src/main.rs` (`main`'s prologue ~line 194-204; `open_denials` ~line
+  486-543; `OPEN_DENIAL_PROBES` ~line 689; add `write_demo` after `fs_demo` ~line 438)
 
 **Interfaces:**
-- Consumes: Task 1's `ROOTFS_SCRATCH_PATH`/`_LEN`/`_PERIOD`/`rootfs_scratch_byte`; the whole path built in Tasks 2-6. Existing `vfs_open`, `vfs_write`, `vfs_read`, `vfs_close`, `append`, `report_line`.
-- Produces: the boot markers `minix.rs init: fs.write ok n=32768 v=32768` and `minix.rs init: open.deny ok n=7`.
+
+- Consumes: Task 1's `ROOTFS_SCRATCH_PATH`/`_LEN`/`_PERIOD`/`rootfs_scratch_byte`; the whole path
+  built in Tasks 2-6. Existing `vfs_open`, `vfs_write`, `vfs_read`, `vfs_close`, `append`,
+  `report_line`.
+- Produces: the boot markers `minix.rs init: fs.write ok n=32768 v=32768` and `minix.rs init:
+  open.deny ok n=7`.
 
 - [ ] **Step 1: Retire the landmined probe**
 
 In `open_denials`, delete the whole `write-file` block:
 
 ```rust
-    // ...and a file descriptor cannot be written to, on a read-only filesystem.
-    let fd = vfs_open(vfs, ROOTFS_MOTD_PATH);
-    if fd < 0 {
-        return report_open_fail(vfs, "setup");
-    }
-    if vfs_write(vfs, fd, ROOTFS_MOTD_PATH.as_bytes()) == EROFS {
-        denied += 1;
-    } else {
-        return report_open_fail(vfs, "write-file");
-    }
+// ...and a file descriptor cannot be written to, on a read-only filesystem.
+let fd = vfs_open(vfs, ROOTFS_MOTD_PATH);
+if fd < 0 {
+    return report_open_fail(vfs, "setup");
+}
+if vfs_write(vfs, fd, ROOTFS_MOTD_PATH.as_bytes()) == EROFS {
+    denied += 1;
+} else {
+    return report_open_fail(vfs, "write-file");
+}
 ```
 
 The following `close-twice` block **needs `fd`**, so keep the open that preceded it:
 
 ```rust
-    // Slice 5.10a retired the probe that used to sit here: it wrote to a
-    // descriptor on `/etc/motd` expecting `EROFS`, and once the write path
-    // became real that call *succeeded*, overwriting the first bytes of the file
-    // `fs.selfcheck` exists to verify. A probe whose expectation silently
-    // inverts is worse than no probe -- so it is gone and the count moved, which
-    // is what makes the retirement a visible diff in `qemu-boot.expected`
-    // rather than a marker that quietly means something else. Writing to a file
-    // is now proved positively, by `write_demo`.
-    let fd = vfs_open(vfs, ROOTFS_MOTD_PATH);
-    if fd < 0 {
-        return report_open_fail(vfs, "setup");
-    }
-    if vfs_close(vfs, fd) == OK && vfs_close(vfs, fd) == EBADF {
+// Slice 5.10a retired the probe that used to sit here: it wrote to a
+// descriptor on `/etc/motd` expecting `EROFS`, and once the write path
+// became real that call *succeeded*, overwriting the first bytes of the file
+// `fs.selfcheck` exists to verify. A probe whose expectation silently
+// inverts is worse than no probe -- so it is gone and the count moved, which
+// is what makes the retirement a visible diff in `qemu-boot.expected`
+// rather than a marker that quietly means something else. Writing to a file
+// is now proved positively, by `write_demo`.
+let fd = vfs_open(vfs, ROOTFS_MOTD_PATH);
+if fd < 0 {
+    return report_open_fail(vfs, "setup");
+}
+if vfs_close(vfs, fd) == OK && vfs_close(vfs, fd) == EBADF {
 ```
 
 Change the marker and the constant:
 
 ```rust
-        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=7\n");
+let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=7\n");
 ```
 
 ```rust
@@ -1634,39 +1742,42 @@ fn verify_window(vfs: Endpoint, fd: i32, start: usize, pos: &mut usize) -> bool 
 }
 ```
 
-**Why these three offsets.** `SEAM` is 28672 and the tail window starts at
-32256; both are multiples of 512, and 32256 + 512 = 32768 = 8 x 4096, so the tail
-window ends exactly at the last block's end. Every window therefore sits inside
-one block and comes back in a single clamped transfer.
+**Why these three offsets.** `SEAM` is 28672 and the tail window starts at 32256; both are multiples
+of 512, and 32256 + 512 = 32768 = 8 x 4096, so the tail window ends exactly at the last block's end.
+Every window therefore sits inside one block and comes back in a single clamped transfer.
 
-**One thing to check while writing this:** `report_line`'s existing signature
-(~line 703) prefixes `minix.rs init: ` and appends `\n`. Read it and match — if it
-does not, adjust the failure strings so every one comes out as
-`minix.rs init: fs.write FAIL <reason>`.
+**One thing to check while writing this:** `report_line`'s existing signature (~line 703) prefixes
+`minix.rs init: ` and appends `\n`. Read it and match — if it does not, adjust the failure strings
+so every one comes out as `minix.rs init: fs.write FAIL <reason>`.
 
 - [ ] **Step 3: Call it from the prologue**
 
 In `main`, between `fs_demo(vfs)` and `exec_denials(pm, vfs)`:
 
 ```rust
-    // The write path runs after the read path and before the exec battery — the
-    // prologue's standing rule, newest code last, so a hang inside it localizes
-    // to the `fs.write` marker instead of taking 5.4's, 5.5's, 5.6's and 5.8's
-    // with it. Do not reorder this prologue.
-    write_demo(vfs);
+// The write path runs after the read path and before the exec battery — the
+// prologue's standing rule, newest code last, so a hang inside it localizes
+// to the `fs.write` marker instead of taking 5.4's, 5.5's, 5.6's and 5.8's
+// with it. Do not reorder this prologue.
+write_demo(vfs);
 ```
 
-Update `fs_demo`'s trailing comment and `exec_denials`' "runs last in the prologue" comment so they still describe the real order.
+Update `fs_demo`'s trailing comment and `exec_denials`' "runs last in the prologue" comment so they
+still describe the real order.
 
 - [ ] **Step 4: Boot and verify**
 
 Run:
+
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings
 timeout 45 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > /tmp/t7.log 2>&1
 grep -a 'fs.write\|open.deny' /tmp/t7.log
 ```
-Expected: `minix.rs init: fs.write ok n=32768 v=32768` and `minix.rs init: open.deny ok n=7`, each exactly once. A `FAIL` spelling names which step broke. **45 s, not 25** — the write demo lengthens the prologue.
+
+Expected: `minix.rs init: fs.write ok n=32768 v=32768` and `minix.rs init: open.deny ok n=7`, each
+exactly once. A `FAIL` spelling names which step broke. **45 s, not 25** — the write demo lengthens
+the prologue.
 
 - [ ] **Step 5: Commit**
 
@@ -1680,11 +1791,13 @@ git commit -s -m "feat(init): write, read back, and prove /etc/scratch (slice 5.
 ### Task 8: Markers, mutation tests, boot matrix, docs
 
 **Files:**
+
 - Modify: `tests/qemu-boot.expected`, `tests/qemu-boot.forbidden`
 - Modify: `.github/workflows/ci.yml` (only if the budget measurement says so)
 - Modify: `CLAUDE.md` (append a slice-5.10a convention bullet after the 5.9 one)
 
 **Interfaces:**
+
 - Consumes: everything above.
 - Produces: a green `tools/check-boot-log.sh` in all four boot configurations.
 
@@ -1695,12 +1808,15 @@ In `tests/qemu-boot.expected`, change:
 ```
 minix.rs init: open.deny ok n=8
 ```
+
 to
+
 ```
 minix.rs init: open.deny ok n=7
 ```
 
-and add, near the other `fs.*` init markers (~line 493), with a comment in the file's established style:
+and add, near the other `fs.*` init markers (~line 493), with a comment in the file's established
+style:
 
 ```
 # Slice 5.10a: the write path, end to end. init writes 32 KiB to /etc/scratch --
@@ -1741,7 +1857,10 @@ wc -c /tmp/before.log
 git stash pop
 ```
 
-Compute each marker's byte offset ÷ total bytes. If the fraction moved materially (say past ~0.85 of the log), raise `qemu-smoke`'s timeout in `.github/workflows/ci.yml` **with real headroom** — CI's TCG is slower than this machine, and 5.9 went 45 s → 120 s for exactly this reason. Never trim the budget to whatever passes locally.
+Compute each marker's byte offset ÷ total bytes. If the fraction moved materially (say past ~0.85 of
+the log), raise `qemu-smoke`'s timeout in `.github/workflows/ci.yml` **with real headroom** — CI's
+TCG is slower than this machine, and 5.9 went 45 s → 120 s for exactly this reason. Never trim the
+budget to whatever passes locally.
 
 - [ ] **Step 3: Run the four-row boot matrix**
 
@@ -1762,7 +1881,11 @@ grep -a 'fs.write\|open.deny\|stack FAIL' /tmp/m4.log
 mv /tmp/musl-sysroot-aside target/musl-sysroot
 ```
 
-Expected: rows 1, 2 fully green. Row 3 (`--no-default-features`) has no stubs, so the stub markers the expected file requires are legitimately missing — everything else, including `fs.write ok n=32768 v=32768`, must be present and nothing forbidden. Row 4 (`/bin/hello` is the `worker` ELF) must show `fs.write ok`, no `stack FAIL`, and no hang. **Record all four results; they go in the PR body.**
+Expected: rows 1, 2 fully green. Row 3 (`--no-default-features`) has no stubs, so the stub markers
+the expected file requires are legitimately missing — everything else, including `fs.write ok
+n=32768 v=32768`, must be present and nothing forbidden. Row 4 (`/bin/hello` is the `worker` ELF)
+must show `fs.write ok`, no `stack FAIL`, and no hang. **Record all four results; they go in the PR
+body.**
 
 - [ ] **Step 4: Mutation tests**
 
@@ -1774,32 +1897,49 @@ cp fs/mfs/src/write.rs fs/mfs/src/main.rs drivers/memory/src/main.rs \
    userland/init/src/main.rs /path/to/scratchpad/mut/
 ```
 
-Apply each mutation, boot, record which marker moved, restore from the scratchpad. **Before recording any observation, check the log actually built:** `grep -a 'error\[E' /tmp/mut.log`, or confirm unrelated markers still PASS — a mutation that fails to compile leaves a log with no kernel output at all and every marker MISSING, which is indistinguishable from a mutation that worked.
+Apply each mutation, boot, record which marker moved, restore from the scratchpad. **Before
+recording any observation, check the log actually built:** `grep -a 'error\[E' /tmp/mut.log`, or
+confirm unrelated markers still PASS — a mutation that fails to compile leaves a log with no kernel
+output at all and every marker MISSING, which is indistinguishable from a mutation that worked.
 
-| # | Mutation | Predicted |
-|---|---|---|
-| 1 | in `alloc_zone`, delete the `write::bitmap_set(buf, bit)` call | every allocation returns the same zone → `fs.write FAIL verify` |
-| 2 | in `do_write`, change step 5's condition to `if grown != node.size` only (drop `dirty`) | the size grows but a hole's pointer is lost → `fs.write FAIL verify` |
-| 3 | in `alloc_zone`, delete the `blocks.zeroed()` before the store | a fresh indirect block holds garbage pointers → `fs.write FAIL verify` or `EIO` |
-| 4 | in `drivers/memory`'s `do_write`, use `SAFECOPY_TO` instead of `SAFECOPY_FROM` | the buffer is overwritten instead of stored → `fs.write FAIL verify` |
-| 5 | in MFS's re-pointed denial probe, grant `CPF_READ` instead of `CPF_WRITE` | MFS's `bdev.deny` marker |
+| # | Mutation                                                                                | Predicted                                                                       |
+| - | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 1 | in `alloc_zone`, delete the `write::bitmap_set(buf, bit)` call                          | every allocation returns the same zone → `fs.write FAIL verify`                 |
+| 2 | in `do_write`, change step 5's condition to `if grown != node.size` only (drop `dirty`) | the size grows but a hole's pointer is lost → `fs.write FAIL verify`            |
+| 3 | in `alloc_zone`, delete the `blocks.zeroed()` before the store                          | a fresh indirect block holds garbage pointers → `fs.write FAIL verify` or `EIO` |
+| 4 | in `drivers/memory`'s `do_write`, use `SAFECOPY_TO` instead of `SAFECOPY_FROM`          | the buffer is overwritten instead of stored → `fs.write FAIL verify`            |
+| 5 | in MFS's re-pointed denial probe, grant `CPF_READ` instead of `CPF_WRITE`               | MFS's `bdev.deny` marker                                                        |
 
 Finish with:
+
 ```sh
 grep -rn MUTATION . --include=*.rs
 git status --short
 ```
-Both must be clean. **That sweep, not the restore command's exit status, is what proves the tree clean.**
+
+Both must be clean. **That sweep, not the restore command's exit status, is what proves the tree
+clean.**
 
 - [ ] **Step 5: Update `CLAUDE.md`**
 
-Append a bullet after the slice-5.9 one, in the same voice and density — the load-bearing facts a future session must not re-derive:
+Append a bullet after the slice-5.9 one, in the same voice and density — the load-bearing facts a
+future session must not re-derive:
 
-- `FS_WRITE = FS_RQ_BASE + 3` reuses `FS_READ`'s payload verbatim (W1); a short `FS_WRITE` is normal (VFS loops), unlike `BDEV`'s refuse-or-nothing, and the two rules differ because BDEV's client cannot interpret half a block while VFS's job is hiding staging from POSIX.
-- The single block buffer is what fixes `do_write`'s step order; `Blocks` gained `buf_mut`/`write` and its grant widened to `CPF_READ | CPF_WRITE` (one buffer, both directions, one static address).
-- A zone's bitmap bit is set **before** its number is stored, so a mid-write failure leaks a zone rather than sharing one — and the inode write-back is keyed on "a zone was assigned **or** the size grew", because a hole filled mid-file moves no size and losing its pointer is corruption rather than a leak.
-- VFS re-grants per round because the FS band has no grant-offset field, unlike the CDEV loop which advances a payload `offset`.
-- The landmine: `open_denials`' `write-file` probe expected `EROFS` and became a *successful overwrite of `/etc/motd`*. Retired, count moved 8 → 7 so the change is a visible diff. Second occurrence of the 5.8 `VFS_WRITE + 1` lesson — **write every denial probe so that a growing capability makes it fail loudly, not pass vacuously.**
+- `FS_WRITE = FS_RQ_BASE + 3` reuses `FS_READ`'s payload verbatim (W1); a short `FS_WRITE` is normal
+  (VFS loops), unlike `BDEV`'s refuse-or-nothing, and the two rules differ because BDEV's client
+  cannot interpret half a block while VFS's job is hiding staging from POSIX.
+- The single block buffer is what fixes `do_write`'s step order; `Blocks` gained `buf_mut`/`write`
+  and its grant widened to `CPF_READ | CPF_WRITE` (one buffer, both directions, one static address).
+- A zone's bitmap bit is set **before** its number is stored, so a mid-write failure leaks a zone
+  rather than sharing one — and the inode write-back is keyed on "a zone was assigned **or** the
+  size grew", because a hole filled mid-file moves no size and losing its pointer is corruption
+  rather than a leak.
+- VFS re-grants per round because the FS band has no grant-offset field, unlike the CDEV loop which
+  advances a payload `offset`.
+- The landmine: `open_denials`' `write-file` probe expected `EROFS` and became a *successful
+  overwrite of `/etc/motd`*. Retired, count moved 8 → 7 so the change is a visible diff. Second
+  occurrence of the 5.8 `VFS_WRITE + 1` lesson — **write every denial probe so that a growing
+  capability makes it fail loudly, not pass vacuously.**
 
 - [ ] **Step 6: Final gate sweep**
 
@@ -1813,6 +1953,7 @@ cargo clippy -p minixrs-mfs --features server -- -D warnings
 cargo test -p minixrs-kernel-shared -p minixrs-mfs -p minixrs-vfs -p minixrs-memory -p minixrs-mkfs-mfs -p minixrs-gen-c-headers
 tools/check-dco.sh
 ```
+
 Expected: all clean, DCO green for every commit on the branch.
 
 - [ ] **Step 7: Commit**
@@ -1826,10 +1967,23 @@ git commit -s -m "test: boot markers and conventions for the MFS write path (sli
 
 ## Notes for the executor
 
-- **Do not create the PR without asking.** `CLAUDE.md`'s pre-PR checklist requires running `/claude-md-management:revise-claude-md` and confirming with Kevin first.
-- **The spec is the argument; this plan is the sequence.** If an implementation detail here contradicts `docs/superpowers/specs/2026-08-18-mfs-write-path-design.md`, the spec wins — say so rather than silently following either.
-- **Boot green at every task boundary except two, both known.** Tasks 1, 3 and 6 leave every marker passing.
-  - Task 2 makes `BDEV_WRITE` real, which breaks MFS's `write` denial probe (`fs/mfs/src/main.rs:877`): it expects `EROFS` and will now get `EPERM`, because the probe's grant is `blocks.gid`, still `CPF_WRITE`-only, and `SAFECOPY_FROM` needs `CPF_READ`. So `[diag mfs] bdev.deny ok n=10` goes missing from Task 2 until **Task 4** re-points the probe. Do not fix it in Task 2 or 3 — the fix needs the dedicated write-only grant Task 4 introduces.
+- **Do not create the PR without asking.** `CLAUDE.md`'s pre-PR checklist requires running
+  `/claude-md-management:revise-claude-md` and confirming with Kevin first.
+- **The spec is the argument; this plan is the sequence.** If an implementation detail here
+  contradicts `docs/superpowers/specs/2026-08-18-mfs-write-path-design.md`, the spec wins — say so
+  rather than silently following either.
+- **Boot green at every task boundary except two, both known.** Tasks 1, 3 and 6 leave every marker
+  passing.
+  - Task 2 makes `BDEV_WRITE` real, which breaks MFS's `write` denial probe
+    (`fs/mfs/src/main.rs:877`): it expects `EROFS` and will now get `EPERM`, because the probe's
+    grant is `blocks.gid`, still `CPF_WRITE`-only, and `SAFECOPY_FROM` needs `CPF_READ`. So `[diag
+    mfs] bdev.deny ok n=10` goes missing from Task 2 until **Task 4** re-points the probe. Do not
+    fix it in Task 2 or 3 — the fix needs the dedicated write-only grant Task 4 introduces.
   - Task 5 knowingly breaks `open.deny`, and Task 7 fixes it.
-  - **The Task 4 hazard this creates.** That probe names `block: 0` — the image header and the superblock — and `gid: good`, which *is* `blocks.gid`. Task 4 Step 1 widens `blocks.gid` to `CPF_READ | CPF_WRITE`. If Step 1 lands without Step 3, the probe stops being refused and writes 32 bytes of MFS's block buffer over block 0, destroying the superblock. Steps 1 and 3 must land together, and Task 4's re-pointed probe must use its own `CPF_WRITE`-only grant rather than `good`, or widening the shared grant re-arms it.
+  - **The Task 4 hazard this creates.** That probe names `block: 0` — the image header and the
+    superblock — and `gid: good`, which *is* `blocks.gid`. Task 4 Step 1 widens `blocks.gid` to
+    `CPF_READ | CPF_WRITE`. If Step 1 lands without Step 3, the probe stops being refused and writes
+    32 bytes of MFS's block buffer over block 0, destroying the superblock. Steps 1 and 3 must land
+    together, and Task 4's re-pointed probe must use its own `CPF_WRITE`-only grant rather than
+    `good`, or widening the shared grant re-arms it.
   - If any *other* marker moves, stop and find out why before continuing.

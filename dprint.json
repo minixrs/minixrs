@@ -1,0 +1,17 @@
+{
+  "lineWidth": 100,
+  "markdown": {
+    "textWrap": "always",
+    "emphasisKind": "asterisks",
+    "strongKind": "asterisks",
+    "unorderedListKind": "dashes"
+  },
+  "excludes": [
+    "target/**",
+    "external/**",
+    "book/book/**"
+  ],
+  "plugins": [
+    "https://plugins.dprint.dev/markdown-0.24.0.wasm@cf7e65674b7eb5d91f85152ae9020dc8b3e73bd7944efcbfb05df71081217764"
+  ]
+}

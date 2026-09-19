@@ -180,8 +180,9 @@ extern "C" fn do_page_fault(esr: u64, elr: u64, far: u64) {
     // Record the fault + block the faulter on RTS_PAGEFAULT under a tightly-
     // scoped borrow, dropped before any rts transition. `rts_set` re-borrows
     // the slot via `dequeue` (`proc_slot_mut`), so holding `p` live across it
-    // would alias — the two-&mut-from-one-UnsafeCell hazard (see CLAUDE.md;
-    // mirrors `ipc::send`/`ipc::receive`). Capture the scalars we need after.
+    // would alias — the two-&mut-from-one-UnsafeCell hazard (see
+    // docs/conventions/kernel.md; mirrors `ipc::send`/`ipc::receive`).
+    // Capture the scalars we need after.
     let (faulting_nr, name);
     {
         // SAFETY: exception context — single-threaded, DAIF.I masked. The

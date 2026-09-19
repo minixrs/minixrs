@@ -1,0 +1,5 @@
+# Revisions to skip in `git blame`. Opt in locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: reflow all markdown to 100 columns with dprint
+7c50886ba9fe3c98fe2b5cf6139bff45ab219833
