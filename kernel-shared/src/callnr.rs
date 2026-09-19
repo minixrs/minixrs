@@ -1091,7 +1091,10 @@ pub const CDEV_RQ_BASE: i32 = 0xB00;
 ///
 /// Payload: minor number in [`CDEV_MINOR_OFF`]`..+4` (i32), grant id in
 /// [`CDEV_GRANT_OFF`]`..+4` (i32), byte count in [`CDEV_LEN_OFF`]`..+4` (i32), and
-/// the offset within the granted range in [`CDEV_OFFSET_OFF`]`..+8` (u64). The
+/// the offset within the granted range in [`CDEV_OFFSET_OFF`]`..+8` (u64). Bytes
+/// `12..16` are **deliberate padding, not a free field**: the u64 has to be
+/// 8-aligned relative to the message base, and the payload itself starts at
+/// message offset 8 — the reasoning [`CDEV_OFFSET_OFF`] documents. The
 /// grant must carry `CPF_READ` and name the driver as its grantee; the driver
 /// reads the bytes with `SYS_SAFECOPY(SAFECOPY_FROM, m_source, …)`.
 ///

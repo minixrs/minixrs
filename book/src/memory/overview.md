@@ -139,9 +139,10 @@ MINIX 3, where VM owns physical memory) and VM supplies only the virtual address
 
 The VM server (`servers/vm/`) is the first real user-space process. It runs a `RECEIVE(ANY)` loop
 and dispatches on message type. It owns no heap allocator — the kernel owns frames — so it tracks
-memory with a static per-process region table (`servers/vm/src/region.rs`): `[ClientRegions; 16]`,
-keyed by process number, each holding up to `MAX_REGIONS = 4` regions. A region is a half-open
-virtual range `[start, end)` tagged with a `Kind`:
+memory with a static per-process region table (`servers/vm/src/region.rs`): `[ClientRegions;
+MAX_CLIENTS]`, keyed by process number, each holding up to `MAX_REGIONS = 16` regions. `MAX_CLIENTS`
+is the shared `NR_SERVED_PROCS` ceiling (32), so the table covers every process PM can fork. A
+region is a half-open virtual range `[start, end)` tagged with a `Kind`:
 
 - `Heap` — grown by `brk`, based at the fixed `HEAP_BASE` (`0x0100_0000`).
 - `Mmap` — anonymous mappings, bump-allocated from `MMAP_BASE` (`0x0200_0000`).
