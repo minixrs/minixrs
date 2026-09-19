@@ -47,14 +47,40 @@ EXCLUDED_DIRS = {
 # Every pattern below is deliberately linear: no nested or alternating
 # quantifiers, so none of them can backtrack super-linearly. Inline
 # `[label](target)` with an optional title; labels containing `[` and targets
-# containing `(` are not used in this tree and are not matched.
+# containing `(` are not used in this tree and are not matched. Headings and
+# fences are parsed with string operations instead -- see `parse_heading` and
+# `fence_marker` -- because a regex for either is harder to read AND harder to
+# prove linear.
 LINK_RE = re.compile(r"\[([^\[\]]*)\]\(\s*([^()\s]+)(?:\s+\"[^\"]*\")?\s*\)", re.S)
-HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$")
-FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 HTML_TAG_RE = re.compile(r"<a[ \t\r\n][^>]*>", re.I)
 HTML_ATTR_RE = re.compile(r"(?:name|id)[ \t]*=[ \t]*[\"']([^\"']*)[\"']", re.I)
 
-EXTERNAL_PREFIXES = ("http://", "https://", "mailto:", "//")
+# A target is external when it names a URI scheme (`https:`, `mailto:`, `tel:`)
+# or is protocol-relative (`//host/...`). Matching the shape rather than a list
+# of known prefixes covers every scheme, and keeps a bare `http` URL literal out
+# of the source, where it reads as an insecure URL to any scanner looking for one.
+ABSOLUTE_TARGET_RE = re.compile(r"\A(?:[A-Za-z][A-Za-z0-9+.\-]*:|//)")
+
+
+def fence_marker(line: str) -> str | None:
+    """The fence character if `line` opens or closes a fenced block, else None."""
+    stripped = line.lstrip(" \t")
+    for marker in ("`", "~"):
+        if stripped.startswith(marker * 3):
+            return marker
+    return None
+
+
+def parse_heading(line: str) -> str | None:
+    """The text of an ATX heading, or None if `line` is not one."""
+    stripped = line.lstrip(" \t")
+    level = len(stripped) - len(stripped.lstrip("#"))
+    if not 1 <= level <= 6:
+        return None
+    rest = stripped[level:]
+    if rest and rest[0] not in " \t":
+        return None  # `#hashtag`, not a heading
+    return rest.strip()
 
 
 def strip_inline_markup(text: str) -> str:
@@ -88,16 +114,15 @@ def blank_fenced_blocks(text: str) -> list[str]:
     out: list[str] = []
     fence: str | None = None
     for line in text.splitlines():
-        m = FENCE_RE.match(line)
-        if m:
-            marker = m.group(1)[0]
-            if fence is None:
-                fence = marker
-            elif marker == fence:
-                fence = None
-            out.append("")
-        else:
+        marker = fence_marker(line)
+        if marker is None:
             out.append("" if fence is not None else line)
+            continue
+        if fence is None:
+            fence = marker
+        elif marker == fence:
+            fence = None
+        out.append("")
     return out
 
 
@@ -108,10 +133,10 @@ def anchors_of(path: Path) -> set[str]:
     for line in blank_fenced_blocks(path.read_text(encoding="utf-8")):
         for tag in HTML_TAG_RE.findall(line):
             found.update(HTML_ATTR_RE.findall(tag))
-        h = HEADING_RE.match(line)
-        if not h:
+        heading = parse_heading(line)
+        if heading is None:
             continue
-        base = slug(h.group(2))
+        base = slug(heading)
         if not base:
             continue
         n = seen.get(base, 0)
@@ -129,7 +154,7 @@ def iter_links(body: str):
     """
     for m in LINK_RE.finditer(body):
         target = m.group(2).strip("<>")
-        if not target or target.startswith(EXTERNAL_PREFIXES):
+        if not target or ABSOLUTE_TARGET_RE.match(target):
             continue
         yield body.count("\n", 0, m.start()) + 1, target
 
@@ -181,15 +206,16 @@ def self_test() -> int:
     anchor whose heading contains `_`, and a link whose label and target were
     reflowed onto different lines.
     """
+    section = "## A section\n"
     cases: list[tuple[str, dict[str, str], int]] = [
         ("control: everything resolves", {
             "a.md": "# Title\n\nSee [b](b.md) and [sec](b.md#a-section).\n",
-            "b.md": "# B\n\n## A section\n\ntext\n",
+            "b.md": "# B\n\n" + section + "\ntext\n",
         }, 0),
         ("missing file", {"a.md": "[gone](nope.md)\n"}, 1),
         ("missing anchor", {
             "a.md": "[bad](b.md#no-such-heading)\n",
-            "b.md": "## A section\n",
+            "b.md": section,
         }, 1),
         ("same-file anchor typo", {"a.md": "# Title\n\n[x](#titel)\n"}, 1),
         ("underscore preserved in heading", {
@@ -202,11 +228,11 @@ def self_test() -> int:
         }, 0),
         ("link reflowed across lines", {
             "a.md": "See [the section\nover here](b.md#a-section) for more.\n",
-            "b.md": "## A section\n",
+            "b.md": section,
         }, 0),
         ("reflowed link with a broken anchor", {
             "a.md": "See [the section\nover here](b.md#gone) for more.\n",
-            "b.md": "## A section\n",
+            "b.md": section,
         }, 1),
         ("duplicate headings get -1", {
             "a.md": "[one](b.md#dup) and [two](b.md#dup-1)\n",
@@ -226,6 +252,13 @@ def self_test() -> int:
         ("external links are skipped", {
             "a.md": "[e](https://example.invalid/nope) [m](mailto:a@b.c)\n",
         }, 0),
+        ("any URI scheme is external, not just the well-known ones", {
+            "a.md": "[t](tel:+15550101) [f](ftp://h/x) [p](//host/x.md)\n",
+        }, 0),
+        ("a bare `#hashtag` is not a heading", {
+            "a.md": "[x](b.md#hashtag)\n",
+            "b.md": "#hashtag is not a heading\n",
+        }, 1),
     ]
 
     failed = 0
