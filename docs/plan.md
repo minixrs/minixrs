@@ -603,6 +603,10 @@ Aggregate scope:
 
 ### Phase 6: VirtIO Drivers
 
+Prep first: [`plans/phase-6-prep.md`](plans/phase-6-prep.md) holds the pre-Phase-6 cleanup chunks —
+the user VA map (high stack, image-relative brk) should land before any virtio code, and the Phase 6
+slicing session gates starting the phase proper.
+
 - [ ] `drivers/driver-rt/`: VirtIO MMIO transport (aarch64), virtqueue management, BDEV/CDEV
       protocol
 - [ ] `drivers/virtio-blk/`: Block device
