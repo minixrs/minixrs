@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "f0fbed21bb22",
+  "strategy": "manual-commit",
+  "branch": "chore/pre6-cleanup",
+  "checkpoints_count": 4,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/f0/fbed21bb22/0/metadata.json",
+      "transcript": "/f0/fbed21bb22/0/full.jsonl",
+      "compact_transcript": "/f0/fbed21bb22/0/transcript.jsonl",
+      "content_hash": "/f0/fbed21bb22/0/content_hash.txt",
+      "prompt": "/f0/fbed21bb22/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 556,
+    "cache_creation_tokens": 1821073,
+    "cache_read_tokens": 99001036,
+    "output_tokens": 347744,
+    "api_call_count": 278
+  }
+}
