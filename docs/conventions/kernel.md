@@ -216,7 +216,8 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
   identify itself — and the text is sanitized to printable ASCII. One call is always exactly one
   line; the `grep -aF` marker contract depends on it
 - The client side is `server-rt::diag_print`; see
-  [`servers-and-drivers.md`](./servers-and-drivers.md)
+  [`testing-and-markers.md`](./testing-and-markers.md#verifying-server-behaviour) for when a server
+  should reach for it rather than for a kernel-side trace
 
 ## Demo stubs
 
