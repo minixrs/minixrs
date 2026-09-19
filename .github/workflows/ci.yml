@@ -17,6 +17,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Every formatting/shape gate that needs no build. The job keeps the name
+  # `rustfmt` because that is what branch protection requires; it now also
+  # covers markdown formatting and markdown link integrity, both of which are
+  # cheap enough that a twelfth blocking job would be pure overhead.
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
@@ -26,6 +30,24 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo fmt --all --check
+      # Pinned to the exact CLI version, the way every other tool here is:
+      # dprint.json already pins the markdown plugin by checksum, but the CLI
+      # itself decides how config is resolved, so a floating CLI could still
+      # move the output from under a checksum-pinned plugin. `dprint/check-action`
+      # would do the same thing at the cost of another third-party action to
+      # SHA-pin.
+      - name: Install dprint (pinned)
+        run: |
+          curl -fsSL https://dprint.dev/install.sh | sh -s 0.57.4
+          echo "$HOME/.dprint/bin" >> "$GITHUB_PATH"
+      - name: Check markdown formatting
+        run: dprint check
+      # Formatting alone does not keep a cross-reference honest: a rule with one
+      # home is only reachable while the pointers at it resolve. This checks that
+      # every relative markdown link names a file that exists and, when it carries
+      # a fragment, a heading that really renders to that anchor.
+      - name: Check markdown links and anchors
+        run: python3 tools/check-md-links.py
 
   clippy:
     name: clippy
