@@ -1949,8 +1949,13 @@ file *after* being exec'd.
 init's `exec_denials` battery (8 probes, all init exec'ing **itself**) is safe precisely because a
 failed exec leaves the caller on its old image — so the battery *is* the rollback proof.
 
-(The standing rules are in [kernel.md](../conventions/kernel.md#exec-from-a-filesystem) and
-[servers-and-drivers.md](../conventions/servers-and-drivers.md#control-plane-travels-inline-data-travels-by-grant).)
+(The standing rules are in [kernel.md](../conventions/kernel.md#exec-from-a-filesystem) and, in
+`servers-and-drivers.md`, under
+[Short transfers](../conventions/servers-and-drivers.md#short-transfers-who-may-who-may-not) for the
+short-stream-is-`EIO` exception,
+[Control plane travels inline](../conventions/servers-and-drivers.md#control-plane-travels-inline-data-travels-by-grant)
+for the inline path, and [Exec staging](../conventions/servers-and-drivers.md#exec-staging) for the
+staging buffer and its grant.)
 
 ### Slice 5.10 (stretch): MFS write path
 
