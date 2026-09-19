@@ -11,7 +11,7 @@ rings and bounce buffers that do not fit in one page, and a disk root invites mu
 that the stack's VA blocks outright. This slice replaces the map before any virtio code is written,
 which is why the tracker orders it first.
 
-Decisions are labelled `V1…V12`: slice-local, distinct from the phase-level `D1…D13`, which stay
+Decisions are labelled `V1…V13`: slice-local, distinct from the phase-level `D1…D13`, which stay
 locked.
 
 ---
@@ -285,11 +285,38 @@ Every claim below is a command whose output is read before the claim is made.
 | --------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | the image ceiling is gone         | `userland/bigprog` loads and runs — see below                                                            |
 | the stack is high                 | `[exec] … sp=0x3fff` in the boot log, with the expectation **tightened** past its current `sp=0x` prefix |
-| brk is image-relative             | an init probe `VM_BRK`s and asserts the returned break ≥ `image_end`, not `0x0100_0000`                  |
-| regions survive exec correctly    | the probe runs in an exec'd proc, so a stale pre-exec heap region would answer the old origin            |
+| brk is image-relative             | `[diag vm] exec` marker (below) + `region.rs` host unit tests over a recorded origin                     |
+| regions survive exec correctly    | the same marker reports how many stale regions it dropped; host tests cover the drop                     |
 | MFS still works with stack locals | the existing `fs.*` marker battery, unchanged                                                            |
 | the tooling checker is green      | `check-image.sh` over every built image, after step 2 of V12                                             |
 | no flavour regressed              | the **mandatory** three-boot matrix (SDK, forced musl, moved-aside sysroot + `MINIXRS_SDK=/nonexistent`) |
+
+### V13 — the brk proof is VM-side, because USER cannot reach VM
+
+`kernel/src/proc/table.rs:394` defines `USER_IPC_TO = [PM_PROC_NR, VFS_PROC_NR]`. The shared USER
+privilege has **no `ipc_to` bit for VM**, so neither init nor any exec'd program can send `VM_BRK` —
+an end-to-end "a program called brk and got an image-relative answer" proof is not available in this
+slice, and opening that edge is chunk 5's work (it costs a *pair* of bits, the 5.4 lesson).
+
+Stating that plainly rather than shipping a proof that cannot run. What is proved instead:
+
+- **A `[diag vm]` marker on every `VM_EXEC`**, carrying the origin VM derived and how many stale
+  regions it dropped:
+
+  ```
+  [diag vm] exec nr=18 image_end=0x302000 heap=0x302000 mmap=0x1302000 dropped=2
+  ```
+
+  `heap` equal to `image_end` and *unequal* to the legacy `0x0100_0000` is the assertable claim.
+  `dropped` is non-zero on a re-exec of a proc that had regions, which is the stale-region gap (V6)
+  becoming observable for the first time.
+- **Host unit tests in `servers/vm/src/region.rs`**, which already carries a `#[cfg(test)]` module
+  and runs on the host: `set_brk` below a recorded origin is `EINVAL`, a first `set_brk` creates the
+  heap at the recorded origin rather than `HEAP_BASE`, a proc with no recorded origin still gets
+  `HEAP_BASE`, `exec` drops prior regions, and the mmap arena bumps from `origin + MMAP_GAP`.
+
+The end-to-end proof is chunk 5's first deliverable and should be written there, against this
+marker.
 
 ### `userland/bigprog`
 
