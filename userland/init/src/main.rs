@@ -155,18 +155,23 @@ const _: () = assert!(UNMAPPED_VA < USER_DEVICE_WINDOW_BASE);
 /// reordering this array silently retires the `exec stack ok` marker while
 /// leaving every other marker in place.
 ///
-/// The two entries are now *different forms*, not just different programs.
-/// `worker` is a boot-image module name — slice 4.7's form, and the only thing
-/// keeping it live. [`ROOTFS_HELLO_PATH`] is an absolute path, so it goes through
+/// The entries are *different forms*, not just different programs. `worker` is a
+/// boot-image module name — slice 4.7's form, and the only thing keeping it
+/// live. [`ROOTFS_HELLO_PATH`] is an absolute path, so it goes through
 /// slice 5.9's whole chain: PM → VFS → MFS → the ramdisk, staged, granted, and
 /// read by the kernel through that grant. Since 5.9 dropped `hello` from the boot
 /// archive there is no other way to reach it, which is what makes the C markers
 /// *proof* of exec-from-FS rather than merely compatible with it.
 ///
-/// Alternating rather than switching outright is still the point: retiring
-/// `worker` would take the exec-ABI proof down with it. Both traces land inside
-/// the `[ksys SYS_EXEC]` head carve-out (6 calls), so both are observable.
-const EXEC_TARGETS: [&str; 2] = ["worker", ROOTFS_HELLO_PATH];
+/// `bigprog` is third: the user VA map's regression fixture (pre-Phase-6 chunk
+/// 2). It is a module name, like `worker` — a 2 MiB `.bss` image does not need
+/// to come off the filesystem to prove the VA ceiling is gone, and keeping it
+/// out of the rootfs leaves the image size and the boot budget untouched.
+///
+/// Rotating rather than switching outright is still the point: retiring
+/// `worker` would take the exec-ABI proof down with it. All three traces land
+/// inside the `[ksys SYS_EXEC]` head carve-out (6 calls), so all are observable.
+const EXEC_TARGETS: [&str; 3] = ["worker", ROOTFS_HELLO_PATH, "bigprog"];
 
 // Each target has to fit the `PM_EXEC` payload field, which is a whole path's
 // worth since slice 5.9 — a module name that fit the old 16-byte field still
