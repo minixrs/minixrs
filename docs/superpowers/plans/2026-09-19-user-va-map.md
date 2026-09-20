@@ -33,6 +33,9 @@ decisions `V1…V13`. Read it before Task 1; every task below argues from it.
 - **Verify before claiming.** Run the command, read its output, *then* say it passes.
 - **Do not write inside `$MINIXRS_SDK`.** Task 12 produces a change plan for the tooling repo; it
   does not edit it.
+- **A `match` that could be `?` trips clippy too** (`question_mark`), once a function returns
+  `Result`. Task 8's prescribed `exec_from_fs` body hit this. When a task changes a return type from
+  a bare code to a `Result`, re-check every `match` in that function.
 - **All-constant `assert!` trips clippy.** CI runs `cargo clippy --workspace --all-targets -- -D
   warnings` (`.github/workflows/ci.yml:91`), and `assertions_on_constants` fires on a runtime
   `assert!` whose operands are all constants. **Several tasks below prescribe exactly that pattern
@@ -1448,10 +1451,10 @@ fn exec_from_fs(
     path: &str,
     argv0: &str,
 ) -> Result<u64, i32> {
-    let (size, gid) = match vfs_exec_stage(vfs, path) {
-        Ok(staged) => staged,
-        Err(rc) => return Err(rc),
-    };
+    // `?`, not a `match`: the old body matched only because the function
+    // returned `i32`. Once it returns `Result`, clippy's `question_mark` lint
+    // rejects the `match` under CI's `-D warnings`.
+    let (size, gid) = vfs_exec_stage(vfs, path)?;
     sys_exec_grant(system, caller_e, argv0, vfs, gid, size)
 }
 ```
