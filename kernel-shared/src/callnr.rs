@@ -175,6 +175,13 @@ pub const EXEC_GRANT_OFF: usize = 28;
 /// 8, hence 32; the reasoning [`CDEV_OFFSET_OFF`] documents).
 pub const EXEC_LEN_OFF: usize = 32;
 
+/// `SYS_EXEC` **reply**: the loader's page-aligned image end (u64, `40..48`).
+///
+/// Reply-only, and deliberately past [`EXEC_LEN_OFF`] (`32..40`) — the last
+/// request field — so it aliases nothing the caller wrote. PM forwards the value
+/// to VM as [`VM_EXEC_IMAGE_END_OFF`].
+pub const EXEC_IMAGE_END_OFF: usize = 40;
+
 // The `SYS_EXEC` payload fields are ordered, non-overlapping, and fit the 96-byte
 // payload. `EXEC_LEN_OFF` is 8 wide (u64); the rest are 4 (i32), except the name
 // field, which is `EXEC_NAME_LEN`.
@@ -184,6 +191,10 @@ const _: () = assert!(EXEC_GRANTER_OFF + 4 <= EXEC_GRANT_OFF);
 const _: () = assert!(EXEC_GRANT_OFF + 4 <= EXEC_LEN_OFF);
 const _: () = assert!(EXEC_LEN_OFF + 8 <= 96);
 const _: () = assert!((8 + EXEC_LEN_OFF).is_multiple_of(8));
+// The reply-only image-end field sits past every request field, so it cannot
+// alias anything the caller wrote.
+const _: () = assert!(EXEC_LEN_OFF + 8 <= EXEC_IMAGE_END_OFF);
+const _: () = assert!(EXEC_IMAGE_END_OFF + 8 <= 96);
 // Selector 0 must stay invalid, so neither form may take it.
 const _: () = assert!(EXEC_SRC_NAME != 0 && EXEC_SRC_GRANT != 0);
 const _: () = assert!(EXEC_SRC_NAME != EXEC_SRC_GRANT);
@@ -1257,6 +1268,39 @@ pub const VM_MUNMAP: i32 = VM_RQ_BASE + 3;
 /// either endpoint maps to an out-of-range proc number. (slice 4.6b)
 pub const VM_FORK: i32 = VM_RQ_BASE + 4;
 
+/// PM → VM: a process has exec'd; reset its memory bookkeeping around the new
+/// image. Payload: target endpoint ([`VM_EXEC_PROC_OFF`], `0..4`, i32) and the
+/// loader's page-aligned image end ([`VM_EXEC_IMAGE_END_OFF`], `8..16`, u64).
+/// Reply `m_type = OK`, or `EINVAL` if the endpoint maps to an out-of-range proc
+/// number.
+///
+/// VM drops every region the proc's *previous* image accumulated and records
+/// `image_end` as the origin for its heap, with the mmap arena a fixed gap
+/// above. Before this request existed VM was never told an exec had happened at
+/// all, so an exec'd process kept regions describing an address space the kernel
+/// had already torn down — benign only because nothing yet asked VM about a
+/// proc that had exec'd twice.
+///
+/// Sent **after** `SYS_EXEC`, which is the point of no return, so a failure here
+/// cannot roll anything back and PM treats it as a diagnostic rather than an
+/// error. Doing the bookkeeping first would mean unwinding it on every failed
+/// exec, and `init`'s denial battery fires eight of those every boot.
+pub const VM_EXEC: i32 = VM_RQ_BASE + 5;
+
+/// `VM_EXEC` payload: target endpoint (i32).
+pub const VM_EXEC_PROC_OFF: usize = 0;
+
+/// `VM_EXEC` payload: the loader's page-aligned image end (u64).
+///
+/// `4..8` is left as padding so the u64 lands 8-byte aligned, matching
+/// [`EXEC_LEN_OFF`] and the BDEV/CDEV offset fields.
+pub const VM_EXEC_IMAGE_END_OFF: usize = 8;
+
+// The `VM_EXEC` payload fields are ordered, non-overlapping, and fit the 96-byte
+// payload.
+const _: () = assert!(VM_EXEC_PROC_OFF + 4 <= VM_EXEC_IMAGE_END_OFF);
+const _: () = assert!(VM_EXEC_IMAGE_END_OFF + 8 <= 96);
+
 // ---------------------------------------------------------------------------
 // DS (Data Store) server request numbers — `m_type` values for messages
 // addressed to the DS server.
@@ -1343,9 +1387,11 @@ pub const SEF_SIGNAL: i32 = SEF_RQ_BASE + 1;
 /// coverage in `server-rt` the way `NR_VMCTL_SUBCALLS` locks `do_vmctl`.
 pub const NR_SEF_MSGS: usize = 2;
 
-// The SEF range sits strictly above the VM request range (0xC00..0xC04) so a
-// server's `m_type` dispatcher and the SEF classifier can never collide.
-const _: () = assert!(SEF_RQ_BASE > VM_RQ_BASE + 4);
+// The SEF range sits strictly above the VM request range (0xC00..0xC05) so a
+// server's `m_type` dispatcher and the SEF classifier can never collide. The
+// bound names the band's highest request, so adding one moves it: the generated
+// C header's mirror of this guard reads `SEF_RQ_BASE > VM_EXEC`.
+const _: () = assert!(SEF_RQ_BASE > VM_RQ_BASE + 5);
 const _: () = assert!(SEF_RQ_BASE < crate::ipc_const::NOTIFY_MESSAGE);
 
 // ---------------------------------------------------------------------------
@@ -1620,6 +1666,48 @@ mod tests {
         // (The VM_FORK < SEF_RQ_BASE ordering is locked by a module-level
         // const-assert, so it needs no runtime assertion here.)
         assert_ne!(VM_FORK, crate::ipc_const::NOTIFY_MESSAGE);
+    }
+
+    #[test]
+    fn vm_exec_is_the_sixth_vm_request() {
+        assert_eq!(VM_EXEC, VM_RQ_BASE + 5);
+        assert_ne!(VM_EXEC, VM_FORK);
+        assert_ne!(VM_EXEC, VM_MUNMAP);
+        assert_ne!(VM_EXEC, VM_MMAP);
+        assert_ne!(VM_EXEC, VM_BRK);
+        assert_ne!(VM_EXEC, VM_PAGEFAULT);
+        assert!(VM_EXEC > KERNEL_CALL + NR_KERN_CALLS as i32);
+        assert_ne!(VM_EXEC, crate::ipc_const::NOTIFY_MESSAGE);
+    }
+
+    #[test]
+    fn the_vm_exec_payload_fields_do_not_overlap() {
+        // proc endpoint is 4 wide (i32); image_end is 8 (u64) and 8-byte
+        // aligned, so 4..8 is padding — the same shape EXEC_LEN_OFF uses.
+        assert_eq!(VM_EXEC_PROC_OFF, 0);
+        assert_eq!(VM_EXEC_IMAGE_END_OFF, 8);
+        // `min` rather than `<=`: an all-constant `assert!` trips clippy's
+        // `assertions_on_constants`, which CI runs as `-D warnings`.
+        let proc_end = VM_EXEC_PROC_OFF + 4;
+        assert_eq!(proc_end.min(VM_EXEC_IMAGE_END_OFF), proc_end);
+        let payload_end = VM_EXEC_IMAGE_END_OFF + 8;
+        assert_eq!(payload_end.min(96), payload_end);
+        assert_eq!(VM_EXEC_IMAGE_END_OFF % 8, 0);
+    }
+
+    #[test]
+    fn exec_image_end_is_reply_only_and_aliases_no_request_field() {
+        // The request's last field is EXEC_LEN_OFF (32..40). A reply-only field
+        // placed past it cannot alias anything a caller wrote, so a handler that
+        // reads a request field after composing the reply reads its own value.
+        assert_eq!(EXEC_IMAGE_END_OFF, 40);
+        // `min` rather than `<=`: an all-constant `assert!` trips clippy's
+        // `assertions_on_constants`, which CI runs as `-D warnings`.
+        let request_end = EXEC_LEN_OFF + 8;
+        assert_eq!(request_end.min(EXEC_IMAGE_END_OFF), request_end);
+        let reply_end = EXEC_IMAGE_END_OFF + 8;
+        assert_eq!(reply_end.min(96), reply_end);
+        assert_eq!(EXEC_IMAGE_END_OFF % 8, 0);
     }
 
     #[test]
