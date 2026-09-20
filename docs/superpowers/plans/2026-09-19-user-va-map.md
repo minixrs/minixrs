@@ -1937,6 +1937,11 @@ nothing about *where* the stack is. Change it to pin the high stack, and add the
 bigprog ok: bss pages mapped
 ```
 
+**Also add `[diag vm] exec FAIL` to `tests/qemu-boot.forbidden`.** Task 7's zero-`image_end`
+rejection and its bad-endpoint arm both print that prefix, and with no forbidden entry they could
+fire on every boot while the run still passed. Note this moves the marker total by **2**, not 1 —
+`check-boot-log.sh`'s PASS count sums both files.
+
 Read [`testing-and-markers.md`](../../conventions/testing-and-markers.md) first: expectations are
 first-occurrence-only, so the `[diag vm] exec` entry matches whichever exec happens first. That is
 deliberate — the marker must appear for *every* exec, so the first one is a sufficient witness, and
@@ -1955,6 +1960,18 @@ tools/check-boot-log.sh /tmp/boot-full.log
 Expected: every marker passes. If `[exec] … sp=0x3fff` fails, read the actual `sp` in the log before
 changing anything — an `sp` that is not in `0x3fff_xxxx` means the stack did not move, which is a
 Task 2 defect, not a marker that needs loosening.
+
+**Run boots serially, with nothing else building.** Measured on this branch at HEAD: `timeout 300`
+passes 106/106, with the last required marker (`hello: errno ok`) at **68% of the window (~204 s)**
+— adequate, not generous. A boot sharing the machine with a `cargo` build tips over that 32%
+headroom and fails markers that have nothing wrong with them; one agent lost three boots to exactly
+that and concluded the budget needed raising to 1800 s. It does not. Do not start a build, a
+subagent, or a second boot while one is running.
+
+**Measure the fraction inside the budget you actually use.** Extrapolating from a longer run
+overestimates headroom badly — the same marker reads 6.90% of an 1800 s log, which scales to a
+flattering "~124 s" — because log growth is not linear across the window. That is why
+[`ci.md`](../../conventions/ci.md) asks for the fraction rather than the wall clock.
 
 - [ ] **Step 3: Measure the boot-timing ratio**
 
