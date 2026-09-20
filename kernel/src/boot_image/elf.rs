@@ -138,7 +138,7 @@ const MAX_NOTE_BYTES: usize = 256;
 // `PAGE_SIZE`, so the two could not disagree; now they can, and a divergence is
 // silent — a 16 KiB-granule port would charge `ceil(memsz / 4096)` pages and then
 // map that many 16 KiB pages, running four times past the segment's end into the
-// next one (or into `SERVER_STACK_VA`). Pin them together here, where both names
+// next one (or into the stack range). Pin them together here, where both names
 // are in scope.
 const _: () = assert!(PAGE_SIZE as u64 == minixrs_kernel_shared::message::USER_PAGE_SIZE);
 
