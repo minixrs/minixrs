@@ -15,22 +15,29 @@
 //!
 //! Slice 5.7 built everything under it — the compile-time MinixFS image, the
 //! ramdisk driver, and the whole `minixrs-mfs` format library. This binary is the
-//! glue: SEF startup, the FS-band receive loop, two `.bss` buffers, and the
-//! grants at either end of them. **Every line with a decision in it is in the
+//! glue: SEF startup, the FS-band receive loop, two block-sized buffers, and
+//! the grants at either end of them. **Every line with a decision in it is in the
 //! library** (`proto.rs`, `walk.rs`), because this file is behind
 //! `required-features = ["server"]` and therefore compiled by no CI job except the
 //! QEMU boot smoke test — see the note in `Cargo.toml`.
 //!
 //! ## Five things worth knowing
 //!
-//! **The block buffer is a `.bss` static, not a `main`-frame local.** A boot
-//! server's stack is exactly one page and a block is exactly one page, so a local
-//! would put the frame base *below* the mapping — and that fault is turned into a
-//! SIGSEGV by VM's out-of-region arm, which prints nothing the forbidden list
-//! catches. This does not contradict TTY's "stage in `main`'s frame, not a
-//! static": that rule's load-bearing half is *the buffer must outlive every call
-//! that names it*, and a static satisfies it strictly better — the address never
-//! changes, so the grant issued over it at boot never needs re-registering.
+//! **The block buffer is a `main`-frame local, and `main`'s frame specifically.**
+//! It was a `.bss` static for as long as a boot server's stack was one page: a
+//! block is exactly one page, so a local would have put the frame base *below*
+//! the mapping, and that fault is turned into a SIGSEGV by VM's out-of-region
+//! arm, which prints nothing the forbidden list catches. At
+//! `uspace::USER_STACK_BYTES` = 64 KiB it fits, and `lib.rs`'s tripwire — written
+//! to fire when the stack grew — is what said to re-read this.
+//!
+//! The frame it lives in is not incidental. A grant issued to the `memory`
+//! driver names this buffer's *address*, so whatever frame holds it must outlive
+//! every safecopy made against it; `main` never returns, which is why `grants`,
+//! `mount` and both capability tokens are already there rather than in
+//! `mfs_init`, whose frame is gone by the time anything copies. This is TTY's
+//! "stage in `main`'s frame, not a static" satisfied literally, where the old
+//! static satisfied it by going one better.
 //!
 //! **It is reached only through the [`Blocks`] capability token.** [`Blocks::read`]
 //! takes `&mut self` and returns a reference borrowed from it, so "hold a
@@ -38,7 +45,11 @@
 //! a promise. That is the aliasing hazard a two-buffer design would relocate
 //! rather than remove, and it is a class of bug this repo has shipped before
 //! (slice 5.3's `free_frame` / `is_usable_pa`). Every intermediate the walk needs
-//! is a small `Copy` value: an `Inode`, a `u32` inode number, a `u32` zone.
+//! is a small `Copy` value: an `Inode`, a `u32` inode number, a `u32` zone. The
+//! token holds the buffer as a plain `&mut` now, so that discipline is the
+//! compiler's from end to end: there is no `UnsafeCell` beneath it and no
+//! hand-written `Sync` impl resting on an argument about MFS being
+//! single-threaded.
 //!
 //! **There are two buffers and two capabilities, not one grown wider (slice
 //! 5.10b).** [`Blocks`] fetches and flushes device blocks; [`Stage`] holds one
@@ -47,7 +58,7 @@
 //! happen after an allocation. They stay separate rather than sharing one buffer
 //! under two names: `Stage` has exactly one caller and one purpose, so folding it
 //! into `Blocks` would only make `Blocks`'s single-writer discipline harder to see
-//! for no reduction in `.bss`.
+//! for no reduction in footprint.
 //!
 //! **Two error-relay rules, which read as contradictory and are not.** A failed
 //! `BDEV_READ` becomes `EIO`: this server's client addressed a *file*, and the
@@ -70,8 +81,6 @@
 #![cfg_attr(not(test), no_main)]
 
 minixrs_abi_note::brand!();
-
-use core::cell::UnsafeCell;
 
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
@@ -109,7 +118,7 @@ use minixrs_server_rt::{
 
 /// Simultaneously outstanding grants. Four are used — the block buffer's, and the
 /// three malformed ones the denial battery needs — and the pool costs `N * 32`
-/// bytes of `main`'s one-page frame, so 8 is ample headroom at 256 bytes.
+/// bytes of `main`'s frame, so 8 is ample headroom at 256 bytes.
 const GRANT_SLOTS: usize = 8;
 
 /// Mode a newly created file gets: a regular file, `rw-r--r--`.
@@ -124,36 +133,6 @@ const NEW_FILE_MODE: u16 = I_REGULAR | 0o644;
 // ---------------------------------------------------------------------------
 // The block buffer, and the capability that reaches it.
 // ---------------------------------------------------------------------------
-
-/// `UnsafeCell`-wrapped static block buffer. See the module note for why it is a
-/// static, and [`Blocks`] for what stops it being aliased.
-///
-/// Same shape as `servers/ds/src/registry.rs`'s table and `servers/vm`'s regions:
-/// a `#[repr(transparent)]` newtype with a hand-written `Sync`.
-#[repr(transparent)]
-struct BlockBuf(UnsafeCell<[u8; MFS_BLOCK_SIZE]>);
-
-// SAFETY: MFS is a single EL0 thread running a straight-line receive loop with no
-// interrupt handlers of its own, so there is never a second accessor. Every path
-// to the bytes goes through `Blocks`, which is created exactly once in `main` and
-// whose `&mut self` methods are what serialize access within that thread.
-unsafe impl Sync for BlockBuf {}
-
-static BLOCK: BlockBuf = BlockBuf(UnsafeCell::new([0u8; MFS_BLOCK_SIZE]));
-
-/// `UnsafeCell`-wrapped staging buffer for one `FS_WRITE` round's client bytes.
-/// See [`Stage`], and [`BlockBuf`] for why it is a static.
-#[repr(transparent)]
-struct StageBuf(UnsafeCell<[u8; MFS_BLOCK_SIZE]>);
-
-// SAFETY: as `BlockBuf` — MFS is a single EL0 thread running a straight-line
-// receive loop with no interrupt handlers of its own, so there is never a second
-// accessor. Every path to the bytes goes through `Stage`, which is created
-// exactly once in `main` and whose `&mut self` method is what serializes access
-// within that thread.
-unsafe impl Sync for StageBuf {}
-
-static STAGE: StageBuf = StageBuf(UnsafeCell::new([0u8; MFS_BLOCK_SIZE]));
 
 /// The capability to stage a client's bytes — one instance, created once in
 /// [`main`], and the whole of slice 5.10b's leak fix.
@@ -170,22 +149,33 @@ static STAGE: StageBuf = StageBuf(UnsafeCell::new([0u8; MFS_BLOCK_SIZE]));
 ///
 /// A grant is not needed: MFS is the *grantee* of this copy, so the destination
 /// is an ordinary address in its own address space.
-///
-/// **The private field is load-bearing**, exactly as [`Blocks`]'s two are. A unit
-/// struct would make `let mut s2 = Stage;` a second, independent `&mut` path to
-/// [`STAGE`] — one word, no arguments, no diagnostic — and a live `&[u8]` from
-/// the first would then alias a buffer the kernel writes into. With the field,
-/// that slip is a compile error and the only way in is [`stage`].
-struct Stage(());
-
-/// Take the one [`Stage`] token. Called exactly once, from [`main`] — the
-/// no-argument twin of [`device`].
-#[cfg_attr(test, allow(dead_code))]
-fn stage() -> Stage {
-    Stage(())
+struct Stage<'a> {
+    /// The staging buffer, borrowed from [`main`]'s frame.
+    ///
+    /// A `&mut` rather than the `UnsafeCell` static this used to reach: the
+    /// static existed only because a one-page stack could not hold 4 KiB, and
+    /// with it went a hand-written `Sync` impl whose soundness rested on an
+    /// argument about MFS being single-threaded. The borrow checker makes that
+    /// argument now, so the `unsafe` goes away rather than moving.
+    ///
+    /// It also subsumes what the old unit-struct field was standing in for. That
+    /// field existed so `let mut s2 = Stage;` could not conjure a second,
+    /// independent `&mut` path to the static; a second `Stage` over these bytes
+    /// now needs a second `&mut` to them, which is a borrow-check error, so
+    /// [`stage`] remains the only way in.
+    ///
+    /// **[`main`]'s frame specifically**, for the reason [`Blocks::buf`] gives.
+    buf: &'a mut [u8; MFS_BLOCK_SIZE],
 }
 
-impl Stage {
+/// Take the one [`Stage`] token, over a buffer borrowed from [`main`]'s frame.
+/// Called exactly once, from [`main`] — the one-argument twin of [`device`].
+#[cfg_attr(test, allow(dead_code))]
+fn stage(buf: &mut [u8; MFS_BLOCK_SIZE]) -> Stage<'_> {
+    Stage { buf }
+}
+
+impl Stage<'_> {
     /// Copy `len` bytes out of the client's grant into the staging buffer, and
     /// hand back exactly what landed.
     ///
@@ -209,7 +199,7 @@ impl Stage {
             granter,
             gid,
             0,
-            STAGE.0.get() as usize as u64,
+            self.buf.as_ptr() as usize as u64,
             len as u64,
         );
         if rc != OK {
@@ -218,10 +208,10 @@ impl Stage {
             // caller's side.
             return Err(rc);
         }
-        // SAFETY: `&mut self` is held, so this is the only reference into the
-        // buffer for as long as the returned one lives, and the copy above — the
-        // only thing that writes these bytes — has completed.
-        unsafe { (*STAGE.0.get()).get(..len).ok_or(EIO) }
+        // `&mut self` is held, so this is the only reference into the buffer for
+        // as long as the returned one lives, and the copy above — the only thing
+        // that writes these bytes — has completed.
+        self.buf.get(..len).ok_or(EIO)
     }
 }
 
@@ -233,12 +223,27 @@ impl Stage {
 /// aliasing bug — the kernel writes into this buffer during a `BDEV_READ`, which
 /// happens inside `read` while `&mut self` is held and no shared reference is
 /// outstanding.
-struct Blocks {
+struct Blocks<'a> {
+    /// The block buffer, borrowed from [`main`]'s frame.
+    ///
+    /// A `&mut` rather than the `UnsafeCell` static this used to reach: the
+    /// static existed only because a one-page stack could not hold 4 KiB, and
+    /// with it went a hand-written `Sync` impl whose soundness rested on an
+    /// argument about MFS being single-threaded. The borrow checker makes that
+    /// argument now, so the `unsafe` goes away rather than moving.
+    ///
+    /// **[`main`]'s frame specifically, not any frame.** [`gid`](Self::gid) names
+    /// this buffer's *address*, so whatever frame holds it has to outlive every
+    /// safecopy the driver makes against it. `main` never returns, which is the
+    /// same reason `grants` lives there rather than in [`mfs_init`]. A buffer in a
+    /// helper's frame would compile and then hand the driver a dangling address.
+    buf: &'a mut [u8; MFS_BLOCK_SIZE],
     /// The block driver, resolved through DS at boot.
     mem: Endpoint,
-    /// Grant naming [`BLOCK`] with the driver as grantee, `CPF_READ | CPF_WRITE`.
-    /// Issued once at boot: the buffer is a static, so its address never changes
-    /// and `GrantPool::ensure_registered` never re-fires.
+    /// Grant naming [`buf`](Self::buf) with the driver as grantee, `CPF_READ |
+    /// CPF_WRITE`. Issued once at boot: the buffer is a local of a `main` that
+    /// never returns, so its address never changes and
+    /// `GrantPool::ensure_registered` never re-fires.
     ///
     /// **Both directions on one grant** (W5): the driver writes into this buffer
     /// on a `BDEV_READ` and reads out of it on a `BDEV_WRITE`, and the grantee is
@@ -252,11 +257,12 @@ struct Blocks {
     gid: i32,
 }
 
-impl Blocks {
+impl Blocks<'_> {
     /// Address of the block buffer, for the grant issued over it. Constant for
-    /// the life of the process.
-    fn addr() -> u64 {
-        BLOCK.0.get() as usize as u64
+    /// the life of the process — see [`buf`](Self::buf) for why that holds of a
+    /// local.
+    fn addr(&self) -> u64 {
+        self.buf.as_ptr() as usize as u64
     }
 
     /// Fetch block `block` from the device, replacing the buffer's contents.
@@ -278,11 +284,11 @@ impl Blocks {
         if rc != MFS_BLOCK_SIZE as i32 {
             return Err(EIO);
         }
-        // SAFETY: `&mut self` is held, so no other reference into the buffer is
+        // `&mut self` is held, so no other reference into the buffer is
         // outstanding, and the `BDEV_READ` above — the only thing that writes
         // these bytes — has completed. The returned lifetime is elided to
         // `&mut self`'s, so the borrow checker keeps it that way.
-        Ok(unsafe { &*BLOCK.0.get() })
+        Ok(&*self.buf)
     }
 
     /// The buffer, zeroed — what a **hole** reads as.
@@ -298,14 +304,11 @@ impl Blocks {
     /// is a legal image regardless, and answering one with stale bytes from the
     /// previous block would be silent corruption.
     fn zeroed(&mut self) -> &[u8; MFS_BLOCK_SIZE] {
-        // SAFETY: as `read` above — `&mut self` is held, so this is the only
-        // reference into the buffer, and the `&mut` the fill borrows dies at the
-        // end of that statement, before the shared reference is formed.
-        unsafe {
-            let p = BLOCK.0.get();
-            (*p).fill(0);
-            &*p
-        }
+        // As `read` above — `&mut self` is held, so this is the only reference
+        // into the buffer, and the `&mut` the fill borrows dies at the end of that
+        // statement, before the shared reference is formed.
+        self.buf.fill(0);
+        &*self.buf
     }
 
     /// The block buffer, mutable — for the splice a partial write performs.
@@ -314,9 +317,9 @@ impl Blocks {
     /// only reference into the buffer, and the borrow checker is what keeps it
     /// the only one.
     fn buf_mut(&mut self) -> &mut [u8; MFS_BLOCK_SIZE] {
-        // SAFETY: as `read` — `&mut self` is held, so this is the only reference
-        // into the buffer for as long as the returned one lives.
-        unsafe { &mut *BLOCK.0.get() }
+        // As `read` — `&mut self` is held, so this is the only reference into the
+        // buffer for as long as the returned one lives.
+        &mut *self.buf
     }
 
     /// Store the buffer's current contents as block `block`.
@@ -388,9 +391,16 @@ fn main() -> ! {
     // `main`-frame values that outlive the receive loop. The grant pool cannot
     // live in `init_fresh`, whose frame is gone by the time a grantee safecopies —
     // the rule `server-rt` keeps `GrantPool` a value rather than a static for.
+    //
+    // The two block buffers join them for that same reason: each is named by a
+    // grant the `memory` driver safecopies against, so the frame holding it has to
+    // outlive every such copy. `main` never returns; a helper's frame would
+    // compile and then leave the driver copying into a dead one.
     let mut grants: GrantPool<GRANT_SLOTS> = GrantPool::new();
-    let mut blocks = device(&mut grants, mem_endpoint());
-    let mut stage = stage();
+    let mut block_buf = [0u8; MFS_BLOCK_SIZE];
+    let mut stage_buf = [0u8; MFS_BLOCK_SIZE];
+    let mut blocks = device(&mut grants, mem_endpoint(), &mut block_buf);
+    let mut stage = stage(&mut stage_buf);
     let mut mount = mount_root(&mut blocks);
 
     if let Some(m) = mount {
@@ -459,7 +469,7 @@ fn mfs_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
 /// still reading through — the failure is reported to this one caller and nothing
 /// else changes.
 #[cfg_attr(test, allow(dead_code))]
-fn do_readsuper(msg: &mut Message, blocks: &mut Blocks, mount: &mut Option<Mount>) -> i32 {
+fn do_readsuper(msg: &mut Message, blocks: &mut Blocks<'_>, mount: &mut Option<Mount>) -> i32 {
     if proto::parse_readsuper(msg) != BDEV_MINOR_RAMDISK {
         // The *device* does not exist. Nothing is wrong with the request itself.
         return ENXIO;
@@ -475,7 +485,7 @@ fn do_readsuper(msg: &mut Message, blocks: &mut Blocks, mount: &mut Option<Mount
 
 /// Serve one `FS_LOOKUP`: resolve a path to `(inode, mode, size)`.
 #[cfg_attr(test, allow(dead_code))]
-fn do_lookup(msg: &mut Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
+fn do_lookup(msg: &mut Message, blocks: &mut Blocks<'_>, mount: &Option<Mount>) -> i32 {
     let Some(mount) = mount else {
         return ENODEV;
     };
@@ -518,7 +528,12 @@ fn do_lookup(msg: &mut Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i
 /// granter would aim a privileged cross-address-space copy wherever the caller
 /// pointed.
 #[cfg_attr(test, allow(dead_code))]
-fn do_read(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
+fn do_read(
+    msg: &Message,
+    granter: Endpoint,
+    blocks: &mut Blocks<'_>,
+    mount: &Option<Mount>,
+) -> i32 {
     let Some(mount) = mount else {
         return ENODEV;
     };
@@ -648,8 +663,8 @@ fn do_read(msg: &Message, granter: Endpoint, blocks: &mut Blocks, mount: &Option
 fn do_write(
     msg: &Message,
     granter: Endpoint,
-    blocks: &mut Blocks,
-    stage: &mut Stage,
+    blocks: &mut Blocks<'_>,
+    stage: &mut Stage<'_>,
     mount: &Option<Mount>,
 ) -> i32 {
     let Some(mount) = mount else {
@@ -756,7 +771,7 @@ fn do_write(
 /// [`proto::parse_lookup`] and [`proto::reply_lookup`] serve both — which is what
 /// lets VFS classify either answer through one function.
 #[cfg_attr(test, allow(dead_code))]
-fn do_create(msg: &mut Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
+fn do_create(msg: &mut Message, blocks: &mut Blocks<'_>, mount: &Option<Mount>) -> i32 {
     let Some(mount) = mount else {
         return ENODEV;
     };
@@ -797,7 +812,7 @@ fn do_create(msg: &mut Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i
 /// is not addressable at all — zero included — is `EINVAL` from
 /// [`read_inode`]'s own split.
 #[cfg_attr(test, allow(dead_code))]
-fn do_trunc(msg: &Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
+fn do_trunc(msg: &Message, blocks: &mut Blocks<'_>, mount: &Option<Mount>) -> i32 {
     let Some(mount) = mount else {
         return ENODEV;
     };
@@ -880,7 +895,7 @@ fn do_trunc(msg: &Message, blocks: &mut Blocks, mount: &Option<Mount>) -> i32 {
 /// inodes for good, and — unlike a leaked zone, which `do_trunc` can hand back —
 /// no amount of truncating recovers an orphaned inode.
 #[cfg_attr(test, allow(dead_code))]
-fn create(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode), i32> {
+fn create(blocks: &mut Blocks<'_>, mount: &Mount, path: &str) -> Result<(u32, Inode), i32> {
     let (parent_path, name) = walk::split_basename(path)?;
     let (parent_ino, parent) = lookup(blocks, mount, parent_path)?;
     if !parent.is_dir() {
@@ -931,7 +946,7 @@ fn create(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode)
 /// server, and through it VFS and init.
 #[cfg_attr(test, allow(dead_code))]
 fn find_free_slot(
-    blocks: &mut Blocks,
+    blocks: &mut Blocks<'_>,
     mount: &Mount,
     dir: &Inode,
     name: &str,
@@ -986,7 +1001,7 @@ struct DirSlot {
 /// does not cover.
 #[cfg_attr(test, allow(dead_code))]
 fn reserve_slot(
-    blocks: &mut Blocks,
+    blocks: &mut Blocks<'_>,
     mount: &Mount,
     parent_ino: u32,
     mut parent: Inode,
@@ -1031,7 +1046,7 @@ fn reserve_slot(
 /// are `EIO` from the device, and the bounds checks that turn a future
 /// slot-arithmetic bug into an errno rather than a write into the wrong bytes.
 #[cfg_attr(test, allow(dead_code))]
-fn store_entry(blocks: &mut Blocks, slot: DirSlot, entry: &DirEntry) -> Result<(), i32> {
+fn store_entry(blocks: &mut Blocks<'_>, slot: DirSlot, entry: &DirEntry) -> Result<(), i32> {
     blocks.read(u64::from(slot.zone))?;
     let buf = blocks.buf_mut();
     let end = slot.off_in_block.checked_add(DIRENT_SIZE).ok_or(EIO)?;
@@ -1047,7 +1062,7 @@ fn store_entry(blocks: &mut Blocks, slot: DirSlot, entry: &DirEntry) -> Result<(
 /// pointer or the indirect pointer is assigned; the caller writes it back.
 #[cfg_attr(test, allow(dead_code))]
 fn place_zone(
-    blocks: &mut Blocks,
+    blocks: &mut Blocks<'_>,
     mount: &Mount,
     node: &mut Inode,
     pos: u64,
@@ -1136,7 +1151,7 @@ fn place_zone(
 /// cap, because a corrupt superblock must not spin this server and, through it,
 /// VFS and init.
 #[cfg_attr(test, allow(dead_code))]
-fn alloc_zone(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
+fn alloc_zone(blocks: &mut Blocks<'_>, mount: &Mount) -> Result<u32, i32> {
     let bits_per_block = u32::try_from(mount.block_size.checked_mul(8).ok_or(EIO)?)
         .ok()
         .filter(|&b| b != 0)
@@ -1206,7 +1221,7 @@ fn alloc_zone(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
 /// caller writes the new inode back before anything names it, which is the
 /// create path's half of the ordering rule.
 #[cfg_attr(test, allow(dead_code))]
-fn alloc_inode(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
+fn alloc_inode(blocks: &mut Blocks<'_>, mount: &Mount) -> Result<u32, i32> {
     let bits_per_block = u32::try_from(mount.block_size.checked_mul(8).ok_or(EIO)?)
         .ok()
         .filter(|&b| b != 0)
@@ -1263,7 +1278,7 @@ fn alloc_inode(blocks: &mut Blocks, mount: &Mount) -> Result<u32, i32> {
 /// The scan bound is the same one [`alloc_zone`] uses, from the other end: the
 /// bit's own block index must lie inside `layout.zmap_blocks`.
 #[cfg_attr(test, allow(dead_code))]
-fn free_zone(blocks: &mut Blocks, mount: &Mount, zone: u32) -> Result<(), i32> {
+fn free_zone(blocks: &mut Blocks<'_>, mount: &Mount, zone: u32) -> Result<(), i32> {
     if !write::write_zone_ok(zone, mount.layout.first_data_zone, mount.blocks) {
         return Err(EIO);
     }
@@ -1309,7 +1324,7 @@ fn free_zone(blocks: &mut Blocks, mount: &Mount, zone: u32) -> Result<(), i32> {
 /// them.
 #[cfg_attr(test, allow(dead_code))]
 fn free_zones_of(
-    blocks: &mut Blocks,
+    blocks: &mut Blocks<'_>,
     mount: &Mount,
     zones: &[u32; NR_TZONES],
     size: i32,
@@ -1354,7 +1369,7 @@ fn free_zones_of(
 /// refusal upstream of it. Below that, the driver's range check makes the fetch
 /// `EIO` rather than a write to a block outside the device.
 #[cfg_attr(test, allow(dead_code))]
-fn write_inode(blocks: &mut Blocks, mount: &Mount, ino: u32, node: &Inode) -> Result<(), i32> {
+fn write_inode(blocks: &mut Blocks<'_>, mount: &Mount, ino: u32, node: &Inode) -> Result<(), i32> {
     let (block, slot) = inode_location(ino, &mount.layout, mount.block_size).ok_or(EINVAL)?;
     blocks.read(u64::from(block))?;
     let buf = blocks.buf_mut();
@@ -1373,7 +1388,7 @@ fn write_inode(blocks: &mut Blocks, mount: &Mount, ino: u32, node: &Inode) -> Re
 
 /// Decode the device's superblock and derive its layout.
 #[cfg_attr(test, allow(dead_code))]
-fn read_super(blocks: &mut Blocks) -> Result<Mount, i32> {
+fn read_super(blocks: &mut Blocks<'_>) -> Result<Mount, i32> {
     let blk = blocks.read(0)?;
     let raw = blk
         .get(SUPER_OFFSET..SUPER_OFFSET + SUPER_ON_DISK_LEN)
@@ -1402,7 +1417,7 @@ fn read_super(blocks: &mut Blocks) -> Result<Mount, i32> {
 /// about the *image*. A corrupt directory entry naming an inode past the table
 /// therefore surfaces as `EINVAL`, which is the one imprecision in that split.
 #[cfg_attr(test, allow(dead_code))]
-fn read_inode(blocks: &mut Blocks, mount: &Mount, ino: u32) -> Result<Inode, i32> {
+fn read_inode(blocks: &mut Blocks<'_>, mount: &Mount, ino: u32) -> Result<Inode, i32> {
     let (block, slot) = inode_location(ino, &mount.layout, mount.block_size).ok_or(EINVAL)?;
     if !walk::zone_ok(block, mount.blocks) {
         return Err(EIO);
@@ -1418,7 +1433,7 @@ fn read_inode(blocks: &mut Blocks, mount: &Mount, ino: u32) -> Result<Inode, i32
 /// `u32`, so nothing is left pointing into the buffer when it does.
 #[cfg_attr(test, allow(dead_code))]
 fn resolve_zone(
-    blocks: &mut Blocks,
+    blocks: &mut Blocks<'_>,
     mount: &Mount,
     node: &Inode,
     pos: u64,
@@ -1446,7 +1461,7 @@ fn resolve_zone(
 /// Fetch the block backing byte `pos` of `node`, holes included.
 #[cfg_attr(test, allow(dead_code))]
 fn fetch<'a>(
-    blocks: &'a mut Blocks,
+    blocks: &'a mut Blocks<'_>,
     mount: &Mount,
     node: &Inode,
     pos: u64,
@@ -1466,7 +1481,7 @@ fn fetch<'a>(
 /// intermediate component is `ENOTDIR` rather than a read of that file's bytes as
 /// directory entries — `verify.rs`'s rule.
 #[cfg_attr(test, allow(dead_code))]
-fn lookup(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode), i32> {
+fn lookup(blocks: &mut Blocks<'_>, mount: &Mount, path: &str) -> Result<(u32, Inode), i32> {
     let mut ino = mount.root;
     let mut node = read_inode(blocks, mount, ino)?;
     for component in walk::components(path) {
@@ -1488,7 +1503,12 @@ fn lookup(blocks: &mut Blocks, mount: &Mount, path: &str) -> Result<(u32, Inode)
 /// [`walk::next_dir_chunk`] is the round itself, in the library because this file
 /// is compiled by no CI job.
 #[cfg_attr(test, allow(dead_code))]
-fn find_component(blocks: &mut Blocks, mount: &Mount, dir: &Inode, name: &str) -> Result<u32, i32> {
+fn find_component(
+    blocks: &mut Blocks<'_>,
+    mount: &Mount,
+    dir: &Inode,
+    name: &str,
+) -> Result<u32, i32> {
     let size = walk::dir_size(dir.size)?;
     let mut off = 0usize;
     while let Some(want) = walk::next_dir_chunk(off, size, mount.block_size) {
@@ -1508,7 +1528,7 @@ fn find_component(blocks: &mut Blocks, mount: &Mount, dir: &Inode, name: &str) -
 /// buffer's borrow is over before the caller fetches that inode's own block.
 #[cfg_attr(test, allow(dead_code))]
 fn scan_block(
-    blocks: &mut Blocks,
+    blocks: &mut Blocks<'_>,
     mount: &Mount,
     dir: &Inode,
     pos: u64,
@@ -1528,7 +1548,7 @@ fn scan_block(
 /// one block fetch, over the real image.
 #[cfg_attr(test, allow(dead_code))]
 fn read_chunk<'a>(
-    blocks: &'a mut Blocks,
+    blocks: &'a mut Blocks<'_>,
     mount: &Mount,
     path: &str,
     pos: u64,
@@ -1581,22 +1601,28 @@ fn mem_endpoint() -> Endpoint {
 
 /// Grant the block buffer to the driver and hand back the fetch capability.
 ///
-/// **Issued once, and never re-issued.** The buffer is a static, so its address
-/// cannot change and `GrantPool::ensure_registered` never fires again — the
-/// concrete benefit of the buffer not living in a stack frame.
+/// **Issued once, and never re-issued.** `buf` is a local of [`main`], whose
+/// frame never goes away, so its address cannot change and
+/// `GrantPool::ensure_registered` never fires again. That the buffer is on the
+/// stack is fine; that it is on *that* frame is what makes it fine — see
+/// [`Blocks::buf`].
 ///
 /// On failure the grant id is [`GRANT_INVALID`], every read fails the kernel's
 /// grant check, the mount fails, and the server answers `ENODEV` to everything:
 /// degraded and still replying, the `memory` driver's `blocks = 0` precedent.
 #[cfg_attr(test, allow(dead_code))]
-fn device(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) -> Blocks {
+fn device<'a>(
+    grants: &mut GrantPool<GRANT_SLOTS>,
+    mem: Endpoint,
+    buf: &'a mut [u8; MFS_BLOCK_SIZE],
+) -> Blocks<'a> {
     // Both directions on one grant: `CPF_WRITE` because the driver copies *into*
     // this buffer on a `BDEV_READ`, `CPF_READ` because it copies *out of* it on a
     // `BDEV_WRITE`. The kernel checks the direction bit per call, so this is not a
     // widening of what any single request may do — see the `gid` field's docs.
     let gid = match grants.grant_direct(
         mem,
-        Blocks::addr(),
+        buf.as_ptr() as usize as u64,
         MFS_BLOCK_SIZE as u64,
         CPF_READ | CPF_WRITE,
     ) {
@@ -1606,7 +1632,7 @@ fn device(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) -> Blocks {
             GRANT_INVALID
         }
     };
-    Blocks { mem, gid }
+    Blocks { buf, mem, gid }
 }
 
 /// Mount the ramdisk and announce the geometry.
@@ -1615,7 +1641,7 @@ fn device(grants: &mut GrantPool<GRANT_SLOTS>, mem: Endpoint) -> Blocks {
 /// own `blocks=` marker comes from the image *header* — two independently derived
 /// numbers that must agree, which is what makes the pair worth more than either.
 #[cfg_attr(test, allow(dead_code))]
-fn mount_root(blocks: &mut Blocks) -> Option<Mount> {
+fn mount_root(blocks: &mut Blocks<'_>) -> Option<Mount> {
     match read_super(blocks) {
         Ok(m) => {
             diag_fmt(format_args!(
@@ -1654,7 +1680,7 @@ const PROBE_LEN: usize = 32;
 /// zones, so a proof keyed on it would be vacuous in exactly the configuration
 /// CI's non-QEMU jobs build. This file's size is constant in both.
 #[cfg_attr(test, allow(dead_code))]
-fn selfcheck(blocks: &mut Blocks, mount: &Mount) {
+fn selfcheck(blocks: &mut Blocks<'_>, mount: &Mount) {
     match read_chunk(blocks, mount, ROOTFS_MOTD_PATH, 0, ROOTFS_MOTD.len()) {
         Ok(got) if got == ROOTFS_MOTD => {
             diag_fmt(format_args!("fs.selfcheck ok n={} match=1", got.len()))
@@ -1697,7 +1723,7 @@ fn pattern_matches(got: &[u8], pos: u64) -> bool {
 /// what proves the `block` field reaches the right page: the driver's own `tail=1`
 /// check proves only the kernel's copy loop, not BDEV indexing.
 #[cfg_attr(test, allow(dead_code))]
-fn tail_probe(blocks: &mut Blocks) {
+fn tail_probe(blocks: &mut Blocks<'_>) {
     match blocks.read(u64::from(ROOTFS_TAIL_BLOCK)) {
         Ok(blk) if blk[..IMAGE_LABEL_LEN] == IMAGE_TAIL_LABEL => {
             diag_fmt(format_args!("bdev.tail ok match=1"))
@@ -1768,11 +1794,11 @@ struct Probe {
 /// test it with, being the one server that would otherwise have a use for such a
 /// VA.
 ///
-/// Every probe grants over the block buffer's own address: it is a static, always
-/// mapped, and needs no stack local on a one-page stack.
+/// Every probe grants over the block buffer's own address: it is already mapped
+/// and already this server's, so the battery needs no buffer of its own.
 #[cfg_attr(test, allow(dead_code))]
-fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks) {
-    let addr = Blocks::addr();
+fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
+    let addr = blocks.addr();
     let len = IMAGE_HDR_LEN as u64;
     // Three deliberately malformed grants. `write_only` is **not** `blocks.gid`:
     // that one carries `CPF_READ | CPF_WRITE` as of slice 5.10a, so a `BDEV_WRITE`
