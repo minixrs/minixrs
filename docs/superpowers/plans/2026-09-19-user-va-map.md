@@ -45,6 +45,27 @@ decisions `V1…V13`. Read it before Task 1; every task below argues from it.
 
 ---
 
+## Execution Waves
+
+Tasks are grouped by the files they touch, not only by their dependencies — two tasks that edit the
+same file cannot run concurrently no matter how independent their logic is.
+
+| Wave | Tasks              | Files, and why they are disjoint                                                                                   |
+| ---- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| A    | **1 ∥ 4**          | `kernel-shared/src/uspace.rs` ∥ `kernel-shared/src/callnr.rs` + `tools/gen-c-headers/`                             |
+| B    | **2+3 ∥ 6 ∥ 9**    | kernel VA (`userland.rs`, `elf.rs`) ∥ `servers/vm/src/region.rs` ∥ `fs/mfs/src/lib.rs` + `servers/vfs/src/main.rs` |
+| C    | **5 ∥ 7 ∥ 8 ∥ 10** | `do_exec.rs` ∥ `servers/vm/src/main.rs` ∥ `servers/pm/src/main.rs` ∥ `fs/mfs/src/main.rs`                          |
+| D    | 11 → 12            | serial: both need a booting system                                                                                 |
+
+**Agents in a shared worktree must not commit concurrently** — `git index.lock` races. Either the
+dispatcher commits each agent's work as it returns, or each agent gets its own worktree.
+
+Tasks 1-8 deliberately leave `cargo check --workspace` **failing**: the `SERVER_STACK_BYTES` rename
+is not finished until Task 9. Each task verifies its own package instead. The workspace goes green
+at Task 9, and that is a checkpoint, not a regression.
+
+---
+
 ## File Structure
 
 | File                                         | Responsibility after this plan                                               |
@@ -318,6 +339,11 @@ Expect this commit to leave the workspace **not building** — Tasks 2, 6 and 9 
 
 ## Task 2: Map the 16-page stack, and invert the collision asserts
 
+> **Execution note — Tasks 2 and 3 run as ONE agent, in this order.** Both edit
+> `kernel/src/arch/aarch64/userland.rs` *and* `kernel/src/boot_image/elf.rs`, so they cannot be
+> dispatched concurrently. They stay two tasks, and two commits, because the changes are logically
+> separate and the history is worth keeping — but one agent does both, committing between them.
+
 **Files:**
 
 - Modify: `kernel/src/arch/aarch64/userland.rs:149` (the `SERVER_STACK_VA` constant and its
@@ -476,6 +502,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ---
 
 ## Task 3: The loader reports where an image ends
+
+> **Execution note — same agent as Task 2** (shared files; see Task 2's note).
 
 **Files:**
 
