@@ -33,6 +33,17 @@ decisions `V1…V13`. Read it before Task 1; every task below argues from it.
 - **Verify before claiming.** Run the command, read its output, *then* say it passes.
 - **Do not write inside `$MINIXRS_SDK`.** Task 12 produces a change plan for the tooling repo; it
   does not edit it.
+- **All-constant `assert!` trips clippy.** CI runs `cargo clippy --workspace --all-targets -- -D
+  warnings` (`.github/workflows/ci.yml:91`), and `assertions_on_constants` fires on a runtime
+  `assert!` whose operands are all constants. **Several tasks below prescribe exactly that pattern
+  in their test code — that is a defect in the plan, not in the repo.** Use the idiom the repo
+  already uses (`kernel-shared/src/callnr.rs:1553`, `uspace.rs`'s window tests): bind a local, then
+  `assert_eq!(a.min(b), a, "msg")`. A `const _: () = assert!(...)` at item scope is unaffected —
+  only runtime `assert!` inside a `#[test]` fn.
+- **`cargo gen-c-headers --stdout`**, with no `--` separator: the cargo alias already ends in `--`.
+- **The generator emits absolute hex** — `#define VM_EXEC 0xC05`, not `(VM_RQ_BASE + 5)`.
+- **Run `cargo fmt -p <crate> -- --check` before reporting done.** It blocks in CI, and rustfmt
+  collapses multi-line `assert_eq!` calls that fit in 100 columns — several appear expanded below.
 - Exact values from the spec, copied verbatim:
   - `USER_STACK_TOP = USER_DEVICE_WINDOW_BASE = 0x4000_0000`
   - `USER_STACK_BYTES = 0x1_0000` (64 KiB, 16 pages)
@@ -47,15 +58,18 @@ decisions `V1…V13`. Read it before Task 1; every task below argues from it.
 
 ## Execution Waves
 
-Tasks are grouped by the files they touch, not only by their dependencies — two tasks that edit the
-same file cannot run concurrently no matter how independent their logic is.
+Tasks are grouped by the **crate** they build, not merely by the files they touch. File-level
+disjointness is not enough: `cargo test -p <crate>` builds the whole lib-test binary, so two agents
+in one crate compile each other's half-finished work. Wave A learned this the hard way — Tasks 1 and
+4 edit different files of `minixrs-kernel-shared`, and one task's TDD red phase made the other's
+green phase fail to compile at all. Group by `-p` target.
 
-| Wave | Tasks              | Files, and why they are disjoint                                                                                   |
-| ---- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| A    | **1 ∥ 4**          | `kernel-shared/src/uspace.rs` ∥ `kernel-shared/src/callnr.rs` + `tools/gen-c-headers/`                             |
-| B    | **2+3 ∥ 6 ∥ 9**    | kernel VA (`userland.rs`, `elf.rs`) ∥ `servers/vm/src/region.rs` ∥ `fs/mfs/src/lib.rs` + `servers/vfs/src/main.rs` |
-| C    | **5 ∥ 7 ∥ 8 ∥ 10** | `do_exec.rs` ∥ `servers/vm/src/main.rs` ∥ `servers/pm/src/main.rs` ∥ `fs/mfs/src/main.rs`                          |
-| D    | 11 → 12            | serial: both need a booting system                                                                                 |
+| Wave | Tasks                  | Files, and why they are disjoint                                                                                                                       |
+| ---- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A    | ~~1 ∥ 4~~ **serial**   | Both are `minixrs-kernel-shared`. **Not parallelizable** — see the note above.                                                                         |
+| B    | **2+3 ∥ 6 ∥ 9**        | `minixrs-kernel` ∥ `minixrs-vm` ∥ `minixrs-mfs` + `minixrs-vfs` — three separate `-p` targets                                                          |
+| C    | **5 ∥ 8 ∥ 10**, then 7 | `minixrs-kernel` ∥ `minixrs-pm` ∥ `minixrs-mfs`. **Task 7 is `minixrs-vm`, the same crate as Task 6** — it follows 6 rather than running beside 5/8/10 |
+| D    | 11 → 12                | serial: both need a booting system                                                                                                                     |
 
 **Agents in a shared worktree must not commit concurrently** — `git index.lock` races. Either the
 dispatcher commits each agent's work as it returns, or each agent gets its own worktree.
