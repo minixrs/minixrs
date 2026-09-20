@@ -69,7 +69,7 @@ green phase fail to compile at all. Group by `-p` target.
 | A    | ~~1 ∥ 4~~ **serial**   | Both are `minixrs-kernel-shared`. **Not parallelizable** — see the note above.                                                                         |
 | B    | **2+3 ∥ 6 ∥ 9**        | `minixrs-kernel` ∥ `minixrs-vm` ∥ `minixrs-mfs` + `minixrs-vfs` — three separate `-p` targets                                                          |
 | C    | **5 ∥ 8 ∥ 10**, then 7 | `minixrs-kernel` ∥ `minixrs-pm` ∥ `minixrs-mfs`. **Task 7 is `minixrs-vm`, the same crate as Task 6** — it follows 6 rather than running beside 5/8/10 |
-| D    | 11 → 12                | serial: both need a booting system                                                                                                                     |
+| D    | 11 → 12 → 13           | serial: 11 and 12 need a booting system; 13 describes what shipped                                                                                     |
 
 **Agents in a shared worktree must not commit concurrently** — `git index.lock` races. Either the
 dispatcher commits each agent's work as it returns, or each agent gets its own worktree.
@@ -605,10 +605,12 @@ image_end: loaded.image_end,
 
 - [ ] **Step 4: Verify it cross-compiles**
 
-Run: `cargo kernel-aarch64` Expected: builds. A `field is never read` warning on
-`ExecImage::image_end` is expected here and goes away in Task 5 — if clippy is configured to deny
-warnings, add `#[allow(dead_code)]` on the field with a `// Task 5 consumes this.` comment and
-remove it in Task 5.
+Run: `cargo kernel-aarch64` Expected: builds, with **no warnings**. `ExecImage::image_end` has no
+reader until Task 5, so it draws `field is never read`, and CI's `cargo clippy --workspace
+--all-targets -- -D warnings` turns that into a failure for every task in between. **Add
+`#[allow(dead_code)]` on the field with a `// Task 5 consumes this.` comment — this is mandatory,
+not conditional.** Task 5 removes it. Same forward-declaration pattern `rust-style.md` prescribes,
+and the one Task 6 uses for `region::exec` / `region::record_stack`.
 
 Run: `cargo clippy -p minixrs-kernel --target aarch64-unknown-none --release` Expected: no errors.
 
@@ -868,8 +870,9 @@ Note the argument order: `{:#x}` placeholders consume positional arguments in or
 
 - [ ] **Step 4: Verify it cross-compiles**
 
-Run: `cargo kernel-aarch64` Expected: builds, and the `ExecImage::image_end` dead-code warning from
-Task 3 is gone. Remove the temporary `#[allow(dead_code)]` if you added one.
+Run: `cargo kernel-aarch64` Expected: builds. **Delete the `#[allow(dead_code)]` and its `// Task 5
+consumes this.` comment from `ExecImage::image_end`** — this task is its consumer, and a
+forward-declaration allow left behind silences a real warning for the rest of the repo's life.
 
 Run: `cargo clippy -p minixrs-kernel --target aarch64-unknown-none --release` Expected: no warnings.
 
@@ -1235,6 +1238,9 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 - Consumes: `region::{exec, record_stack}` (Task 6), `VM_EXEC`, `VM_EXEC_PROC_OFF`,
   `VM_EXEC_IMAGE_END_OFF` (Task 4), `diag_fmt` from `server-rt`
+- **Required cleanup:** Task 6 left `#[allow(dead_code)]` on `region::exec` and
+  `region::record_stack`, with comments naming this task as their consumer. **Delete both attributes
+  and both comments** — this task wires up the callers, so the forward declaration is spent.
 - Produces: the `[diag vm] exec …` marker Task 12 asserts
 
 - [ ] **Step 1: Add the handler**
@@ -2007,6 +2013,86 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
+## Task 13: The documentation the rename falsifies
+
+**Files:**
+
+- Modify: `docs/conventions/servers-and-drivers.md:121`, `:390`, `:394`
+- Modify: `docs/conventions/kernel.md:314`, `:359`, `:392`
+- Modify: `docs/conventions/build-and-boot.md:56`
+- Modify: `book/src/servers/overview.md:330-331`
+- Modify: `book/src/libc/overview.md:264`
+
+**Interfaces:**
+
+- Consumes: everything. Run this last, so the prose describes what actually shipped.
+- Produces: nothing code depends on.
+
+**Why this task exists.** Wave B found ten live references to the one-page stack that no other task
+owned — and three of them (`servers-and-drivers.md:390`, `:394`, `build-and-boot.md:56`) name
+`uspace::SERVER_STACK_BYTES`, **a constant that no longer exists**. `CLAUDE.md` makes
+`docs/conventions/` mandatory reading before working in an area, and `book/` is the canonical
+how-it-works documentation, so these are not history files: they are instructions to the next agent,
+and they would have shipped pointing at a name that does not compile.
+
+`docs/plans/phase-4-*` and `phase-5-*` hits are **legitimate history and must stay** — they record
+what was true in those slices. Only live guidance is in scope.
+
+- [ ] **Step 1: Find every reference**
+
+```bash
+grep -rn --include='*.md' "SERVER_STACK_BYTES\|SERVER_STACK_VA" docs/conventions/ book/
+grep -rn --include='*.md' "exactly one page\|one RW stack page\|stack is exactly" docs/conventions/ book/
+```
+
+Read each hit in context before editing. The count at the time of writing was ten; re-run rather
+than trusting that number.
+
+- [ ] **Step 2: Correct them**
+
+Each is a claim about the *old* map. Rewrite to the new one rather than deleting the sentence — the
+surrounding reasoning is usually still valid and only the number is wrong. Two need more than a
+number swap:
+
+- `book/src/libc/overview.md:264` — "Both sit a clear megabyte below `SERVER_STACK_VA` (`0x200000`)"
+  is **doubly wrong** after this slice: the stack is not at `0x200000`, and V11 makes `0x200000` the
+  SDK images' own load base. Re-argue it from `USER_REGION_LIMIT`.
+- `docs/conventions/servers-and-drivers.md:394` — "`uspace::SERVER_STACK_BYTES` exists solely to
+  carry `fs/mfs`'s `const _`" describes a tripwire that has since fired and been re-aimed. Say what
+  it carries now.
+
+- [ ] **Step 3: Verify**
+
+```bash
+grep -rn --include='*.md' "SERVER_STACK_BYTES\|SERVER_STACK_VA" docs/ book/
+```
+
+Expected: hits **only** under `docs/plans/phase-4-*` and `docs/plans/phase-5-*` (history), and in
+this slice's own spec and plan where they name what was replaced.
+
+Run `~/.dprint/bin/dprint fmt`, then `~/.dprint/bin/dprint check` and `python3
+tools/check-md-links.py`. Both block in CI.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docs/conventions book/src
+git commit --signoff -m "docs: retire the one-page stack from live guidance
+
+Ten references across docs/conventions/ and book/ still described the
+one-page stack, and three named uspace::SERVER_STACK_BYTES -- a constant
+this slice deleted. CLAUDE.md makes docs/conventions/ mandatory reading
+before working in an area, so these were not stale trivia: they were
+instructions handing the next agent a name that does not compile.
+
+docs/plans/phase-4-* and phase-5-* keep theirs. Those record what was true
+in those slices, which is what a plan history is for.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+```
+
+---
+
 ## Verification Before Completion
 
 Before claiming the slice is done, run each of these and read the output:
@@ -2024,6 +2110,8 @@ Before claiming the slice is done, run each of these and read the output:
 - [ ] the three-boot matrix, all rows, with the flavour of each confirmed
 - [ ] `~/.dprint/bin/dprint check` and `python3 tools/check-md-links.py` — clean
 - [ ] the boot-timing ratio measured against the merge base, both numbers recorded
+- [ ] `grep -rn --include='*.md' "SERVER_STACK_BYTES\|SERVER_STACK_VA" docs/ book/` — hits only in
+      `docs/plans/phase-4-*`, `docs/plans/phase-5-*`, and this slice's own spec/plan
 
 Then **stop**. Do not push and do not open a PR — run `/claude-md-management:revise-claude-md`
 first, then surface the branch for review.
