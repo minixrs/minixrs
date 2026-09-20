@@ -442,15 +442,20 @@ pub(crate) struct ExecImage {
     /// `e_phnum` / `e_phentsize` — `exec`'s `AT_PHNUM` / `AT_PHENT`.
     pub phnum: u16,
     pub phentsize: u16,
+    /// Page-aligned first VA above the loaded image. `do_exec` returns it to PM,
+    /// which forwards it to VM as the process's heap origin.
+    // Task 5 consumes this.
+    #[allow(dead_code)]
+    pub image_end: u64,
 }
 
 /// Build a fresh address space from an ELF image: allocate the L0 root, load
 /// the `PT_LOAD` segments (BSS satisfied for free — `alloc_frame` zeroes), map
-/// one zeroed RW stack page at [`SERVER_STACK_VA`], and allocate an ASID. The
-/// `AddrSpace` is `mem::forget`-ed — the page-table tree is now owned via the
-/// returned `ttbr0_pa` (tear it down with the `do_exit` teardown sequence, never
-/// `AddrSpace::destroy`). On failure any partial tree is freed first so nothing
-/// leaks (the do_fork `copy_addrspace` contract).
+/// [`USER_STACK_PAGES`] zeroed RW stack pages at [`USER_STACK_BASE`], and
+/// allocate an ASID. The `AddrSpace` is `mem::forget`-ed — the page-table tree is
+/// now owned via the returned `ttbr0_pa` (tear it down with the `do_exit`
+/// teardown sequence, never `AddrSpace::destroy`). On failure any partial tree is
+/// freed first so nothing leaks (the do_fork `copy_addrspace` contract).
 ///
 /// The image arrives as an [`ElfSource`] rather than a slice as of slice 5.9:
 /// boot passes `ElfSource::Bytes` over the MXBI archive, `do_exec` passes either
@@ -542,6 +547,7 @@ pub(crate) unsafe fn load_exec_image(source: &ElfSource) -> Result<ExecImage, i3
         phdr_va: loaded.phdr_va,
         phnum: loaded.phnum,
         phentsize: loaded.phentsize,
+        image_end: loaded.image_end,
     })
 }
 

@@ -240,6 +240,28 @@ pub struct LoadedElf {
     /// `e_phentsize` — bytes per entry (always 56 here; the header is rejected
     /// otherwise).
     pub phentsize: u16,
+    /// Page-aligned exclusive end of the highest `PT_LOAD` segment — the first
+    /// VA above the image that no segment claims.
+    ///
+    /// This is where a process's heap begins (`VM_EXEC` carries it to VM, which
+    /// seeds the heap region there). Before this slice VM used a fixed
+    /// `HEAP_BASE` unrelated to the image, which worked only because nothing
+    /// had an image big enough to reach it.
+    ///
+    /// **Zero is reachable, and consumers must treat it as invalid.**
+    ///
+    /// `load_into` does *not* reject an ELF with no `PT_LOAD`: the phdr walk
+    /// `continue`s past every non-`PT_LOAD` header and falls out of the loop
+    /// into `Ok(..)`, so a branded image carrying only a `PT_NOTE` loads
+    /// "successfully" having mapped nothing, and reports `image_end == 0`.
+    ///
+    /// Nothing exploitable follows — such an image has no entry point worth
+    /// jumping to and faults immediately — but a zero must not be handed on as a
+    /// heap origin, which would seed a process's heap at VA 0. VM's `VM_EXEC`
+    /// handler rejects it; the check lives there rather than here because making
+    /// the loader refuse a zero-`PT_LOAD` image would change `exec`'s errno
+    /// surface, which is an ABI-visible decision this slice does not own.
+    pub image_end: u64,
 }
 
 /// The parts of the ELF header the two phdr walks below both need.
@@ -269,6 +291,7 @@ pub fn load_into(source: &ElfSource, aspace: &mut AddrSpace) -> Result<LoadedElf
 
     let mut budget = PageBudget::new();
     let mut phdr_va = None;
+    let mut image_end: u64 = 0;
     for i in 0..eh.phnum {
         let ph = read_phdr(source, &eh, i)?;
         if rd_u32(&ph, 0)? != PT_LOAD {
@@ -302,6 +325,16 @@ pub fn load_into(source: &ElfSource, aspace: &mut AddrSpace) -> Result<LoadedElf
             p_filesz,
             p_memsz,
         )?;
+
+        // Tracked *after* a successful `load_segment`, which is what makes the
+        // `saturating_add` honest rather than lazy: the segment has already been
+        // mapped, so its whole span passed `check_va` and cannot exceed
+        // `USER_VA_TOP`. An overflow here is unreachable, and saturating is the
+        // right answer for an unreachable case that must not panic in a kernel.
+        let seg_end = p_vaddr.saturating_add(p_memsz as u64);
+        if seg_end > image_end {
+            image_end = seg_end;
+        }
     }
 
     Ok(LoadedElf {
@@ -309,6 +342,11 @@ pub fn load_into(source: &ElfSource, aspace: &mut AddrSpace) -> Result<LoadedElf
         phdr_va,
         phnum: eh.phnum as u16,
         phentsize: eh.phentsize as u16,
+        // Page-aligned up: the heap starts on a page boundary, and the loader
+        // has already mapped whole pages for a segment whose `p_memsz` ends
+        // mid-page, so the partial page belongs to the image, not the heap.
+        image_end: (image_end + minixrs_kernel_shared::message::USER_PAGE_SIZE - 1)
+            & !(minixrs_kernel_shared::message::USER_PAGE_SIZE - 1),
     })
 }
 
