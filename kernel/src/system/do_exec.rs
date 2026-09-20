@@ -63,14 +63,19 @@
 //! | 24..28             | granter endpoint (i32, grant form)     | in        |
 //! | 28..32             | grant id (i32, grant form)             | in        |
 //! | 32..40             | image length (u64, grant form)         | in        |
+//! | 40..48             | page-aligned image end (u64)           | out       |
+//!
+//! The one `out` field is written on every success and sits past `32..40`, the
+//! last request field, so it aliases nothing the caller wrote. PM forwards it to
+//! VM as the exec'd process's heap origin.
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::{
-    EXEC_GRANT_OFF, EXEC_GRANTER_OFF, EXEC_LEN_OFF, EXEC_NAME_LEN, EXEC_SRC_GRANT, EXEC_SRC_NAME,
-    EXEC_SRC_OFF,
+    EXEC_GRANT_OFF, EXEC_GRANTER_OFF, EXEC_IMAGE_END_OFF, EXEC_LEN_OFF, EXEC_NAME_LEN,
+    EXEC_SRC_GRANT, EXEC_SRC_NAME, EXEC_SRC_OFF,
 };
 use minixrs_kernel_shared::com::NR_SYS_PROCS;
 use minixrs_kernel_shared::endpoint::{Endpoint, NONE, SELF};
@@ -293,9 +298,10 @@ pub(super) fn do_exec(
         };
         let _ = writeln!(
             Uart::new(),
-            "[ksys SYS_EXEC] target={target_nr} name={name} src={src_name} entry={:#x} old_asid={old_asid} new_asid={} freed={freed} granter={granter_e} len={image_len}",
+            "[ksys SYS_EXEC] target={target_nr} name={name} src={src_name} entry={:#x} old_asid={old_asid} new_asid={} freed={freed} granter={granter_e} len={image_len} image_end={:#x}",
             img.entry,
             img.asid,
+            img.image_end,
         );
         // The initial stack the new image will read. `auxv` counts real pairs,
         // excluding the `AT_NULL` terminator — which is what makes the
@@ -308,6 +314,15 @@ pub(super) fn do_exec(
             frame.sp,
         );
     }
+
+    // The reply's one payload field. PM forwards it to VM as the exec'd
+    // process's heap origin (`VM_EXEC`); nothing in the kernel reads it back.
+    //
+    // Written after the trace rather than before it so the point-of-no-return
+    // sequence above stays one uninterrupted block — and it must be written on
+    // *every* success, not only on a traced one, which is exactly the kind of
+    // thing a sampled trace hides.
+    write_u64(msg, EXEC_IMAGE_END_OFF, img.image_end);
     OK
 }
 
@@ -384,4 +399,13 @@ fn read_u64(msg: &Message, off: usize) -> u64 {
             .try_into()
             .expect("payload in range"),
     )
+}
+
+/// Write a native-endian `u64` into the message payload at `off`.
+///
+/// Mirrors [`read_u64`]'s convention. The caller is responsible for `off + 8 <=
+/// 96`; every call site uses a `const` offset that `callnr.rs` const-asserts.
+#[inline]
+fn write_u64(msg: &mut Message, off: usize, v: u64) {
+    msg.payload[off..off + 8].copy_from_slice(&v.to_ne_bytes());
 }

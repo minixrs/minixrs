@@ -444,8 +444,6 @@ pub(crate) struct ExecImage {
     pub phentsize: u16,
     /// Page-aligned first VA above the loaded image. `do_exec` returns it to PM,
     /// which forwards it to VM as the process's heap origin.
-    // Task 5 consumes this.
-    #[allow(dead_code)]
     pub image_end: u64,
 }
 
