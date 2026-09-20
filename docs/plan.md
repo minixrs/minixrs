@@ -608,7 +608,7 @@ tracked in [`docs/plans/phase-6-prep.md`](plans/phase-6-prep.md). Chunk 2 (the u
 land before any virtio code; chunk 4 gates starting Phase 6 proper.
 
 - [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
-- [ ] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
+- [x] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
 - [ ] **Chunk 3** — `SYS_IRQCTL` design note
 - [ ] **Chunk 4** — Phase 6 tracker + slicing session
 - [ ] **Chunk 5** — musl syscall surface

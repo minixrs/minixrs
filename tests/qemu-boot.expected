@@ -237,7 +237,16 @@ minix.rs init: vfs.deny ok n=4
 # first PT_LOAD covers the ELF header. Revert that link change and this becomes
 # auxv=1: the count is what makes the conditional arm observable rather than
 # quietly dead. sp is last because it is the run-variable field.
-[exec] argc=1 envc=0 auxv=4 sp=0x
+#
+# Pre-Phase-6 chunk 2 tightened the `sp=0x` prefix this line used to carry: a
+# bare `sp=0x` proved a stack pointer existed and nothing at all about where it
+# pointed, which is precisely the claim the VA-map slice makes. `0x3fff` pins
+# the frame into the 64 KiB stack at USER_STACK_BASE = 0x3FFF_0000 without
+# pinning the exact offset, which moves with argv/envp/auxv. If this ever fails,
+# read the real sp in the log before touching this line -- an sp outside
+# 0x3fff_xxxx means the stack did not move, which is a kernel defect and not a
+# marker that needs loosening.
+[exec] argc=1 envc=0 auxv=4 sp=0x3fff
 
 # ...and the EL0 half, which is the one that actually proves anything: the trace
 # above only says the kernel *thinks* it wrote a frame. `worker`'s _start is
@@ -728,3 +737,31 @@ minix.rs init: fs.hole ok
 # construction rather than by measurement -- the slice-5.5/5.6 trap, avoided
 # rather than measured around.
 minix.rs init: fs.leak ok n=256
+
+# ---------------------------------------------------------------------------
+# Pre-Phase-6 chunk 2: the user VA map -- high stack, image-relative heap.
+# ---------------------------------------------------------------------------
+
+# VM is now told about every exec (VM_EXEC) and reports the map it derived:
+# `heap` equal to `image_end`, and unequal to the legacy 0x0100_0000 origin.
+# The line is unconditional rather than sampled, because exec is rare and this
+# is the ONLY available proof that the heap follows the image -- the shared USER
+# privilege has no ipc_to bit for VM (kernel/src/proc/table.rs's USER_IPC_TO),
+# so no user program can call VM_BRK and no end-to-end brk proof exists until
+# chunk 5 opens that edge.
+#
+# Deliberately no `nr=` value, no image_end and no dropped count: expectations
+# are first-occurrence-only, so this matches whichever exec happens first, and
+# pinning any of those numbers would make the marker rebuild-fragile without
+# strengthening the claim. The failing spelling is on the forbidden list, which
+# is what keeps a later exec from failing silently behind this one.
+[diag vm] exec nr=
+
+# bigprog's .bss is 2 MiB, so its highest PT_LOAD runs from the 0x0010_0000
+# load base to roughly 0x0030_0000 -- straight through 0x0020_0000, where the
+# initial stack page used to sit. Under the old map load_exec_image failed to
+# map the stack with AlreadyMapped and the exec answered ENOEXEC, so this line
+# existing at all is the VA ceiling being gone. The program reads its first and
+# last .bss page before printing, so the marker also proves the loader really
+# mapped ceil(p_memsz / PAGE_SIZE) pages rather than believing a program header.
+bigprog ok: bss pages mapped

@@ -57,3 +57,18 @@ minix.rs init: dev.null FAIL
 minix.rs init: dev.console FAIL
 # ...and VFS's prologue battery against the memory driver's CDEV validator.
 [diag vfs] mem.deny FAIL
+# Pre-Phase-6 chunk 2: VM refused a VM_EXEC. Both of handle_exec's failing arms
+# print this prefix -- a zero image_end (a branded PT_LOAD-less image, whose
+# origin must never become a heap at VA 0) and a negative rc from region::exec.
+# The `[diag vm] exec nr=` expectation cannot catch these on its own, because
+# expectations are first-occurrence-only: one succeeding exec satisfies it while
+# every later exec fails, so without this line a boot could refuse every exec
+# after the first and still pass.
+[diag vm] exec FAIL
+# ...and bigprog's own disagreement. Distinct from `bigprog ok: bss pages
+# mapped` simply going missing (the exec never happened, or ENOEXEC'd): this
+# spelling means the program ran, read its first and last .bss page, and found
+# them non-zero -- the loader mapped the pages but handed over frames it did not
+# zero, which is another address space's data leaking into this one rather than
+# merely a fixture that did not load.
+bigprog FAIL

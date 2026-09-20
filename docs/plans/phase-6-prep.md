@@ -26,7 +26,7 @@ one item that is simply *done* is recorded as chunk 1 so the reasoning is not lo
 ## Status
 
 - [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
-- [ ] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
+- [x] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
 - [ ] **Chunk 3** — `SYS_IRQCTL` design note
 - [ ] **Chunk 4** — Phase 6 tracker + slicing session
 - [ ] **Chunk 5** — musl syscall surface
@@ -57,6 +57,19 @@ chunk 2 rather than virtio transport.
 [`2026-09-19-user-va-map-design.md`](../superpowers/specs/2026-09-19-user-va-map-design.md) —
 decisions `V1…V12`, including the two this file did not anticipate: VM is never told that an exec
 happened, and the clang `--image-base` pin is dropped rather than kept.
+
+**Plan:** [`2026-09-19-user-va-map.md`](../superpowers/plans/2026-09-19-user-va-map.md) — twelve
+tasks, all landed on `feature/user-va-map`.
+
+**Tooling hand-off — outstanding.** The minixrs half is done and checked above; the tooling half is
+not. [`2026-09-19-user-va-map-tooling.md`](../superpowers/plans/2026-09-19-user-va-map-tooling.md)
+carries the exact edits for a separate session in `~/src/tooling`: `verify/check-image.sh`'s VA
+constants and overlap rule, `verify/check-driver.sh`'s `--image-base` assertion, LLVM patch 0006's
+dropped pin, and `verify/selftest.sh`'s inverted `image-base-1m` fixture. Per `V12` the ordering is
+load-bearing — **this repo's PR lands first**, because dropping the pin before the stack moves would
+link SDK images straight onto the stack page — and the three-boot matrix is re-run against the
+rebuilt SDK afterwards. Chunk 2's box above is checked for the OS-side work it names; the tooling
+edits are tracked by that plan, not by this box.
 
 **Do this before any virtio code.** Phase 5 kept a greenfield *low* map that is not borrowed from
 32-bit MINIX 3 (which puts `USR_STACKTOP` near `0xF0000000`). Verified on `main`:
@@ -109,10 +122,12 @@ Four consequences, all of which Phase 6 makes worse:
   window, and decide whether clang may drop the unconditional `--image-base` pin (keep it if a
   shared `0x100000` load base independent of the stack is still wanted).
 
-**Proof:** a multi-MiB image loads and runs; `sp` is high in the `[exec] … sp=0x` marker (which is
-prefix-only today — good); brk lands past the last `PT_LOAD`; tooling's image checker is green.
-Re-mutation-test the image-base and oversized-image fixtures. This is a **mandatory** three-boot
-matrix change — see [`ci.md`](../conventions/ci.md#the-sdk-flavor-has-zero-ci-coverage).
+**Proof:** a multi-MiB image loads and runs (`userland/bigprog`); `sp` is high in the `[exec] …
+sp=0x3fff` marker, which this chunk tightened from its prefix-only `sp=0x` form; brk lands past the
+last `PT_LOAD`, witnessed by the `[diag vm] exec nr=` marker; tooling's image checker is green after
+the hand-off above. Re-mutation-test the image-base and oversized-image fixtures. This is a
+**mandatory** three-boot matrix change — see
+[`ci.md`](../conventions/ci.md#the-sdk-flavor-has-zero-ci-coverage).
 
 **Out of scope:** CoW, ASLR, guard-page stack growth, and USER→VM for malloc — the last can follow
 immediately once the map is sane.
