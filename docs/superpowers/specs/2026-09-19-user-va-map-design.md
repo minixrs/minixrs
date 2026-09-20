@@ -11,7 +11,7 @@ rings and bounce buffers that do not fit in one page, and a disk root invites mu
 that the stack's VA blocks outright. This slice replaces the map before any virtio code is written,
 which is why the tracker orders it first.
 
-Decisions are labelled `V1…V13`: slice-local, distinct from the phase-level `D1…D13`, which stay
+Decisions are labelled `V1…V14`: slice-local, distinct from the phase-level `D1…D13`, which stay
 locked.
 
 ---
@@ -243,13 +243,13 @@ number rather than the old one.
 Per the cross-repo rule these are **not** edited from the minixrs session. This design carries the
 exact change list; a separate session in `~/src/tooling` implements it with its own signing.
 
-| File                        | Change                                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `verify/check-image.sh:59`  | `STACK_VA`/`STACK_PAGES` → `USER_STACK_BASE=$((0x3FFF0000))`, `STACK_PAGES=16`                         |
-| `verify/check-image.sh:179` | the overlap rule becomes `vend > USER_STACK_BASE`; it subsumes the separate `DEVICE_WINDOW_BASE` check |
-| `verify/check-driver.sh:94` | the `--image-base=0x100000` assertion is removed                                                       |
-| LLVM patch 0006             | the unconditional `--image-base=0x100000` pin is dropped (V11)                                         |
-| `verify/selftest.sh:142`    | the `image-base-1m` fixture inverts — it stops being the pass sentinel                                 |
+| File                        | Change                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `verify/check-image.sh:59`  | `STACK_VA`/`STACK_PAGES` → `USER_REGION_LIMIT=$((0x3FFEF000))`, derived not literal (see V14)            |
+| `verify/check-image.sh:179` | the overlap rule becomes `vend > USER_REGION_LIMIT`; it subsumes the separate `DEVICE_WINDOW_BASE` check |
+| `verify/check-driver.sh:94` | the `--image-base=0x100000` assertion is removed                                                         |
+| LLVM patch 0006             | the unconditional `--image-base=0x100000` pin is dropped (V11)                                           |
+| `verify/selftest.sh:142`    | the `image-base-1m` fixture inverts — it stops being the pass sentinel                                   |
 
 ### V11 — the clang `--image-base` pin is dropped
 
@@ -261,6 +261,23 @@ TTBR0, which is the same reasoning that already lets every server share one base
 
 `check-image.sh` continues to assert what actually matters (segments clear of the stack, headers
 covered by a `PT_LOAD`, the brand present) and stops asserting a particular base.
+
+### V14 — the image checker's ceiling is `USER_REGION_LIMIT`, not `USER_STACK_BASE`
+
+An earlier draft of this section had `check-image.sh` refuse a `PT_LOAD` whose end passed
+`USER_STACK_BASE`. That is one page too permissive. An image whose last page lands exactly on the
+guard page (`0x3FFE_F000`) overlaps no stack page, so a `USER_STACK_BASE` rule admits it — and it
+has then consumed the guard, which is the page whose entire purpose is to be unmapped so a stack
+overflow faults instead of walking into whatever is below.
+
+VM will not place a heap or mmap region there either (`USER_REGION_LIMIT` is its exclusive bound),
+so an image that may occupy it is the only way anything legitimately reaches that page. The checker
+must use the same ceiling VM does.
+
+Derive it in the script rather than adding a second literal: the tooling repo already carries one
+copy of this map, and two independently-maintained constants that must agree is the defect
+[`abi.md`](../../conventions/abi.md) warns about for hand-maintained lists. `USER_REGION_LIMIT` is
+the single name to mirror; `USER_STACK_BASE` and the page count follow from it.
 
 ### V12 — ordering is load-bearing
 
