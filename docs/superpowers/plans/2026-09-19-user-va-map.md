@@ -2005,15 +2005,45 @@ MINIXRS_SDK=/nonexistent timeout 300 cargo run -p minixrs-kernel \
   --target aarch64-unknown-none --release > /tmp/row-musl.log 2>&1
 
 # Row 3: moved-aside sysroot — needs MINIXRS_SDK=/nonexistent TOO, or the
-# flavour selector never reaches the sysroot and this silently re-runs row 1.
-mv ~/toolchains/minixrs/sysroot ~/toolchains/minixrs/sysroot.aside
+# flavour selector never reaches the sysroot and this silently re-runs row 2.
+#
+# The sysroot is `target/musl-sysroot` (kernel/build.rs's HelloFlavor::Musl),
+# NOT ~/toolchains/minixrs/sysroot. Nothing outside the repo is touched.
+# Chain the restore into the same command so an interrupted run cannot leave
+# the tree without its sysroot.
+mv target/musl-sysroot target/musl-sysroot.aside
 MINIXRS_SDK=/nonexistent timeout 300 cargo run -p minixrs-kernel \
   --target aarch64-unknown-none --release > /tmp/row-aside.log 2>&1
-mv ~/toolchains/minixrs/sysroot.aside ~/toolchains/minixrs/sysroot
+mv target/musl-sysroot.aside target/musl-sysroot
 ```
 
-Run `tools/check-boot-log.sh` on each. Confirm the flavour each row actually built — markers are
-byte-identical across flavours, which is what makes a mis-measured row invisible.
+**Row 3 is expected to FAIL `check-boot-log.sh`, and a pass is the bug.** With neither an SDK nor an
+in-tree sysroot the selector falls to `HelloFlavor::Worker`, which packs the `worker` ELF *under the
+name* `hello` — so the five C markers (`hello: stderr works`, `hello: iov ok match=1`, `hello: errno
+ok`, …) cannot appear, because `worker` does not print them. A 110/110 on this row means the
+fallback did not engage and the row tested nothing.
+
+What row 3 actually checks:
+
+1. the ``no C toolchain for \``hello\`` build-script warning **appears** — the fallback engaged;
+2. the `built with the minix.rs SDK` warning does **not** appear;
+3. the boot still runs to completion, i.e. the fallback produces a working system;
+4. the **only** missing markers are the `hello:` C ones. Anything else missing is a real failure.
+
+**Identify every row's flavour from the build-script warnings, not from the env var**, because the
+boot markers are byte-identical across flavours — that is what makes a mis-measured row invisible.
+The three flavours are told apart by which warning is absent:
+
+| Flavour | `built with the minix.rs SDK` | ``no C toolchain for \``hello\`` |
+| ------- | ----------------------------- | -------------------------------- |
+| SDK     | present                       | absent                           |
+| musl    | absent                        | absent                           |
+| worker  | absent                        | present                          |
+
+`HelloFlavor::Musl` prints nothing **on purpose** (`kernel/build.rs:298`): it is what every CI job
+builds, and warning on the norm is how people learn to ignore build-script warnings — which would
+cost the two that mean something. So an empty flavour line in row 2 is the correct result, not a
+failed grep.
 
 Also run the linted-path check `ci.md` requires:
 
@@ -2073,6 +2103,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `docs/conventions/kernel.md:314`, `:359`, `:392`
 - Modify: `docs/conventions/build-and-boot.md:56` (the stale constant) **and `:55-63`, the broken
   stack-frame recipe — see below**
+- Modify: `docs/conventions/ci.md`'s three-boot-matrix bullets — the moved-aside row names the wrong
+  sysroot and does not say what a correct result looks like (see Step 2d)
 - Modify: `docs/conventions/testing-and-markers.md` (add the starved-boot check — see below)
 - Modify: `book/src/servers/overview.md:330-331`
 - Modify: `book/src/libc/overview.md:264`
@@ -2156,6 +2188,26 @@ A clean 300 s run on this branch reaches **~18.8 M** ticks; a passing 1200 s run
 marker failure, and do not change code on the strength of a starved boot. The control that settles
 it in one step is to restore the merge base's copy of the changed file, rebuild, and boot again: if
 HEAD fails identically, the host is the cause.
+
+- [ ] **Step 2d: Correct the three-boot matrix guidance** (`ci.md:136-146`)
+
+Two defects, both found by running it:
+
+1. **The moved-aside row's sysroot is `target/musl-sysroot`**, inside the repo — not
+   `~/toolchains/minixrs/sysroot`. `ci.md` says only "moved-aside sysroot", which reads as the SDK's
+   and sent this slice's dispatcher to the wrong directory. With `MINIXRS_SDK=/nonexistent` the
+   selector never consults the SDK prefix, so moving *that* aside re-runs the musl row and tests
+   nothing — the precise failure the bullet exists to warn about, committed while following it. Name
+   the path.
+2. **A correct row 3 FAILS `check-boot-log.sh`, and `ci.md` does not say so.** The selector falls to
+   `HelloFlavor::Worker`, which packs `worker` under the name `hello`, so the five C markers cannot
+   appear. "Run `check-boot-log.sh` on each" invites the next reader to treat the correct outcome as
+   a regression, or to "fix" a non-bug. State that only the `hello:` markers may be missing and that
+   a 110/110 on row 3 means the fallback did not engage.
+
+While there, add the flavour-identification table (SDK / musl / worker × which warning is present),
+and note that `HelloFlavor::Musl` is silent by design — an empty flavour line is the musl result,
+not a failed grep.
 
 - [ ] **Step 3: Verify**
 
