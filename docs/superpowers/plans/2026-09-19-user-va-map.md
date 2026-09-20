@@ -2071,7 +2071,9 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 - Modify: `docs/conventions/servers-and-drivers.md:121`, `:390`, `:394`
 - Modify: `docs/conventions/kernel.md:314`, `:359`, `:392`
-- Modify: `docs/conventions/build-and-boot.md:56`
+- Modify: `docs/conventions/build-and-boot.md:56` (the stale constant) **and `:55-63`, the broken
+  stack-frame recipe — see below**
+- Modify: `docs/conventions/testing-and-markers.md` (add the starved-boot check — see below)
 - Modify: `book/src/servers/overview.md:330-331`
 - Modify: `book/src/libc/overview.md:264`
 
@@ -2113,10 +2115,59 @@ number swap:
   carry `fs/mfs`'s `const _`" describes a tripwire that has since fired and been re-aimed. Say what
   it carries now.
 
+- [ ] **Step 2b: Fix the broken stack-frame recipe** (`build-and-boot.md:55-63`)
+
+This one is not stale prose, it is a **check that silently lies**, and this slice is what makes it
+dangerous. Its grep is:
+
+```
+grep -oE 'sub[[:space:]]+sp, sp, #0x[0-9a-f]+'
+```
+
+which does **not** match `sub sp, sp, #0x1, lsl #12` — the form LLVM emits for every frame ≥ 4 KiB.
+Verified against today's `minixrs-mfs`: the recipe reports **1248** bytes where `main`'s real frame
+is **9440** (`0x1<<12` twice, plus `0x4e0`).
+
+It under-reports by 7.5x, and it does so precisely on the large frames it exists to catch — which
+this slice just made legal by growing the stack to 64 KiB and moving MFS's two 4 KiB buffers into
+`main`. A recipe that reports a small number for a big frame is worse than no recipe.
+
+Fix the pattern to handle both encodings and sum the pair LLVM emits for a single prologue, or
+replace it with a note to read the prologue directly. Whatever you write, **run it against
+`minixrs-mfs` and confirm it reports 9440**, not 1248. The surrounding prose also still says a
+server gets one page; correct it with the rest.
+
+- [ ] **Step 2c: Record the starved-boot check** (`testing-and-markers.md`)
+
+A boot on a loaded host fails markers that are not broken, and the failure mimics a real regression
+in an unrelated subsystem. This has now produced a wrong conclusion three times in one slice: once
+"the budget must rise to 1800 s", once "the filesystem write path hangs", and once "the line I just
+added broke the boot". Each was host contention.
+
+Record the cheap discriminator, which costs one command:
+
+```bash
+grep -ao '\[ipc [0-9]*' <log> | tail -1      # final IPC counter, the throughput proxy
+uptime; ps -eo pcpu,comm -r | head -5       # what was competing
+```
+
+A clean 300 s run on this branch reaches **~18.8 M** ticks; a passing 1200 s run reached **114 M**.
+**Under ~10 M at timeout means the run was starved, not broken** — re-run it before believing any
+marker failure, and do not change code on the strength of a starved boot. The control that settles
+it in one step is to restore the merge base's copy of the changed file, rebuild, and boot again: if
+HEAD fails identically, the host is the cause.
+
 - [ ] **Step 3: Verify**
 
 ```bash
 grep -rn --include='*.md' "SERVER_STACK_BYTES\|SERVER_STACK_VA" docs/ book/
+```
+
+and confirm the repaired recipe reports the real frame:
+
+```bash
+MFS=target/minixrs-user/aarch64-unknown-minixrs/release/minixrs-mfs
+# <the repaired recipe> -> must print 9440, not 1248
 ```
 
 Expected: hits **only** under `docs/plans/phase-4-*` and `docs/plans/phase-5-*` (history), and in
