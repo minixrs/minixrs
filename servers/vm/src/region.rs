@@ -445,18 +445,12 @@ pub fn fork(parent_nr: i32, child_nr: i32) -> Result<(), i32> {
 /// Reset process `nr`'s regions around a freshly exec'd image whose page-aligned
 /// end is `image_end` (the `VM_EXEC` path). Returns the number of stale regions
 /// dropped, or `EINVAL` if `nr` is untrackable.
-// Forward declaration: `main.rs`'s `VM_EXEC` handler is the sole caller and lands
-// in the next task of this slice. Drop the allow when it does.
-#[allow(dead_code)]
 pub fn exec(nr: i32, image_end: u64) -> Result<usize, i32> {
     Ok(client_mut(nr).ok_or(EINVAL)?.exec(image_end))
 }
 
 /// Record the kernel-mapped initial stack as a region of process `nr`.
 /// `EINVAL` if `nr` is untrackable.
-// Forward declaration, like `exec` above: called from `main.rs`'s `VM_EXEC`
-// handler and from `vm_init` (for the boot procs) in the next task of this slice.
-#[allow(dead_code)]
 pub fn record_stack(nr: i32) -> Result<(), i32> {
     client_mut(nr).ok_or(EINVAL)?.record_stack();
     Ok(())
