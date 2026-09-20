@@ -28,56 +28,73 @@ use core::cell::UnsafeCell;
 
 use minixrs_kernel_shared::com::NR_SERVED_PROCS;
 use minixrs_kernel_shared::error::{EINVAL, ENOMEM};
-use minixrs_kernel_shared::uspace::{RAMDISK_WINDOW_BASE, USER_DEVICE_WINDOW_BASE};
+use minixrs_kernel_shared::uspace::{USER_REGION_LIMIT, USER_STACK_BASE, USER_STACK_TOP};
 
-/// Fixed heap origin. Until PM supplies a real per-process memory layout
-/// (Phase 4), VM and stub D agree on this VA by convention: `brk` grows the
-/// heap as `[HEAP_BASE, new_break)` and stub D writes inside that range.
+/// **Legacy** heap origin: the origin used by a process that has never been
+/// through `VM_EXEC` — stub D and the boot servers. VM and stub D agree on this
+/// VA by a convention baked into `user_stub.S`'s blob: `brk` grows the heap as
+/// `[HEAP_BASE, new_break)` and stub D writes inside that range.
+///
+/// An exec'd image gets an *image-relative* origin instead — the loader's
+/// page-aligned image end, carried to VM by `VM_EXEC` and recorded per process.
+/// This constant survives rather than moving because nothing ever tells VM that
+/// a boot server or a stub exists, so there is no moment at which their origin
+/// could be recorded.
 pub const HEAP_BASE: u64 = 0x0100_0000;
 
-/// Origin of the per-process anonymous-mmap arena. VM bump-allocates mmap
-/// addresses upward from here, so a mapping never collides with stub D's code
-/// (`0x0043_0000`), stack (`0x0083_0000`), or heap
-/// (`[0x0100_0000, 0x0100_8000)` today). `0x0200_0000` sits a clean 16 MiB above
-/// `HEAP_BASE`, leaving the heap room to grow before it could reach the arena.
+/// **Legacy** origin of the anonymous-mmap arena, paired with [`HEAP_BASE`] and
+/// belonging to the same processes: the ones that never go through `VM_EXEC`. VM
+/// bump-allocates mmap addresses upward from here, so a mapping never collides
+/// with stub D's code (`0x0043_0000`), stack (`0x0083_0000`), or heap
+/// (`[0x0100_0000, 0x0100_8000)` today). `0x0200_0000` sits a clean [`MMAP_GAP`]
+/// above `HEAP_BASE`, leaving the heap room to grow before it could reach the
+/// arena — and an exec'd process gets that same gap above its own
+/// image-relative origin.
 ///
 /// The arena is bump-only — munmap never returns addresses to it (reuse waits for
 /// a real per-process VM layout). Since slice 5.3 it is **capped** at
-/// [`REGION_LIMIT`] rather than growing without bound: the kernel now pre-maps a
-/// device window at [`USER_DEVICE_WINDOW_BASE`], and an unbounded mmap loop would
-/// eventually hand a client an address inside it. Past the cap, `mmap` returns
-/// `ENOMEM`.
+/// [`REGION_LIMIT`] rather than growing without bound: an unbounded mmap loop
+/// would otherwise eventually hand a client an address the kernel has already
+/// promised to something else. Past the cap, `mmap` returns `ENOMEM`.
 pub const MMAP_BASE: u64 = 0x0200_0000;
 
-/// Exclusive upper bound of **every** tracked region: the base of the **lowest**
-/// kernel-owned window, which is the device window (slice 5.3). No heap and no
-/// mmap may extend past here.
+/// Exclusive upper bound of **every** tracked region.
 ///
-/// A `const _` on the *bases* would not be enough — it proves only where each
-/// region starts, and both grow on request: the mmap arena's bump cursor advances,
-/// and `set_brk` raises the heap's `end` to whatever the client asks for. So both
-/// carry a runtime check against this bound, returning `ENOMEM`.
+/// A re-export of [`USER_REGION_LIMIT`], which is where the user VA map is
+/// defined. It used to be defined here as the base of the lowest kernel-owned
+/// window; the stack moving to the top of process VA made that wrong — the first
+/// thing above a growing region is now the stack's guard page, not a window.
 ///
-/// Why it matters even though nothing is exploitable today: a kernel-owned window's
-/// whole purpose is to be kernel-owned in *every* address space, so Phase 6 can
-/// pre-map a device page into any driver without first asking whether VM already
-/// promised that VA to the process's heap.
+/// The definition moved to `kernel-shared` rather than merely changing value,
+/// because `kernel-shared::uspace` documents the whole map and could not name
+/// the bound the map is really about: a shared crate cannot reference a server.
 ///
-/// **This constant does not move when a window is added.** Slice 5.7's ramdisk
-/// window sits at 2 GiB, above the device window, precisely so that the lowest
-/// kernel-owned window stays the low-water mark and VM needs no edit — the
-/// disjoint-and-ascending assert in `kernel-shared::uspace` is what enforces that,
-/// and the assert below is this file's half of it.
-pub const REGION_LIMIT: u64 = USER_DEVICE_WINDOW_BASE;
+/// A `const _` on the region *bases* would not be enough — it proves only where
+/// each region starts, and both grow on request: the mmap arena's bump cursor
+/// advances, and `set_brk` raises the heap's `end` to whatever the client asks
+/// for. So both carry a runtime check against this bound, returning `ENOMEM`.
+pub const REGION_LIMIT: u64 = USER_REGION_LIMIT;
 
-// Both region origins must sit below the bound, or their first request would be
-// refused outright.
-const _: () = assert!(MMAP_BASE < USER_DEVICE_WINDOW_BASE);
-const _: () = assert!(HEAP_BASE < USER_DEVICE_WINDOW_BASE);
+/// Distance from a process's heap origin to its mmap arena origin.
+///
+/// Extracted from the legacy pair rather than invented: `MMAP_BASE - HEAP_BASE`
+/// has been 16 MiB since slice 3.6, and applying the same gap to a per-process
+/// origin keeps the heap exactly as much room to grow as it has always had.
+pub const MMAP_GAP: u64 = 0x0100_0000;
 
-// ...and the bound must stay at or below every *other* kernel-owned window, or a
-// window added above it would be reachable by a growing heap or mmap arena.
-const _: () = assert!(REGION_LIMIT <= RAMDISK_WINDOW_BASE);
+// The gap describes the legacy pair too, or it would be a number that happens to
+// work for new processes and silently disagrees with stub D's layout.
+const _: () = assert!(MMAP_BASE == HEAP_BASE + MMAP_GAP);
+
+// The legacy origins must still sit below the bound, which is now *lower* than
+// it was — so these asserts do more work than before, not less.
+const _: () = assert!(MMAP_BASE < REGION_LIMIT);
+const _: () = assert!(HEAP_BASE < REGION_LIMIT);
+
+// The ceiling must clear the stack and its guard page. This is the assert that
+// replaces the old `REGION_LIMIT <= RAMDISK_WINDOW_BASE`: the windows are no
+// longer what bounds a region, the stack is.
+const _: () = assert!(REGION_LIMIT < USER_STACK_BASE);
 
 /// aarch64 4 KiB page.
 const PAGE_SIZE: u64 = 4096;
@@ -103,6 +120,14 @@ pub enum Kind {
     Unused,
     Heap,
     Mmap,
+    /// The initial stack the *kernel* mapped at image load.
+    ///
+    /// VM records it but never resolves a fault against it: every stack page is
+    /// already mapped when the record is made, so the region is pure
+    /// bookkeeping. What it buys is `fork` cloning a region set that describes
+    /// the child's whole address space, and a fault in the guard page landing
+    /// just outside a known neighbour instead of nowhere at all.
+    Stack,
 }
 
 /// A half-open virtual-address range `[start, end)` and what it backs.
@@ -129,15 +154,19 @@ impl Region {
 #[derive(Copy, Clone)]
 struct ClientRegions {
     regions: [Region; MAX_REGIONS],
+    /// Origin of this process's heap. The legacy [`HEAP_BASE`] until a
+    /// `VM_EXEC` records the image end.
+    heap_origin: u64,
     /// Next free VA for an anonymous mmap. Bump-only: munmap never returns
-    /// addresses here (matches a trivial mmap allocator; reuse waits for
-    /// Phase 4's real VM layout).
+    /// addresses here (matches a trivial mmap allocator; reuse waits for a real
+    /// per-process VM layout).
     mmap_next: u64,
 }
 
 impl ClientRegions {
     const EMPTY: Self = Self {
         regions: [Region::EMPTY; MAX_REGIONS],
+        heap_origin: HEAP_BASE,
         mmap_next: MMAP_BASE,
     };
 
@@ -147,13 +176,16 @@ impl ClientRegions {
     }
 
     /// Set the program break to `new_break`, growing or creating the heap
-    /// region as `[HEAP_BASE, page_align_up(new_break))`. Returns the resulting
-    /// break. Errors: `EINVAL` if `new_break` is below `HEAP_BASE`, the page-aligned
-    /// break would overflow `u64`, or no region slot is free for a new heap;
-    /// `ENOMEM` if the break would carry the heap past [`REGION_LIMIT`] into the
-    /// kernel's device window.
+    /// region as `[heap_origin, page_align_up(new_break))`. Returns the
+    /// resulting break. Errors: `EINVAL` if `new_break` is below this process's
+    /// heap origin, the page-aligned break would overflow `u64`, or no region
+    /// slot is free for a new heap; `ENOMEM` if the break would carry the heap
+    /// past [`REGION_LIMIT`] into the stack's guard page.
     fn set_brk(&mut self, new_break: u64) -> Result<u64, i32> {
-        if new_break < HEAP_BASE {
+        // The origin is read once, up front: the free-slot loop below borrows
+        // `self.regions` mutably, so `self.heap_origin` cannot be read inside it.
+        let origin = self.heap_origin;
+        if new_break < origin {
             return Err(EINVAL);
         }
         // page_align_up, guarding the round-up add against wraparound near
@@ -163,10 +195,10 @@ impl ClientRegions {
             .map(|v| v & !(PAGE_SIZE - 1))
             .ok_or(EINVAL)?;
         // Same cap the mmap arena carries, and for the same reason: a heap grows to
-        // whatever the client asks for, so the `HEAP_BASE < REGION_LIMIT` const
-        // assert bounds only where it starts. Checked *after* the page-align, since
-        // rounding up can carry a break that was just under the bound over it, and
-        // *before* any region is mutated, so a refused brk changes nothing.
+        // whatever the client asks for, so a const assert on the origin bounds only
+        // where it starts. Checked *after* the page-align, since rounding up can
+        // carry a break that was just under the bound over it, and *before* any
+        // region is mutated, so a refused brk changes nothing.
         if end > REGION_LIMIT {
             return Err(ENOMEM);
         }
@@ -182,7 +214,7 @@ impl ClientRegions {
         for r in self.regions.iter_mut() {
             if r.kind == Kind::Unused {
                 *r = Region {
-                    start: HEAP_BASE,
+                    start: origin,
                     end,
                     kind: Kind::Heap,
                 };
@@ -196,8 +228,8 @@ impl ClientRegions {
     /// a whole page; the base address is bump-allocated from `mmap_next`.
     /// Returns the chosen base. Errors: `EINVAL` if `len` is 0 or the round-up /
     /// bump would overflow `u64`; `ENOMEM` if no region slot is free, or if the
-    /// bump would carry the arena past [`REGION_LIMIT`] into the kernel's device
-    /// window.
+    /// bump would carry the arena past [`REGION_LIMIT`] into the stack's guard
+    /// page.
     fn mmap(&mut self, len: u64) -> Result<u64, i32> {
         if len == 0 {
             return Err(EINVAL);
@@ -210,8 +242,8 @@ impl ClientRegions {
         let start = self.mmap_next;
         let end = start.checked_add(size).ok_or(EINVAL)?;
         // The arena is bump-only, so without this cap a long-running mmap loop
-        // would eventually hand out an address inside the kernel's device window
-        // (`USER_DEVICE_WINDOW_BASE`) and VM would try to resolve faults there.
+        // would eventually hand out an address inside the stack's guard page and
+        // then the stack itself, and VM would try to resolve faults there.
         // `ENOMEM` is the honest answer: address space, not frames, ran out.
         if end > REGION_LIMIT {
             return Err(ENOMEM);
@@ -260,6 +292,63 @@ impl ClientRegions {
         }
         Err(EINVAL)
     }
+
+    /// Reset this process's bookkeeping around a freshly exec'd image.
+    ///
+    /// Drops every region the *previous* image accumulated and records
+    /// `image_end` as the heap origin, with the mmap arena [`MMAP_GAP`] above
+    /// it. Returns how many regions were dropped — non-zero only for a proc that
+    /// had touched memory before exec'ing, which is what makes the stale-region
+    /// gap observable in a boot log.
+    ///
+    /// A full reset, not a merge: the old regions describe an address space the
+    /// kernel tore down in `SYS_EXEC`, so every one of them is wrong.
+    fn exec(&mut self, image_end: u64) -> usize {
+        let dropped = self
+            .regions
+            .iter()
+            .filter(|r| r.kind != Kind::Unused)
+            .count();
+        self.regions = [Region::EMPTY; MAX_REGIONS];
+        self.heap_origin = image_end;
+        // Saturating rather than checked: an image_end near u64::MAX cannot come
+        // out of the loader (every segment passed `check_va`), and an arena
+        // origin above REGION_LIMIT simply makes every mmap answer ENOMEM, which
+        // is the correct outcome for a process with no address space left.
+        self.mmap_next = image_end.saturating_add(MMAP_GAP);
+        dropped
+    }
+
+    /// Record the initial stack the kernel mapped, as a [`Kind::Stack`] region.
+    ///
+    /// Idempotent: a second call replaces the existing stack region rather than
+    /// consuming a second slot, so a re-exec cannot leak slots.
+    fn record_stack(&mut self) {
+        for r in self.regions.iter_mut() {
+            if r.kind == Kind::Stack {
+                *r = Region {
+                    start: USER_STACK_BASE,
+                    end: USER_STACK_TOP,
+                    kind: Kind::Stack,
+                };
+                return;
+            }
+        }
+        for r in self.regions.iter_mut() {
+            if r.kind == Kind::Unused {
+                *r = Region {
+                    start: USER_STACK_BASE,
+                    end: USER_STACK_TOP,
+                    kind: Kind::Stack,
+                };
+                return;
+            }
+        }
+        // No free slot: MAX_REGIONS is 16 and a proc uses heap + stack + mmaps,
+        // so this is unreachable in practice. Dropping the record silently is
+        // the right failure — the stack is mapped either way, and refusing the
+        // exec over a bookkeeping slot would be worse than not recording it.
+    }
 }
 
 /// `UnsafeCell`-wrapped static table. See the module-level note for the
@@ -305,9 +394,10 @@ pub fn contains(nr: i32, addr: u64) -> bool {
 }
 
 /// Set process `nr`'s program break to `new_break`, growing or creating its
-/// heap region as `[HEAP_BASE, page_align_up(new_break))`. Returns the
+/// heap region as `[heap_origin, page_align_up(new_break))`. Returns the
 /// resulting break on success, or `EINVAL` if `nr` is untrackable or
-/// `new_break` is below `HEAP_BASE`.
+/// `new_break` is below that process's heap origin — the legacy [`HEAP_BASE`]
+/// until a `VM_EXEC` records an image-relative one.
 ///
 /// No frames are mapped here — pages fault in lazily on first touch and are
 /// resolved through [`contains`] in the fault path.
@@ -349,6 +439,26 @@ pub fn fork(parent_nr: i32, child_nr: i32) -> Result<(), i32> {
     // hold two live borrows into TABLE at once.
     let parent = *client_ref(parent_nr).ok_or(EINVAL)?;
     *client_mut(child_nr).ok_or(EINVAL)? = parent;
+    Ok(())
+}
+
+/// Reset process `nr`'s regions around a freshly exec'd image whose page-aligned
+/// end is `image_end` (the `VM_EXEC` path). Returns the number of stale regions
+/// dropped, or `EINVAL` if `nr` is untrackable.
+// Forward declaration: `main.rs`'s `VM_EXEC` handler is the sole caller and lands
+// in the next task of this slice. Drop the allow when it does.
+#[allow(dead_code)]
+pub fn exec(nr: i32, image_end: u64) -> Result<usize, i32> {
+    Ok(client_mut(nr).ok_or(EINVAL)?.exec(image_end))
+}
+
+/// Record the kernel-mapped initial stack as a region of process `nr`.
+/// `EINVAL` if `nr` is untrackable.
+// Forward declaration, like `exec` above: called from `main.rs`'s `VM_EXEC`
+// handler and from `vm_init` (for the boot procs) in the next task of this slice.
+#[allow(dead_code)]
+pub fn record_stack(nr: i32) -> Result<(), i32> {
+    client_mut(nr).ok_or(EINVAL)?.record_stack();
     Ok(())
 }
 
@@ -510,10 +620,10 @@ mod tests {
     /// arena — the `HEAP_BASE < REGION_LIMIT` const assert bounds only where it
     /// starts. Check both sides of the boundary, and that a refused brk is inert.
     #[test]
-    fn set_brk_stops_at_the_device_window() {
+    fn set_brk_stops_at_the_region_ceiling() {
         let mut c = ClientRegions::EMPTY;
         // Right up to the bound is fine: the region is half-open, so a heap ending
-        // exactly at REGION_LIMIT does not include the window's first byte.
+        // exactly at REGION_LIMIT does not include the guard page's first byte.
         assert_eq!(c.set_brk(REGION_LIMIT), Ok(REGION_LIMIT));
         assert!(!c.contains(REGION_LIMIT));
         assert!(c.contains(REGION_LIMIT - 1));
@@ -540,7 +650,9 @@ mod tests {
 
     #[test]
     fn both_region_origins_sit_below_the_bound() {
-        assert_eq!(REGION_LIMIT, USER_DEVICE_WINDOW_BASE);
+        // The legacy origins, which a process that never goes through VM_EXEC
+        // still uses, must clear a bound that is now *lower* than it was.
+        assert_eq!(REGION_LIMIT, USER_REGION_LIMIT);
         // `min` rather than `<`: an all-constant `assert!` trips clippy's
         // `assertions_on_constants`.
         assert_eq!(HEAP_BASE.min(REGION_LIMIT), HEAP_BASE);
@@ -548,10 +660,10 @@ mod tests {
     }
 
     /// The arena is bump-only, so the only thing standing between a long-running
-    /// mmap loop and the kernel's device window is [`REGION_LIMIT`]. Drive the
+    /// mmap loop and the stack's guard page is [`REGION_LIMIT`]. Drive the
     /// cursor right up to it and check both sides of the boundary.
     #[test]
-    fn mmap_stops_at_the_device_window() {
+    fn mmap_stops_at_the_region_ceiling() {
         let mut c = ClientRegions::EMPTY;
         // Park the cursor one page short of the limit: that page must succeed…
         c.mmap_next = REGION_LIMIT - PAGE_SIZE;
@@ -571,8 +683,8 @@ mod tests {
     }
 
     #[test]
-    fn the_arena_starts_below_the_device_window() {
-        assert_eq!(REGION_LIMIT, USER_DEVICE_WINDOW_BASE);
+    fn the_arena_starts_below_the_region_ceiling() {
+        assert_eq!(REGION_LIMIT, USER_REGION_LIMIT);
         // `min` rather than `<`: an all-constant `assert!` trips clippy's
         // `assertions_on_constants`. The module-level `const _` proves the same
         // thing at compile time; this records it where a reader looks.
@@ -660,5 +772,94 @@ mod tests {
         // Kernel-task parent or past-the-cap child are both untrackable.
         assert_eq!(fork(-1, 5), Err(EINVAL));
         assert_eq!(fork(30, MAX_CLIENTS as i32), Err(EINVAL));
+    }
+
+    #[test]
+    fn a_fresh_client_still_uses_the_legacy_origins() {
+        // Stub D and the boot servers never get a VM_EXEC, so the fixed origins
+        // stay their default. This is the arm that keeps user_stub.S working.
+        let mut c = ClientRegions::EMPTY;
+        let brk = c.set_brk(HEAP_BASE + 0x1000).unwrap();
+        assert_eq!(brk, HEAP_BASE + 0x1000);
+        assert!(c.contains(HEAP_BASE));
+    }
+
+    #[test]
+    fn exec_moves_the_heap_origin_to_the_image_end() {
+        let mut c = ClientRegions::EMPTY;
+        let image_end = 0x0030_2000;
+        c.exec(image_end);
+        // The first brk creates the heap at the recorded origin, not HEAP_BASE.
+        let brk = c.set_brk(image_end + 0x1000).unwrap();
+        assert_eq!(brk, image_end + 0x1000);
+        assert!(c.contains(image_end));
+        assert!(!c.contains(HEAP_BASE));
+    }
+
+    #[test]
+    fn a_brk_below_the_recorded_origin_is_einval() {
+        let mut c = ClientRegions::EMPTY;
+        // Deliberately *above* the legacy `HEAP_BASE`, so the second assertion
+        // tests what it claims to: an image whose end outruns the fixed origin
+        // is the whole reason the origin had to become per-process.
+        let image_end = HEAP_BASE + 0x0010_0000;
+        c.exec(image_end);
+        assert_eq!(c.set_brk(image_end - 1), Err(EINVAL));
+        // ...including an address that would have been valid under the legacy
+        // origin, which is the regression this guards.
+        assert_eq!(c.set_brk(HEAP_BASE + 0x1000), Err(EINVAL));
+    }
+
+    #[test]
+    fn exec_drops_the_previous_images_regions() {
+        let mut c = ClientRegions::EMPTY;
+        c.set_brk(HEAP_BASE + 0x4000).unwrap();
+        let old_mmap = c.mmap(0x2000).unwrap();
+        assert!(c.contains(old_mmap));
+
+        let dropped = c.exec(0x0030_2000);
+        assert_eq!(dropped, 2, "heap + one mmap should have been dropped");
+        assert!(!c.contains(old_mmap));
+        assert!(!c.contains(HEAP_BASE));
+    }
+
+    #[test]
+    fn the_mmap_arena_bumps_from_the_recorded_origin_plus_the_gap() {
+        let mut c = ClientRegions::EMPTY;
+        let image_end = 0x0030_2000;
+        c.exec(image_end);
+        let base = c.mmap(0x1000).unwrap();
+        assert_eq!(base, image_end + MMAP_GAP);
+        // The legacy pair still differ by exactly the same gap, so the constant
+        // describes both worlds rather than only the new one.
+        assert_eq!(MMAP_BASE, HEAP_BASE + MMAP_GAP);
+    }
+
+    #[test]
+    fn a_recorded_stack_is_contained_but_is_not_a_heap_or_an_mmap() {
+        let mut c = ClientRegions::EMPTY;
+        c.record_stack();
+        assert!(c.contains(USER_STACK_BASE));
+        assert!(c.contains(USER_STACK_TOP - 1));
+        assert!(!c.contains(USER_STACK_TOP), "the range is half-open");
+        // The guard page below the stack must NOT be covered, or an overflow
+        // would be silently resolved instead of faulting.
+        assert!(!c.contains(USER_STACK_BASE - 1));
+        // brk must not mistake it for a heap, and munmap must refuse it.
+        assert_eq!(c.munmap(USER_STACK_BASE, 0x1000), Err(EINVAL));
+    }
+
+    #[test]
+    fn the_region_ceiling_excludes_the_stack_and_its_guard_page() {
+        let mut c = ClientRegions::EMPTY;
+        // A brk that would reach the guard page is refused.
+        assert_eq!(c.set_brk(REGION_LIMIT + 1), Err(ENOMEM));
+        assert_eq!(REGION_LIMIT, USER_REGION_LIMIT);
+        // Exactly one guard page between the ceiling and the lowest stack VA --
+        // stronger than `REGION_LIMIT < USER_STACK_BASE`, and written through a
+        // local because an all-constant `assert!` trips clippy's
+        // `assertions_on_constants`.
+        let guard = USER_STACK_BASE - REGION_LIMIT;
+        assert_eq!(guard, PAGE_SIZE, "the guard page is not one page wide");
     }
 }
