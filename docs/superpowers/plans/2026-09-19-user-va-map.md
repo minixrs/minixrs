@@ -1393,6 +1393,19 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 - Consumes: `EXEC_IMAGE_END_OFF` (Task 4), `VM_EXEC` + its offsets (Task 4), the `SYS_EXEC` reply
   field (Task 5), VM's handler (Task 7)
+
+**`image_end` is only meaningful when `m_type == OK`.** The kernel writes `40..48` on the success
+path alone, and `kernel/src/system/mod.rs` replies with the buffer it copied in from the caller — so
+on a failed exec those bytes are whatever PM sent, not a kernel value. Spec V4's "reply-only, past
+`EXEC_LEN_OFF`, aliases nothing a caller wrote" covers *request-field* aliasing and says nothing
+about the failure reply.
+
+Two things already contain this, and both must stay: the marshallers below return `Err` on `m.m_type
+!= OK` **before** reading the field, and PM builds each request with `payload: [0u8; 96]` so those
+bytes are zero going out and therefore zero coming back. Neither is load-bearing alone — keep both,
+and do not "simplify" the `m_type` check into reading the field unconditionally. This is not
+theoretical: init's denial battery fires eight failed execs every boot.
+
 - Produces: nothing other tasks consume
 
 - [ ] **Step 1: Change the two `SYS_EXEC` marshallers to return the image end**
