@@ -62,14 +62,25 @@ Tasks are grouped by the **crate** they build, not merely by the files they touc
 disjointness is not enough: `cargo test -p <crate>` builds the whole lib-test binary, so two agents
 in one crate compile each other's half-finished work. Wave A learned this the hard way — Tasks 1 and
 4 edit different files of `minixrs-kernel-shared`, and one task's TDD red phase made the other's
-green phase fail to compile at all. Group by `-p` target.
+green phase fail to compile at all.
 
-| Wave | Tasks                  | Files, and why they are disjoint                                                                                                                       |
-| ---- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A    | ~~1 ∥ 4~~ **serial**   | Both are `minixrs-kernel-shared`. **Not parallelizable** — see the note above.                                                                         |
-| B    | **2+3 ∥ 6 ∥ 9**        | `minixrs-kernel` ∥ `minixrs-vm` ∥ `minixrs-mfs` + `minixrs-vfs` — three separate `-p` targets                                                          |
-| C    | **5 ∥ 8 ∥ 10**, then 7 | `minixrs-kernel` ∥ `minixrs-pm` ∥ `minixrs-mfs`. **Task 7 is `minixrs-vm`, the same crate as Task 6** — it follows 6 rather than running beside 5/8/10 |
-| D    | 11 → 12 → 13           | serial: 11 and 12 need a booting system; 13 describes what shipped                                                                                     |
+**Grouping by `-p` target is also not enough**, which Wave B then learned. `kernel/Cargo.toml`
+build-depends on `minixrs-mkfs-mfs` → `minixrs-mfs`, and `kernel/build.rs` shells out to build every
+server ELF (`servers/vm`, `servers/vfs`, `servers/pm`, …). So `cargo kernel-aarch64` is **not** a
+kernel-only build: it transitively builds most of the workspace. Worse, `kernel/build.rs:815` scrubs
+`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` but **not** `RUSTC_WORKSPACE_WRAPPER`/`CLIPPY_ARGS`, so `cargo
+clippy -p minixrs-kernel -- -D warnings` runs clippy with `-D warnings` over those nested server
+builds too — and fails on a neighbouring task's not-yet-called code.
+
+The practical rule: **a task that touches `minixrs-kernel` cannot run beside a task that touches any
+crate the kernel's build script builds.** In this plan that means Wave C is sequential.
+
+| Wave | Tasks                | Files, and why they are disjoint                                                                                                                   |
+| ---- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A    | ~~1 ∥ 4~~ **serial** | Both are `minixrs-kernel-shared`. **Not parallelizable** — see the note above.                                                                     |
+| B    | **2+3 ∥ 6 ∥ 9**      | `minixrs-kernel` ∥ `minixrs-vm` ∥ `minixrs-mfs` + `minixrs-vfs` — three separate `-p` targets                                                      |
+| C    | **5 → 7 → 8 → 10**   | **Sequential.** Task 5 is `minixrs-kernel`, whose build script builds `minixrs-vm`, `minixrs-pm` and `minixrs-mfs` — the other three tasks' crates |
+| D    | 11 → 12 → 13         | serial: 11 and 12 need a booting system; 13 describes what shipped                                                                                 |
 
 **Agents in a shared worktree must not commit concurrently** — `git index.lock` races. Either the
 dispatcher commits each agent's work as it returns, or each agent gets its own worktree.
@@ -1241,6 +1252,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - **Required cleanup:** Task 6 left `#[allow(dead_code)]` on `region::exec` and
   `region::record_stack`, with comments naming this task as their consumer. **Delete both attributes
   and both comments** — this task wires up the callers, so the forward declaration is spent.
+- **Required check — reject `image_end == 0`.** Task 3 established that `load_into` does *not*
+  refuse an ELF with no `PT_LOAD`: the phdr walk `continue`s past every non-`PT_LOAD` header and
+  falls into `Ok(..)`, so a branded `PT_NOTE`-only image loads having mapped nothing and reports
+  `image_end == 0`. Nothing exploitable follows — such an image faults immediately — but a zero must
+  never become a heap origin, which would seed a process's heap at VA 0 and make the first `brk`
+  hand out page zero. `handle_exec` answers `EINVAL` and emits a `[diag vm] exec FAIL` line before
+  calling `region::exec`. The check lives here, not in the loader: refusing the image there would
+  change `exec`'s errno surface, which is ABI-visible and outside this slice.
 - Produces: the `[diag vm] exec …` marker Task 12 asserts
 
 - [ ] **Step 1: Add the handler**
