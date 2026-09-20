@@ -1801,7 +1801,7 @@ became `VFS_OPEN` the moment the band grew — a real request answering `EINVAL`
 as i32`) is the only spelling that survives a growing band.
 
 (The standing rules are in [abi.md](../conventions/abi.md#request-band-allocation),
-[servers-and-drivers.md](../conventions/servers-and-drivers.md#the-one-page-stack),
+[servers-and-drivers.md](../conventions/servers-and-drivers.md#the-64-kib-stack),
 [servers-and-drivers.md](../conventions/servers-and-drivers.md#error-relay) and
 [testing-and-markers.md](../conventions/testing-and-markers.md#markers).)
 

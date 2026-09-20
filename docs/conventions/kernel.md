@@ -311,7 +311,7 @@ follows is the engine and the policy.
   count). **No TLB maintenance**, because the AS was built moments ago and never installed in TTBR0
   (a recycled ASID is clean — `teardown_addrspace` flushes before `free_asid`) and
   `switch_ttbr0_with_asid` already issues `isb; tlbi aside1; dsb ish; isb` on TTY's first schedule —
-  the same reasoning `SERVER_STACK_VA` relies on. Do not diverge
+  the same reasoning the stack mapping in `load_exec_image` relies on. Do not diverge
 - PL011 register offsets are duplicated between the kernel and `drivers/tty`, deliberately; that
   rule lives in [`servers-and-drivers.md`](./servers-and-drivers.md)
 
@@ -356,15 +356,15 @@ follows is the engine and the policy.
   resumes it at the new entry — and an errno reply on failure, which is why PM's `handle_exec`
   replies only on `rc != OK`
 - `userland::load_exec_image` is factored out of `load_boot_server` (`AddrSpace::new` +
-  `elf::load_into` + one RW stack page at `SERVER_STACK_VA` + `alloc_asid`, `mem::forget` the tree)
-  and **cleans up on OOM** via `destroy_addrspace_with_leaves` — the `do_fork` `copy_addrspace`
-  no-leak contract. Keep both halves when editing it
+  `elf::load_into` + `USER_STACK_PAGES` RW stack pages at `uspace::USER_STACK_BASE` + `alloc_asid`,
+  `mem::forget` the tree) and **cleans up on OOM** via `destroy_addrspace_with_leaves` — the
+  `do_fork` `copy_addrspace` no-leak contract. Keep both halves when editing it
 
 ## `exec` — the initial stack
 
 (slice 5.5, D13 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
 
-- `SYS_EXEC` does not merely point `sp_el0` at the stack page top — it builds the **Linux/SysV
+- `SYS_EXEC` does not merely point `sp_el0` at `uspace::USER_STACK_TOP` — it builds the **Linux/SysV
   initial frame** there first (`[argc][argv…][NULL][envp…][NULL][auxv pairs][AT_NULL]` then the
   NUL-terminated name, padded so `sp` is 16-aligned; `argc = 1`, empty envp) so musl's
   crt/`__libc_start_main`/`__init_tls` run **unpatched**. The standing keep-the-musl-diff-minimal
@@ -389,8 +389,8 @@ follows is the engine and the policy.
   (`text PT_LOAD FILEHDR PHDRS FLAGS(5)` + `. = <base> + SIZEOF_HEADERS`), giving PT_LOAD #0 at
   offset `0x0` / vaddr `0x100000` — both still page-aligned, so the loader's strict checks are
   untouched; only the entry moves one page up. **Server `user.ld`s stay unchanged** (boot-loaded
-  images keep `sp = SERVER_STACK_VA + PAGE_SIZE` and never read an auxv). Any new exec'able binary
-  that wants `AT_PHDR` must copy that idiom and be re-checked with `llvm-readobj --program-headers`
+  images keep `sp = uspace::USER_STACK_TOP` and never read an auxv). Any new exec'able binary that
+  wants `AT_PHDR` must copy that idiom and be re-checked with `llvm-readobj --program-headers`
 
 ## `exec` from a filesystem
 

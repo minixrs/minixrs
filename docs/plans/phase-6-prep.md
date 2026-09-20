@@ -229,14 +229,14 @@ longer** marker-equivalent to MEM.
 
 ## Capacity: what is already raised, and what is not
 
-| Limit                                    | Value             | Note                                                                          |
-| ---------------------------------------- | ----------------- | ----------------------------------------------------------------------------- |
-| `NR_SERVED_PROCS`                        | 32                | The shared PM/VM/SCHED ceiling — keep it shared                               |
-| VM `MAX_REGIONS`                         | 16                | Already raised from the Phase-4 "4" scare                                     |
-| VFS `NR_FDS`                             | 8                 | Raised 4 → 8 in 5.8; VFS-local, not ABI                                       |
-| `SERVER_STACK_BYTES`                     | 4 KiB             | **Raise in chunk 2** — three large `.bss` buffers exist only because of it    |
-| `ROOTFS_IMAGE_BLOCKS` / `ROOTFS_NINODES` | 256 (1 MiB) / 128 | Fine for the ramdisk; a disk root must not inherit either as a format limit   |
-| qemu-smoke budget                        | 600 s             | Raised 120 → 240 → 600 across 5.10a/5.10b; disk I/O under TCG will push again |
+| Limit                                    | Value             | Note                                                                                                              |
+| ---------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `NR_SERVED_PROCS`                        | 32                | The shared PM/VM/SCHED ceiling — keep it shared                                                                   |
+| VM `MAX_REGIONS`                         | 16                | Already raised from the Phase-4 "4" scare                                                                         |
+| VFS `NR_FDS`                             | 8                 | Raised 4 → 8 in 5.8; VFS-local, not ABI                                                                           |
+| `USER_STACK_BYTES`                       | 64 KiB            | Raised 4 KiB → 64 KiB in chunk 2; MFS's two block buffers became `main` locals, VFS's 256 KiB stage stayed `.bss` |
+| `ROOTFS_IMAGE_BLOCKS` / `ROOTFS_NINODES` | 256 (1 MiB) / 128 | Fine for the ramdisk; a disk root must not inherit either as a format limit                                       |
+| qemu-smoke budget                        | 600 s             | Raised 120 → 240 → 600 across 5.10a/5.10b; disk I/O under TCG will push again                                     |
 
 Before raising the boot budget again, measure the way [`ci.md`](../conventions/ci.md) prescribes —
 the last required marker's byte position as a fraction of a fixed-timeout log, compared against the

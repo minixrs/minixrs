@@ -58,13 +58,13 @@ Kernel-call numbers are contiguous from `KERNEL_CALL = 0x600` (`kernel-shared/sr
 
 ### The `SYS_EXEC` initial stack
 
-`SYS_EXEC` does not merely set `sp` to the top of the new image's stack page — it builds the
-**SysV/Linux initial process stack** there first and points `SP_EL0` at it. That is what lets a C
-runtime start unpatched: musl's `crt1` → `__libc_start_main` → `__init_libc` reads
-`argc`/`argv`/`envp` and the auxiliary vector straight off the stack, takes `libc.page_size` from
-`AT_PAGESZ`, and lets `__init_tls` walk the program headers from `AT_PHDR`. Keeping the musl fork's
-diff confined to `arch/aarch64/syscall_arch.h` + `src/minix/` depends on the kernel supplying this
-frame rather than crt being taught a new shape.
+`SYS_EXEC` does not merely set `sp` to the top of the new image's stack — it builds the **SysV/Linux
+initial process stack** there first and points `SP_EL0` at it. That is what lets a C runtime start
+unpatched: musl's `crt1` → `__libc_start_main` → `__init_libc` reads `argc`/`argv`/`envp` and the
+auxiliary vector straight off the stack, takes `libc.page_size` from `AT_PAGESZ`, and lets
+`__init_tls` walk the program headers from `AT_PHDR`. Keeping the musl fork's diff confined to
+`arch/aarch64/syscall_arch.h` + `src/minix/` depends on the kernel supplying this frame rather than
+crt being taught a new shape.
 
 The layout, upward from `sp` (16-byte aligned, as the AAPCS64 requires at entry — `SCTLR_EL1.SA0`
 turns a violation into an EL0 alignment abort):
@@ -78,7 +78,7 @@ turns a violation into an EL0 alignment abort):
 |  `+32` | auxiliary vector: `(a_type, a_val)` pairs, 16 bytes each |
 |      … | `(AT_NULL, 0)` — auxv terminator                         |
 |      … | the NUL-terminated name string                           |
-|      … | zero padding up to the stack-page top                    |
+|      … | zero padding up to `uspace::USER_STACK_TOP`              |
 
 There is exactly one argument (`argc == 1`, `argv[0]` the exec name) and no environment. Slice 5.9
 added exec-from-FS and deliberately **did not** add user-supplied `argv`/`envp`: the kernel keeps

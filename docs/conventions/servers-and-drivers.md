@@ -117,9 +117,9 @@ To add a boot server, append a `(crate, dir, proc_nr)` row to the `servers` arra
 `kernel-shared/com.rs`) and watch its `src` dir. The `env!("BOOT_IMAGE_PATH")` `include_bytes!`
 lives only in `boot_image/mod.rs`, which is `#[cfg(target_os = "none")]` — that gate is what keeps
 host `cargo check`/`test` (env unset) compiling, so never reference `BOOT_IMAGE_PATH` from a
-host-compiled module. `boot_image::BootImage::iter()` drives `userland::load_boot_server(nr, elf,
-stack_va)` (the generalized `vm_bootstrap`); all servers share one `SERVER_STACK_VA` since each has
-its own TTBR0.
+host-compiled module. `boot_image::BootImage::iter()` drives `userland::load_boot_server(nr, elf)`
+(the generalized `vm_bootstrap`); all servers share one stack range — `uspace::USER_STACK_BASE ..
+USER_STACK_TOP`, 16 pages — since each has its own TTBR0.
 
 No new boot priv wiring is needed — `init_boot_image` already grants every boot server `SRV_T`
 `ipc_to` over `[0, n_active)`.
@@ -385,24 +385,43 @@ there is no PUTNODE — which is also why `VFS_CLOSE` sends the FS nothing — a
 carries mode and size instead of a separate stat (slice 5.8 — see
 [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
-## The one-page stack
+## The 64 KiB stack
 
-A server gets exactly `uspace::SERVER_STACK_BYTES` — one page. Overrunning it faults into VM's
-SIGSEGV arm, which prints nothing `tests/qemu-boot.forbidden` catches, so the failure is silent.
+A server gets exactly `uspace::USER_STACK_BYTES` — 16 pages, all mapped eagerly at image load, with
+an unmapped guard page (`uspace::USER_STACK_GUARD_BYTES`) immediately below and
+`uspace::USER_REGION_LIMIT` below that. Overrunning the stack now *faults* in the guard page instead
+of walking silently into the mmap arena — but a fault is still a crash: VM turns it into a SIGSEGV
+that prints nothing `tests/qemu-boot.forbidden` catches, so the failure is still silent in the log.
 
-- **A 4 KiB block buffer is a `.bss` static, not a `main`-frame local.** A local would put the frame
-  base *below* the mapping. `uspace::SERVER_STACK_BYTES` exists solely to carry `fs/mfs`'s `const _`
-  tripwire for this, and `userland.rs` const-asserts its own stack mapping against it.
-- This does **not** contradict TTY's "stage in `main`'s frame, not a static". That rule's
-  load-bearing half is *the buffer outlives every call that names it*, and a static satisfies it
-  strictly better — the address never changes, so MFS's grant to MEM is issued once at boot and
-  `ensure_registered` never re-fires.
-- **Do not grow a server's stack for a demo.** A small granted buffer is a local (32 bytes in VFS's
-  retired BDEV demo); a 4096-byte local is the silent fault above.
+- **A 4 KiB block buffer is a `main`-frame local again.** Under the old one-page stack it could not
+  be — the frame base would have landed below the mapping — so `fs/mfs` kept its block and staging
+  buffers in `.bss`. Sixteen pages made a block-sized local plausible again, which is precisely what
+  `fs/mfs/src/lib.rs`'s `const _` tripwire was written to prompt. It has **fired and been
+  re-aimed**: it now asserts `MFS_BLOCK_SIZE * 4 <= USER_STACK_BYTES`, the margin that keeps two
+  block buffers plus ordinary frame overhead comfortably inside a frame. That margin, not the buffer
+  count, is what `uspace::USER_STACK_BYTES` is published for — a server author has to be able to
+  answer "may this be a local at all?" from a constant rather than from a comment.
+- **Bigger buffers still belong in `.bss`.** VFS's 256 KiB exec stage would overflow a 64 KiB stack
+  four times over, so it stays a static. The stack grew enough to make a *block* a local, not enough
+  to make a quarter-megabyte staging buffer one.
+- MFS's move out of `.bss` does **not** weaken TTY's "stage in `main`'s frame, not a static" rule —
+  it satisfies it. That rule's load-bearing half is *the buffer outlives every call that names it*,
+  and `main` never returns, so a `main`-frame local is as stable as a static: MFS's grant to MEM is
+  still issued once at boot and `ensure_registered` still never re-fires. A **helper's** frame would
+  compile and then leave the driver safecopying into a dead one; that is the shape to refuse.
+- The capability token around MFS's block buffer is independent of where the buffer lives. Its
+  load-bearing half is that `Blocks::read(&mut self) -> &[u8; N]` makes "hold a directory block
+  across the next fetch" a borrow-check error, and that survived the move from `.bss` to `main`'s
+  frame unchanged.
+- **Do not grow a server's stack for a demo.** 64 KiB rather than 256 KiB is deliberate: at 256 KiB
+  a server author stops thinking about the stack budget at all, which is the discipline this
+  constant exists to enforce.
 
 Check the largest stack frame in a built server whenever a handler grows a buffer — the
-`llvm-objdump` recipe is in [build-and-boot.md](./build-and-boot.md) (slices 5.7 and 5.8 — see
-[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+`llvm-objdump` recipe is in [build-and-boot.md](./build-and-boot.md), and note the warning there
+that the obvious one-line version of it under-reports large frames by 7.5x (slices 5.7 and 5.8 — see
+[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md); the stack grew to 64 KiB in the user-VA-map slice
+— see [phase-6-prep.md](../plans/phase-6-prep.md)).
 
 ## Drivers
 
@@ -546,8 +565,9 @@ load it by grant. Four rules:
   applies with the confused-deputy question deleted outright.
 - **A short stream is `EIO`, not a short stage** — the exception recorded under "Short transfers"
   above, and the one place in VFS where a partial transfer is not a legitimate answer.
-- **The 256 KiB staging buffer is a `.bss` static** for the one-page-stack reason MFS's block buffer
-  is one. Unlike that buffer it needs **no capability token and no borrow discipline**: VFS never
+- **The 256 KiB staging buffer is a `.bss` static.** It is the buffer a 64 KiB stack still cannot
+  hold — four times over — which is why it stayed static when MFS's block buffer became a `main`
+  local. Unlike that buffer it needs **no capability token and no borrow discipline**: VFS never
   dereferences the staged bytes, it only wants the buffer's address, which is why the crate keeps
   zero `unsafe` blocks.
 - **Nothing releases the stage grant.** Re-granting per request bumps the sequence and kills the

@@ -289,11 +289,13 @@ Four things are worth stating:
 - **A short stream is `EIO`, not a short stage.** Everywhere else in VFS a partial transfer is a
   legitimate answer; here it is not, because an ELF cannot be loaded in pieces by a loader with no
   filesystem.
-- **The staging buffer is a 256 KiB `.bss` static**, for MFS's block-buffer reason: a server's stack
-  is one page, so a local would fault into VM's SIGSEGV arm, which prints nothing the
-  forbidden-marker list catches. Unlike MFS's block buffer it needs no capability token and no
-  borrow discipline — **VFS never dereferences the staged bytes**. MFS writes into them by safecopy
-  and the kernel reads them through the grant; VFS only ever needs the address.
+- **The staging buffer is a 256 KiB `.bss` static.** A server's stack is 64 KiB, so a
+  quarter-megabyte local would overrun it four times over into the guard page below — a fault VM
+  turns into a SIGSEGV that prints nothing the forbidden-marker list catches. MFS's block buffer
+  became a `main`-frame local when the stack grew; this is the buffer that is still too big to.
+  Unlike MFS's block buffer it needs no capability token and no borrow discipline — **VFS never
+  dereferences the staged bytes**. MFS writes into them by safecopy and the kernel reads them
+  through the grant; VFS only ever needs the address.
 
 Nothing releases the grant afterwards and nothing needs to: each request re-grants the same buffer,
 which bumps the sequence and kills the previous id, and PM serialises exec so two staged images are
@@ -327,12 +329,16 @@ traversal and read policy), and `main.rs` is SEF/IPC/grant glue.
 
 Three things characterise the server itself:
 
-- **One 4 KiB block buffer, in `.bss`.** A boot server's stack is exactly one page and a block is
-  exactly one page, so the buffer cannot be a local — the frame base would land below the mapping,
-  and VM turns that fault into a SIGSEGV that prints nothing the forbidden-marker list catches. It
-  is reached only through a `Blocks` capability token whose `read(&mut self) -> &[u8; N]` makes
-  "hold a directory block across the next fetch" a *borrow-check error* rather than a promise. Every
-  intermediate the walk needs is a small `Copy` value.
+- **One 4 KiB block buffer, in `main`'s frame.** It was a `.bss` static for most of its life: a boot
+  server's stack was exactly one page and a block is exactly one page, so a local's frame base would
+  have landed below the mapping. The stack is 64 KiB now, so a block is a frame-sized thing again,
+  and the block buffer and the staging buffer beside it are both locals in `main` — which never
+  returns, so each outlives every safecopy the `memory` driver makes against its grant. A *helper's*
+  frame would not, and that is the shape to refuse. The capability token stayed: `Blocks` still
+  hands the bytes out only through `read(&mut self) -> &[u8; N]`, which makes "hold a directory
+  block across the next fetch" a *borrow-check error* rather than a promise. That discipline is
+  about aliasing, not about storage, so it survived the move unchanged. Every intermediate the walk
+  needs is a small `Copy` value.
 - **Streaming, not buffering.** `tools/mkfs-mfs`'s `verify.rs` is the reference implementation of
   the same reader, but it materializes a whole directory into a `Vec`; MFS asks about one block at a
   time and keeps nothing but a `u32`. The `fs.selfcheck` boot marker is the one place the two

@@ -2124,7 +2124,7 @@ and they would have shipped pointing at a name that does not compile.
 `docs/plans/phase-4-*` and `phase-5-*` hits are **legitimate history and must stay** — they record
 what was true in those slices. Only live guidance is in scope.
 
-- [ ] **Step 1: Find every reference**
+- [x] **Step 1: Find every reference**
 
 ```bash
 grep -rn --include='*.md' "SERVER_STACK_BYTES\|SERVER_STACK_VA" docs/conventions/ book/
@@ -2134,7 +2134,7 @@ grep -rn --include='*.md' "exactly one page\|one RW stack page\|stack is exactly
 Read each hit in context before editing. The count at the time of writing was ten; re-run rather
 than trusting that number.
 
-- [ ] **Step 2: Correct them**
+- [x] **Step 2: Correct them**
 
 Each is a claim about the *old* map. Rewrite to the new one rather than deleting the sentence — the
 surrounding reasoning is usually still valid and only the number is wrong. Two need more than a
@@ -2147,7 +2147,7 @@ number swap:
   carry `fs/mfs`'s `const _`" describes a tripwire that has since fired and been re-aimed. Say what
   it carries now.
 
-- [ ] **Step 2b: Fix the broken stack-frame recipe** (`build-and-boot.md:55-63`)
+- [x] **Step 2b: Fix the broken stack-frame recipe** (`build-and-boot.md:55-63`)
 
 This one is not stale prose, it is a **check that silently lies**, and this slice is what makes it
 dangerous. Its grep is:
@@ -2169,7 +2169,7 @@ replace it with a note to read the prologue directly. Whatever you write, **run 
 `minixrs-mfs` and confirm it reports 9440**, not 1248. The surrounding prose also still says a
 server gets one page; correct it with the rest.
 
-- [ ] **Step 2c: Record the starved-boot check** (`testing-and-markers.md`)
+- [x] **Step 2c: Record the starved-boot check** (`testing-and-markers.md`)
 
 A boot on a loaded host fails markers that are not broken, and the failure mimics a real regression
 in an unrelated subsystem. This has now produced a wrong conclusion three times in one slice: once
@@ -2189,7 +2189,7 @@ marker failure, and do not change code on the strength of a starved boot. The co
 it in one step is to restore the merge base's copy of the changed file, rebuild, and boot again: if
 HEAD fails identically, the host is the cause.
 
-- [ ] **Step 2d: Correct the three-boot matrix guidance** (`ci.md:136-146`)
+- [x] **Step 2d: Correct the three-boot matrix guidance** (`ci.md:136-146`)
 
 Two defects, both found by running it:
 
@@ -2209,7 +2209,7 @@ While there, add the flavour-identification table (SDK / musl / worker × which 
 and note that `HelloFlavor::Musl` is silent by design — an empty flavour line is the musl result,
 not a failed grep.
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 ```bash
 grep -rn --include='*.md' "SERVER_STACK_BYTES\|SERVER_STACK_VA" docs/ book/
@@ -2228,7 +2228,7 @@ this slice's own spec and plan where they name what was replaced.
 Run `~/.dprint/bin/dprint fmt`, then `~/.dprint/bin/dprint check` and `python3
 tools/check-md-links.py`. Both block in CI.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/conventions book/src

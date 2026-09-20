@@ -52,15 +52,41 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release -
 "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-readobj --program-headers \
   --elf-output-style=GNU target/minixrs-user/aarch64-unknown-minixrs/release/minixrs-worker
 
-# Largest stack frame in a built server -- the one-page-stack check (a server gets
-# exactly `uspace::SERVER_STACK_BYTES`, and overrunning it faults into VM's SIGSEGV
-# arm, which prints nothing the forbidden list catches). Run it whenever a handler
-# grows a buffer. `sort -u` is LEXICAL and reports the wrong maximum -- convert to
-# decimal first:
+# Largest stack frame in a built server -- the stack-budget check. A server gets
+# exactly `uspace::USER_STACK_BYTES` (64 KiB, 16 pages); overrunning it lands in
+# the unmapped guard page below, which VM turns into a SIGSEGV that prints
+# nothing the forbidden list catches. Run it whenever a handler grows a buffer.
+#
+# Do NOT reduce this to `grep -oE 'sub sp, sp, #0x[0-9a-f]+' | sort -n | tail -1`.
+# That pattern is what this file used to carry and it LIES: LLVM encodes a frame
+# >= 4 KiB as a *run* of subtractions, and the shifted form
+# `sub sp, sp, #0x1, lsl #12` does not match it at all. Against minixrs-mfs the
+# naive grep reports 1248 where `main`'s real frame is 9440 (0x1<<12 twice, plus
+# 0x4e0) -- it under-reports by 7.5x on exactly the large frames it exists to
+# catch. Sum the run per function, and decode both encodings:
 "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objdump -d \
   target/minixrs-user/aarch64-unknown-minixrs/release/minixrs-mfs \
-  | grep -oE 'sub[[:space:]]+sp, sp, #0x[0-9a-f]+' | grep -oE '0x[0-9a-f]+' \
-  | while read h; do printf '%d\n' "$h"; done | sort -n | tail -1
+  | awk '
+      function hx(s,   i, n, d) {
+        gsub(/[#,]/, "", s); sub(/^0x/, "", s); n = 0
+        for (i = 1; i <= length(s); i++) {
+          d = index("0123456789abcdef", substr(tolower(s), i, 1)) - 1
+          n = n * 16 + d
+        }
+        return n
+      }
+      /^[0-9a-f]+ </       { if (cur > max) { max = cur; who = fn }
+                             fn = $2; cur = 0 }
+      /sub[ \t]+sp, sp, #/ { cur += hx($6) * (/lsl #12/ ? 4096 : 1) }
+      END                  { if (cur > max) { max = cur; who = fn }
+                             print max, who }'
+# -> 9440 <_RNvCs..._11minixrs_mfs4main>   (the symbol hash varies per build)
+#
+# Two caveats the one-liner cannot express. It counts `sub sp, sp` only, so the
+# callee-save pre-index (`stp x29, x30, [sp, #-0x60]!`) is a further 96 bytes on
+# top -- read the prologue directly when a frame is close enough to 64 KiB for
+# that to matter. And `hx` decodes hex by hand because `strtonum` is a gawk
+# extension that macOS's awk does not have.
 
 # Verify a captured boot log against the standard acceptance markers:
 #   tools/check-boot-log.sh <log>   (tests/qemu-boot.expected/.forbidden;
