@@ -100,6 +100,22 @@ A clean 300 s run on this branch reaches **~18.8 M**; a passing 1200 s run reach
 marker failure, and never change code on the strength of a starved boot — a "fix" that passes on the
 re-run has proved nothing about the code.
 
+**The shape of the missing set is the better tell, and the threshold alone will fool you.** One run
+reached 10.59 M — over the floor — and was plainly starved. Read the whole `MISSING` list:
+
+- **Contiguous from some point to the end of the boot** → the run stopped early. Starvation.
+- **A specific subsystem's markers gone while later ones still land** → a real regression.
+
+The first shape is unmistakable once seen: a starved run loses `SYS_FORK`, then every exec, then
+everything downstream, because it never got there. A regression in the exec path would let fork
+through and take out exec alone.
+
+**Never pipe `check-boot-log.sh` through `tail`.** It prints one `MISSING` line per marker and the
+verdict last, so `tail -2` shows the final miss and hides the rest — which is exactly how a
+contiguous tail-of-boot failure gets mistaken for a single broken marker. Since the last missing
+marker is usually the newest feature's, a truncated verdict points straight at whatever you just
+changed. Use `grep -c '^MISSING'` and read the full list.
+
 The control that settles it in one step: restore the merge base's copy of the file you changed,
 rebuild, and boot again. If HEAD fails identically, the host is the cause and the file is innocent.
 Restore via the scratchpad-snapshot discipline below, not `git checkout`.
