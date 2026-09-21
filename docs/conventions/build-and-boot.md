@@ -3,6 +3,15 @@
 How to build minix.rs, how to boot it under QEMU, and how to inspect what came out. Rules that bind
 every build live here; see [`ci.md`](./ci.md) for what CI enforces.
 
+**`cargo kernel-aarch64` is not a kernel-only build.** `kernel/Cargo.toml` build-depends on
+`minixrs-mkfs-mfs` → `minixrs-mfs`, and `kernel/build.rs` shells out to build every server ELF — so
+it transitively builds most of the workspace, and an error in `servers/*` or `fs/*` from this
+command is not necessarily a kernel bug. `build.rs` scrubs `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` but
+**not** `RUSTC_WORKSPACE_WRAPPER`, so `cargo clippy -p minixrs-kernel -- -D warnings` runs clippy
+with `-D warnings` over those nested server builds too. Two consequences: a neighbouring crate's
+not-yet-called code fails your build, and work split across agents cannot be isolated by `-p` target
+alone.
+
 ```sh
 # Build kernel for aarch64 (primary target)
 cargo kernel-aarch64
