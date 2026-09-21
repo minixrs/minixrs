@@ -333,9 +333,22 @@ fn handle_exec(msg: &mut Message) {
     let image_end = rd_u64(msg, VM_EXEC_IMAGE_END_OFF);
     let target_nr = endpoint_proc(target_e).get();
 
-    let reply_type = if image_end == 0 {
+    // `image_end` arrives in a message, so it is validated rather than trusted —
+    // even though PM is the only sender today and the kernel is the only source
+    // of the value.
+    //
+    // Zero: `load_into` does not refuse an ELF with no `PT_LOAD`, so a branded
+    // `PT_NOTE`-only image loads having mapped nothing and reports zero. A zero
+    // origin would seed the heap at VA 0 and hand out page zero on the first brk.
+    //
+    // Past the ceiling: an origin at or above `REGION_LIMIT` would sit in the
+    // guard page, the stack, or a kernel-owned window. `segment_end` now refuses
+    // the images that could produce one, so this arm is unreachable through the
+    // kernel — which is the reason to keep it. It bounds what a *message* can do,
+    // and the two checks fail independently.
+    let reply_type = if image_end == 0 || image_end > region::REGION_LIMIT {
         diag_fmt(format_args!(
-            "exec FAIL nr={target_nr} rc={EINVAL} image_end=0"
+            "exec FAIL nr={target_nr} rc={EINVAL} image_end={image_end:#x}"
         ));
         EINVAL
     } else {
