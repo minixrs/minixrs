@@ -55,10 +55,13 @@ chunk 2 rather than virtio transport.
 
 **Design:**
 [`2026-09-19-user-va-map-design.md`](../superpowers/specs/2026-09-19-user-va-map-design.md) —
-decisions `V1…V12`, including the two this file did not anticipate: VM is never told that an exec
-happened, and the clang `--image-base` pin is dropped rather than kept.
+decisions `V1…V14`, including two things this file did not anticipate. VM had never been told that
+an exec happened, so an exec'd process kept the regions of an image whose address space the kernel
+had already torn down; V6 closes that with `VM_EXEC`, and `dropped=1` on every `[diag vm] exec` line
+is the gap being closed once per exec. And the clang `--image-base` pin is dropped rather than kept
+— it only ever compensated for the stack sitting at lld's default base.
 
-**Plan:** [`2026-09-19-user-va-map.md`](../superpowers/plans/2026-09-19-user-va-map.md) — twelve
+**Plan:** [`2026-09-19-user-va-map.md`](../superpowers/plans/2026-09-19-user-va-map.md) — thirteen
 tasks, all landed on `feature/user-va-map`.
 
 **Tooling hand-off — outstanding.** The minixrs half is done and checked above; the tooling half is
