@@ -42,8 +42,13 @@ use minixrs_kernel_shared::com::{
 };
 
 use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
+// Gated to match its only users: the stub-VA collision asserts below. Every
+// other declared VA is a stub VA too, so with `boot-stubs` off there is nothing
+// left for the ceiling to be compared against and an ungated import is unused.
+#[cfg(feature = "boot-stubs")]
+use minixrs_kernel_shared::uspace::USER_REGION_LIMIT;
 use minixrs_kernel_shared::uspace::{
-    RAMDISK_VA, RAMDISK_WINDOW_SIZE, SERVER_STACK_BYTES, TTY_UART_VA, USER_DEVICE_WINDOW_BASE,
+    RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA, USER_STACK_BASE, USER_STACK_BYTES, USER_STACK_TOP,
 };
 
 use minixrs_kernel_shared::error::{EFAULT, ENOEXEC, ENOMEM};
@@ -141,46 +146,42 @@ unsafe extern "C" {
     static _user_stub_d_end: u8;
 }
 
-/// VA at which each boot server's stack page is mapped. Distinct from the server
-/// ELF segments (loaded from `0x0010_0000` up by `servers/*/user.ld`) and from
-/// every EL0 stub VA. Shared across all servers: each has its own per-process
-/// TTBR0, so the same low VA resolves to a distinct frame per server with no
-/// collision (the same reason `user.ld`'s `0x0010_0000` base is shared).
-const SERVER_STACK_VA: u64 = 0x0020_0000; // 2 MiB
+/// Pages of stack the kernel maps for every image. Derived from the shared
+/// [`USER_STACK_BYTES`] so the count and the size cannot drift.
+const USER_STACK_PAGES: usize = (USER_STACK_BYTES / PAGE_SIZE as u64) as usize;
 
-// The VA stays private to the kernel — each server reaches its stack through
-// `SP_EL0`, never through a constant — but the *size* is published as
-// `uspace::SERVER_STACK_BYTES`, because a server has to know how much frame it
-// can spend (slice 5.8's MFS block buffer is the first case where the answer is
-// "none of it"). One page here, so the two must agree.
-const _: () = assert!(SERVER_STACK_BYTES == PAGE_SIZE as u64);
+// The stack VA is no longer this file's to choose. It used to be private —
+// each server reaches its stack through `SP_EL0`, never through a constant — but
+// the tooling repo's image checker has to know where it is in order to refuse an
+// image that would collide with it, and it was duplicating the number from a
+// comment. `uspace` owns the whole range now; this file only maps it.
+const _: () = assert!(USER_STACK_BYTES.is_multiple_of(PAGE_SIZE as u64));
+const _: () = assert!(USER_STACK_PAGES > 0);
 
-// ----- The device window must clear every VA declared above ------------------
+// ----- Every VA declared here must clear the region ceiling ------------------
 //
 // `kernel-shared::uspace` documents the whole user VA map and const-asserts the
-// window's internal geometry, but the VAs it has to stay clear of are declared
-// *here* (and, for the mmap arena, in `servers/vm/src/region.rs`, which carries
-// its own guard plus a runtime cap). So the collision checks live here, where a
-// future slice that raises `SERVER_STACK_VA` or adds a stub trips them.
+// stack's and the windows' geometry, but the *stub* VAs are declared here. So
+// the collision checks live here, where a slice that adds a stub trips them.
 //
-// Slice 5.7's ramdisk window needs **no entries of its own here**, and adding six
-// redundant asserts would be a maintenance cost with no coverage: every assert
-// below is `USER_DEVICE_WINDOW_BASE > <va>`, and `uspace`'s
-// `USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE <= RAMDISK_WINDOW_BASE`
-// makes the ramdisk's separation from each of these transitive.
+// These used to read `USER_DEVICE_WINDOW_BASE > <va>`. The stack moving to the
+// top of process VA inverts that: the device window is no longer the first thing
+// above these addresses — the region ceiling is, and it is strictly lower. So the
+// bound is `USER_REGION_LIMIT`, and each assert is strictly stronger than the one
+// it replaces. Do not weaken them back to the window: a stub placed between
+// `USER_REGION_LIMIT` and `USER_DEVICE_WINDOW_BASE` would land in the guard page
+// or the stack and pass a window-based check.
 
-const _: () = assert!(USER_DEVICE_WINDOW_BASE > SERVER_STACK_VA + PAGE_SIZE as u64);
-
 #[cfg(feature = "boot-stubs")]
-const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_STACK_VA_A + PAGE_SIZE as u64);
+const _: () = assert!(USER_STACK_VA_A + PAGE_SIZE as u64 <= USER_REGION_LIMIT);
 #[cfg(feature = "boot-stubs")]
-const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_STACK_VA_B + PAGE_SIZE as u64);
+const _: () = assert!(USER_STACK_VA_B + PAGE_SIZE as u64 <= USER_REGION_LIMIT);
 #[cfg(feature = "boot-stubs")]
-const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_STACK_VA_C + PAGE_SIZE as u64);
+const _: () = assert!(USER_STACK_VA_C + PAGE_SIZE as u64 <= USER_REGION_LIMIT);
 #[cfg(feature = "boot-stubs")]
-const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_STACK_VA_D + PAGE_SIZE as u64);
+const _: () = assert!(USER_STACK_VA_D + PAGE_SIZE as u64 <= USER_REGION_LIMIT);
 #[cfg(feature = "boot-stubs")]
-const _: () = assert!(USER_DEVICE_WINDOW_BASE > USER_CODE_VA_D + PAGE_SIZE as u64);
+const _: () = assert!(USER_CODE_VA_D + PAGE_SIZE as u64 <= USER_REGION_LIMIT);
 
 // ----- Bootstrap ----------------------------------------------------------
 
@@ -431,9 +432,9 @@ pub(crate) struct ExecImage {
     pub ttbr0_pa: u64,
     pub asid: u8,
     pub entry: u64,
-    /// Top of the image's single stack page. `exec` builds the SysV initial
-    /// stack frame downward from here and points `sp_el0` at the frame's base;
-    /// a boot server has no frame and starts with `sp_el0` here.
+    /// Top of the image's stack range ([`USER_STACK_TOP`]). `exec` builds the
+    /// SysV initial stack frame downward from here and points `sp_el0` at the
+    /// frame's base; a boot server has no frame and starts with `sp_el0` here.
     pub sp_top: u64,
     /// VA the program headers are readable at, when a `PT_LOAD` maps them —
     /// `exec`'s `AT_PHDR`. See [`crate::boot_image::elf::LoadedElf::phdr_va`].
@@ -441,15 +442,18 @@ pub(crate) struct ExecImage {
     /// `e_phnum` / `e_phentsize` — `exec`'s `AT_PHNUM` / `AT_PHENT`.
     pub phnum: u16,
     pub phentsize: u16,
+    /// Page-aligned first VA above the loaded image. `do_exec` returns it to PM,
+    /// which forwards it to VM as the process's heap origin.
+    pub image_end: u64,
 }
 
 /// Build a fresh address space from an ELF image: allocate the L0 root, load
 /// the `PT_LOAD` segments (BSS satisfied for free — `alloc_frame` zeroes), map
-/// one zeroed RW stack page at [`SERVER_STACK_VA`], and allocate an ASID. The
-/// `AddrSpace` is `mem::forget`-ed — the page-table tree is now owned via the
-/// returned `ttbr0_pa` (tear it down with the `do_exit` teardown sequence, never
-/// `AddrSpace::destroy`). On failure any partial tree is freed first so nothing
-/// leaks (the do_fork `copy_addrspace` contract).
+/// [`USER_STACK_PAGES`] zeroed RW stack pages at [`USER_STACK_BASE`], and
+/// allocate an ASID. The `AddrSpace` is `mem::forget`-ed — the page-table tree is
+/// now owned via the returned `ttbr0_pa` (tear it down with the `do_exit`
+/// teardown sequence, never `AddrSpace::destroy`). On failure any partial tree is
+/// freed first so nothing leaks (the do_fork `copy_addrspace` contract).
 ///
 /// The image arrives as an [`ElfSource`] rather than a slice as of slice 5.9:
 /// boot passes `ElfSource::Bytes` over the MXBI archive, `do_exec` passes either
@@ -466,8 +470,9 @@ pub(crate) struct ExecImage {
 /// (POSIX's answer, and what makes init's "stage `/etc/motd` and refuse it"
 /// probe mean something).
 ///
-/// The stack VA is shared with every boot server because each image gets its own
-/// TTBR0, so the same low VA resolves to a distinct frame per proc.
+/// The stack VA is shared by every image because each gets its own TTBR0, so the
+/// same VA resolves to a distinct set of frames per proc — the same reasoning
+/// that lets every `user.ld` share one load base.
 ///
 /// SAFETY: single-threaded EL1; the sole caller of the frame allocator + ASID
 /// pool for its duration. Must run after `mm::init_from_limine_memmap`.
@@ -500,25 +505,28 @@ pub(crate) unsafe fn load_exec_image(source: &ElfSource) -> Result<ExecImage, i3
         }
     };
 
-    // Stack: one zeroed RW page; SP starts at its top.
-    let stack_frame = match alloc_frame() {
-        Some(f) => f,
-        None => {
+    // Stack: 16 zeroed RW pages, mapped eagerly; SP starts at the top.
+    // `alloc_frame` zeroes, so the stack arrives clean without an explicit memset.
+    for page in 0..USER_STACK_PAGES {
+        let va = USER_STACK_BASE + (page * PAGE_SIZE) as u64;
+        let stack_frame = match alloc_frame() {
+            Some(f) => f,
+            None => {
+                destroy_addrspace_with_leaves(aspace);
+                return Err(ENOMEM);
+            }
+        };
+        if let Err(e) = aspace.map_page(va, stack_frame.addr(), Prot::RW_DATA) {
+            // `map_page` failed before linking this leaf, so free the orphan
+            // frame explicitly; the sweep below sees only the ones that linked.
+            free_frame(stack_frame);
             destroy_addrspace_with_leaves(aspace);
-            return Err(ENOMEM);
+            // Since exec-from-FS the image is an *input*, so `AlreadyMapped`
+            // here means the file's own segments cover a stack VA — that is
+            // `ENOEXEC` ("not an image this kernel will run"), not `ENOMEM`
+            // ("out of frames"). Only a genuine allocator failure is the latter.
+            return Err(elf_errno(ElfError::Map(e)));
         }
-    };
-    if let Err(e) = aspace.map_page(SERVER_STACK_VA, stack_frame.addr(), Prot::RW_DATA) {
-        // `map_page` failed before linking the leaf, so free the orphan stack
-        // frame explicitly; the leaf sweep below won't see it.
-        free_frame(stack_frame);
-        destroy_addrspace_with_leaves(aspace);
-        // Told apart for the reason the loader's errors are (see above). Since
-        // exec-from-FS the image is an *input*, so `AlreadyMapped` here means the
-        // file's own segments cover the stack VA — that is `ENOEXEC` ("this is
-        // not an image this kernel will run"), not `ENOMEM` ("the machine is out
-        // of frames"). Only a genuine allocator failure is the latter.
-        return Err(elf_errno(ElfError::Map(e)));
     }
 
     let ttbr0_pa = aspace.ttbr0_pa;
@@ -533,10 +541,11 @@ pub(crate) unsafe fn load_exec_image(source: &ElfSource) -> Result<ExecImage, i3
         ttbr0_pa,
         asid,
         entry: loaded.entry,
-        sp_top: SERVER_STACK_VA + PAGE_SIZE as u64,
+        sp_top: USER_STACK_TOP,
         phdr_va: loaded.phdr_va,
         phnum: loaded.phnum,
         phentsize: loaded.phentsize,
+        image_end: loaded.image_end,
     })
 }
 
@@ -626,8 +635,8 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
     // recycled ASID is always clean — `teardown_addrspace` flushes before
     // `free_asid`), and `mmu::switch_ttbr0_with_asid`, which runs on TTY's first
     // schedule, already issues `isb; tlbi aside1; dsb ish; isb`. This is the same
-    // reasoning the `SERVER_STACK_VA` mapping above already relies on; do not
-    // diverge from it here.
+    // reasoning the stack mapping above already relies on; do not diverge from it
+    // here.
     if nr == TTY_PROC_NR {
         map_page_in(
             img.ttbr0_pa,

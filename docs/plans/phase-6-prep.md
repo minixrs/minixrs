@@ -26,7 +26,7 @@ one item that is simply *done* is recorded as chunk 1 so the reasoning is not lo
 ## Status
 
 - [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
-- [ ] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
+- [x] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
 - [ ] **Chunk 3** — `SYS_IRQCTL` design note
 - [ ] **Chunk 4** — Phase 6 tracker + slicing session
 - [ ] **Chunk 5** — musl syscall surface
@@ -52,6 +52,27 @@ Nothing further is owed here. Matching checkboxes live under Pre-Phase-6 cleanup
 chunk 2 rather than virtio transport.
 
 ## Chunk 2: User VA map — high stack, larger stack, image-relative brk
+
+**Design:**
+[`2026-09-19-user-va-map-design.md`](../superpowers/specs/2026-09-19-user-va-map-design.md) —
+decisions `V1…V14`, including two things this file did not anticipate. VM had never been told that
+an exec happened, so an exec'd process kept the regions of an image whose address space the kernel
+had already torn down; V6 closes that with `VM_EXEC`, and `dropped=1` on every `[diag vm] exec` line
+is the gap being closed once per exec. And the clang `--image-base` pin is dropped rather than kept
+— it only ever compensated for the stack sitting at lld's default base.
+
+**Plan:** [`2026-09-19-user-va-map.md`](../superpowers/plans/2026-09-19-user-va-map.md) — thirteen
+tasks, all landed on `feature/user-va-map`.
+
+**Tooling hand-off — outstanding.** The minixrs half is done and checked above; the tooling half is
+not. [`2026-09-19-user-va-map-tooling.md`](../superpowers/plans/2026-09-19-user-va-map-tooling.md)
+carries the exact edits for a separate session in `~/src/tooling`: `verify/check-image.sh`'s VA
+constants and overlap rule, `verify/check-driver.sh`'s `--image-base` assertion, LLVM patch 0006's
+dropped pin, and `verify/selftest.sh`'s inverted `image-base-1m` fixture. Per `V12` the ordering is
+load-bearing — **this repo's PR lands first**, because dropping the pin before the stack moves would
+link SDK images straight onto the stack page — and the three-boot matrix is re-run against the
+rebuilt SDK afterwards. Chunk 2's box above is checked for the OS-side work it names; the tooling
+edits are tracked by that plan, not by this box.
 
 **Do this before any virtio code.** Phase 5 kept a greenfield *low* map that is not borrowed from
 32-bit MINIX 3 (which puts `USR_STACKTOP` near `0xF0000000`). Verified on `main`:
@@ -104,10 +125,12 @@ Four consequences, all of which Phase 6 makes worse:
   window, and decide whether clang may drop the unconditional `--image-base` pin (keep it if a
   shared `0x100000` load base independent of the stack is still wanted).
 
-**Proof:** a multi-MiB image loads and runs; `sp` is high in the `[exec] … sp=0x` marker (which is
-prefix-only today — good); brk lands past the last `PT_LOAD`; tooling's image checker is green.
-Re-mutation-test the image-base and oversized-image fixtures. This is a **mandatory** three-boot
-matrix change — see [`ci.md`](../conventions/ci.md#the-sdk-flavor-has-zero-ci-coverage).
+**Proof:** a multi-MiB image loads and runs (`userland/bigprog`); `sp` is high in the `[exec] …
+sp=0x3fff` marker, which this chunk tightened from its prefix-only `sp=0x` form; brk lands past the
+last `PT_LOAD`, witnessed by the `[diag vm] exec nr=` marker; tooling's image checker is green after
+the hand-off above. Re-mutation-test the image-base and oversized-image fixtures. This is a
+**mandatory** three-boot matrix change — see
+[`ci.md`](../conventions/ci.md#the-sdk-flavor-has-zero-ci-coverage).
 
 **Out of scope:** CoW, ASLR, guard-page stack growth, and USER→VM for malloc — the last can follow
 immediately once the map is sane.
@@ -209,14 +232,14 @@ longer** marker-equivalent to MEM.
 
 ## Capacity: what is already raised, and what is not
 
-| Limit                                    | Value             | Note                                                                          |
-| ---------------------------------------- | ----------------- | ----------------------------------------------------------------------------- |
-| `NR_SERVED_PROCS`                        | 32                | The shared PM/VM/SCHED ceiling — keep it shared                               |
-| VM `MAX_REGIONS`                         | 16                | Already raised from the Phase-4 "4" scare                                     |
-| VFS `NR_FDS`                             | 8                 | Raised 4 → 8 in 5.8; VFS-local, not ABI                                       |
-| `SERVER_STACK_BYTES`                     | 4 KiB             | **Raise in chunk 2** — three large `.bss` buffers exist only because of it    |
-| `ROOTFS_IMAGE_BLOCKS` / `ROOTFS_NINODES` | 256 (1 MiB) / 128 | Fine for the ramdisk; a disk root must not inherit either as a format limit   |
-| qemu-smoke budget                        | 600 s             | Raised 120 → 240 → 600 across 5.10a/5.10b; disk I/O under TCG will push again |
+| Limit                                    | Value             | Note                                                                                                              |
+| ---------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `NR_SERVED_PROCS`                        | 32                | The shared PM/VM/SCHED ceiling — keep it shared                                                                   |
+| VM `MAX_REGIONS`                         | 16                | Already raised from the Phase-4 "4" scare                                                                         |
+| VFS `NR_FDS`                             | 8                 | Raised 4 → 8 in 5.8; VFS-local, not ABI                                                                           |
+| `USER_STACK_BYTES`                       | 64 KiB            | Raised 4 KiB → 64 KiB in chunk 2; MFS's two block buffers became `main` locals, VFS's 256 KiB stage stayed `.bss` |
+| `ROOTFS_IMAGE_BLOCKS` / `ROOTFS_NINODES` | 256 (1 MiB) / 128 | Fine for the ramdisk; a disk root must not inherit either as a format limit                                       |
+| qemu-smoke budget                        | 600 s             | Raised 120 → 240 → 600 across 5.10a/5.10b; disk I/O under TCG will push again                                     |
 
 Before raising the boot budget again, measure the way [`ci.md`](../conventions/ci.md) prescribes —
 the last required marker's byte position as a fraction of a fixed-timeout log, compared against the

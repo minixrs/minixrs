@@ -47,12 +47,12 @@ mod path;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    EXEC_GRANT_OFF, EXEC_GRANTER_OFF, EXEC_LEN_OFF, EXEC_NAME_LEN, EXEC_SRC_GRANT, EXEC_SRC_NAME,
-    EXEC_SRC_OFF, FS_PATH_MAX, PM_EXEC, PM_EXEC_PATH_MAX, PM_EXEC_PATH_OFF, PM_EXIT, PM_FORK,
-    PM_GETPID, PM_GRANT_TEST, PM_WAIT, PRIVCTL_SET_USER, SAFECOPY_FROM, SAFECOPY_TO,
-    SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT, SYS_FORK,
-    SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VFS_EXEC_GRANT_OFF, VFS_EXEC_PATH_OFF,
-    VFS_EXEC_STAGE, VM_FORK,
+    EXEC_GRANT_OFF, EXEC_GRANTER_OFF, EXEC_IMAGE_END_OFF, EXEC_LEN_OFF, EXEC_NAME_LEN,
+    EXEC_SRC_GRANT, EXEC_SRC_NAME, EXEC_SRC_OFF, FS_PATH_MAX, PM_EXEC, PM_EXEC_PATH_MAX,
+    PM_EXEC_PATH_OFF, PM_EXIT, PM_FORK, PM_GETPID, PM_GRANT_TEST, PM_WAIT, PRIVCTL_SET_USER,
+    SAFECOPY_FROM, SAFECOPY_TO, SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT,
+    SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VFS_EXEC_GRANT_OFF,
+    VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE, VM_EXEC, VM_EXEC_IMAGE_END_OFF, VM_EXEC_PROC_OFF, VM_FORK,
 };
 use minixrs_kernel_shared::com::{
     INIT_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
@@ -165,7 +165,7 @@ fn main() -> ! {
             PM_FORK => handle_fork(system, vm, sched, &mut msg),
             PM_EXIT => handle_exit(system, sched, &mut msg),
             PM_WAIT => handle_wait(&mut msg),
-            PM_EXEC => handle_exec(system, vfs, &mut msg),
+            PM_EXEC => handle_exec(system, vfs, vm, &mut msg),
             PM_GRANT_TEST => handle_grant_test(own_e, &mut grants, &msg),
             // Unknown request: drop it.
             _ => {}
@@ -366,12 +366,18 @@ fn handle_wait(msg: &mut Message) {
 /// answered for a path that could not be staged, or whatever the kernel answered
 /// (`ENOENT` for an unknown module, `ENOEXEC` for bytes that are not an ELF).
 ///
-/// **There is nothing to roll back.** Every failure happens before `SYS_EXEC`
-/// reaches its point of no return, which is why init's `exec_denials` battery can
-/// fire eight failing execs at itself and keep running — the battery *is* the
-/// rollback proof.
+/// **There is nothing to roll back.** Every failure that produces an errno happens
+/// before `SYS_EXEC` reaches its point of no return, which is why init's
+/// `exec_denials` battery can fire eight failing execs at itself and keep running
+/// — the battery *is* the rollback proof.
+///
+/// The one step past that point is [`vm_exec`], which hands VM the loader's image
+/// end so it can drop the old image's regions and seed the heap origin there. It
+/// runs last and its result is discarded: the caller is already executing its new
+/// image, so there is no one left to tell and nothing to undo. Running it before
+/// `SYS_EXEC` would mean unwinding VM state on each of those eight denials.
 #[cfg_attr(test, allow(dead_code))]
-fn handle_exec(system: Endpoint, vfs: Endpoint, msg: &mut Message) {
+fn handle_exec(system: Endpoint, vfs: Endpoint, vm: Endpoint, msg: &mut Message) {
     let caller_e = msg.m_source;
     // The target borrows `msg`, and so does the staged path; both marshallers
     // below copy into their own message, so the borrow ends before `reply` needs
@@ -384,12 +390,30 @@ fn handle_exec(system: Endpoint, vfs: Endpoint, msg: &mut Message) {
     {
         Ok(path::Target::Module(name)) => sys_exec_name(system, caller_e, name),
         Ok(path::Target::Path { path, argv0 }) => exec_from_fs(system, vfs, caller_e, path, argv0),
-        Err(e) => e,
+        Err(e) => Err(e),
     };
-    if rc != OK {
-        reply(caller_e, msg, rc);
+    match rc {
+        Ok(image_end) => {
+            // Success: the kernel already resumed the caller at the new image —
+            // no reply. VM is told *after* the point of no return, so a failure
+            // here cannot be rolled back and is relayed to no caller: the
+            // process is running either way, and the worst case is VM keeping
+            // the stale view it has kept for every exec until now.
+            //
+            // Doing this before SYS_EXEC would mean unwinding VM state on every
+            // failed exec, and init's denial battery fires eight per boot.
+            // The result is not relayed, but it is not discarded either: a VM
+            // that refuses this leaves the proc running against a stale region
+            // set, and a silent failure is one nothing in a boot log would ever
+            // show. Spec V7 calls for a trace line, and a trace is the only
+            // thing there is left to do with the answer.
+            let rc = vm_exec(vm, caller_e, image_end);
+            if rc != OK {
+                diag_fmt(format_args!("exec.vm FAIL e={caller_e} rc={rc}"));
+            }
+        }
+        Err(e) => reply(caller_e, msg, e),
     }
-    // Success: the kernel already resumed the caller at the new image — no reply.
 }
 
 /// Stage `path` through VFS and exec the caller from the resulting grant.
@@ -408,11 +432,8 @@ fn exec_from_fs(
     caller_e: Endpoint,
     path: &str,
     argv0: &str,
-) -> i32 {
-    let (size, gid) = match vfs_exec_stage(vfs, path) {
-        Ok(staged) => staged,
-        Err(rc) => return rc,
-    };
+) -> Result<u64, i32> {
+    let (size, gid) = vfs_exec_stage(vfs, path)?;
     sys_exec_grant(system, caller_e, argv0, vfs, gid, size)
 }
 
@@ -763,14 +784,17 @@ fn sys_fork(system: Endpoint, parent_e: Endpoint, child_nr: i32) -> (i32, Endpoi
 /// `SYS_EXEC` — ask the kernel to replace `target_e`'s image with the
 /// boot-embedded module `name` (SENDREC to SYSTEM). Payload: target endpoint in
 /// `0..4`, the NUL-padded name in `4..4+EXEC_NAME_LEN`, and
-/// [`EXEC_SRC_NAME`] in [`EXEC_SRC_OFF`]. Returns the kernel-call result; on `OK`
-/// the kernel has already resumed the target at the new entry.
+/// [`EXEC_SRC_NAME`] in [`EXEC_SRC_OFF`].
+///
+/// Returns the loader's page-aligned image end on success — PM forwards it to VM
+/// as the new image's heap origin — or the kernel-call / kernel error. On
+/// success the kernel has already resumed the target at the new entry.
 ///
 /// The selector is written explicitly rather than left zero: a zeroed payload is
 /// deliberately *not* a valid form (slice 5.9), so a caller that forgot it gets
 /// `EINVAL` instead of whichever source happened to be the default.
 #[cfg_attr(test, allow(dead_code))]
-fn sys_exec_name(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
+fn sys_exec_name(system: Endpoint, target_e: Endpoint, name: &str) -> Result<u64, i32> {
     let mut m = Message {
         m_source: 0,
         m_type: SYS_EXEC,
@@ -787,9 +811,16 @@ fn sys_exec_name(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
     wr_i32(&mut m, EXEC_SRC_OFF, EXEC_SRC_NAME);
     let rc = ipc_sendrec(system, &mut m);
     if rc != OK {
-        return rc;
+        return Err(rc);
     }
-    m.m_type
+    // `image_end` is meaningful only on the success path: the kernel writes
+    // payload `40..48` there and nowhere else, and SYSTEM's reply is the request
+    // buffer PM sent, so on a failure those bytes are PM's own zeros. Both
+    // protections stay — this early return *and* the zeroed payload above.
+    if m.m_type != OK {
+        return Err(m.m_type);
+    }
+    Ok(rd_u64(&m, EXEC_IMAGE_END_OFF))
 }
 
 /// `SYS_EXEC` — ask the kernel to replace `target_e`'s image with the bytes of
@@ -801,8 +832,9 @@ fn sys_exec_name(system: Endpoint, target_e: Endpoint, name: &str) -> i32 {
 /// safecopy uses — `who_to` must be **PM's own** stored endpoint — so this message
 /// cannot aim the loader at a grant PM was not given.
 ///
-/// Returns the kernel-call result; on `OK` the kernel has already resumed the
-/// target at the new entry.
+/// Returns the loader's page-aligned image end on success — PM forwards it to VM
+/// as the new image's heap origin — or the kernel-call / kernel error. On
+/// success the kernel has already resumed the target at the new entry.
 #[cfg_attr(test, allow(dead_code))]
 fn sys_exec_grant(
     system: Endpoint,
@@ -811,7 +843,7 @@ fn sys_exec_grant(
     granter: Endpoint,
     gid: i32,
     len: usize,
-) -> i32 {
+) -> Result<u64, i32> {
     let mut m = Message {
         m_source: 0,
         m_type: SYS_EXEC,
@@ -830,9 +862,16 @@ fn sys_exec_grant(
     wr_u64(&mut m, EXEC_LEN_OFF, len as u64);
     let rc = ipc_sendrec(system, &mut m);
     if rc != OK {
-        return rc;
+        return Err(rc);
     }
-    m.m_type
+    // `image_end` is meaningful only on the success path: the kernel writes
+    // payload `40..48` there and nowhere else, and SYSTEM's reply is the request
+    // buffer PM sent, so on a failure those bytes are PM's own zeros. Both
+    // protections stay — this early return *and* the zeroed payload above.
+    if m.m_type != OK {
+        return Err(m.m_type);
+    }
+    Ok(rd_u64(&m, EXEC_IMAGE_END_OFF))
 }
 
 /// `VFS_EXEC_STAGE` — ask VFS to read `path` into its staging buffer and grant it
@@ -912,6 +951,27 @@ fn vm_fork(vm: Endpoint, parent_e: Endpoint, child_e: Endpoint) -> i32 {
         return rc;
     }
     m.m_type
+}
+
+/// `VM_EXEC` — tell VM that `target_e` has exec'd an image ending at
+/// `image_end`, so it drops the previous image's regions and seeds the heap
+/// origin there (SENDREC to VM).
+///
+/// Returns VM's reply `m_type`. **The caller ignores it**, and deliberately: this
+/// runs after `SYS_EXEC`'s point of no return, so there is nothing to roll back
+/// and no error to report to a caller that is already running its new image.
+/// See [`handle_exec`] for why it cannot run earlier.
+#[cfg_attr(test, allow(dead_code))]
+fn vm_exec(vm: Endpoint, target_e: Endpoint, image_end: u64) -> i32 {
+    let mut m = Message {
+        m_source: 0,
+        m_type: VM_EXEC,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, VM_EXEC_PROC_OFF, target_e);
+    wr_u64(&mut m, VM_EXEC_IMAGE_END_OFF, image_end);
+    let rc = ipc_sendrec(vm, &mut m);
+    if rc != OK { rc } else { m.m_type }
 }
 
 /// `SCHEDULING_START` — ask SCHED to begin scheduling `target_e` at the given

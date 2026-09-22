@@ -48,14 +48,15 @@ mod region;
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    SYS_GETINFO_NAME_LEN, SYS_KILL, SYS_VMCTL, VM_BRK, VM_FORK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT,
-    VMCTL_CLEAR_PAGEFAULT, VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP,
+    SYS_GETINFO_NAME_LEN, SYS_KILL, SYS_VMCTL, VM_BRK, VM_EXEC, VM_EXEC_IMAGE_END_OFF,
+    VM_EXEC_PROC_OFF, VM_FORK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT,
+    VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP,
 };
-use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
+use minixrs_kernel_shared::com::{NR_BOOT_PROCS, SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
-use minixrs_kernel_shared::error::OK;
+use minixrs_kernel_shared::error::{EINVAL, OK};
 use minixrs_kernel_shared::signal::SIGSEGV;
-use minixrs_server_rt::{SefConfig, sef_publish_to_ds, sef_startup};
+use minixrs_server_rt::{SefConfig, diag_fmt, sef_publish_to_ds, sef_startup};
 
 /// aarch64 4 KiB page size — VM only needs to page-align fault addresses.
 const PAGE_SIZE: u64 = 4096;
@@ -112,6 +113,7 @@ fn main() -> ! {
             VM_MMAP => handle_mmap(&mut msg),
             VM_MUNMAP => handle_munmap(system, &mut msg),
             VM_FORK => handle_fork(&mut msg),
+            VM_EXEC => handle_exec(&mut msg),
             // Unknown request: drop it.
             _ => {}
         }
@@ -119,9 +121,23 @@ fn main() -> ! {
 }
 
 /// SEF fresh-init callback: publish VM's endpoint to DS under its name, so other
-/// servers can look VM up by name (slice 4.2). DS registers the caller's
-/// kernel-stamped endpoint, so `_endpoint` from `GET_WHOAMI` is not sent.
+/// servers can look VM up by name (slice 4.2), and record the initial stack
+/// every boot proc was given. DS registers the caller's kernel-stamped endpoint,
+/// so `_endpoint` from `GET_WHOAMI` is not sent.
+///
+/// The boot procs never go through `VM_EXEC` — the kernel builds their address
+/// spaces in `load_boot_server`, and the kernel does not originate server
+/// requests — so this is the only place their stack region can be recorded. The
+/// range is the same compile-time constant for every proc, since each has its
+/// own TTBR0.
+///
+/// A failure to record is not a startup failure: the stack is mapped by the
+/// kernel either way, and the region is bookkeeping that `fork` and the fault
+/// path benefit from rather than depend on.
 fn vm_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
+    for nr in 0..NR_BOOT_PROCS as i32 {
+        let _ = region::record_stack(nr);
+    }
     sef_publish_to_ds(name)
 }
 
@@ -279,6 +295,80 @@ fn handle_fork(msg: &mut Message) {
     let reply_type = match region::fork(parent_nr, child_nr) {
         Ok(()) => OK,
         Err(e) => e,
+    };
+
+    msg.m_type = reply_type;
+    msg.m_source = 0; // kernel overwrites on delivery
+    let _ = ipc_send(caller_e, msg);
+}
+
+/// Handle a `VM_EXEC` request from PM: reset a freshly exec'd process's memory
+/// bookkeeping around its new image.
+///
+/// PM passes the target endpoint (payload [`VM_EXEC_PROC_OFF`]) and the loader's
+/// page-aligned image end ([`VM_EXEC_IMAGE_END_OFF`]). VM drops every region the
+/// proc's previous image accumulated — they describe an address space `SYS_EXEC`
+/// already tore down — records `image_end` as the heap origin, and records the
+/// kernel-mapped stack. Reply (PM issued a SENDREC) with `m_type = OK`, or the
+/// negative error from [`region::exec`].
+///
+/// A zero `image_end` is refused with `EINVAL` before `region::exec` sees it.
+/// The kernel's loader does *not* reject an ELF with no `PT_LOAD` — its phdr
+/// walk skips every other header type and falls into `Ok(..)` — so a branded
+/// `PT_NOTE`-only image loads having mapped nothing and reports `image_end ==
+/// 0`. Such an image faults immediately and nothing exploitable follows, but a
+/// zero must never become a heap origin: it would seed the heap at VA 0 and hand
+/// out page zero on the first `brk`. The check lives here rather than in the
+/// loader because refusing the image there would change `exec`'s errno surface,
+/// which is ABI-visible.
+///
+/// The marker is unconditional rather than sampled. exec is rare — a handful per
+/// boot — and this line is the *only* proof that the heap origin follows the
+/// image, since no user process can reach `VM_BRK`: the shared USER privilege
+/// has no `ipc_to` bit for VM (`kernel/src/proc/table.rs`'s `USER_IPC_TO`), and
+/// opening that edge is pre-Phase-6 chunk 5's work.
+fn handle_exec(msg: &mut Message) {
+    let caller_e = msg.m_source;
+    let target_e: Endpoint = rd_i32(msg, VM_EXEC_PROC_OFF);
+    let image_end = rd_u64(msg, VM_EXEC_IMAGE_END_OFF);
+    let target_nr = endpoint_proc(target_e).get();
+
+    // `image_end` arrives in a message, so it is validated rather than trusted —
+    // even though PM is the only sender today and the kernel is the only source
+    // of the value.
+    //
+    // Zero: `load_into` does not refuse an ELF with no `PT_LOAD`, so a branded
+    // `PT_NOTE`-only image loads having mapped nothing and reports zero. A zero
+    // origin would seed the heap at VA 0 and hand out page zero on the first brk.
+    //
+    // Past the ceiling: an origin at or above `REGION_LIMIT` would sit in the
+    // guard page, the stack, or a kernel-owned window. `segment_end` now refuses
+    // the images that could produce one, so this arm is unreachable through the
+    // kernel — which is the reason to keep it. It bounds what a *message* can do,
+    // and the two checks fail independently.
+    let reply_type = if image_end == 0 || image_end > region::REGION_LIMIT {
+        diag_fmt(format_args!(
+            "exec FAIL nr={target_nr} rc={EINVAL} image_end={image_end:#x}"
+        ));
+        EINVAL
+    } else {
+        match region::exec(target_nr, image_end) {
+            Ok(dropped) => {
+                // The stack is recorded *after* the reset, which clears it along
+                // with everything else — the kernel maps a fresh stack for the new
+                // image, so the record has to be re-made, not preserved.
+                let _ = region::record_stack(target_nr);
+                let mmap = image_end.saturating_add(region::MMAP_GAP);
+                diag_fmt(format_args!(
+                    "exec nr={target_nr} image_end={image_end:#x} heap={image_end:#x} mmap={mmap:#x} dropped={dropped}"
+                ));
+                OK
+            }
+            Err(e) => {
+                diag_fmt(format_args!("exec FAIL nr={target_nr} rc={e}"));
+                e
+            }
+        }
     };
 
     msg.m_type = reply_type;

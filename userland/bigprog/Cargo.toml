@@ -1,0 +1,18 @@
+[package]
+name = "minixrs-bigprog"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "minixrs-bigprog"
+path = "src/main.rs"
+
+[dependencies]
+minixrs-kernel-shared = { path = "../../kernel-shared" }
+minixrs-ipc = { path = "../../minixrs-ipc" }
+minixrs-abi-note = { path = "../../minixrs-abi-note" }
+
+[lints]
+workspace = true

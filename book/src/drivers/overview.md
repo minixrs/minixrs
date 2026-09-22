@@ -77,7 +77,7 @@ Two placement details matter:
   TTBR0 (and a recycled ASID is always clean, because address-space teardown flushes before
   returning the ASID to the pool). Beyond that, `switch_ttbr0_with_asid` — which runs on TTY's first
   schedule — already issues `isb; tlbi aside1; dsb ish; isb`. This is the same reasoning the server
-  stack-page mapping already relies on.
+  stack mapping already relies on.
 
 The boot log records it as `[devmap] tty va=0x40000000 pa=0x9000000 attr_idx=<n>`. The two addresses
 are fixed constants and the boot-log checker asserts both; `<n>` is whichever MAIR index the scan

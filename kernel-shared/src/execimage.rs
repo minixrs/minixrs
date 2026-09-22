@@ -28,7 +28,8 @@
 //! is a predicate with no test. Same carve-out [`crate::message::user_va_ok`] and
 //! [`crate::execstack`] already use.
 
-use crate::message::{USER_PAGE_SIZE, USER_VA_TOP};
+use crate::message::USER_PAGE_SIZE;
+use crate::uspace::USER_REGION_LIMIT;
 
 /// Most program headers the loader will walk.
 ///
@@ -81,11 +82,30 @@ pub const fn phnum_ok(e_phnum: usize) -> bool {
 /// fields, so `p_vaddr + p_memsz` is exactly the addition that must not wrap. A
 /// wrapped end would read as a tiny segment and then have the per-page loop walk
 /// off the top of the address space one page at a time.
+///
+/// ## The ceiling is [`USER_REGION_LIMIT`], not `USER_VA_TOP`
+///
+/// An image may occupy only what a *process region* may occupy. `USER_VA_TOP`
+/// (2^48) was too weak by an entire address space: the stack mapper starts at
+/// `USER_STACK_BASE`, so a segment ending anywhere below that never collides
+/// with a stack page and never raises `AlreadyMapped`. A branded ELF whose last
+/// `PT_LOAD` covers the **guard page** therefore loaded cleanly, left that page
+/// mapped, and silently retracted the guarantee the guard page exists for — a
+/// stack underflow would write into the image instead of faulting.
+///
+/// It also reported `image_end == USER_STACK_BASE`, which `VM_EXEC` would then
+/// record as a heap origin sitting inside the stack.
+///
+/// Refusing it here is the right layer: this is the single choke point every
+/// `PT_LOAD` passes on both the boot and exec-from-FS paths. The tooling repo's
+/// `check-image.sh` carries the same rule, but it is a build-time lint in
+/// another repository and is not on the exec path at all — a file written
+/// through the FS write path and exec'd never meets it.
 pub fn segment_end(p_vaddr: u64, p_memsz: usize) -> Result<u64, ImageError> {
     let end = p_vaddr
         .checked_add(p_memsz as u64)
         .ok_or(ImageError::BadSpan)?;
-    if end > USER_VA_TOP {
+    if end > USER_REGION_LIMIT {
         return Err(ImageError::BadSpan);
     }
     Ok(end)
@@ -234,12 +254,47 @@ mod tests {
 
     #[test]
     fn a_span_past_the_user_range_is_rejected() {
-        assert_eq!(segment_end(USER_VA_TOP, 1), Err(ImageError::BadSpan));
-        assert_eq!(segment_end(USER_VA_TOP - 1, 2), Err(ImageError::BadSpan));
         assert_eq!(
-            segment_end(USER_VA_TOP - PAGE as u64, PAGE),
-            Ok(USER_VA_TOP),
-            "ending exactly at the top is in range"
+            segment_end(crate::message::USER_VA_TOP, 1),
+            Err(ImageError::BadSpan)
+        );
+        assert_eq!(
+            segment_end(crate::message::USER_VA_TOP - 1, 2),
+            Err(ImageError::BadSpan)
+        );
+    }
+
+    #[test]
+    fn a_span_reaching_the_guard_page_is_rejected() {
+        // The hole this ceiling closes. The guard page is
+        // `[USER_REGION_LIMIT, USER_STACK_BASE)`, and it is never mapped — a
+        // stack underflow must fault there rather than land in something.
+        //
+        // A segment ending *in* it never touches a stack page, so the loader's
+        // `AlreadyMapped` collision does not fire and the image loads. That is
+        // precisely the case `USER_VA_TOP` admitted.
+        use crate::uspace::{USER_STACK_BASE, USER_STACK_TOP};
+
+        assert_eq!(
+            segment_end(USER_REGION_LIMIT, PAGE),
+            Err(ImageError::BadSpan),
+            "a segment covering the guard page must be refused"
+        );
+        assert_eq!(
+            segment_end(USER_STACK_BASE, PAGE),
+            Err(ImageError::BadSpan),
+            "a segment covering the first stack page must be refused"
+        );
+        assert_eq!(
+            segment_end(USER_STACK_TOP - PAGE as u64, PAGE),
+            Err(ImageError::BadSpan),
+            "a segment covering the last stack page must be refused"
+        );
+        // ...and the last byte a segment MAY occupy is the one below the guard.
+        assert_eq!(
+            segment_end(USER_REGION_LIMIT - PAGE as u64, PAGE),
+            Ok(USER_REGION_LIMIT),
+            "ending exactly at the ceiling is in range"
         );
     }
 }

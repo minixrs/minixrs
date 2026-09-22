@@ -65,6 +65,9 @@ test-config too (`clippy --all-targets`). That surfaces a specific set of traps:
   `assert!(c, "{x}")` are both rejected).
 - In a `#[test]` fn the reverse holds: iterate freely, but use `assert_eq!` rather than a bare
   `assert!(CONST op CONST)`, which trips the same `assertions_on_constants`.
+- Changing a function's return type from a bare code to `Result` makes `question_mark` reject any
+  `match` that `?` would replace — under `-D warnings` that is a gate failure, not a lint. Re-check
+  every `match` in a function whose signature you just changed.
 - For an *ordering* comparison, where there is no `assert_eq!` form, write `assert_eq!(a.min(b), a)`
   (slice 5.3 needed this in `uspace.rs`, `callnr.rs`, and `vm/region.rs`) — or restructure into a
   loop over a `[(name, value, width)]` array so the operands stop being compile-time constants.

@@ -24,6 +24,7 @@ members = [
     "userland/sh",
     "userland/coreutils",
     "userland/worker",
+    "userland/bigprog",
     "minixrs",
     # Host-side build tooling. Unlike every other member these are std crates
     # that run on the developer's machine (and inside `kernel/build.rs`), not on

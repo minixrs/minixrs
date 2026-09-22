@@ -79,6 +79,47 @@ A few properties of the script matter when you're reading its output rather than
 - **Never copy a count into a marker from a plan** — recompute it from the constant. 5.8's plan said
   `n=30` for what was actually a 31-byte `ROOTFS_MOTD`.
 
+## A starved boot is not a regression
+
+A boot on a loaded host fails markers that are not broken, and the failure mimics a real regression
+in an unrelated subsystem. In the user-VA-map slice alone that produced three wrong conclusions —
+"the budget must rise to 1800 s", "the filesystem write path hangs", and "the line I just added
+broke the boot". Every one of them was host contention.
+
+The discriminator costs one command. The IPC counter is the throughput proxy: QEMU under TCG
+advances guest time at whatever share of the host it gets, so a starved run simply does less work in
+the same wall-clock budget.
+
+```bash
+grep -ao '\[ipc [0-9]*' <log> | tail -1     # final IPC counter, the throughput proxy
+uptime; ps -eo pcpu,comm -r | head -5       # what was competing for the machine
+```
+
+A clean 300 s run on this branch reaches **~18.8 M**; a passing 1200 s run reached **114 M**.
+**Under ~10 M at the timeout means the run was starved, not broken.** Re-run before believing any
+marker failure, and never change code on the strength of a starved boot — a "fix" that passes on the
+re-run has proved nothing about the code.
+
+**The shape of the missing set is the better tell, and the threshold alone will fool you.** One run
+reached 10.59 M — over the floor — and was plainly starved. Read the whole `MISSING` list:
+
+- **Contiguous from some point to the end of the boot** → the run stopped early. Starvation.
+- **A specific subsystem's markers gone while later ones still land** → a real regression.
+
+The first shape is unmistakable once seen: a starved run loses `SYS_FORK`, then every exec, then
+everything downstream, because it never got there. A regression in the exec path would let fork
+through and take out exec alone.
+
+**Never pipe `check-boot-log.sh` through `tail`.** It prints one `MISSING` line per marker and the
+verdict last, so `tail -2` shows the final miss and hides the rest — which is exactly how a
+contiguous tail-of-boot failure gets mistaken for a single broken marker. Since the last missing
+marker is usually the newest feature's, a truncated verdict points straight at whatever you just
+changed. Use `grep -c '^MISSING'` and read the full list.
+
+The control that settles it in one step: restore the merge base's copy of the file you changed,
+rebuild, and boot again. If HEAD fails identically, the host is the cause and the file is innocent.
+Restore via the scratchpad-snapshot discipline below, not `git checkout`.
+
 ## Mutation testing
 
 The standard (established slices 5.1–5.3): apply a mutation, observe the named marker move, revert.

@@ -163,11 +163,16 @@ use fd::{CharDriver, Fd};
 
 /// `UnsafeCell`-wrapped static staging buffer for [`do_exec_stage`].
 ///
-/// **It cannot be a `main`-frame local.** A server's stack is exactly one page
-/// (`uspace::SERVER_STACK_BYTES`), so a 256 KiB frame would put the frame base
-/// far below the mapping and the first touch would fault into VM's SIGSEGV arm —
-/// which prints nothing `tests/qemu-boot.forbidden` catches. That is MFS's
-/// `BlockBuf` reasoning at a larger size, and the same shape:
+/// **It cannot be a `main`-frame local.** A server's stack is 64 KiB
+/// (`uspace::USER_STACK_BYTES`), so a 256 KiB frame would still overflow the
+/// stack four times over even at 16 pages. `EXEC_STAGE` stays in `.bss`: the
+/// stack grew enough to make a *block* buffer a local again (`fs/mfs`), not
+/// enough to make a quarter-megabyte staging buffer one. The overflow lands in
+/// the guard page now rather than walking silently into the mmap arena, but a
+/// fault is still a crash — VM turns it into a SIGSEGV, which prints nothing
+/// `tests/qemu-boot.forbidden` catches.
+///
+/// The shape is the usual one for a buffer that cannot be a local:
 /// `#[repr(transparent)]` newtype with a hand-written `Sync`.
 ///
 /// `.bss` costs nothing in the image — `elf.rs` allocates `p_memsz` zeroed frames

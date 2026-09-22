@@ -154,6 +154,7 @@ fn bands() -> [Band; 9] {
                 ("VM_MMAP", callnr::VM_MMAP),
                 ("VM_MUNMAP", callnr::VM_MUNMAP),
                 ("VM_FORK", callnr::VM_FORK),
+                ("VM_EXEC", callnr::VM_EXEC),
             ],
         },
         Band {
@@ -404,7 +405,7 @@ pub fn render() -> String {
         "CDEV_RQ_BASE + NR_CDEV_MSGS - 1 < VM_RQ_BASE",
         "the CDEV band overlaps the VM band",
     );
-    f.static_assert("SEF_RQ_BASE > VM_FORK", "the SEF band overlaps the VM band");
+    f.static_assert("SEF_RQ_BASE > VM_EXEC", "the SEF band overlaps the VM band");
     f.static_assert(
         "DS_RQ_BASE > SEF_RQ_BASE + NR_SEF_MSGS - 1",
         "the DS band overlaps the SEF band",
@@ -573,8 +574,12 @@ mod tests {
 
     /// VM is the one band with no `NR_*` count on the Rust side, so its guard
     /// names the last member instead. Pin both the guard text and the member the
-    /// guard names, so a future `NR_VM_MSGS` — or a `VM_RQ_BASE + 5` request —
+    /// guard names, so a future `NR_VM_MSGS` — or a `VM_RQ_BASE + 6` request —
     /// is a deliberate change here rather than a silent gap.
+    ///
+    /// The `VM_RQ_BASE + 5` request this comment anticipated is `VM_EXEC`, added
+    /// with the user VA map: the guard moved off `VM_FORK` onto it, which is the
+    /// deliberate edit the comment was asking for.
     #[test]
     fn the_vm_band_has_no_count_constant() {
         let vm = bands()
@@ -584,10 +589,10 @@ mod tests {
         assert!(vm.count.is_none());
         assert_eq!(
             vm.members.last().map(|(name, value)| (*name, *value)),
-            Some(("VM_FORK", callnr::VM_FORK)),
+            Some(("VM_EXEC", callnr::VM_EXEC)),
             "the SEF ordering assert names the VM band's last member"
         );
-        assert!(render().contains("SEF_RQ_BASE > VM_FORK"));
+        assert!(render().contains("SEF_RQ_BASE > VM_EXEC"));
     }
 
     #[test]

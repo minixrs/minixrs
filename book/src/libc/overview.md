@@ -261,9 +261,21 @@ Same source, same libc, two toolchains:
 | Brand note       | `0x100200`         | `0x117000`           |
 | Last mapped byte | `0x108ce0`         | `0x11caf8`           |
 
-Both sit a clear megabyte below `SERVER_STACK_VA` (`0x200000`). The size gap is mostly `-z
-separate-loadable-segments` splitting RO/RX/RW/relro across four segments in the SDK build versus
-three, plus differing section merging — not a libc difference.
+Both sit far below `uspace::USER_REGION_LIMIT` (`0x3FFE_F000`) — the ceiling every VA a process
+places by hand has to clear, and the bound the tooling repo's `check-image.sh` refuses a `PT_LOAD`
+against. The larger build's last mapped byte, `0x11caf8`, is three orders of magnitude short of it.
+
+`0x200000` used to be the stack; it is not any more. The stack is 16 pages at `0x3FFF_0000`, flush
+beneath the device window, with an unmapped guard page below it. `0x200000` is instead where
+SDK-built images will *start* once the patched clang stops forcing `--image-base=0x100000` — that
+pin existed only to keep images off the old stack page, so the compensation has no subject left. The
+figures above were measured with the pin still in place: when it drops, the SDK column shifts up by
+1 MiB and the in-tree-musl column does not move, because repo-built images keep `user.ld`'s explicit
+`0x100000`. Two different load bases are fine — each image has its own TTBR0, the same reasoning
+that already lets every server share one base.
+
+The size gap is mostly `-z separate-loadable-segments` splitting RO/RX/RW/relro across four segments
+in the SDK build versus three, plus differing section merging — not a libc difference.
 
 This closes a loop from slice 5.7. At 4096 bytes per MFS block, 46,664 bytes is **12 blocks** —
 still past the seven direct zones, so `hello` continues to exercise MinixFS's single-indirect arm in
