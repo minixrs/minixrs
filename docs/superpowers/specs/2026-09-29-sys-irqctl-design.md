@@ -48,7 +48,8 @@ acknowledgement (I7).
 
 ### I2 — payload
 
-Request, all `i32`, in MINIX's field order:
+Offsets here and everywhere in this document are **payload** offsets: payload byte 0 is `Message`
+byte 8, after `m_source` and `m_type`. Request, all `i32`, in MINIX's field order:
 
 | Offset   | Field     | Used by                                                                  |
 | -------- | --------- | ------------------------------------------------------------------------ |
@@ -65,7 +66,8 @@ convention.
 driver's own small integer (`notify_id`, `0..=31`), the bit the driver will see set in the
 notification; on the way out it is the kernel's handle. Two names in `callnr.rs`
 (`IRQCTL_NOTIFY_ID_OFF` and `IRQCTL_HOOK_ID_OFF`, both 12) keep the call sites honest about which
-one they mean.
+one they mean. `notify_id` is range-checked as a signed value — `0 <= notify_id <= 31` — before it
+is ever used as a shift count; a negative `i32` is `EINVAL`, not a bit.
 
 **D8.** The call number has been allocated since Phase 2 and no C consumer reads these bytes, so the
 new constants are additive rather than an ABI bump. 6.1 regenerates the C headers in the same PR.
@@ -92,8 +94,13 @@ is the kernel's timer and nothing at EL0 has business with it.
 
 The list is filled at boot, in `load_boot_server`'s per-driver arms beside the device pre-map — the
 same place and the same reasoning as TTY's UART page: the kernel decides which hardware a boot
-driver owns, the driver cannot widen it. Drivers started after boot get their list from RS through
-`SYS_PRIVCTL`; that path is out of scope until a driver is started that way.
+driver owns, the driver cannot widen it. **The allow-list follows the mapping.** 6.1 puts exactly
+one entry in the tree: INTID 33 on TTY. From 6.2 on, a virtio driver is given the SPIs of precisely
+the transport slots the kernel mapped into it — `48 + n` for each mapped slot *n* — so the driver
+may probe those slots for its device (I9) without the kernel having to know which one QEMU chose,
+and without being able to claim a line whose registers it cannot reach. Drivers started after boot
+get their list from RS through `SYS_PRIVCTL`; that path is out of scope until a driver is started
+that way.
 
 `NR_IRQ` is 8 per process. A virtio driver needs one.
 
@@ -106,14 +113,14 @@ several processes' interrupts. This is also why the handler needs `&mut Priv` an
 
 ### Result codes
 
-| Condition                                                         | Result   |
-| ----------------------------------------------------------------- | -------- |
-| unknown `request`; `vector` not an SPI in range; `notify_id > 31` | `EINVAL` |
-| `hook_id` out of range or naming a free hook                      | `EINVAL` |
-| `policy` has `IRQ_REENABLE` set (I10)                             | `EINVAL` |
-| vector not in `Priv::irqs`; shared slot; hook owned by another    | `EPERM`  |
-| line already claimed by another process (I6)                      | `EBUSY`  |
-| hook table full                                                   | `ENOSPC` |
+| Condition                                                                     | Result   |
+| ----------------------------------------------------------------------------- | -------- |
+| unknown `request`; `vector` not an SPI in range; `notify_id` outside `0..=31` | `EINVAL` |
+| `hook_id` out of range or naming a free hook                                  | `EINVAL` |
+| `policy != 0` (I10)                                                           | `EINVAL` |
+| vector not in `Priv::irqs`; shared slot; hook owned by another                | `EPERM`  |
+| line already claimed, by anyone, other than the replace case in I6            | `EBUSY`  |
+| hook table full                                                               | `ENOSPC` |
 
 ---
 
@@ -134,10 +141,14 @@ The usual `UnsafeCell` newtype, per [`kernel.md`](../../conventions/kernel.md). 
 hook by a linear scan over sixteen entries; a per-INTID index is not worth a second table.
 
 MINIX chains several hooks on one line for shared PC interrupts. QEMU `virt` gives every device its
-own SPI, so a second `IRQ_SETPOLICY` on a line owned by a different process answers `EBUSY` and
-there is no chain to keep consistent. A repeat `IRQ_SETPOLICY` from the **same** owner with the same
-`notify_id` replaces its hook, as in MINIX — that is what lets a restarted driver re-register
-without first knowing its old hook id.
+own SPI, so there is no chain to keep consistent: a line has at most one hook.
+
+A repeat `IRQ_SETPOLICY` from the **same** owner with the same `notify_id` **replaces** its hook, as
+in MINIX — that is what lets a driver re-register without first knowing its old hook id. The
+replacement may name a different INTID; when it does, the old SPI is masked as the hook moves. Every
+check on the new vector runs first, so a replacement that would answer `EPERM` or `EBUSY` leaves the
+old hook exactly as it was. **Any other** `IRQ_SETPOLICY` on a claimed line is `EBUSY` — a different
+process, or the same owner under a second `notify_id`.
 
 `Priv` gains `int_pending: u32`, MINIX's `s_int_pending`: bit `notify_id` is set when that hook's
 line fires.
@@ -168,10 +179,11 @@ check** (`HARDWARE`'s bitmap is empty, so `mini_notify` would deny it), immediat
 `HARDWARE`'s privilege slot.
 
 The notification carries the bitmap. `build_notify_message`, when the source is `HARDWARE`, writes
-the destination's `int_pending` into payload `0..4` (`NOTIFY_IRQ_PENDING_OFF`) **and zeroes it** —
-at build time, which for a deferred notification is the owner's later `RECEIVE`, so bits from
-several lines that fired while the driver was busy arrive coalesced in one message. Every other
-notification keeps its all-zero payload.
+the destination's `int_pending` into payload `0..4` (`NOTIFY_IRQ_PENDING_OFF`) **and zeroes it**.
+That happens wherever the message is built — in `deliver_irq`'s immediate path, and in
+`mini_receive`'s later build for a deferred one — so bits from several lines that fired while the
+driver was busy arrive coalesced in one message, and no bit is ever delivered twice. `m_type` stays
+`NOTIFY_MESSAGE`; every other notification keeps its all-zero payload.
 
 An INTID with no hook keeps today's `do_irq: unexpected INTID` line and is additionally **masked**
 if it is an SPI — a line nobody owns must not be able to storm either.
@@ -184,11 +196,18 @@ slot's next occupant — MINIX panics in `generic_handler` on exactly this. Exec
 privilege slot survives but the new image holds none of the old image's hook ids; this is the
 `SYS_SETGRANT` precedent for state that describes an image being discarded.
 
+A deferred notification also leaves `HARDWARE`'s bit set in the owner's `notify_pending`. `do_exit`
+already zeroes that whole map; `do_exec` does not touch it, so exec must clear the `HARDWARE` bit
+explicitly — otherwise the new image's first `RECEIVE` collects an interrupt notification with an
+empty bitmap, for a line it never claimed.
+
 ### I9 — GIC: what `gic.rs` gains
 
 - `enable_spi(intid, priority)` — `GICD_IGROUPR` (group 1 NS), `GICD_IPRIORITYR`, `GICD_ICFGR`
   (level), `GICD_IROUTER<n>` (affinity 0.0.0.0 — CPU 0, required because `ARE_NS` is on), then
-  `GICD_ISENABLER`. Called by `IRQ_SETPOLICY`, which therefore leaves the line live.
+  `GICD_ISENABLER`. Called by `IRQ_SETPOLICY`, which therefore leaves the line live. The priority is
+  `0x80`, the value `main` passes to `enable_ppi` for the timer: `ICC_PMR_EL1` is `0xFF`, and a line
+  whose priority is not numerically below the mask never fires.
 - `mask_spi(intid)` / `unmask_spi(intid)` — `GICD_ICENABLER` / `GICD_ISENABLER`.
 - `nr_intids()` — from `GICD_TYPER.ITLinesNumber`, read once in `init`. The range check in I3 uses
   it rather than a constant, so a claim on a line the distributor does not implement is `EINVAL`,
@@ -208,9 +227,11 @@ slot.
 
 ### I10 — `IRQ_REENABLE` is defined and refused
 
-MINIX's `policy` bit `IRQ_REENABLE` asks the kernel to unmask the line itself straight after
-notifying. On a level-triggered line that is the storm I7 exists to prevent, by construction.
-`IRQ_SETPOLICY` with the bit set answers `EINVAL`. The constant is published so the refusal is
+MINIX's `policy` bit `IRQ_REENABLE` (`0x001`) asks the kernel to unmask the line itself straight
+after notifying. On a level-triggered line that is the storm I7 exists to prevent, by construction.
+The same word in `com.h` also holds `IRQ_BYTE` / `IRQ_WORD` / `IRQ_LONG` (`0x100` / `0x200` /
+`0x400`), which minix.rs has no use for. So the rule is on the whole word: **`policy` must be 0**,
+and anything else answers `EINVAL`. `IRQ_REENABLE` is published at MINIX's value so the refusal is
 explicit — the "define and refuse" rule in
 [`servers-and-drivers.md`](../../conventions/servers-and-drivers.md#define-and-refuse-never-fold-into-enosys)
 — and so an edge-triggered line, if one ever appears, has a bit waiting for it.
@@ -227,19 +248,40 @@ Interrupt-driven I/O makes "no process is runnable" the ordinary state: every se
 - IRQs are taken only from EL0: vector slot 9 is wired, `el1h_irq` is still the fatal `EXC_ENTRY`.
 
 The design, chosen to need **no** EL1 IRQ vector and no idle process: when `pick_proc` is `None`,
-`schedule_next` records `IDLE` as current and loops — `wfi`, then the body of `do_irq` called
-directly, then `pick_proc` again. `wfi` wakes on a pending interrupt even with `PSTATE.I` set, and
+`schedule_next` loops **inside itself** — `wfi`, then the body of `do_irq` called directly, then
+`pick_proc` again — and does not return towards `el1_return_to_user` until `pick_proc` yields a
+process with an address space. `wfi` wakes on a pending interrupt even with `PSTATE.I` set, and
 `do_irq` already ignores its frame argument, so the interrupt is serviced by polling the GIC on the
-kernel stack with IRQs still masked. No nested exception frame exists at any point. The clock tick
-reached this way must not bill or rotate a process: `sched::reschedule` returns early when current
-is `IDLE`.
+kernel stack with IRQs still masked. They must stay masked: `el1h_irq` is the fatal vector. No
+nested exception frame exists at any point.
+
+Three things that loop must get right, each of which the obvious implementation gets wrong:
+
+- **The sentinel is a flag, not the `IDLE` slot.** `IDLE` is a kernel task with `ttbr0_pa == 0`,
+  `asid == 0` and `quantum_ms == 0`; `schedule_next` already refuses to switch to such a slot, and
+  recording it in `CURRENT_PROC_NR` would make it look like a process to everything that reads
+  current. The loop sets a `sched` idling flag on entry and clears it on exit; `CURRENT_PROC_NR` is
+  left alone until a real process is picked.
+- **`clock::tick` must do only its timekeeping while idling.** Today it `putc`s `current.name[0]`
+  every tick and, when `quantum_left` reaches 0, calls `sched::reschedule` — whose last act is
+  `schedule_next()`. From inside the idle loop that is a re-entry per tick, and the kernel stack
+  grows until it dies; and the per-tick byte would bury the very marker I13 asks for. With the flag
+  set, `tick` advances uptime and fires due alarms (an alarm is a legitimate reason to leave idle)
+  and does nothing else: no `putc`, no quantum accounting, no `reschedule`. As defence in depth the
+  flag check is also the **first line** of `reschedule`, ahead of its `schedule_next` call.
+- **`gic::ack`'s contract widens.** Its `// SAFETY:` says "IRQ context only". The idle poll is EL1
+  with `DAIF.I` set, which is as exclusive as IRQ context; the comment is rewritten to name both
+  callers rather than left as a contract the new caller silently breaks.
 
 The alternatives: an EL0 idle process needs an image, an address space and `SCTLR_EL1.nTWI`; a wired
 `el1h_irq` vector needs a second save/restore path and a decision about interrupting the kernel,
 which the single-threaded-EL1 invariant every `// SAFETY:` comment cites currently rules out.
 
-6.1 measures first: boot `--no-default-features` and establish whether the empty-queue state is
-reached today, before changing what it does.
+6.1 measures two things first, before changing what the empty queue does:
+
+1. boot `--no-default-features` and establish whether the empty-queue state is reached today;
+2. establish that `wfi` **returns** on this QEMU with `PSTATE.I` set and the virtual timer pending.
+   The architecture says it does; the whole design rests on it, so it is observed, not assumed.
 
 ---
 
@@ -250,7 +292,7 @@ reached today, before changing what it does.
 ```text
 init:    hook = irqctl(IRQ_SETPOLICY, vector, policy = 0, notify_id)
 loop:    m = receive(ANY)
-         if m.m_source == HARDWARE && m.m_type == NOTIFY_MESSAGE:
+         if m.m_source == boot_endpoint(HARDWARE) && m.m_type == NOTIFY_MESSAGE:
              for each set bit in payload[0..4]:
                  drain the device          (RX FIFO until empty / walk the used ring)
                  acknowledge at the device (PL011 UARTICR / virtio InterruptACK)
@@ -260,17 +302,32 @@ loop:    m = receive(ANY)
 
 The order inside the loop is load-bearing: acknowledging at the device **before** `IRQ_ENABLE` is
 what makes the unmask safe, and draining before acknowledging is what makes the acknowledgement
-true. The pattern lives once, as an `IrqLine` type in `drivers/driver-rt` (claim in `new`, `rearm()`
-for the `IRQ_ENABLE`), so TTY and the virtio drivers cannot each get the order subtly different.
+true. "Acknowledge" means *whatever makes this device drop its line*, and that differs by source:
+`UARTICR` is right for a drained RX FIFO and `InterruptACK` for a walked used ring — the
+steady-state pattern above — but it is **not** right for I13's proof, whose source is a condition,
+not an event.
+
+**Where the pattern lives.** 6.1 keeps it **local to `drivers/tty`**. `drivers/tty` deliberately
+does not depend on `minixrs-driver-rt` today
+([`servers-and-drivers.md`](../../conventions/servers-and-drivers.md#replying-relaying-and-register-layouts)),
+and one consumer does not justify reversing that. The move to an `IrqLine` type in
+`drivers/driver-rt` (claim in `new`, `rearm()` for the `IRQ_ENABLE`) belongs to 6.2, when virtio
+makes a second consumer, and it owes three things in that PR: the dependency and its `Cargo.toml`
+comment, the convention line, and the `drivers/driver-rt/src` watch entry in `kernel/build.rs`.
 
 A driver identifies the notification by the **kernel-stamped `m_source`**, never by payload —
-`HARDWARE` cannot be forged by a process, a payload bit can.
+`HARDWARE` cannot be forged by a process, a payload bit can. The comparison is against
+`boot_endpoint(HARDWARE)` (`HARDWARE_EP` in the generated C header), not the bare `ProcNr`:
+`HARDWARE` is `ProcNr(-1)`, and an endpoint is not its proc number. `server-rt`'s SEF classifier
+already gates on `m_source` alone, so a `HARDWARE` notification with a non-zero payload stays
+application traffic; 6.1 keeps it that way and corrects `classify.rs`'s "NOTIFY carries no payload"
+comment, which this design falsifies.
 
-**TTY RX** then needs no VFS and no ABI change. 5.11 already defined `CDEV_READ` and TTY refuses it
-from its unknown-request arm; RX is one new arm in TTY plus the loop above feeding a small input
-buffer. **virtio-console** is the same loop with a used ring in place of a FIFO. What TTY does with
-a `CDEV_READ` that arrives when no input is buffered — VFS is blocked in `SENDREC` for as long as
-TTY withholds the reply — is a VFS-concurrency question that belongs to slice 6.5, not here.
+**TTY RX** needs no VFS and no ABI change. 5.11 already defined `CDEV_READ` and TTY refuses it from
+its unknown-request arm; RX is one new arm in TTY plus the loop above feeding a small input buffer.
+**virtio-console** is the same loop with a used ring in place of a FIFO. What TTY does with a
+`CDEV_READ` that arrives when no input is buffered — VFS is blocked in `SENDREC` for as long as TTY
+withholds the reply — is a VFS-concurrency question that belongs to slice 6.5, not here.
 
 **No polling.** A blk driver that spins on the used ring passes under TCG, where the device
 completes inside the `QueueNotify` write, and proves nothing about a disk root under real completion
@@ -285,8 +342,17 @@ interrupts. 6.3's driver blocks in `receive` between requests, full stop.
 No virtio and no synthetic pend (`GICD_ISPENDR` on a level-configured line latches until explicitly
 cleared, which would exercise a path no real device takes). TTY owns a real level-triggered source
 already: it claims INTID 33, sets `UARTIMSC.TXIM`, and the PL011 raises its TX interrupt. TTY
-receives the `HARDWARE` notification, clears `TXIM` — the device-side acknowledgement — calls
-`IRQ_ENABLE`, and prints one line.
+receives the `HARDWARE` notification, **clears `TXIM`**, calls `IRQ_ENABLE`, and prints one line.
+
+Clearing `TXIM` — not writing `UARTICR.TXIC` — is the acknowledgement here. The TX interrupt is a
+level condition that holds for as long as the FIFO is empty, which it is; clearing the raw status
+and unmasking the line re-enters `do_irq` at once. Only masking the source at the device drops the
+line. `TXIM` is **left clear** afterwards, because the kernel's own polled console writes the same
+UART and would otherwise keep re-raising a line TTY has no reason to service. The proof is a
+one-shot, and deliberately not the steady-state pattern of I12.
+
+To see `IRQ_ENABLE` work rather than merely return, the one-shot runs **twice**: after the first
+round TTY sets `TXIM` again and must receive a second notification before it prints.
 
 | Kind      | Marker                     | Proves                                            |
 | --------- | -------------------------- | ------------------------------------------------- |
@@ -301,7 +367,8 @@ recomputed from constants, never copied from this document
 Mutations 6.1 owes, each observed and reverted:
 
 - drop the `mask_spi` in `do_irq` → the boot storms and the marker never prints;
-- drop the `IRQ_ENABLE` in TTY → a second forced interrupt never arrives;
+- drop the `IRQ_ENABLE` in TTY → the second round's notification never arrives;
+- write `UARTICR.TXIC` in place of clearing `TXIM` → the boot storms;
 - drop the allow-list check → the denial probe's `EPERM` line changes.
 
 Host-testable logic — the subcode decode, the range and allow-list predicates, the hook-table
