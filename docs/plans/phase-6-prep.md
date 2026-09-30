@@ -27,7 +27,7 @@ one item that is simply *done* is recorded as chunk 1 so the reasoning is not lo
 
 - [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
 - [x] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
-- [ ] **Chunk 3** — `SYS_IRQCTL` design note
+- [x] **Chunk 3** — `SYS_IRQCTL` design note
 - [ ] **Chunk 4** — Phase 6 tracker + slicing session
 - [ ] **Chunk 5** — musl syscall surface
 - [ ] **Chunk 6** — SDK flavor CI coverage
@@ -136,6 +136,14 @@ the hand-off above. Re-mutation-test the image-base and oversized-image fixtures
 immediately once the map is sane.
 
 ## Chunk 3: `SYS_IRQCTL` design note
+
+**Design:**
+[`2026-09-29-sys-irqctl-design.md`](../superpowers/specs/2026-09-29-sys-irqctl-design.md) —
+decisions `I1…I13`. The note lives in the superpowers tree rather than as a section of the Phase 6
+tracker, which does not exist until chunk 4; that tracker's 6.1 row links here. One thing this file
+did not anticipate: the kernel has no idle path — an empty run queue resumes the previous, blocked,
+process, and IRQs are taken only from EL0 — so I11 makes one a prerequisite of 6.1. The box above is
+checked for the note; the forced-IRQ round trip under **Proof** is slice 6.1's to show.
 
 **Goal:** Phase 6's first real kernel work is IRQ delivery to EL0 (a `NOTIFY` from `HARDWARE` after
 registration). `stubs::do_irqctl` is still `ENOSYS`, dispatched from `kernel/src/system/mod.rs`.
