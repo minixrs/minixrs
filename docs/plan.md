@@ -395,7 +395,8 @@ Boot modules are packed into the kernel ELF as a `.boot_image` section (MXBI hea
   `crt*.o` installed to a sysroot
 - **`tools/mkbootimage.rs`** packs server/driver ELF binaries into the boot archive linked into the
   kernel
-- **`tools/mkimage.sh`** creates GPT disk: FAT32 boot partition (Limine + kernel) + MinixFS root
+- **`tools/mkimage`** (a host Rust tool, slice 6.4 — not the shell script first sketched here)
+  creates the GPT disk: FAT32 boot partition (Limine + kernel) + MinixFS root
 - **`tools/qemu-run.sh`** launches QEMU with VirtIO devices and serial console
 
 ---
@@ -610,19 +611,33 @@ land before any virtio code; chunk 4 gates starting Phase 6 proper.
 - [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
 - [x] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
 - [x] **Chunk 3** — `SYS_IRQCTL` design note
-- [ ] **Chunk 4** — Phase 6 tracker + slicing session
+- [x] **Chunk 4** — Phase 6 tracker + slicing session
 - [ ] **Chunk 5** — musl syscall surface
 - [ ] **Chunk 6** — SDK flavor CI coverage
 
 ### Phase 6: VirtIO Drivers
 
-- [ ] `drivers/driver-rt/`: VirtIO MMIO transport (aarch64), virtqueue management, BDEV/CDEV
-      protocol
-- [ ] `drivers/virtio-blk/`: Block device
-- [ ] `drivers/virtio-console/`: TTY
-- [ ] `drivers/virtio-net/`: Network (packet I/O only; TCP/IP stack is later)
-- [ ] Root filesystem on VirtIO disk
-- **Milestone:** Boots from VirtIO disk, mounts MinixFS root
+Designed and sliced by the pre-Phase-6 chunk-4 session (2026-09-30) — locked decisions `H1…H12`,
+rationale, and per-slice scope/proof in [`docs/plans/phase-6-virtio.md`](plans/phase-6-virtio.md).
+Headline decisions: four driver boot slots reserved together; the kernel probes the virtio-mmio
+slots at boot and pre-maps each driver's device page, DMA memory and one IRQ line; modern
+virtio-mmio only; the root backend is chosen by whether a virtio disk is attached, with the ramdisk
+kept as the second backend for the whole phase; one GPT disk built by a host Rust tool; and a
+framebuffer console plus a keyboard driver inside the milestone bar.
+
+- [ ] **6.1** `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
+- [ ] **6.2** `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
+- [ ] **6.3** `virtio-blk` behind BDEV + root backend selection
+- [ ] **6.4** `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
+- [ ] **6.5** TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
+- [ ] **6.6** `virtio-console` as a second CDEV backend
+- [ ] **6.7** framebuffer console: Limine framebuffer → TTY
+- [ ] **6.8** `virtio-input` keyboard driver — **sub-milestone: non-headless boot**
+- [ ] **6.9** `virtio-net`, packet I/O only — **milestone; Phase 6 complete**
+- [ ] **6.10** stretch: `virtio-gpu` under the same TTY renderer
+- **Milestone:** a QEMU window boot from one virtio GPT disk — MinixFS root through virtio-blk under
+  completion interrupts, console on the framebuffer, keyboard input reaching `read(0)`, and
+  virtio-console and virtio-net each passing a round-trip proof
 
 ### Phase 7: Userland
 
@@ -685,7 +700,7 @@ Each phase has a concrete milestone testable in QEMU (aarch64 primary):
 - Phase 3: Boot processes run in separate address spaces
 - Phase 4: Server initialization sequence completes to init
 - Phase 5: `printf("Hello\n")` from C program reaches serial
-- Phase 6: Boots from VirtIO disk, mounts MinixFS root
+- Phase 6: Boots in a QEMU window from a VirtIO disk, mounts MinixFS root, takes keyboard input
 - Phase 7: Interactive shell session
 - Phase 8: Same tests pass on `qemu-system-x86_64`
 - Phase 9: `cargo doc`, test suite green

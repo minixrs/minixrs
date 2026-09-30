@@ -11,6 +11,11 @@ implements it, from its own plan document.
 
 Decisions are labelled `I1…I13`: slice-local, distinct from the phase-level `D1…D13`.
 
+**Amended for slices 6.2 onward** by decision H2 of
+[`phase-6-virtio.md`](../../plans/phase-6-virtio.md): the kernel, not the driver, finds a driver's
+virtio-mmio slot, and the allow-list holds that one line. I4's and I9's driver-side probing is
+superseded there. Nothing in 6.1's own scope changes.
+
 ---
 
 ## 1. What exists, and what 6.1 changes

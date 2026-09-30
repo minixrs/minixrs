@@ -61,9 +61,9 @@ A PR is atomic: it contains the work **and** the record that the work is done. T
 implements a slice checks that slice's box in `docs/plan.md` and, **when that file exists**, in the
 matching `docs/plans/phase-N-*.md`, in the same PR, as part of the same change. Not every phase has
 a slice tracker. `docs/plans/phase-6-prep.md` is the pre-Phase-6 chunk tracker (like
-`phase-5-prep.md`); a Phase 6 *slice* still checks its box in `docs/plan.md` only until chunk 4
-lands `docs/plans/phase-6-virtio.md`. Do not treat `phase-6-prep.md` as the Phase 6 slice file, and
-do not invent a `phase-6-*.md` just to hold crate-path boxes.
+`phase-5-prep.md`) and `docs/plans/phase-6-virtio.md` is the Phase 6 slice tracker: a Phase 6 slice
+checks its box in **both** `docs/plan.md` and `phase-6-virtio.md`. Do not treat `phase-6-prep.md` as
+the Phase 6 slice file.
 
 Marking completion is never a follow-up commit, never a separate PR, and never a cleanup task
 inherited by the next slice. Those are the shapes that go stale — the tracker carried a wrong status
@@ -80,9 +80,8 @@ Status is a GFM checkbox and nothing else — here are `docs/plan.md`'s first tw
 they will read once the first of them has shipped:
 
 ```markdown
-- [x] `drivers/driver-rt/`: VirtIO MMIO transport (aarch64), virtqueue management, BDEV/CDEV
-      protocol
-- [ ] `drivers/virtio-blk/`: Block device
+- [x] **6.1** `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
+- [ ] **6.2** `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 ```
 
 Check the box the tracker already carries; never invent a row, and never invent a slice number that

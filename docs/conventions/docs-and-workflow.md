@@ -17,10 +17,11 @@ slice summaries), and `docs/plans/` holds the full per-phase slice histories (`p
 `phase-3-vm.md` / `phase-4-servers.md`), the two inter-phase cleanup trackers (`phase-5-prep.md` and
 `phase-6-prep.md` — one PR-sized chunk per session), and the Phase 5 design + slice plan
 (`phase-5-musl-fs.md` — locked decisions D1–D13 and slices 5.0–5.11 with per-slice scope/proof; read
-it before starting any Phase 5 slice). A pre-phase review belongs **in that tracker**, not in a
-loose `*-RECOMMEND.md` at the repo root: those drafts go stale silently because nothing links them
-and no PR is obliged to update them. Build locally with `mdbook build book`; output `book/book/` is
-gitignored.
+it before starting any Phase 5 slice), and its Phase 6 counterpart (`phase-6-virtio.md` — locked
+decisions H1–H12 and slices 6.1–6.10; read it before starting any Phase 6 slice). A pre-phase review
+belongs **in that tracker**, not in a loose `*-RECOMMEND.md` at the repo root: those drafts go stale
+silently because nothing links them and no PR is obliged to update them. Build locally with `mdbook
+build book`; output `book/book/` is gitignored.
 
 To install mdBook or preview the book locally, use the `mdbook-preview` skill.
 

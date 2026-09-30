@@ -28,7 +28,7 @@ one item that is simply *done* is recorded as chunk 1 so the reasoning is not lo
 - [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
 - [x] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
 - [x] **Chunk 3** — `SYS_IRQCTL` design note
-- [ ] **Chunk 4** — Phase 6 tracker + slicing session
+- [x] **Chunk 4** — Phase 6 tracker + slicing session
 - [ ] **Chunk 5** — musl syscall surface
 - [ ] **Chunk 6** — SDK flavor CI coverage
 
@@ -166,6 +166,14 @@ milestone is a disk root under real completion interrupts.
 `[diag]` line or a boot marker before any virtio code is written.
 
 ## Chunk 4: Phase 6 tracker + slicing session
+
+**Outcome:** [`phase-6-virtio.md`](phase-6-virtio.md) — locked decisions `H1…H12` and slices
+6.1–6.10. It departs from the recommended decomposition below in four ways, and that file, not this
+table, is what a Phase 6 slice follows. The 6.0 row is gone, chunk 2 having landed. The milestone
+bar is wider: a framebuffer console and a `virtio-input` keyboard driver were added, and console and
+net sit inside the bar rather than after it. `mkimage` is a host Rust tool, not a shell script. And
+H2 amends chunk 3's I4 and I9 — the kernel, not the driver, finds a driver's virtio-mmio slot,
+because 32 probeable lines exceed `NR_IRQ`.
 
 **Goal:** [`../plan.md`](../plan.md)'s Phase 6 is five checkboxes and one milestone, and there is no
 `docs/plans/phase-6-virtio.md`. That is exactly how Phase 5 looked before `phase-5-prep.md` chunk 6
