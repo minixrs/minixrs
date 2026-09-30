@@ -609,7 +609,7 @@ land before any virtio code; chunk 4 gates starting Phase 6 proper.
 
 - [x] **Chunk 1** — plan-marker freshness (superseded by the checkbox convention; PR #58)
 - [x] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
-- [ ] **Chunk 3** — `SYS_IRQCTL` design note
+- [x] **Chunk 3** — `SYS_IRQCTL` design note
 - [ ] **Chunk 4** — Phase 6 tracker + slicing session
 - [ ] **Chunk 5** — musl syscall surface
 - [ ] **Chunk 6** — SDK flavor CI coverage
