@@ -17,10 +17,11 @@ slice summaries), and `docs/plans/` holds the full per-phase slice histories (`p
 `phase-3-vm.md` / `phase-4-servers.md`), the two inter-phase cleanup trackers (`phase-5-prep.md` and
 `phase-6-prep.md` — one PR-sized chunk per session), and the Phase 5 design + slice plan
 (`phase-5-musl-fs.md` — locked decisions D1–D13 and slices 5.0–5.11 with per-slice scope/proof; read
-it before starting any Phase 5 slice). A pre-phase review belongs **in that tracker**, not in a
-loose `*-RECOMMEND.md` at the repo root: those drafts go stale silently because nothing links them
-and no PR is obliged to update them. Build locally with `mdbook build book`; output `book/book/` is
-gitignored.
+it before starting any Phase 5 slice), and its Phase 6 counterpart (`phase-6-virtio.md` — locked
+decisions H1–H12 and slices 6.1–6.10; read it before starting any Phase 6 slice). A pre-phase review
+belongs **in that tracker**, not in a loose `*-RECOMMEND.md` at the repo root: those drafts go stale
+silently because nothing links them and no PR is obliged to update them. Build locally with `mdbook
+build book`; output `book/book/` is gitignored.
 
 To install mdBook or preview the book locally, use the `mdbook-preview` skill.
 
@@ -34,6 +35,11 @@ follows, `docs/plan.md` + `docs/plans/` for slice *status*, and the superpowers 
 reasoning behind one slice — the decisions considered and rejected, the per-task steps, the
 verification plan. The phase tracker links to the spec by relative path rather than restating it;
 keep it that way, or the two drift and the tracker is the one people read.
+
+**Amending a merged spec means rewriting its operative paragraphs**, not adding a banner above them:
+an implementer reads the decision text, not the preface. Chunk 4's H2 first reached the IRQCTL spec
+as a banner over I4 and I9 that still described the driver-side probe H2 replaced; a review caught
+it.
 
 Two habits from 5.10a worth keeping, both of which caught real defects that slice-level review
 missed. **Give a fresh reviewer the diff as a file** and ask it to verify arithmetic by hand rather

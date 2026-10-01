@@ -82,8 +82,10 @@ restarts it. They talk to the kernel (interrupts, I/O) and to VFS (device protoc
   on x86_64. Devices exchange data through **virtqueues**: a descriptor table plus an available ring
   (driver → device) and a used ring (device → driver).
 - The hardware-free `memory` driver already shipped in Phase 5 — the ramdisk in slice 5.7,
-  `/dev/null` and `/dev/zero` in slice 5.11 — so Phase 6's driver work is VirtIO only: `virtio-blk`,
-  `virtio-net`, and `virtio-console` (a VirtIO TTY).
+  `/dev/null` and `/dev/zero` in slice 5.11 — so Phase 6's new driver processes are all VirtIO:
+  `virtio-blk`, `virtio-console`, `virtio-input` (the keyboard) and `virtio-net`. The existing TTY
+  driver also grows in Phase 6: PL011 receive, and a text console on the bootloader-provided
+  framebuffer.
 - A `driver-rt` crate will provide the reusable `BlockDriver` / `CharDriver` traits and the VirtIO
   transport types. Only a console story is needed for the Phase-5 `printf` milestone; the rest is
   Phase 6.

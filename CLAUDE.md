@@ -95,5 +95,5 @@ Everything else:
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`book/`](book/src/SUMMARY.md)                          | **Canonical** how-the-system-works documentation (mdBook, published to GitHub Pages). Write new documentation here, derived from source.          |
 | [`docs/plan.md`](docs/plan.md)                          | The lean live tracker: phase status plus one summary line per slice.                                                                              |
-| [`docs/plans/`](docs/plans/phase-6-prep.md)             | Full per-phase slice histories, the phase design documents, and the inter-phase prep trackers. Read the phase file before starting a slice in it. |
+| [`docs/plans/`](docs/plans/phase-6-virtio.md)           | Full per-phase slice histories, the phase design documents, and the inter-phase prep trackers. Read the phase file before starting a slice in it. |
 | `docs/superpowers/specs/` and `docs/superpowers/plans/` | The reasoning behind one slice — decisions considered and rejected, per-task steps, verification plan.                                            |
