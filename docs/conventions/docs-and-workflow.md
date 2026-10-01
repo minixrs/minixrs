@@ -36,6 +36,11 @@ reasoning behind one slice — the decisions considered and rejected, the per-ta
 verification plan. The phase tracker links to the spec by relative path rather than restating it;
 keep it that way, or the two drift and the tracker is the one people read.
 
+**Amending a merged spec means rewriting its operative paragraphs**, not adding a banner above them:
+an implementer reads the decision text, not the preface. Chunk 4's H2 first reached the IRQCTL spec
+as a banner over I4 and I9 that still described the driver-side probe H2 replaced; a review caught
+it.
+
 Two habits from 5.10a worth keeping, both of which caught real defects that slice-level review
 missed. **Give a fresh reviewer the diff as a file** and ask it to verify arithmetic by hand rather
 than confirming that tests exist — that is what caught a tautological cap test whose assertion held
