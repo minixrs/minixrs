@@ -83,14 +83,15 @@ Three things the design depends on that are **not** verified, because only runni
 verify them. Each is a measure-first step of the slice named, in the manner of I11's two
 measurements:
 
-1. **Which transport slot QEMU gives a device, and whether several share a page** (6.2). Slots are
-   `0x200` apart, so eight fit in one 4 KiB page; if QEMU fills them from one end, every virtio
-   driver's registers are in the same page and H2's mapping cannot isolate them from each other.
+1. **Which transport address a pinned bus name denotes** (6.2). Where a device lands is a
+   command-line choice, not a measurement — H2 pins every device with `bus=virtio-mmio-bus.N` — but
+   the mapping from `N` to `0x0A00_0000 + slot * 0x200` is read off the kernel's boot probe, not
+   assumed. 6.2 attaches **two** devices on buses meant to be in different pages and confirms they
+   are, so the check covers the case one device cannot show.
 2. **Whether edk2 boots from a modern virtio-mmio disk** (6.4). H4 forces version 2; the firmware
    has to read the ESP from the same device.
-3. **Whether the ramfb framebuffer is usable from EL0** (6.7) — that Limine reports it, that it
-   survives `ExitBootServices`, and which mapping attributes `map_page_in`'s RAM/device invariant
-   permits for memory that is RAM-backed but absent from the usable map.
+3. **Whether the ramfb framebuffer reaches the kernel** (6.7) — that Limine reports it and that it
+   survives `ExitBootServices`. How it is then mapped is not a measurement: H9 decides it.
 
 ## Locked design decisions
 
@@ -107,6 +108,13 @@ Reserving all four at once means the stub markers (`[as] stub A nr=11` …) and 
 fork-pool-derived number in `tests/qemu-boot.expected` change **once**. The constant names above are
 the working names; 6.2's plan fixes them.
 
+**This overturns a written contract, and 6.2 amends it where it is written.** `com.rs` reserves
+`11..=14` for the stubs "regardless of the `boot-stubs` feature" and keeps `FORK_POOL_BASE` at 15 so
+that feature never renumbers a forked child; PM's `mproc.rs` documents the base as 15; and
+`proc/table.rs` asserts `N_IMAGE == 16`, which becomes 20. The property the contract protects
+survives — with the stubs on or off, the pool stays at 19 — but the numbers in all three places
+change, and each is rewritten rather than left describing the old layout.
+
 *Rejected:* a slot per slice (four rounds of marker churn); RS-started drivers (MINIX-authentic, but
 needs RS fork/exec, dynamic `SYS_PRIVCTL` allow-lists and VM-mediated device mapping before the
 first register read); reusing the unloaded PFS slot (the name lies until Phase 7 forces the renumber
@@ -121,15 +129,19 @@ on its `Priv::irqs` allow-list, and reports `(va, intid)` through a new `SYS_GET
 on the caller's proc number, as `GET_RAMDISK` is.
 
 This amends chunk 3. I4 had the kernel map a set of slots and the driver probe them; I9 made finding
-the device "slice 6.2's problem". With five virtio devices that arithmetic fails: a driver that may
-probe any slot needs every slot's SPI allowed, and 32 exceeds `NR_IRQ = 8`. Probing in the kernel
-keeps I4's actual rule — **the allow-list follows the mapping** — and makes the list exactly one
-entry long. The cost is three register reads of virtio knowledge in the kernel; feature negotiation
-and everything else stay in `driver-rt`.
+the device "slice 6.2's problem". With four virtio devices (five with 6.10) that arithmetic fails: a
+driver that may probe any slot needs every slot's SPI allowed, and 32 exceeds `NR_IRQ = 8`. Probing
+in the kernel keeps I4's actual rule — **the allow-list follows the mapping** — and makes the list
+exactly one entry long. The cost is three register reads of virtio knowledge in the kernel; feature
+negotiation and everything else stay in `driver-rt`.
 
-Isolation between virtio drivers is page-granular at best (see the first unverified fact above). The
-tracker records that honestly rather than claiming a per-driver register boundary the hardware does
-not offer.
+**Every device is pinned to a transport in its own page.** Slots are `0x200` apart, so eight share a
+4 KiB page and H2 maps whole pages: two devices in one page would each be mapped the other's
+registers. `qemu-run.sh` therefore attaches every virtio device with an explicit
+`bus=virtio-mmio-bus.N`, choosing buses eight slots apart, and the kernel probe **refuses** to map a
+page that holds the slot of more than one driver's device — a `[diag]` line and an absent device,
+not a silently shared page. The per-driver register boundary is then real, and it is the command
+line that makes it so.
 
 A device that is absent is not an error: the driver is told so, publishes nothing to DS, and idles.
 That is what makes H5 work.
@@ -140,9 +152,21 @@ whitelist (D1's deferred alternative — still deferred, until a driver is start
 ### H3. DMA memory is a third kernel-owned window
 
 A virtqueue's descriptor table, rings and data buffers must be at guest-physical addresses the
-driver knows. At boot the kernel allocates a run of **physically contiguous** frames for each virtio
-driver, maps it `RW_DATA` at a fixed VA in a new window above the ramdisk window, and reports `(va,
-pa, len)` through `SYS_GETINFO`. Contiguity is cheap at boot and is asserted, not assumed.
+driver knows. The kernel gives each virtio driver a run of **physically contiguous** frames, maps it
+`RW_DATA` at a fixed VA in a new window above the ramdisk window, and reports `(va, pa, len)`
+through `SYS_GETINFO`.
+
+The run is **not** a loop of `alloc_frame`. That call takes the free list first and one frame at a
+time, so successive calls are contiguous only by accident — not once anything has been freed, and
+not across the end of a Limine region. The kernel instead **reserves one bump run per driver at
+boot, before the first `free_frame`**, from a single usable region, and asserts the run is
+contiguous. A new `mm::frame` entry point does this; nothing frees it.
+
+**One request in flight per driver.** A BDEV transfer is at most one 4096-byte block
+(`BDEV_MAX_IO`), so virtio-blk's bounce buffer is one page; the device's 512-byte sectors are the
+driver's translation (eight sectors per block), not a second block size anywhere above it. The run
+is sized for the queue structures plus that one buffer, and a deeper queue is a later optimisation
+with no consumer.
 
 Drivers **bounce**: a BDEV or CDEV request's payload moves between the client's grant and a DMA
 buffer with `SYS_SAFECOPY`, exactly as `memory` moves it to and from the ramdisk today. The device
@@ -170,6 +194,18 @@ root. MFS asks DS for the virtio name first and the `memory` name second. So the
 is the selector: with a virtio disk attached the root is on it, without one the root is the ramdisk.
 No kernel command line, no compile-time feature, no ABI change.
 
+**The selection lives in MFS alone.** VFS also looks up `memory` in DS, but as the **character**
+peer behind `/dev/null` and `/dev/zero` (5.11), not as a block device. Pointing that lookup at
+virtio-blk would send those nodes to the block driver. VFS's lookup does not change.
+
+**"Carries a minix.rs root" is the image-header check `memory` already performs** — the 32-byte
+header in block 0's boot area and the tail label in the reserved last zone — run against **minor 0
+as H6 defines it**, not against the raw device. In 6.3 minor 0 is the whole raw image, so the check
+reads LBA 0. In 6.4 minor 0 is the partition the GPT lookup selected, so the same check reads that
+partition's first and last blocks. Run against LBA 0 of a GPT disk it would find the protective MBR,
+decide the disk is not a root, and fall back — which the marker files would catch, but which the
+design must not invite.
+
 The risk is a silent fallback that reports a broken virtio driver as a healthy ramdisk boot. It is
 closed by the marker files, not by the code: the disk boot's expected set **requires** a root line
 naming the virtio backend, so a fallback fails that boot.
@@ -186,13 +222,24 @@ ubuntu runner, and `parted` / `mtools` / `hdiutil` are what `qemu-run.sh` was wr
 writes a GPT, a FAT32 ESP holding Limine, its config and the kernel, and a MinixFS partition
 produced by the existing `mkfs-mfs` library.
 
-Partitions are **BDEV minors**: minor 0 is the whole disk, minor *n* is partition *n*. The GPT
-parser is a host-tested module of `driver-rt`. The root is found by **partition type GUID**, never
-by index. Any crate the tool pulls in is BSD/MIT/Apache and passes `cargo deny`.
+**Minor 0 is the root filesystem, on every block driver.** MFS sends every `BDEV_READ` /
+`BDEV_WRITE` as minor 0 and answers `ENXIO` to a `FS_READSUPER` for any other minor; VFS mounts with
+minor 0. Rather than change both, minor 0 is *defined* as "the root filesystem this driver serves":
+the whole ramdisk on `memory` (as today), the whole raw image on virtio-blk in 6.3, and in 6.4 the
+partition **virtio-blk** finds by its **partition type GUID** — never by index. The whole disk is
+minor 1 and GPT partition *n* is minor `1 + n`. `BDEV_MINOR_RAMDISK` gains a `BDEV_MINOR_ROOT` alias
+with the same value, so new code says what it means and no existing value moves. MFS and VFS are
+literally unchanged, which is D3's promise.
+
+The GPT parser is a host-tested module of `driver-rt`; the type GUID is a minix.rs-specific constant
+in `kernel-shared`, shared with `tools/mkimage`. Any crate the tool pulls in is BSD/MIT/Apache and
+passes `cargo deny`.
 
 *Rejected:* two drives — a `fat:rw:` directory for the firmware and a raw MinixFS disk for the root
 — which is where 6.3 starts and deliberately not where the phase ends: the milestone is a machine
-that boots from its disk.
+that boots from its disk. Also rejected: MINIX-shaped minors (0 = whole disk) with VFS passing the
+root's minor in `FS_READSUPER` — more honest numbering, but MFS and VFS both change in 6.4, which
+D3's "unchanged MFS" exists to avoid.
 
 ### H7. The ramdisk stays for the whole phase
 
@@ -227,6 +274,14 @@ The text renderer is a host-tested library half of `drivers/tty`, in the `fs/mfs
 font is a bitmap font under a BSD or MIT licence, vendored with its attribution recorded — Spleen
 (BSD-2-Clause) is the working choice. Kernel messages and `[diag]` lines stay serial-only: the
 screen shows what user space writes to fd 1 and 2, which is what a console is.
+
+**The mapping class follows from `map_page_in`'s invariant**, which asserts that a device mapping is
+not usable RAM and a normal mapping is. A framebuffer outside the frame allocator's usable regions
+can only be mapped **device**. If Limine reports one that overlaps a usable region, the kernel first
+**removes that range from the allocator** — otherwise a normal mapping would pass the assert and
+teardown would `free_frame` the screen — and then maps it device. Either way it is a device mapping,
+and the renderer is written for that: aligned stores only, never an unaligned or merged access,
+which Device memory faults or mishandles.
 
 *Rejected:* virtio-gpu as the milestone path (nothing visible until virtqueues work, and a whole
 driver between TTY and its first pixel — it is 6.10 instead); a kernel log tap onto the screen.
@@ -305,15 +360,18 @@ transport and split virtqueue in `driver-rt` behind H11's trait, with the queue 
 host-tested; the `IrqLine` type (claim in `new`, `rearm()` for `IRQ_ENABLE`) moved into `driver-rt`,
 and TTY migrated onto it. That migration owes the three things I12 lists: the dependency and its
 `Cargo.toml` comment, the convention line in `servers-and-drivers.md`, and the
-`drivers/driver-rt/src` watch entry in `kernel/build.rs`. `qemu-run.sh` gains a virtio-blk-device on
-a raw image and the `force-legacy=false` global. `virtio-blk` is loaded as the first consumer but
-serves nothing yet.
+`drivers/driver-rt/src` watch entry in `kernel/build.rs`. H1's three amended texts (`com.rs`,
+`mproc.rs`, `table.rs`'s `N_IMAGE` assert). `qemu-run.sh` gains a virtio-blk-device on a raw image,
+pinned to its bus per H2, and the `force-legacy=false` global. `virtio-blk` is loaded as the first
+consumer but serves nothing yet.
 
-**Measure first:** unverified fact 1; H12's check of the fork.
+**Measure first:** unverified fact 1, with a second device attached for the measurement; H12's check
+of the fork.
 
 **Proof:** virtio-blk reports the negotiated feature bits and the disk's capacity read from device
-configuration space, matching the image's size; a version-1 transport produces the refusal line; the
-stub and fork-pool markers carry their new numbers.
+configuration space, matching the image's size; a version-1 transport produces the refusal line; two
+devices pinned into one page produce the probe's refusal line; the stub and fork-pool markers carry
+their new numbers.
 
 ### Slice 6.3: `virtio-blk` behind BDEV + root backend selection
 
@@ -322,8 +380,10 @@ stub and fork-pool markers carry their new numbers.
 **Scope:** `BDEV_READ` / `BDEV_WRITE` served from the request queue, completion by interrupt; the
 bounce path of H3; `EIO` for a device-reported failure, the errno
 [`servers-and-drivers.md`](../conventions/servers-and-drivers.md#block-drivers) reserved for it;
-H5's DS-name selection in MFS and VFS. The disk is a **raw, whole-disk** MinixFS image — the bytes
-`build_rootfs` already produces — written to a file under `target/`. No partitions yet.
+H5's DS-name selection, **in MFS only** — VFS's `memory` lookup is the `/dev/null` / `/dev/zero`
+peer and does not move. The disk is a **raw, whole-disk** MinixFS image — the bytes `build_rootfs`
+already produces — written to a file under `target/`. No partitions yet: minor 0 is the whole image
+(H6), so H5's root check reads LBA 0.
 
 **Proof:** the full MFS battery — read, `fs.write ok`, create/truncate, the `/etc/holey` hole probe
 — is **byte-identical** on the two backends apart from the one line naming the backend. Two boots,
@@ -338,16 +398,30 @@ truncate consumer, which is what probing them needs. They stay owed on that trac
 
 **Goal:** the machine boots from its disk.
 
-**Scope:** H6 — the host tool, the GPT module in `driver-rt`, partition minors in virtio-blk, root
-found by type GUID. `qemu-run.sh` attaches the one image as a virtio-blk-device and drops the
+**Scope:** H6 — the host tool, the GPT module in `driver-rt`, the minor layout in virtio-blk (minor
+0 the GUID-selected root partition, 1 the whole disk, `1 + n` partition *n*), and H5's root check
+moved onto that partition. `qemu-run.sh` attaches the one image as a virtio-blk-device and drops the
 `fat:rw:` directory.
+
+**Flush.** virtio-blk negotiates `VIRTIO_BLK_F_FLUSH` and issues `VIRTIO_BLK_T_FLUSH` before
+replying to every `BDEV_WRITE` — write-through, with no new BDEV request. A device that does not
+offer the feature is used read-write anyway, with a `[diag]` line saying so.
 
 **Measure first:** unverified fact 2. If edk2 cannot boot from a modern virtio-mmio disk, the
 fallback is a second, firmware-only attachment of the **same** image file — recorded as a deviation,
 not adopted quietly.
 
 **Proof:** no `fat:rw:` in the QEMU command line; `/bin/hello` exec'd from the MinixFS partition; a
-write to the root survives into a second boot of the same image, which the ramdisk could never show.
+write to the root survives into a second boot of the same image, which the ramdisk could never show;
+the GPT disk's boot reports a root minor whose first block is not LBA 0.
+
+The persistence proof shows that writes **reach the device**, and nothing more. It cannot prove the
+flush: with a raw image, QEMU's writes land in the host page cache at once, so a second boot sees
+them with or without a guest flush, and `cache=writethrough` would only hide the difference. The
+flush is evidenced by its completion status in a `[diag]` count, and dropping it is recorded as a
+mutation that moves nothing, with the honest record
+[`testing-and-markers.md`](../conventions/testing-and-markers.md#mutation-testing) asks for, rather
+than claimed as covered.
 
 ### Slice 6.5: TTY RX — PL011 receive interrupt + `CDEV_READ`
 
@@ -359,6 +433,11 @@ buffer; a `CDEV_READ` arm. And the part the prep tracker undersold as "one new a
 withholds the reply, which stalls every other file operation in the system. This slice owes VFS a
 way to park a read and reply later. That design is the slice's own; what is locked here is only that
 **VFS does not block on a console**, and that 6.6 and 6.8 reuse whatever 6.5 builds.
+
+It also owes two prose edits, because both still say the opposite: the console paragraph in
+[`servers-and-drivers.md`](../conventions/servers-and-drivers.md) ("Phase 6 adds one TTY arm and
+touches VFS not at all") and its copy in `book/src/drivers/overview.md` ("Phase 6 changes TTY and
+nothing else"). Each is replaced, not appended to.
 
 **Proof:** bytes piped to QEMU's stdin come back from `read(0)`; a second process's file read
 completes **while** a console read is parked.
@@ -394,10 +473,12 @@ is in the next `screendump`. In windowed mode, typing does the same.
 ### Slice 6.9: `virtio-net`, packet I/O only — milestone
 
 **Scope:** the driver on slot 14; RX and TX queues; MAC from configuration space. No band (H10), no
-stack.
+stack — so **nothing asks the driver to transmit**. The TX proof's frame is built and sent by the
+driver itself, once, at boot: a broadcast frame from its own MAC. A slice that finds itself adding a
+request so a client can trigger a send has outgrown H10.
 
-**Proof:** a frame the driver transmits is captured by QEMU's `filter-dump`; a frame injected from
-the host is reported by the driver in `[diag]` with its length and ethertype.
+**Proof:** the driver's boot frame is captured by QEMU's `filter-dump`; a frame injected from the
+host is reported by the driver in `[diag]` with its length and ethertype.
 
 **Phase 6 closes here.** The closing PR checks the phase's box in `../plan.md` and records the
 milestone boot.

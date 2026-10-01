@@ -13,8 +13,8 @@ Decisions are labelled `I1…I13`: slice-local, distinct from the phase-level `D
 
 **Amended for slices 6.2 onward** by decision H2 of
 [`phase-6-virtio.md`](../../plans/phase-6-virtio.md): the kernel, not the driver, finds a driver's
-virtio-mmio slot, and the allow-list holds that one line. I4's and I9's driver-side probing is
-superseded there. Nothing in 6.1's own scope changes.
+virtio-mmio slot, and the allow-list holds that one line. I4 and I9 below have been rewritten to say
+so. Nothing in 6.1's own scope changes.
 
 ---
 
@@ -100,12 +100,12 @@ is the kernel's timer and nothing at EL0 has business with it.
 The list is filled at boot, in `load_boot_server`'s per-driver arms beside the device pre-map — the
 same place and the same reasoning as TTY's UART page: the kernel decides which hardware a boot
 driver owns, the driver cannot widen it. **The allow-list follows the mapping.** 6.1 puts exactly
-one entry in the tree: INTID 33 on TTY. From 6.2 on, a virtio driver is given the SPIs of precisely
-the transport slots the kernel mapped into it — `48 + n` for each mapped slot *n* — so the driver
-may probe those slots for its device (I9) without the kernel having to know which one QEMU chose,
-and without being able to claim a line whose registers it cannot reach. Drivers started after boot
-get their list from RS through `SYS_PRIVCTL`; that path is out of scope until a driver is started
-that way.
+one entry in the tree: INTID 33 on TTY. From 6.2 on, the **kernel** finds each virtio driver's
+device by probing the transport slots at boot (H2 of
+[`phase-6-virtio.md`](../../plans/phase-6-virtio.md)), maps the page holding that one slot *n*, and
+allows that one line, `48 + n`. The driver probes nothing and cannot claim a line whose registers it
+cannot reach. Drivers started after boot get their list from RS through `SYS_PRIVCTL`; that path is
+out of scope until a driver is started that way.
 
 `NR_IRQ` is 8 per process. A virtio driver needs one.
 
@@ -225,10 +225,11 @@ The lines on QEMU `-M virt,gic-version=3`:
 | PL011 UART0                    | `0x0900_0000`             | 1        | 33       |
 | virtio-mmio transport *n* (32) | `0x0A00_0000 + n * 0x200` | `16 + n` | `48 + n` |
 
-Which transport slot a `-device virtio-*-device` lands in is QEMU's choice, not the command line's
-order. A driver finds its device by probing `MagicValue` / `DeviceID`, never by slot number; that is
-slice 6.2's problem and is recorded here only so 6.1's allow-list is not written against a guessed
-slot.
+Which transport slot a `-device virtio-*-device` lands in is pinned on the command line with
+`bus=virtio-mmio-bus.N`, one device per page, and the kernel's boot probe reads `MagicValue` /
+`DeviceID` to match each slot to its driver — H2 of
+[`phase-6-virtio.md`](../../plans/phase-6-virtio.md). No driver finds its device by slot number or
+by probing. Recorded here so 6.1's allow-list is not written against a guessed slot.
 
 ### I10 — `IRQ_REENABLE` is defined and refused
 
