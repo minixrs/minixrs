@@ -184,8 +184,8 @@ mod tests {
     fn spread() -> Inode {
         let mut i = Inode::EMPTY;
         i.mode = I_REGULAR;
-        for slot in 0..NR_TZONES {
-            i.zone[slot] = 200 + slot as u32;
+        for (slot, zone) in i.zone.iter_mut().enumerate().take(NR_TZONES) {
+            *zone = 200 + slot as u32;
         }
         i
     }

@@ -273,11 +273,8 @@ mod tests {
             node.zone[SINGLE_INDIRECT_SLOT], 0,
             "a nine-block file must have an indirect block"
         );
-        for slot in 0..NR_DIRECT_ZONES {
-            assert_ne!(
-                node.zone[slot], 0,
-                "direct zone {slot} must be filled first"
-            );
+        for (slot, &zone) in node.zone.iter().enumerate().take(NR_DIRECT_ZONES) {
+            assert_ne!(zone, 0, "direct zone {slot} must be filled first");
         }
         assert_eq!(read_file(&img, "/bin/hello").unwrap(), big_bytes());
     }

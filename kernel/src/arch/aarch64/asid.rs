@@ -91,8 +91,8 @@ pub unsafe fn free_asid(asid: u8) {
         (asid as u16) < pool.next,
         "freeing ASID {asid} that was never allocated"
     );
-    for i in 0..pool.free_len {
-        assert!(pool.free[i] != asid, "double free of ASID {asid}");
+    for &free in &pool.free[..pool.free_len] {
+        assert!(free != asid, "double free of ASID {asid}");
     }
     pool.free[pool.free_len] = asid;
     pool.free_len += 1;
