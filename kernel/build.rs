@@ -723,9 +723,19 @@ fn build_hello_musl(workspace: &std::path::Path, src: &std::path::Path) -> Optio
 
 /// Locate the `compiler_builtins` rlib the nested `-Zbuild-std` builds produced.
 fn find_compiler_builtins(workspace: &std::path::Path) -> Option<PathBuf> {
-    let deps = workspace.join("target/minixrs-user/aarch64-unknown-minixrs/release/deps");
-    let mut hits: Vec<PathBuf> = std::fs::read_dir(&deps)
+    // cargo's build-dir layout as of the pinned nightly: each unit's artifacts
+    // land in `build/<pkg>/<hash>/out/`, not the old flat `deps/`. Never fall
+    // back to `deps/`: on a tree that predates the layout change it holds an
+    // rlib built by the *previous* toolchain, which links and boots fine
+    // locally while a clean CI checkout finds nothing — exactly how the
+    // nightly-2026-10-01 bump first went red.
+    let units = workspace
+        .join("target/minixrs-user/aarch64-unknown-minixrs/release/build/compiler_builtins");
+    let mut hits: Vec<PathBuf> = std::fs::read_dir(&units)
         .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|unit| std::fs::read_dir(unit.path().join("out")).ok())
+        .flatten()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
