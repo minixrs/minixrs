@@ -189,11 +189,14 @@ see the Deferred table in `docs/plans/phase-6-prep.md`.
 **The proof.** `/bin/fileio` (`userland/fileio/fileio.c`) is a second C program on the root
 filesystem, exec'd by `init` next to `hello`. It exercises, through musl: raw `read`, `lseek`
 (including the `SEEK_END` refusal), `readv`, a read into a never-touched mmap'd buffer, a write past
-end of file that leaves a hole (`/etc/seekhole`), `brk` against the heap origin, `fopen` and
-`fgets`, a verified `mmap`, a large verified `malloc`, and finally a descriptor deliberately left
-open at exit so that VFS's `VFS_PM_EXIT` row reset is visible (`[diag vfs] pm-exit reset closed=1`).
-Each step prints its own `minix.rs fileio: … ok` marker; the list lives in
-`tests/qemu-boot.expected`.
+end of file that leaves a hole (`/etc/seekhole`), `brk` against the heap origin, `fopen`, `fgets`,
+`fread` and the negative `SEEK_CUR` that `fflush` issues on a partly read stream, a verified `mmap`,
+a large verified `malloc`, and finally a descriptor deliberately left open at exit so that VFS's
+`VFS_PM_EXIT` row reset is visible (`[diag vfs] pm-exit reset closed=1`). Each step prints its own
+`minix.rs fileio: … ok` marker; the list lives in `tests/qemu-boot.expected`. Every run truncates
+and rewrites `/etc/seekhole`, so `init` keeps at most one `fileio` alive at a time — it skips that
+slot of its rotation until the running one is reaped — while still letting `hello` and `fileio`
+overlap.
 
 Two kernel defects surfaced while building it, and both were fixed in this chunk because they hit
 every user process, not just fileio. The kernel never saved the user **thread pointer**

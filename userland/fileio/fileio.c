@@ -671,7 +671,8 @@ out:
 }
 
 /*
- * stdio: fopen + fgets + fread + fclose of /etc/motd, and printf to say so.
+ * stdio: fopen + fgets + fread + fflush + fclose of /etc/motd, and printf to
+ * say so.
  *
  * fgets refills through __uflow, a plain read() into the FILE's buffer. fread
  * of more than one byte into the caller's buffer is the other path: musl's
@@ -680,15 +681,35 @@ out:
  * iovec. The rewind between them (an lseek SEEK_SET through stdio) empties the
  * buffer, so the fread really reads, and reads known bytes.
  *
+ * Then the one seek stdio makes on its own: a NEGATIVE SEEK_CUR. A second
+ * rewind, then fgets into a STDIO_SHORT-byte buffer, which consumes
+ * STDIO_SHORT - 1 bytes of motd and leaves the rest unread in the FILE's
+ * buffer -- the refill read the whole line. fflush on a read stream must hand
+ * those back (musl's fflush: seek(f, rpos - rend, SEEK_CUR), a negative
+ * offset), so the descriptor's own position afterwards is exactly what fgets
+ * consumed. fflush ignores that seek's result, so only the position says
+ * whether it happened. This is the same seek fclose makes on a partly
+ * consumed stream, but after fclose there is no descriptor left to ask.
+ *
  * Failures report through write(2), like every other check, so a broken
  * stdio still says where; only `stdio ok` itself goes through printf -- the
- * marker is printf's proof. musl's stdout starts line-buffered and turns
- * fully buffered on its first write (the shim's ioctl answers ENOTTY), so the
- * fflush is what puts the line out now rather than at exit, in one write.
+ * marker is printf's proof. musl's stdout starts line-buffered, so the
+ * newline already flushes the line, in one write (that first write is also
+ * where the shim's ENOTTY ioctl turns stdout fully buffered for later ones).
+ * The fflush is belt-and-braces: it makes the line's timing independent of
+ * stdout's buffering mode, and its result is checked.
+ *
+ * Mutation: a shim lseek that sends every whence as SEEK_SET fails `pos`
+ * (rc=0); skipping the fflush fails it too (rc=31, the whole line the refill
+ * read), so the position really is the fflush's doing.
  */
+#define STDIO_SHORT 8
+
 static void check_stdio(void)
 {
 	char buf[64];
+	char shortbuf[STDIO_SHORT];
+	off_t pos;
 	size_t n;
 	FILE *f;
 
@@ -713,6 +734,32 @@ static void check_stdio(void)
 	n = fread(buf, 1, MOTD_LEN, f);
 	if (n != MOTD_LEN || memcmp(buf, motd, MOTD_LEN) != 0) {
 		fail("stdio", "fread", (long)n, errno);
+		(void)fclose(f);
+		return;
+	}
+
+	rewind(f);
+	memset(shortbuf, 0, sizeof shortbuf);
+	errno = 0;
+	if (fgets(shortbuf, sizeof shortbuf, f) != shortbuf ||
+	    strlen(shortbuf) != sizeof shortbuf - 1 ||
+	    memcmp(shortbuf, motd, sizeof shortbuf - 1) != 0) {
+		fail("stdio", "short-fgets", (long)strlen(shortbuf), errno);
+		(void)fclose(f);
+		return;
+	}
+
+	errno = 0;
+	if (fflush(f) != 0) {
+		fail("stdio", "fflush-read", -1, errno);
+		(void)fclose(f);
+		return;
+	}
+
+	errno = 0;
+	pos = lseek(fileno(f), 0, SEEK_CUR);
+	if (pos != (off_t)(sizeof shortbuf - 1)) {
+		fail("stdio", "pos", (long)pos, errno);
 		(void)fclose(f);
 		return;
 	}

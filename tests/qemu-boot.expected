@@ -212,19 +212,22 @@ vfs-loop-end
 # integer anyway (no server-rt, so no diag_fmt).
 minix.rs init: vfs.long ok match=1
 
-# Four refusals, then the summary on fd 2 (so that descriptor is proven too).
+# Five refusals, then the summary on fd 2 (so that descriptor is proven too).
 # Each probe is well-formed but for one field: descriptor 3 (in range of the fd
-# row, not open -> EBADF), a request number one past VFS_WRITE (-> ENOSYS, and the
-# reply itself is the assertion -- a dropped unknown request would block init
+# row, not open -> EBADF), a request number one past the VFS band (-> ENOSYS, and
+# the reply itself is the assertion -- a dropped unknown request would block init
 # forever and hang the boot), an unmapped buffer (-> EFAULT from the kernel's
 # page-table walk, relayed back through TTY and VFS unflattened; it costs init no
-# page fault, since the copy engine walks rather than dereferences), and a negative
-# length (-> EINVAL, which unchecked would widen into a ~16 EiB u64 on the grant).
+# page fault, since the copy engine walks rather than dereferences), a negative
+# length (-> EINVAL, which unchecked would widen into a ~16 EiB u64 on the grant),
+# and VFS_PM_EXIT sent by init rather than PM (-> EPERM; chunk 5's M16 gate on a
+# request that resets a process's descriptor row -- without the gate VFS answers
+# OK). n=5 is the probe count, recomputed from deny_probes' table, not copied.
 # A missing check makes its probe succeed and turns this into
 # `vfs.deny FAIL <name>`. A zero-length write is deliberately not probed here --
 # it is a legal no-op, not a denial, and `write::validate` covers it (and the
 # check order that keeps it from issuing a grant) in host tests.
-minix.rs init: vfs.deny ok n=4
+minix.rs init: vfs.deny ok n=5
 
 # init's SENDRECs to VM, which the shared USER privilege reaches since chunk 5.
 # VM_FORK and VM_EXEC rewrite another process's bookkeeping and are PM-only, so
@@ -871,7 +874,12 @@ minix.rs fileio: brk ok
 # and fflushed. fgets refills through a plain read() into the FILE's buffer;
 # the fread is what reaches readv through stdio (musl's __stdio_read hands it
 # the caller's buffer less one byte plus the FILE's buffer, so motd's last
-# byte arrives through the second iovec).
+# byte arrives through the second iovec). Then rewind + fgets into an 8-byte
+# buffer (7 bytes consumed, the rest left in the FILE's buffer) + fflush, after
+# which the descriptor's lseek(0, SEEK_CUR) must be 7: fflush handed the unread
+# bytes back with a NEGATIVE SEEK_CUR, the one seek stdio makes on its own.
+# Mutation-tested: a shim lseek that sends every whence as SEEK_SET prints
+# `stdio FAIL pos rc=0`, and skipping the fflush prints `stdio FAIL pos rc=31`.
 minix.rs fileio: stdio ok
 
 # A four-page anonymous mmap, every byte filled and read back, munmap answers
@@ -892,6 +900,9 @@ minix.rs fileio: malloc ok
 # exits never print it. fileio checks the leaked descriptor is 3, the lowest
 # above the console's 0/1/2 (open returns the lowest free one), so `closed=1`
 # is that one leak and not an earlier check's. NR_FDS is 8, so `closed=1` is
-# never a prefix of a longer count. Mutation-tested: PM not sending
-# VFS_PM_EXIT makes the line vanish.
+# never a prefix of a longer count. But the marker matches ANY occurrence, from
+# any run: a fileio that died mid-check (killed, say) with one descriptor open
+# satisfies it too, so it proves the reset, not that the leak was the deliberate
+# one -- the fd-3 check speaks only for runs that got that far. Mutation-tested:
+# PM not sending VFS_PM_EXIT makes the line vanish.
 [diag vfs] pm-exit reset closed=1

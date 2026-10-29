@@ -56,8 +56,8 @@ use minixrs_kernel_shared::callnr::{
     BDEV_BLOCK_SIZE, CDEV_MAX_IO, DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH, FS_PATH_MAX,
     NR_VFS_MSGS, PM_EXEC, PM_EXEC_PATH_MAX, PM_EXEC_PATH_OFF, PM_FORK, PM_WAIT, VFS_BUF_OFF,
     VFS_CLOSE, VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE, VFS_FD_OFF, VFS_FLAGS_OFF, VFS_LEN_OFF, VFS_OPEN,
-    VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE, VFS_WRITE, VM_EXEC,
-    VM_EXEC_IMAGE_END_OFF, VM_EXEC_PROC_OFF, VM_FORK, VM_RQ_BASE,
+    VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_PM_EXIT, VFS_PM_EXIT_PROC_OFF, VFS_READ, VFS_RQ_BASE,
+    VFS_WRITE, VM_EXEC, VM_EXEC_IMAGE_END_OFF, VM_EXEC_PROC_OFF, VM_FORK, VM_RQ_BASE,
 };
 use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, VM_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, NONE};
@@ -182,6 +182,19 @@ const _: () = assert!(UNMAPPED_VA < USER_DEVICE_WINDOW_BASE);
 /// Rotating rather than switching outright is still the point: retiring
 /// `worker` would take the exec-ABI proof down with it. All four traces land
 /// inside the `[ksys SYS_EXEC]` head carve-out (6 calls), so all are observable.
+///
+/// **At most one `fileio` is alive at a time** — [`main`]'s `fileio_pid` guard.
+/// The rotation is not one-child-at-a-time: each cycle forks one child and
+/// reaps *one*, and PM seeds the four boot stubs as init's children, so the
+/// first four reaps take stub zombies and ~5 of init's children run at once.
+/// With four targets that puts two `fileio`s side by side, and both truncate
+/// and rewrite the one `/etc/seekhole`: a `B` `open(O_TRUNC)` inside `A`'s
+/// seek-hole window flakes `seek-hole FAIL` / `FAIL not-truncated`. So while a
+/// `fileio` is alive its slot is *skipped* — the rotation moves on to the next
+/// target rather than stalling — and the slot reopens when `wait()` reaps that
+/// pid. Only `fileio` is serialized: `hello` and `fileio` must still overlap,
+/// because that scheduling overlap is what proves per-process TPIDR_EL0 (spec
+/// M18) — a shared thread pointer faults one of them.
 const EXEC_TARGETS: [&str; 4] = ["worker", ROOTFS_HELLO_PATH, "bigprog", ROOTFS_FILEIO_PATH];
 
 // Each target has to fit the `PM_EXEC` payload field, which is a whole path's
@@ -257,13 +270,24 @@ fn main() -> ! {
     let mut probe_pid = 0;
     let mut reported = false;
     let mut cycle = 0usize;
+    // The live `fileio`'s pid, or 0 when none is alive — the [`EXEC_TARGETS`]
+    // serialization guard (`/etc/seekhole` is shared mutable state). Set from
+    // the fork that launched it, cleared by the `wait()` that reaps it; 0 is
+    // "none" for the same reason as `probe_pid`.
+    let mut fileio_pid = 0;
 
     loop {
         // Chosen *before* the fork, so both halves of the SENDREC agree on it:
         // the child is a copy of this address space taken during `SYS_FORK`, so
         // it inherits this value and needs no way to ask which turn it is. The
-        // parent advances `cycle` only after a successful fork.
+        // parent advances `cycle` only after a successful fork — or here, past
+        // a `fileio` slot while one is still running, so the rotation goes on
+        // to the next target instead of stalling on it.
         let target = EXEC_TARGETS[cycle % EXEC_TARGETS.len()];
+        if target == ROOTFS_FILEIO_PATH && fileio_pid != 0 {
+            cycle = cycle.wrapping_add(1);
+            continue;
+        }
 
         // fork(): PM replies to both halves of this SENDREC — the child sees
         // `m_type == 0`, the parent sees the child pid (`> 0`); a negative value
@@ -289,6 +313,9 @@ fn main() -> ! {
                 if probe_pid == 0 {
                     probe_pid = n;
                 }
+                if target == ROOTFS_FILEIO_PATH {
+                    fileio_pid = n;
+                }
                 // Reap a child (blocks until one exits), then loop to fork the
                 // next. `wait()` replies the reaped child's pid, so the verdict
                 // is reported only when the child that ran `worker` comes back —
@@ -296,6 +323,11 @@ fn main() -> ! {
                 // cycle would bury the console.
                 let mut w = pm_msg(PM_WAIT);
                 let rc = ipc_sendrec(pm, &mut w);
+                // Reaping the live `fileio` — however it ended, since a killed
+                // child is reaped like an exited one — reopens its slot.
+                if rc == OK && fileio_pid != 0 && w.m_type == fileio_pid {
+                    fileio_pid = 0;
+                }
                 if !reported && rc == OK && w.m_type == probe_pid {
                     reported = true;
                     report_exec_stack(vfs, rd_i32(&w, 0));
@@ -325,10 +357,10 @@ fn main() -> ! {
 ///    subsumes the other — a `write()` that moved every byte but returned `OK`
 ///    would print the tail and still be broken, which is exactly the bug a caller
 ///    looping on a short write would then hit forever.
-/// 3. **Three denial probes and a summary** (fd 2, so that descriptor is proven
-///    too). Each probe is well-formed in every respect but one — the slice-5.1
-///    lesson that a check no marker exercises is a check that can regress
-///    silently.
+/// 3. **The [`deny_probes`] refusals and a summary** (fd 2, so that descriptor
+///    is proven too). Each probe is well-formed in every respect but one — the
+///    slice-5.1 lesson that a check no marker exercises is a check that can
+///    regress silently.
 ///
 /// `match=1` rather than the length itself, the slice-5.3 convention: it is
 /// self-checking, needs no formatting machinery (init has none), and does not have
@@ -368,6 +400,14 @@ fn announce(vfs: Endpoint) {
 ///   - `bad-len` — a negative byte count. `EINVAL`, and the check matters more
 ///     than it looks: left unchecked the length widens into a ~16 EiB `u64` on the
 ///     grant VFS is about to issue over the caller's buffer.
+///   - `pm-exit-gate` — `VFS_PM_EXIT` (chunk 5, M16) sent by init, naming
+///     [`NONE`]. `EPERM`: the request resets a process's whole descriptor row, so
+///     only PM may send it. With the gate gone VFS answers `OK` — `NONE`'s proc
+///     number lies past the descriptor table, so the reset touches no row and
+///     the probe costs nothing even then — and only this reply tells the two
+///     apart. It rides the `VFS_WRITE` wire
+///     format: the endpoint field is the descriptor field (asserted below), and
+///     the buffer and length are ignored.
 ///
 /// The one arm with no probe here is a **zero**-length write, which is a legal
 /// no-op rather than a denial and would need a distinct positive marker to say
@@ -386,7 +426,7 @@ fn deny_probes(vfs: Endpoint) {
     // marker below while every other line stayed green. One past the *band* is the
     // only spelling that stays an unknown request as the band grows, and it is the
     // form `bdev_denials` already used.
-    let probes: [(&str, i32, i32, u64, i32, i32); 4] = [
+    let probes: [(&str, i32, i32, u64, i32, i32); 5] = [
         ("bad-fd", VFS_WRITE, 3, addr, len, EBADF),
         (
             "no-such",
@@ -398,6 +438,7 @@ fn deny_probes(vfs: Endpoint) {
         ),
         ("bad-buf", VFS_WRITE, STDOUT, UNMAPPED_VA, len, EFAULT),
         ("bad-len", VFS_WRITE, STDOUT, addr, -1, EINVAL),
+        ("pm-exit-gate", VFS_PM_EXIT, NONE, addr, len, EPERM),
     ];
 
     for (name, m_type, fd, buf, len, want) in probes {
@@ -405,8 +446,11 @@ fn deny_probes(vfs: Endpoint) {
             return report_fail(vfs, name);
         }
     }
-    let _ = vfs_write(vfs, STDERR, "minix.rs init: vfs.deny ok n=4\n".as_bytes());
+    let _ = vfs_write(vfs, STDERR, "minix.rs init: vfs.deny ok n=5\n".as_bytes());
 }
+
+// `pm-exit-gate` puts its endpoint where `vfs_request` puts a descriptor.
+const _: () = assert!(VFS_PM_EXIT_PROC_OFF == VFS_FD_OFF);
 
 /// The requests VM must refuse an ordinary user process (chunk 5, M7 and M8).
 ///
