@@ -52,9 +52,10 @@ use minixrs_kernel_shared::callnr::{
     VM_EXEC_PROC_OFF, VM_FORK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT, VMCTL_CLEAR_PAGEFAULT,
     VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP,
 };
-use minixrs_kernel_shared::com::{NR_BOOT_PROCS, SYSTEM, boot_endpoint};
+use minixrs_kernel_shared::com::{NR_BOOT_PROCS, PM_PROC_NR, SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{Endpoint, endpoint_proc};
-use minixrs_kernel_shared::error::{EINVAL, OK};
+use minixrs_kernel_shared::error::{EINVAL, ENOSYS, EPERM, OK};
+use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minixrs_kernel_shared::signal::SIGSEGV;
 use minixrs_server_rt::{SefConfig, diag_fmt, sef_publish_to_ds, sef_startup};
 
@@ -108,14 +109,32 @@ fn main() -> ! {
             continue;
         }
         match msg.m_type {
+            // VM_PAGEFAULT stays ungated (M7): it is a request for the sender's
+            // *own* fault. The handler keys everything on `m_source`, so a caller
+            // can only ever map a page for itself, and only inside a region VM
+            // already granted it. Its final `VMCTL_CLEAR_PAGEFAULT` on a proc
+            // that is not faulted is inert: `rts_unset` (kernel/src/proc/sched.rs)
+            // enqueues only when the cleared flag was the *last* bit set
+            // (`prev != 0 && prev & !flag == 0`), and a proc blocked in this
+            // SENDREC still carries RTS_SENDING/RTS_RECEIVING, so it stays blocked.
             VM_PAGEFAULT => handle_pagefault(system, msg.m_source, rd_u64(&msg, 0)),
             VM_BRK => handle_brk(&mut msg),
             VM_MMAP => handle_mmap(&mut msg),
             VM_MUNMAP => handle_munmap(system, &mut msg),
             VM_FORK => handle_fork(&mut msg),
             VM_EXEC => handle_exec(&mut msg),
-            // Unknown request: drop it.
-            _ => {}
+            // Unknown request (M8): reply rather than drop. Every client reaches VM
+            // by SENDREC, and a dropped request blocks the caller forever. A
+            // notification has no reply to receive (`sef.receive` strips only
+            // RS's ping), so it is the one thing dropped.
+            _ => {
+                if msg.m_type != NOTIFY_MESSAGE {
+                    let caller_e = msg.m_source;
+                    msg.m_type = ENOSYS;
+                    msg.m_source = 0; // kernel overwrites on delivery
+                    let _ = ipc_send(caller_e, &mut msg);
+                }
+            }
         }
     }
 }
@@ -155,14 +174,7 @@ fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     if !region::contains(nr, far) {
         // SIGSEGV: unmapped access outside any region. Raise it toward PM and
         // leave the faulter blocked; PM terminates it.
-        let mut m = Message {
-            m_source: 0,
-            m_type: SYS_KILL,
-            payload: [0u8; 96],
-        };
-        wr_i32(&mut m, 0, faulting_e);
-        wr_i32(&mut m, 4, SIGSEGV);
-        let _ = ipc_sendrec(system, &mut m);
+        raise_sigsegv(system, faulting_e);
         return;
     }
 
@@ -180,7 +192,16 @@ fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     wr_i32(&mut m, 4, faulting_e);
     wr_u64(&mut m, 8, page);
     wr_i32(&mut m, 16, VMCTL_PROT_WRITE);
-    let _ = ipc_sendrec(system, &mut m);
+    // M17 / spec section 4: a failed map (out of frames, a bad address) must not
+    // be followed by a clear. The faulter would re-execute the access, fault
+    // again and loop forever against a VM that keeps "resolving" it. Treat it
+    // as an unresolvable fault: raise SIGSEGV like the out-of-region arm and
+    // leave the fault uncleared. Both the trap rc and the reply type are
+    // checked -- the trap can succeed while the kernel call itself failed.
+    if ipc_sendrec(system, &mut m) != OK || m.m_type != OK {
+        raise_sigsegv(system, faulting_e);
+        return;
+    }
 
     // SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT, target=faulting_e) — unblock the faulter.
     let mut m = Message {
@@ -193,11 +214,25 @@ fn handle_pagefault(system: Endpoint, faulting_e: Endpoint, far: u64) {
     let _ = ipc_sendrec(system, &mut m);
 }
 
+/// Raise SIGSEGV toward PM for `faulting_e` via `SYS_KILL`. The faulter stays
+/// blocked on `RTS_PAGEFAULT`; PM terminates it.
+fn raise_sigsegv(system: Endpoint, faulting_e: Endpoint) {
+    let mut m = Message {
+        m_source: 0,
+        m_type: SYS_KILL,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, 0, faulting_e);
+    wr_i32(&mut m, 4, SIGSEGV);
+    let _ = ipc_sendrec(system, &mut m);
+}
+
 /// Handle a `VM_BRK` request: set the caller's program break, growing or
 /// creating its heap region. No frames are mapped here — pages fault in lazily
 /// and are then satisfied by [`handle_pagefault`] via the region check. Reply
-/// to the caller (it issued a SENDREC) with `m_type = OK` and the resulting
-/// break in payload `0..8`, or the negative error in `m_type`.
+/// to the caller (it issued a SENDREC) with `m_type = OK` and the exact break
+/// in payload `0..8`, or the negative error in `m_type`. A request of `0` is a
+/// query (M3): it replies the current break and changes nothing.
 fn handle_brk(msg: &mut Message) {
     let caller_e = msg.m_source;
     let nr = endpoint_proc(caller_e).get();
@@ -279,6 +314,20 @@ fn handle_munmap(system: Endpoint, msg: &mut Message) {
     let _ = ipc_send(caller_e, msg);
 }
 
+/// True if `caller_e` is PM. `VM_FORK` and `VM_EXEC` rewrite another process's
+/// bookkeeping, so they are PM-only (M7).
+fn from_pm(caller_e: Endpoint) -> bool {
+    caller_e == boot_endpoint(PM_PROC_NR)
+}
+
+/// Reply `EPERM` to a non-PM caller of a PM-only request, before the payload is
+/// read.
+fn reject_non_pm(msg: &mut Message, caller_e: Endpoint) {
+    msg.m_type = EPERM;
+    msg.m_source = 0; // kernel overwrites on delivery
+    let _ = ipc_send(caller_e, msg);
+}
+
 /// Handle a `VM_FORK` request from PM: clone the parent's region set into the
 /// freshly forked child. PM passes the parent endpoint (payload `0..4`) and the
 /// child endpoint (payload `4..8`); the kernel already copied the child's page
@@ -287,6 +336,10 @@ fn handle_munmap(system: Endpoint, msg: &mut Message) {
 /// with `m_type = OK`, or the negative error from [`region::fork`].
 fn handle_fork(msg: &mut Message) {
     let caller_e = msg.m_source;
+    if !from_pm(caller_e) {
+        reject_non_pm(msg, caller_e);
+        return;
+    }
     let parent_e: Endpoint = rd_i32(msg, 0);
     let child_e: Endpoint = rd_i32(msg, 4);
     let parent_nr = endpoint_proc(parent_e).get();
@@ -322,13 +375,18 @@ fn handle_fork(msg: &mut Message) {
 /// loader because refusing the image there would change `exec`'s errno surface,
 /// which is ABI-visible.
 ///
+/// PM-only (M7): any other sender gets `EPERM` before the payload is read.
+///
 /// The marker is unconditional rather than sampled. exec is rare — a handful per
-/// boot — and this line is the *only* proof that the heap origin follows the
-/// image, since no user process can reach `VM_BRK`: the shared USER privilege
-/// has no `ipc_to` bit for VM (`kernel/src/proc/table.rs`'s `USER_IPC_TO`), and
-/// opening that edge is pre-Phase-6 chunk 5's work.
+/// boot — and this line is the proof that the heap origin follows the image;
+/// `VM_BRK(0)` now lets a user process read the origin back too, but only once
+/// the USER privilege has an `ipc_to` bit for VM.
 fn handle_exec(msg: &mut Message) {
     let caller_e = msg.m_source;
+    if !from_pm(caller_e) {
+        reject_non_pm(msg, caller_e);
+        return;
+    }
     let target_e: Endpoint = rd_i32(msg, VM_EXEC_PROC_OFF);
     let image_end = rd_u64(msg, VM_EXEC_IMAGE_END_OFF);
     let target_nr = endpoint_proc(target_e).get();
