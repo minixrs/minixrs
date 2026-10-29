@@ -99,6 +99,8 @@ fn bands() -> [Band; 9] {
                 ("VFS_READ", callnr::VFS_READ),
                 ("VFS_CLOSE", callnr::VFS_CLOSE),
                 ("VFS_EXEC_STAGE", callnr::VFS_EXEC_STAGE),
+                ("VFS_LSEEK", callnr::VFS_LSEEK),
+                ("VFS_PM_EXIT", callnr::VFS_PM_EXIT),
             ],
         },
         // Base + members + count only, like BDEV and CDEV below: no payload
@@ -358,6 +360,12 @@ pub fn render() -> String {
     f.define_dec("VFS_FD_OFF", callnr::VFS_FD_OFF as i64);
     f.define_dec("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64);
     f.define_dec("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64);
+    f.define_dec("VFS_PATH_OFF", callnr::VFS_PATH_OFF as i64);
+    f.define_dec("VFS_PATH_LEN_OFF", callnr::VFS_PATH_LEN_OFF as i64);
+    f.define_dec("VFS_FLAGS_OFF", callnr::VFS_FLAGS_OFF as i64);
+    f.define_dec("VFS_WHENCE_OFF", callnr::VFS_WHENCE_OFF as i64);
+    f.define_dec("VFS_OFFSET_OFF", callnr::VFS_OFFSET_OFF as i64);
+    f.define_dec("VFS_POS_OFF", callnr::VFS_POS_OFF as i64);
     f.blank();
     f.define_dec("PM_EXEC_PATH_OFF", callnr::PM_EXEC_PATH_OFF as i64);
     f.define_dec("PM_EXEC_PATH_MAX", callnr::PM_EXEC_PATH_MAX as i64);
@@ -548,10 +556,16 @@ mod tests {
                 "{request} itself must be emitted"
             );
         }
-        let offsets: [(&str, i64); 13] = [
+        let offsets: [(&str, i64); 19] = [
             ("VFS_FD_OFF", callnr::VFS_FD_OFF as i64),
             ("VFS_LEN_OFF", callnr::VFS_LEN_OFF as i64),
             ("VFS_BUF_OFF", callnr::VFS_BUF_OFF as i64),
+            ("VFS_PATH_OFF", callnr::VFS_PATH_OFF as i64),
+            ("VFS_PATH_LEN_OFF", callnr::VFS_PATH_LEN_OFF as i64),
+            ("VFS_FLAGS_OFF", callnr::VFS_FLAGS_OFF as i64),
+            ("VFS_WHENCE_OFF", callnr::VFS_WHENCE_OFF as i64),
+            ("VFS_OFFSET_OFF", callnr::VFS_OFFSET_OFF as i64),
+            ("VFS_POS_OFF", callnr::VFS_POS_OFF as i64),
             ("PM_EXEC_PATH_OFF", callnr::PM_EXEC_PATH_OFF as i64),
             ("PM_EXEC_PATH_MAX", callnr::PM_EXEC_PATH_MAX as i64),
             ("CDEV_MINOR_OFF", callnr::CDEV_MINOR_OFF as i64),

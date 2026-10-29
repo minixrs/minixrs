@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `open(2)` flags (slice 5.10b).
+//! `open(2)` flags (slice 5.10b) and `lseek(2)` whences.
 //!
 //! **The Linux/musl values**, for decision D7's reason applied to a second ABI:
 //! musl's `open()` passes its own `O_CREAT` straight to the syscall, so matching
@@ -36,6 +36,14 @@ pub const O_TRUNC: i32 = 0o1000;
 /// because they are acted on.
 pub const O_KNOWN: i32 = O_ACCMODE | O_CREAT | O_TRUNC;
 
+/// `lseek` whence: offset is absolute.
+pub const SEEK_SET: i32 = 0;
+/// `lseek` whence: offset is relative to the current position.
+pub const SEEK_CUR: i32 = 1;
+/// `lseek` whence: offset is relative to end of file. `VFS_LSEEK` answers
+/// `EINVAL` for it until a stat request has a consumer.
+pub const SEEK_END: i32 = 2;
+
 /// A flag bit this build does **not** honour — what a denial probe aims at.
 ///
 /// Derived from [`O_KNOWN`] rather than written as a literal, so that a flag
@@ -57,6 +65,11 @@ const _: () = assert!(O_RDWR == 2);
 const _: () = assert!(O_CREAT == 64);
 const _: () = assert!(O_TRUNC == 512);
 
+// Linux's `lseek` whences, pinned by literal like the flags above.
+const _: () = assert!(SEEK_SET == 0);
+const _: () = assert!(SEEK_CUR == 1);
+const _: () = assert!(SEEK_END == 2);
+
 // The access mode and the behaviour bits must not overlap, or masking one would
 // silently read the other.
 const _: () = assert!(O_ACCMODE & (O_CREAT | O_TRUNC) == 0);
@@ -76,6 +89,11 @@ mod tests {
         assert_eq!((O_RDWR | O_CREAT | O_TRUNC) & O_ACCMODE, O_RDWR);
         assert_eq!((O_WRONLY | O_TRUNC) & O_ACCMODE, O_WRONLY);
         assert_eq!(O_CREAT & O_ACCMODE, O_RDONLY);
+    }
+
+    #[test]
+    fn the_seek_whences_are_linuxs_zero_one_two() {
+        assert_eq!((SEEK_SET, SEEK_CUR, SEEK_END), (0, 1, 2));
     }
 
     #[test]
