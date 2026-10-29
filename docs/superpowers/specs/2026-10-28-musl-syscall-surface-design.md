@@ -11,7 +11,7 @@ to the rest, so a C program can print but cannot read a file, and `malloc` has n
 This chunk closes that gap far enough for **one C program to read a MinixFS file twice over — once
 through raw descriptors, once through `fopen` and malloc — and to seek inside it.**
 
-Decisions are labelled `M1…M17`: chunk-local, distinct from the phase-level `D1…D13` (which stay
+Decisions are labelled `M1…M18`: chunk-local, distinct from the phase-level `D1…D13` (which stay
 locked) and from chunk 2's `V*` and chunk 3's `I*`.
 
 ---
@@ -358,6 +358,23 @@ to `mmap`/`brk` freely that is one loop away. On a `PT_MAP` failure VM instead r
 toward PM exactly as its out-of-region arm does, and leaves the fault uncleared. No ABI change. No
 boot probe is practical — exhausting 256 MiB under TCG would blow the boot budget — so record it as
 unproven by marker, and host-test any helper the decision is factored into.
+
+### M18 — the kernel saves and restores `TPIDR_EL0` per process (found during execution)
+
+Added after the design was approved, when Task 7's default-features boot failed. The kernel's
+`ArchRegisterFrame` has no slot for `TPIDR_EL0`, and neither the exception entry stubs nor
+`el1_return_to_user` touch it, while musl's `__set_thread_area` writes it directly. So every C
+process shares one thread pointer and the last to start wins. Stub-free boots ran one C program at a
+time and hid this; with the boot stubs on, `hello` and `fileio` overlap, and `fileio`'s next `errno`
+write lands in `hello`'s TLS address — unmapped in `fileio`'s address space — and it takes
+`SIGSEGV`. **A pre-existing kernel bug, not a chunk-5 regression**, but chunk 5 is the first boot
+that makes two C programs overlap, so it lands here: without it the chunk is red on `qemu-smoke`.
+
+The frame gains `tpidr_el0`; both entry stubs save it and the return path restores it. `do_exec`
+already resets the frame to `EMPTY` (thread pointer 0) and `do_fork` already copies the whole frame
+(the child inherits it), so neither changes. Proof: the default-features fileio markers, plus a
+mutation that drops the restore and brings back the `SIGSEGV` — scheduler-dependent, so the commit
+says so.
 
 ---
 

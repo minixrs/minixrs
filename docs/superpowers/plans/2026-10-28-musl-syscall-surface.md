@@ -18,7 +18,7 @@ aarch64, QEMU, `dprint`.
 
 **Spec:**
 [`../specs/2026-10-28-musl-syscall-surface-design.md`](../specs/2026-10-28-musl-syscall-surface-design.md)
-— decisions `M1…M17`. Read it before Task 1; every task argues from it. Where this plan and the spec
+— decisions `M1…M18`. Read it before Task 1; every task argues from it. Where this plan and the spec
 disagree, **the spec wins** and the plan gets corrected.
 
 ## Global Constraints
@@ -366,6 +366,33 @@ task is self-contained: hand it the spec, this task, and the generated headers.
       fileio markers, every other marker passes.
 - [ ] **Step 5: Commit** (main repo; fork commits for any shim fix go in the fork and re-bump the
       gitlink) `fileio: raw-descriptor proof — read, lseek, readv, fresh-buf, seek-hole`.
+
+### Task 7a: Kernel — save and restore `TPIDR_EL0` per process (spec M18)
+
+Added during execution: Task 7's default-features boot showed concurrent C processes sharing one
+thread pointer. Its report (`.superpowers/sdd/2026-10-28-musl-syscall-surface/task-7-report.md`,
+"Blocker") holds the diagnosis and the reverted experiment that fixed it.
+
+**Files:**
+
+- Modify: `kernel/src/arch/aarch64/context.rs` (`ArchRegisterFrame`, `EMPTY`, size assert)
+- Modify: `kernel/src/arch/aarch64/trap.S`, `kernel/src/arch/aarch64/interrupt.S` (entry saves;
+  `el1_return_to_user` restore)
+
+**Interfaces:**
+
+- Produces: `ArchRegisterFrame.tpidr_el0: u64` at a fixed offset named by a constant the assembly
+  uses (follow how the existing frame offsets are shared between Rust and `.S`).
+
+- [ ] **Step 1:** Default-features musl-flavour `timeout 300` boot at the current HEAD: record the
+      `[pf] … far=0x120514`-style fault and missing fileio markers (the RED).
+- [ ] **Step 2: Implement** the field, the two entry-stub saves and the return-path restore. Confirm
+      `do_exec` resets and `do_fork` copies it with no change.
+- [ ] **Step 3:** Same boot → `check-boot-log.sh` PASS with every fileio marker present and no
+      cross-process TLS faults. Stub-free boot unchanged. Kernel clippy both feature sets.
+- [ ] **Step 4: Mutation:** drop the restore → the fault and missing markers return. Record it, and
+      that the proof depends on the stubs overlapping two C programs.
+- [ ] **Step 5: Commit** `kernel: save and restore TPIDR_EL0 per process`.
 
 ### Task 8: `/bin/fileio` — stdio, brk, mmap, malloc, exit reset
 
