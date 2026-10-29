@@ -137,8 +137,8 @@ use minixrs_kernel_shared::callnr::{
     FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER, FS_RQ_BASE, FS_SIZE_OFF,
     FS_SUPER_BLOCK_SIZE_OFF, FS_SUPER_BLOCKS_OFF, FS_SUPER_MINOR_OFF, FS_SUPER_ROOT_OFF, FS_TRUNC,
     FS_WRITE, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_CLOSE, VFS_EXEC_GRANT_OFF,
-    VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_FD_OFF, VFS_LSEEK, VFS_OFFSET_OFF, VFS_OPEN, VFS_POS_OFF,
-    VFS_READ, VFS_WHENCE_OFF, VFS_WRITE,
+    VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_FD_OFF, VFS_LSEEK, VFS_OFFSET_OFF, VFS_OPEN, VFS_PM_EXIT,
+    VFS_PM_EXIT_PROC_OFF, VFS_POS_OFF, VFS_READ, VFS_WHENCE_OFF, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{
     MEM_PROC_NR, MFS_PROC_NR, PM_PROC_NR, TTY_PROC_NR, boot_endpoint,
@@ -354,6 +354,7 @@ fn main() -> ! {
             VFS_READ => do_read(caller_e, &msg, &mut grants, tty, mem, mfs),
             VFS_CLOSE => do_close(caller_e, &msg),
             VFS_LSEEK => do_lseek(caller_e, &mut msg),
+            VFS_PM_EXIT => do_pm_exit(caller_e, &msg),
             VFS_EXEC_STAGE => do_exec_stage(
                 caller_e,
                 &mut msg,
@@ -1005,6 +1006,23 @@ fn do_lseek(caller_e: Endpoint, msg: &mut Message) -> i32 {
         }
         Err(e) => e,
     }
+}
+
+/// Serve one `VFS_PM_EXIT`: PM reports `payload[0..4]` (an endpoint) is gone, so
+/// reset its descriptor row. `EPERM` unless the kernel-stamped sender is PM (the
+/// [`do_exec_stage`] check). Emits a diag line only when a descriptor was actually
+/// left open, so a run where nothing leaks is silent.
+#[cfg_attr(test, allow(dead_code))]
+fn do_pm_exit(caller_e: Endpoint, msg: &Message) -> i32 {
+    if caller_e != boot_endpoint(PM_PROC_NR) {
+        return EPERM;
+    }
+    let target = rd_i32(msg, VFS_PM_EXIT_PROC_OFF);
+    let closed = fd::reset(endpoint_proc(target).get());
+    if closed > 0 {
+        diag_fmt(format_args!("pm-exit reset closed={closed}"));
+    }
+    OK
 }
 
 /// Issue one `FS_READSUPER` and decode the geometry it reports.

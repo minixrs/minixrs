@@ -48,24 +48,17 @@
 //!
 //! ## What this table still does not know about
 //!
-//! **Nothing resets a row when a process exits, and proc numbers are recycled.**
-//! Rows became mutable in slice 5.8, so a [`Fd::File`] entry outlives the process
-//! that opened it: PM hands the fork pool's proc numbers back out every init
-//! cycle, and VFS is told nothing about exit (`signal_handler: None`, and no
-//! PM→VFS request exists). Today only init opens files, so no row is ever
-//! inherited — but the first forked child that calls `open` would leave a live
-//! descriptor onto an arbitrary inode for whatever process lands on that slot
-//! next. **`fork` also does not duplicate the parent's descriptors**, which POSIX
-//! requires.
+//! **Exit is handled; fork is not.** Proc numbers are recycled, so a [`Fd::File`]
+//! entry would outlive the process that opened it. PM therefore sends
+//! [`VFS_PM_EXIT`] on every exit path (`PM_EXIT` and the signal/kill path), and
+//! [`reset`] returns the dead process's row to [`DEFAULT_ROW`] before the proc
+//! number can be handed out again. **`fork` still does not duplicate the parent's
+//! descriptors**, which POSIX requires; that debt stays open (see the musl
+//! syscall-surface design, section 4). Today exec-from-FS resolves a binary by
+//! *inode* through [`VFS_EXEC_STAGE`], so no forked child holds a descriptor it
+//! did not open itself.
 //!
-//! **Slice 5.9 was predicted to force this and did not.** exec-from-FS resolves a
-//! binary by *inode*, through [`VFS_EXEC_STAGE`], with PM staging on the child's
-//! behalf — so no forked child ever holds a descriptor and no row is inherited by
-//! anything. The debt is real and still deferred; what changed is that it now has
-//! no scheduled forcing slice, and closing it needs a PM→VFS exit notification the
-//! ABI does not have. The first thing that will force it is a program that opens a
-//! file *after* being exec'd.
-//!
+//! [`VFS_PM_EXIT`]: minixrs_kernel_shared::callnr::VFS_PM_EXIT
 //! [`VFS_EXEC_STAGE`]: minixrs_kernel_shared::callnr::VFS_EXEC_STAGE
 
 use minixrs_kernel_shared::callnr::CDEV_MINOR_CONSOLE;
@@ -307,6 +300,30 @@ pub fn seek_in(
     Ok(new)
 }
 
+/// Reset `proc_nr`'s row to [`DEFAULT_ROW`] (the process is gone), returning how
+/// many descriptors were open beyond the defaults.
+///
+/// "Open beyond the defaults" counts every entry that differs from its default
+/// and is not `Unused` — a [`Fd::File`], or a console descriptor that was
+/// re-pointed — so a closed 0/1/2 (which the reset *re-opens*) is not counted as
+/// a leak. An out-of-range `proc_nr` is `0` and touches nothing: a stray
+/// `VFS_PM_EXIT` cannot corrupt a neighbour's row.
+pub fn reset_in(rows: &mut [FdRow], proc_nr: i32) -> usize {
+    let Some(row) = usize::try_from(proc_nr)
+        .ok()
+        .and_then(|slot| rows.get_mut(slot))
+    else {
+        return 0;
+    };
+    let leaked = row
+        .iter()
+        .zip(DEFAULT_ROW.iter())
+        .filter(|(have, default)| have != default && **have != Fd::Unused)
+        .count();
+    *row = DEFAULT_ROW;
+    leaked
+}
+
 /// Resolve `(proc_nr, fd)` against the live table.
 pub fn resolve(proc_nr: i32, fd: i32) -> Result<Fd, i32> {
     // SAFETY: single-mutator invariant (see the module note). The borrow is taken
@@ -339,6 +356,12 @@ pub fn seek(proc_nr: i32, fd: i32, whence: i32, offset: i64) -> Result<u64, i32>
     seek_in(unsafe { &mut *ROWS.0.get() }, proc_nr, fd, whence, offset)
 }
 
+/// Reset a process's row in the live table.
+pub fn reset(proc_nr: i32) -> usize {
+    // SAFETY: as `resolve` — one mutator, and the borrow does not escape.
+    reset_in(unsafe { &mut *ROWS.0.get() }, proc_nr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +383,34 @@ mod tests {
     /// be aliasing UB (see the module note).
     fn rows() -> [FdRow; NR_FD_ROWS] {
         [DEFAULT_ROW; NR_FD_ROWS]
+    }
+
+    #[test]
+    fn reset_restores_the_default_row_and_counts() {
+        let mut r = rows();
+        r[2][3] = Fd::File { ino: 7, pos: 9 };
+        r[2][5] = Fd::File { ino: 8, pos: 0 };
+        r[3][3] = Fd::File { ino: 9, pos: 1 };
+        assert_eq!(reset_in(&mut r, 2), 2);
+        assert_eq!(r[2], DEFAULT_ROW);
+        assert_eq!(r[3][3], Fd::File { ino: 9, pos: 1 }, "other rows untouched");
+    }
+
+    #[test]
+    fn reset_of_a_default_row_counts_zero() {
+        let mut r = rows();
+        assert_eq!(reset_in(&mut r, 4), 0);
+        assert_eq!(r[4], DEFAULT_ROW);
+    }
+
+    #[test]
+    fn reset_of_an_out_of_range_proc_is_zero_and_harmless() {
+        let mut r = rows();
+        r[0][3] = FILE;
+        assert_eq!(reset_in(&mut r, -2), 0);
+        assert_eq!(reset_in(&mut r, NR_SERVED_PROCS as i32), 0);
+        assert_eq!(r[0][3], FILE);
+        assert_eq!(r[1], DEFAULT_ROW);
     }
 
     #[test]
