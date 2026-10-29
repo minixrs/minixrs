@@ -226,6 +226,16 @@ minix.rs init: vfs.long ok match=1
 # check order that keeps it from issuing a grant) in host tests.
 minix.rs init: vfs.deny ok n=4
 
+# init's SENDRECs to VM, which the shared USER privilege reaches since chunk 5.
+# VM_FORK and VM_EXEC rewrite another process's bookkeeping and are PM-only, so
+# both must answer EPERM to init; the third probe is the top of VM's request band,
+# which must answer ENOSYS rather than be dropped (a dropped request would hang
+# init here and take every later init marker with it). The gate payloads are
+# deliberately invalid -- with a gate missing VM answers EINVAL, which this
+# marker's absence names as `vm.deny FAIL <fork-gate|exec-gate>`, and no real
+# process's bookkeeping is touched.
+minix.rs init: vm.deny ok n=3
+
 # ---------------------------------------------------------------------------
 # Slice 5.5: the exec ABI -- a SysV initial stack, so musl's crt runs unpatched.
 # ---------------------------------------------------------------------------
@@ -745,10 +755,10 @@ minix.rs init: fs.leak ok n=256
 # VM is now told about every exec (VM_EXEC) and reports the map it derived:
 # `heap` equal to `image_end`, and unequal to the legacy 0x0100_0000 origin.
 # The line is unconditional rather than sampled, because exec is rare and this
-# is the ONLY available proof that the heap follows the image -- the shared USER
-# privilege has no ipc_to bit for VM (kernel/src/proc/table.rs's USER_IPC_TO),
-# so no user program can call VM_BRK and no end-to-end brk proof exists until
-# chunk 5 opens that edge.
+# is the ONLY available proof that the heap follows the image from the exec
+# side. (The shared USER privilege now has an ipc_to bit for VM, so a user
+# program can read the origin back with VM_BRK(0); this marker stays the
+# exec-side proof.)
 #
 # Deliberately no `nr=` value, no image_end and no dropped count: expectations
 # are first-occurrence-only, so this matches whichever exec happens first, and

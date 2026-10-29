@@ -277,8 +277,8 @@ static IMAGE: [BootEntry; N_IMAGE] = [
     },
     // init (PID 1) is an ordinary user process, not a system server (slice 4.8):
     // `USR_T` traps (SENDREC only), and `init_boot_image` points its proc slot at
-    // the shared `USER_PRIV_ID` (ipc_to = {PM, VFS}, empty kernel-call mask) rather
-    // populating a dedicated server-grade priv slot. `priv_flags` here is *inert*
+    // the shared `USER_PRIV_ID` (ipc_to = {PM, VFS, VM}, empty kernel-call mask)
+    // rather populating a dedicated server-grade priv slot. `priv_flags` here is *inert*
     // for init: `init_boot_image` skips `populate_priv` for this entry, so `SYS_PROC`
     // is never consumed — it's kept only so the `IMAGE` array stays structurally
     // uniform. The user grade is enforced entirely by the shared `USER_PRIV_ID` slot.
@@ -384,14 +384,17 @@ const _: () = assert!((USER_PRIV_ID.get() as usize) < NR_SYS_PROCS);
 /// PM has been here since slice 4.5 — the whole process lifecycle flows through
 /// it in the POSIX shape (user → PM, never user → kernel). VFS joins in slice
 /// 5.4, which puts `write(1)` / `write(2)` on the VFS → TTY path and gives a user
-/// process its first way to put a byte on the console.
+/// process its first way to put a byte on the console. VM joins in chunk 5
+/// (musl syscall surface) so `brk`/`mmap`/`munmap` can go straight to it; VM
+/// gates the requests that rewrite another process's state (`VM_FORK`,
+/// `VM_EXEC`) to PM itself, and init's `vm.deny` probes prove it.
 ///
 /// Every entry costs a **pair** of `ipc_to` bits, and the reverse one is not
 /// free: `init_boot_image` fills a boot server's bitmap only over the active boot
 /// priv slots `[0, n_active)`, and [`USER_PRIV_ID`] is well past that, so each
 /// server's *reply* edge has to be opened here explicitly. Without it a user
 /// proc's SENDREC blocks forever with the server unable to answer.
-const USER_IPC_TO: [ProcNr; 2] = [PM_PROC_NR, VFS_PROC_NR];
+const USER_IPC_TO: [ProcNr; 3] = [PM_PROC_NR, VFS_PROC_NR, VM_PROC_NR];
 
 /// Populate the shared USER priv slot (slice 4.5).
 ///
@@ -478,10 +481,10 @@ fn init_boot_image() {
     for (slot, entry) in IMAGE.iter().enumerate() {
         if entry.nr == INIT_PROC_NR {
             // init is PID 1 — an ordinary user process. Point its proc slot at the
-            // shared USER priv (`USER_PRIV_ID`: `USR_T`, ipc_to = {PM, VFS}, empty
+            // shared USER priv (`USER_PRIV_ID`: `USR_T`, ipc_to = {PM, VFS, VM}, empty
             // k_call_mask, sig_mgr = PM), the same slot every forked child uses.
             // `populate_user_priv()` (called right after this loop) fills that slot
-            // and opens the PM → USER reverse edge, so no dedicated server-grade
+            // and opens each server → USER reverse edge, so no dedicated server-grade
             // priv slot is populated for init. Its would-be slot stays free.
             populate_proc(USER_PRIV_ID, entry);
             continue;

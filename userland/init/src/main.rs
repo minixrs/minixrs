@@ -6,8 +6,8 @@
 //! into the boot-image archive with its true proc number (`INIT_PROC_NR = 10`)
 //! and loaded + made runnable by the ordinary boot loop
 //! (`kernel/src/arch/aarch64/userland.rs`), not hand-released by PM. It runs as
-//! an ordinary user process — the shared `USER_PRIV_ID` privilege (SENDREC to PM
-//! and VFS, and no kernel calls at all) — so the whole process lifecycle flows
+//! an ordinary user process — the shared `USER_PRIV_ID` privilege (SENDREC to PM,
+//! VFS and VM, and no kernel calls at all) — so the whole process lifecycle flows
 //! through PM, and every byte of output through VFS, in the POSIX shape
 //! (user → server, never user → kernel).
 //!
@@ -37,6 +37,10 @@
 //! prints the **first** such status and nothing thereafter. See
 //! [`report_exec_stack`].
 //!
+//! Chunk 5 opens VM to the shared USER privilege, and `init` proves VM's side of
+//! that edge: [`vm_deny_probes`] sends `VM_FORK` / `VM_EXEC` (PM-only) and an
+//! unknown request, and expects `EPERM` / `EPERM` / `ENOSYS`.
+//!
 //! Built as a freestanding aarch64 ELF (`userland/init/user.ld`). It uses
 //! `minixrs-ipc` directly — no `server-rt`/SEF, because it is a plain user program,
 //! not a server. The `_start` shim and panic handler are gated to `not(test)`.
@@ -52,10 +56,11 @@ use minixrs_kernel_shared::callnr::{
     BDEV_BLOCK_SIZE, CDEV_MAX_IO, DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH, FS_PATH_MAX,
     NR_VFS_MSGS, PM_EXEC, PM_EXEC_PATH_MAX, PM_EXEC_PATH_OFF, PM_FORK, PM_WAIT, VFS_BUF_OFF,
     VFS_CLOSE, VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE, VFS_FD_OFF, VFS_FLAGS_OFF, VFS_LEN_OFF, VFS_OPEN,
-    VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE, VFS_WRITE,
+    VFS_PATH_LEN_OFF, VFS_PATH_OFF, VFS_READ, VFS_RQ_BASE, VFS_WRITE, VM_EXEC,
+    VM_EXEC_IMAGE_END_OFF, VM_EXEC_PROC_OFF, VM_FORK, VM_RQ_BASE,
 };
-use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, boot_endpoint};
-use minixrs_kernel_shared::endpoint::Endpoint;
+use minixrs_kernel_shared::com::{PM_PROC_NR, VFS_PROC_NR, VM_PROC_NR, boot_endpoint};
+use minixrs_kernel_shared::endpoint::{Endpoint, NONE};
 use minixrs_kernel_shared::error::{
     EBADF, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOEXEC, ENOSPC, ENOSYS, EPERM, OK,
 };
@@ -338,6 +343,7 @@ fn announce(vfs: Endpoint) {
     let _ = vfs_write(vfs, STDOUT, verdict.as_bytes());
 
     deny_probes(vfs);
+    vm_deny_probes(vfs);
 }
 
 /// The `VFS_WRITE` requests that must be refused, each valid but for one field.
@@ -394,6 +400,63 @@ fn deny_probes(vfs: Endpoint) {
         }
     }
     let _ = vfs_write(vfs, STDERR, "minix.rs init: vfs.deny ok n=4\n".as_bytes());
+}
+
+/// The requests VM must refuse an ordinary user process (chunk 5, M7 and M8).
+///
+/// The shared USER privilege reaches VM since this chunk (`USER_IPC_TO`), which
+/// is what lets `brk` and `mmap` work — and what makes VM's own gates load-bearing:
+/// `VM_FORK` and `VM_EXEC` rewrite another process's bookkeeping and are PM-only.
+///
+///   - `fork-gate` — `VM_FORK` from init. `EPERM`.
+///   - `exec-gate` — `VM_EXEC` from init. `EPERM`.
+///   - `no-such` — the top of VM's request band. `ENOSYS`; VM has no
+///     `NR_VM_MSGS` to be band-relative against, so the last slot is the closest
+///     spelling. As in [`deny_probes`] the reply itself is an assertion: a VM that
+///     dropped an unknown request would leave init blocked here forever.
+///
+/// The gate targets are **deliberately invalid** (`NONE`, a zero-ish image end):
+/// with a gate missing VM answers `EINVAL` — distinguishable from `EPERM` — and
+/// touches no real process's bookkeeping.
+///
+/// These live in init rather than `fileio`: the fork's IPC trap `__minixrs_ipc`
+/// is `hidden` libc-internal API a user program should not declare. init holds
+/// the same USER privilege, so the sender is still an ordinary user process.
+#[cfg_attr(test, allow(dead_code))]
+fn vm_deny_probes(vfs: Endpoint) {
+    let vm = boot_endpoint(VM_PROC_NR);
+
+    let mut fork = pm_msg(VM_FORK);
+    fork.payload[0..4].copy_from_slice(&NONE.to_ne_bytes());
+    fork.payload[4..8].copy_from_slice(&NONE.to_ne_bytes());
+
+    let mut exec = pm_msg(VM_EXEC);
+    exec.payload[VM_EXEC_PROC_OFF..VM_EXEC_PROC_OFF + 4].copy_from_slice(&NONE.to_ne_bytes());
+    exec.payload[VM_EXEC_IMAGE_END_OFF..VM_EXEC_IMAGE_END_OFF + 8]
+        .copy_from_slice(&0x10_0000u64.to_ne_bytes());
+
+    let probes = [
+        ("fork-gate", fork, EPERM),
+        ("exec-gate", exec, EPERM),
+        ("no-such", pm_msg(VM_RQ_BASE + 0xFF), ENOSYS),
+    ];
+
+    for (name, mut m, want) in probes {
+        if ipc_sendrec(vm, &mut m) != OK || m.m_type != want {
+            return report_vm_fail(vfs, name);
+        }
+    }
+    let _ = vfs_write(vfs, STDERR, "minix.rs init: vm.deny ok n=3\n".as_bytes());
+}
+
+/// Report a failed [`vm_deny_probes`] probe, the way [`report_fail`] does for VFS.
+#[cfg_attr(test, allow(dead_code))]
+fn report_vm_fail(vfs: Endpoint, name: &str) {
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: vm.deny FAIL ");
+    n = append(&mut line, n, name.as_bytes());
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDERR, &line[..n]);
 }
 
 // ----- Slice 5.8: the read path ---------------------------------------------
