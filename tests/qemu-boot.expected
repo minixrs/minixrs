@@ -847,3 +847,51 @@ minix.rs fileio: fresh-buf ok
 # otherwise read back correct. Mutation-tested: a shim that drops O_TRUNC passes
 # the first run and prints `seek-hole FAIL not-truncated` on every later one.
 minix.rs fileio: seek-hole ok
+
+# fileio's MEMORY AND STDIO section, after the raw one. Still reported through
+# write(2) -- all but `stdio ok`, which is printf's own proof -- so a broken
+# stdio costs one marker rather than four.
+
+# The heap origin, observed from C. fileio reads sbrk(0) as the first statement
+# of main, before anything can malloc, and requires it to equal the linker's
+# _end rounded up to a page -- the image end the kernel's exec measured and PM
+# handed VM_EXEC, derived here independently. Then brk below the origin answers
+# the unchanged break with errno untouched (Linux semantics, Review Focus 4);
+# the first malloc advances the break (mallocng took the brk path, not its mmap
+# fallback); and an UNALIGNED break, cur + 0x123, comes back exactly and its
+# last byte is writable. mallocng only ever asks for page-aligned breaks, so
+# that last probe is the only thing telling VM's exact break from its aligned
+# region end. Mutation-tested: VM replying the aligned end prints `brk FAIL
+# unaligned`; VM refusing the brk(0) query makes the shim answer 0 and prints
+# `brk FAIL origin rc=0`.
+minix.rs fileio: brk ok
+
+# fopen("/etc/motd") + fgets returns the motd line, then rewind + an fread of
+# all 31 bytes returns them again, and fclose answers 0 -- printed with printf
+# and fflushed. fgets refills through a plain read() into the FILE's buffer;
+# the fread is what reaches readv through stdio (musl's __stdio_read hands it
+# the caller's buffer less one byte plus the FILE's buffer, so motd's last
+# byte arrives through the second iovec).
+minix.rs fileio: stdio ok
+
+# A four-page anonymous mmap, every byte filled and read back, munmap answers
+# 0, and a second munmap of the same base answers -1/EINVAL -- which only VM can
+# say, so the first one really reached it. Then MAP_FIXED, which VM cannot
+# honour, answers -1/ENOSYS rather than a mapping somewhere else.
+minix.rs fileio: mmap ok
+
+# malloc(64) and malloc(256 KiB) -- the second past mallocng's mmap threshold
+# (131052 bytes), so both of its allocation paths run -- each filled, read back
+# and freed.
+minix.rs fileio: malloc ok
+
+# The exit reset (design M16): fileio's last act is to open /etc/motd and exit
+# without closing it, and VFS, told of the exit by PM's VFS_PM_EXIT, resets the
+# row and reports closing exactly one descriptor. VFS prints this, so it is not
+# `fileio:`-prefixed; it is silent when a reset closed nothing, so ordinary
+# exits never print it. fileio checks the leaked descriptor is 3, the lowest
+# above the console's 0/1/2 (open returns the lowest free one), so `closed=1`
+# is that one leak and not an earlier check's. NR_FDS is 8, so `closed=1` is
+# never a prefix of a longer count. Mutation-tested: PM not sending
+# VFS_PM_EXIT makes the line vanish.
+[diag vfs] pm-exit reset closed=1

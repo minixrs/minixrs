@@ -87,3 +87,12 @@ minix.rs fileio: lseek deny FAIL
 minix.rs fileio: readv FAIL
 minix.rs fileio: fresh-buf FAIL
 minix.rs fileio: seek-hole FAIL
+# ...and the memory-and-stdio section's checks, in the same form. `exit-reset
+# FAIL` is the leak's own precondition failing: the descriptor fileio leaves
+# open for VFS's exit reset was not 3, so an earlier check leaked one (or the
+# open itself failed), and VFS's count would be judging that leak too.
+minix.rs fileio: brk FAIL
+minix.rs fileio: stdio FAIL
+minix.rs fileio: mmap FAIL
+minix.rs fileio: malloc FAIL
+minix.rs fileio: exit-reset FAIL

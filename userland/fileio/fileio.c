@@ -8,19 +8,35 @@
  * of /etc on the MinixFS root, through the fork's syscall shim, VFS and MFS.
  * Exec'd by init out of the filesystem (/bin/fileio), exactly as hello is.
  *
- * This is the RAW section (design M10): every check reports through write(2)
- * on fd 1 directly, never through stdio, so its markers are on the console
- * before stdio or malloc has run at all. A crash in a later section cannot
- * swallow them.
+ * Two sections, in this order (design M10):
+ *
+ *   - RAW: read, lseek, lseek deny, readv, fresh-buf, seek-hole. Every check
+ *     reports through write(2) on fd 1 directly, never through stdio, so its
+ *     markers are on the console before stdio or malloc has run at all. A
+ *     crash in a later section cannot swallow them.
+ *   - MEMORY AND STDIO: brk, stdio, mmap, malloc, then the exit-reset leak.
+ *     These still report through write(2) -- except `stdio ok`, which is
+ *     printf's own proof -- so a broken stdio costs one marker, not four.
+ *
+ * One reading happens before either section: the program break, taken as the
+ * first statement of main, before anything can malloc. The brk check judges
+ * it later.
  *
  * Each check prints `minix.rs fileio: <name> ok` only when the thing it names
  * actually worked, or `minix.rs fileio: <name> FAIL <detail>` -- the
  * self-checking 5.3/5.4 style. The FAIL forms are on tests/qemu-boot.forbidden.
  *
- * errno is cleared before every errno-checked call. Nothing in this section
- * mallocs, but a later one will, and mallocng's first allocation leaves errno
- * at ENOSYS (its ignored MAP_FIXED guard mmap) -- a probe that read errno
- * without clearing it first would be judging someone else's failure.
+ * errno is cleared before every errno-checked call. mallocng's first
+ * allocation leaves errno at ENOSYS (its ignored MAP_FIXED guard mmap), so a
+ * probe that read errno without clearing it first would be judging someone
+ * else's failure.
+ *
+ * No PT_TLS (design M11): nothing here is _Thread_local and musl's own TLS
+ * fits builtin_tls, so __init_tls never reaches the mmap arm and startup still
+ * issues exactly one syscall. Verify with
+ *   llvm-readobj --program-headers --elf-output-style=GNU target/fileio/fileio
+ * -- three LOADs and a NOTE, no TLS. (fileio.ld, like hello.ld, declares no
+ * PT_TLS phdr at all; its header says why.)
  *
  * Nothing here is minix.rs-specific, as in hello: no <minixrs/...> header,
  * just POSIX. The few facts about the image it depends on are literals, each
@@ -31,8 +47,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -552,16 +572,329 @@ out:
 	(void)close(fd);
 }
 
+/* ========================================================================= */
+/* Memory and stdio. */
+
+/* The kernel's USER_PAGE_SIZE, and the AT_PAGESZ mallocng reads. */
+#define PAGE 4096UL
+
+/* The end of the image's last section, .bss: fileio.ld PROVIDEs it for the
+ * in-tree musl flavour, and lld defines it itself for the SDK's script-less
+ * link. */
+extern char _end[];
+
+/*
+ * brk: the heap origin VM_EXEC recorded, observed from C, and Linux's brk
+ * semantics through the shim (design M3).
+ *
+ *   - The break main read before anything could malloc equals the image end
+ *     rounded up to a page -- the origin the kernel's exec measured and PM
+ *     handed VM, here derived independently from the linker's _end.
+ *   - brk below the origin (Review Focus 4) returns the unchanged current
+ *     break: not an errno, not a moved break. errno must stay 0.
+ *   - The first malloc advances the break: mallocng took the brk path for its
+ *     metadata, not the mmap fallback.
+ *   - An UNALIGNED break comes back exactly as asked, and its last byte is
+ *     writable. mallocng only ever asks for page-aligned breaks, so this is
+ *     the one probe that can tell VM's exact break from its page-aligned
+ *     region end -- the reply a libc compares for equality.
+ *
+ * The probe then puts the byte and the break back where mallocng left them:
+ * mallocng keeps its own copy of the break and expects the memory above it
+ * to be untouched and zero when it next grows the heap.
+ *
+ * Mutations: VM replying the aligned region end fails `unaligned`; VM
+ * answering brk(0) with EINVAL makes the shim's query answer 0, and `origin`
+ * fails.
+ */
+#define BRK_UNALIGNED 0x123
+#define BRK_PROBE_BYTE 0x5A
+
+static void check_brk(uintptr_t origin)
+{
+	uintptr_t want = ((uintptr_t)_end + PAGE - 1) & ~(PAGE - 1);
+	volatile unsigned char *last;
+	uintptr_t cur;
+	long r;
+	void *p;
+
+	if (origin != want) {
+		fail("brk", "origin", (long)origin, 0);
+		return;
+	}
+
+	errno = 0;
+	r = syscall(SYS_brk, PAGE);
+	if ((uintptr_t)r != origin || errno != 0) {
+		fail("brk", "below-origin", r, errno);
+		return;
+	}
+
+	errno = 0;
+	p = malloc(16);
+	if (p == NULL) {
+		fail("brk", "malloc", 0, errno);
+		return;
+	}
+	cur = (uintptr_t)sbrk(0);
+	if (cur <= origin) {
+		fail("brk", "not-advanced", (long)cur, 0);
+		goto out;
+	}
+
+	errno = 0;
+	r = syscall(SYS_brk, cur + BRK_UNALIGNED);
+	if ((uintptr_t)r != cur + BRK_UNALIGNED || errno != 0) {
+		fail("brk", "unaligned", r, errno);
+		goto out;
+	}
+	/* A break VM accepted but did not back would fault here, and VM's
+	 * out-of-region arm would kill the process: the marker never prints. */
+	last = (volatile unsigned char *)(cur + BRK_UNALIGNED - 1);
+	*last = BRK_PROBE_BYTE;
+	if (*last != BRK_PROBE_BYTE) {
+		fail("brk", "last-byte", *last, 0);
+		goto out;
+	}
+	*last = 0;
+
+	errno = 0;
+	r = syscall(SYS_brk, cur);
+	if ((uintptr_t)r != cur || errno != 0) {
+		fail("brk", "restore", r, errno);
+		goto out;
+	}
+
+	ok("brk");
+out:
+	free(p);
+}
+
+/*
+ * stdio: fopen + fgets + fread + fclose of /etc/motd, and printf to say so.
+ *
+ * fgets refills through __uflow, a plain read() into the FILE's buffer. fread
+ * of more than one byte into the caller's buffer is the other path: musl's
+ * __stdio_read hands readv TWO iovecs, the caller's buffer less one byte and
+ * the FILE's own buffer, so the last byte of motd arrives through the second
+ * iovec. The rewind between them (an lseek SEEK_SET through stdio) empties the
+ * buffer, so the fread really reads, and reads known bytes.
+ *
+ * Failures report through write(2), like every other check, so a broken
+ * stdio still says where; only `stdio ok` itself goes through printf -- the
+ * marker is printf's proof. musl's stdout starts line-buffered and turns
+ * fully buffered on its first write (the shim's ioctl answers ENOTTY), so the
+ * fflush is what puts the line out now rather than at exit, in one write.
+ */
+static void check_stdio(void)
+{
+	char buf[64];
+	size_t n;
+	FILE *f;
+
+	errno = 0;
+	f = fopen(motd_path, "r");
+	if (f == NULL) {
+		fail("stdio", "fopen", 0, errno);
+		return;
+	}
+
+	memset(buf, 0, sizeof buf);
+	errno = 0;
+	if (fgets(buf, sizeof buf, f) != buf || strcmp(buf, motd) != 0) {
+		fail("stdio", "fgets", (long)strlen(buf), errno);
+		(void)fclose(f);
+		return;
+	}
+
+	rewind(f);
+	memset(buf, 0, sizeof buf);
+	errno = 0;
+	n = fread(buf, 1, MOTD_LEN, f);
+	if (n != MOTD_LEN || memcmp(buf, motd, MOTD_LEN) != 0) {
+		fail("stdio", "fread", (long)n, errno);
+		(void)fclose(f);
+		return;
+	}
+
+	errno = 0;
+	if (fclose(f) != 0) {
+		fail("stdio", "fclose", -1, errno);
+		return;
+	}
+
+	printf("minix.rs fileio: stdio ok\n");
+	errno = 0;
+	if (fflush(stdout) != 0)
+		fail("stdio", "fflush", -1, errno);
+}
+
+/*
+ * mmap: an anonymous four-page mapping, filled and read back, then unmapped
+ * (design M4).
+ *
+ * munmap answering 0 alone proves nothing -- a shim that answered 0 without
+ * asking VM would pass it. A second munmap of the same base must answer
+ * -1/EINVAL, which only VM can say: the first one really removed the region.
+ * Then MAP_FIXED, which VM cannot honour, must be -1/ENOSYS rather than a
+ * mapping somewhere else.
+ *
+ * Mutation: a shim munmap that returns 0 without sending fails `again`.
+ */
+#define MMAP_PAGES 4
+#define MMAP_LEN (MMAP_PAGES * PAGE)
+#define FILL_BYTE(i) ((unsigned char)(((i) * 7 + 3) & 0xff))
+
+static void check_mmap(void)
+{
+	unsigned char *p;
+	void *q;
+	size_t i;
+	int r;
+
+	errno = 0;
+	p = mmap(NULL, MMAP_LEN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (p == MAP_FAILED) {
+		fail("mmap", "mmap", -1, errno);
+		return;
+	}
+	for (i = 0; i < MMAP_LEN; i++)
+		p[i] = FILL_BYTE(i);
+	for (i = 0; i < MMAP_LEN; i++)
+		if (p[i] != FILL_BYTE(i)) {
+			fail("mmap", "verify", (long)i, 0);
+			(void)munmap(p, MMAP_LEN);
+			return;
+		}
+
+	errno = 0;
+	if ((r = munmap(p, MMAP_LEN)) != 0) {
+		fail("mmap", "munmap", r, errno);
+		return;
+	}
+
+	errno = 0;
+	r = munmap(p, MMAP_LEN);
+	if (r != -1 || errno != EINVAL) {
+		fail("mmap", "again", r, errno);
+		return;
+	}
+
+	errno = 0;
+	q = mmap(p, PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	if (q != MAP_FAILED || errno != ENOSYS) {
+		fail("mmap", "fixed", q == MAP_FAILED ? -1 : 0, errno);
+		if (q != MAP_FAILED)
+			(void)munmap(q, PAGE);
+		return;
+	}
+
+	ok("mmap");
+}
+
+/*
+ * malloc: a small allocation, and a large one past mallocng's mmap threshold
+ * (MMAP_THRESHOLD, 131052 bytes in v1.2.6), so both of its allocation paths
+ * run: a slot in a group, and a dedicated mapping of its own. Each is filled,
+ * read back and freed.
+ */
+#define MALLOC_SMALL 64
+#define MALLOC_LARGE (256 * 1024)
+
+static int filled_ok(unsigned char *p, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		p[i] = FILL_BYTE(i);
+	for (i = 0; i < len; i++)
+		if (p[i] != FILL_BYTE(i))
+			return 0;
+	return 1;
+}
+
+static void check_malloc(void)
+{
+	unsigned char *small, *large;
+
+	errno = 0;
+	small = malloc(MALLOC_SMALL);
+	if (small == NULL) {
+		fail("malloc", "small", 0, errno);
+		return;
+	}
+	errno = 0;
+	large = malloc(MALLOC_LARGE);
+	if (large == NULL) {
+		fail("malloc", "large", 0, errno);
+		free(small);
+		return;
+	}
+
+	if (!filled_ok(small, MALLOC_SMALL)) {
+		fail("malloc", "small-verify", 0, 0);
+		goto out;
+	}
+	if (!filled_ok(large, MALLOC_LARGE)) {
+		fail("malloc", "large-verify", 0, 0);
+		goto out;
+	}
+
+	ok("malloc");
+out:
+	free(large);
+	free(small);
+}
+
+/*
+ * The exit-reset leak (design M16), LAST: open /etc/motd and exit without
+ * closing it. VFS's exit reset then closes exactly this one descriptor and
+ * says so -- `[diag vfs] pm-exit reset closed=1` -- which is the proof that PM
+ * told VFS about the exit at all.
+ *
+ * The descriptor must be 3, the lowest above the console's 0/1/2: open
+ * returns the lowest free descriptor, so anything higher means an earlier
+ * check leaked one, and VFS's count would be judging that leak too.
+ *
+ * Mutation: PM not sending VFS_PM_EXIT makes the diag line vanish.
+ */
+#define FIRST_FREE_FD 3
+
+static void leak_one_descriptor(void)
+{
+	int fd;
+
+	errno = 0;
+	fd = open(motd_path, O_RDONLY);
+	if (fd != FIRST_FREE_FD) {
+		fail("exit-reset", "open", fd, errno);
+		if (fd >= 0)
+			(void)close(fd);
+	}
+}
+
 int main(void)
 {
-	/* Each check opens and closes its own descriptors, so one failing leaves
-	 * the next its own clean start -- and the process exits with nothing
-	 * open (VFS's exit reset reports only when it closed something). */
+	/* The first statement, before anything can malloc: from here on, any
+	 * stdio or malloc call may move the break. */
+	uintptr_t brk_origin = (uintptr_t)sbrk(0);
+
+	/* RAW. Each check opens and closes its own descriptors, so one failing
+	 * leaves the next its own clean start. */
 	check_read();
 	check_lseek();
 	check_lseek_deny();
 	check_readv();
 	check_fresh_buf();
 	check_seek_hole();
+
+	/* Memory and stdio. */
+	check_brk(brk_origin);
+	check_stdio();
+	check_mmap();
+	check_malloc();
+
+	/* Last: one descriptor deliberately left open for VFS's exit reset. */
+	leak_one_descriptor();
 	return 0;
 }

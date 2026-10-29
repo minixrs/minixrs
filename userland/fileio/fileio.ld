@@ -114,6 +114,16 @@ SECTIONS {
         *(COMMON)
     } :data
 
+    /*
+     * The image end, for a C program that asks where its heap starts: fileio's
+     * brk probe compares the origin VM_EXEC recorded with this, rounded up to a
+     * page. lld defines `_end` itself only for a link with no SECTIONS command
+     * (the SDK's), so a script has to provide it. .bss is the last section of
+     * the last PT_LOAD, so `.` here is that segment's p_vaddr + p_memsz.
+     * PROVIDE: defined only when something references it.
+     */
+    PROVIDE(_end = .);
+
     /DISCARD/ : {
         *(.eh_frame)
         *(.eh_frame_hdr)

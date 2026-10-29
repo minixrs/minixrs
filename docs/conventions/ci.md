@@ -151,13 +151,15 @@ The mitigation is local. Run the **three-boot matrix** when touching `build_c_*`
   selector never reaches the sysroot, so moving it aside alone re-runs the SDK row — 5.10a nearly
   recorded that as a passing fourth row.
 - **A correct row 3 FAILS `check-boot-log.sh`, by design.** The fallback packs `worker` under the
-  names `hello` and `fileio`, so the C programs' own markers cannot appear. Exactly eleven expected
+  names `hello` and `fileio`, so the C programs' own markers cannot appear. Exactly sixteen expected
   markers go missing and nothing else — `hello`'s five (`hello: Hello from C!`, `hello: stderr
-  works`, `hello: errno ok`, `iov-end`, `hello: iov ok match=1`) and `fileio`'s six (`fileio: read`,
-  `lseek ok`, `lseek deny ok`, `readv ok`, `fresh-buf ok`, `seek-hole ok`). The two exec-trace
-  markers still match, because `worker` is exec'd under those names. Any *other* missing marker is a
-  real regression — and a **125/125 on row 3 means the fallback did not engage**, so what you
-  measured was the musl row again. Rows 1 and 2 must be fully clean.
+  works`, `hello: errno ok`, `iov-end`, `hello: iov ok match=1`), `fileio`'s ten (`fileio: read`,
+  `lseek ok`, `lseek deny ok`, `readv ok`, `fresh-buf ok`, `seek-hole ok`, `brk ok`, `stdio ok`,
+  `mmap ok`, `malloc ok`), and VFS's `[diag vfs] pm-exit reset closed=1`, since `worker` leaves no
+  descriptor open for the exit reset to close. The two exec-trace markers still match, because
+  `worker` is exec'd under those names. Any *other* missing marker is a real regression — and a
+  **135/135 on row 3 means the fallback did not engage**, so what you measured was the musl row
+  again. Rows 1 and 2 must be fully clean.
 
 Identify the flavour from the **build-script warnings**, never from the boot log: the C markers are
 byte-identical across the SDK and musl flavours, so the log physically cannot tell them apart.
