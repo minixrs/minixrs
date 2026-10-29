@@ -41,8 +41,8 @@ minix.rs hello: Hello from C!
 3. **`Worker`** — no C toolchain: the `worker` ELF is packed *under the name* `hello`.
 
 `Musl` is **not** a fallback. CI's blocking `qemu-smoke` job cannot install an SDK — an LLVM build
-is hours — while `tests/qemu-boot.expected` *requires* the five C markers, so the in-tree sysroot is
-that gate's real dependency. Only `Worker` loses markers.
+is hours — while `tests/qemu-boot.expected` *requires* the C programs' markers (`hello`'s and
+`fileio`'s), so the in-tree sysroot is that gate's real dependency. Only `Worker` loses markers.
 
 An SDK is "usable" when exactly three files exist:
 

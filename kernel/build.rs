@@ -396,8 +396,9 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 /// The files that earn their place:
 ///
 ///   * `/bin/hello` — what slice 5.9 execs out of the filesystem. Passed in rather
-///     than rebuilt, so the image and the archive's `hello` module can never
-///     disagree.
+///     than rebuilt: the caller built it once, brand-checked and size-checked
+///     it, and this image is the only place it goes — no boot-archive copy has
+///     existed since 5.9 dropped the `hello` module.
 ///   * `/bin/fileio` — the C file-I/O proof (pre-Phase-6 chunk 5), exec'd the
 ///     same way and passed in for the same reason. It *creates*
 ///     `/etc/seekhole` at runtime, which is why that file is not in the
@@ -462,12 +463,12 @@ fn build_rootfs(hello_bytes: &[u8], fileio_bytes: &[u8]) -> Vec<u8> {
     // MFS at *runtime*. Checked here, against the bytes just built, because it
     // cannot be settled anywhere else: the image's largest files are `/bin/hello`
     // and `/bin/fileio`, whose sizes are a property of the toolchain flavour
-    // (`hello` ~230 KB with in-tree musl and ~47 KB with the SDK; `fileio` ~27 KB
-    // with either while it does not use stdio; both ~15 KB in the sysroot-absent
-    // fallback), so a unit test over a fixture manifest would be measuring
-    // something that is not this image. Without it, contents growing past the
-    // headroom is `ENOSPC` on the first write and surfaces only as
-    // `fs.write FAIL short` in a QEMU boot.
+    // (`hello` ~230 KB with in-tree musl and ~47 KB with the SDK; `fileio`
+    // ~260 KB with in-tree musl, stdio and mallocng linked in, and ~48 KB with
+    // the SDK; both ~15 KB in the sysroot-absent fallback), so a unit test over
+    // a fixture manifest would be measuring something that is not this image.
+    // Without it, contents growing past the headroom is `ENOSPC` on the first
+    // write and surfaces only as `fs.write FAIL short` in a QEMU boot.
     let free = minixrs_mkfs_mfs::verify::free_zones(&img)
         .expect("the image just built decodes its own layout");
     assert!(

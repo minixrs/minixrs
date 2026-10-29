@@ -4,12 +4,15 @@
  * minix.rs aarch64 EL0 → EL1 trap entry + eret stub.
  *
  * Used for:
- *   - EL0 SVC traps (vector slot 8). `vectors.S` branches here unconditionally
- *     for that slot; this stub saves user state into CURRENT_PROC->regs,
- *     decodes ESR_EL1, and dispatches either `do_ipc` (EC = SVC64) or the
- *     unexpected-sync panic helper.
- *   - Returning to EL0. `switch_to_user` and the SVC tail both branch to
- *     `el1_return_to_user`, which restores `tpidr_el1`-pointed regs and erets.
+ *   - EL0 synchronous exceptions (vector slot 8). `vectors.S` branches here
+ *     unconditionally for that slot; this stub saves the whole user context
+ *     into CURRENT_PROC->regs -- x0..x30, SP_EL0, ELR_EL1, SPSR_EL1, the
+ *     TPIDR_EL0 thread pointer (spec M18) and the FP/SIMD state, FPCR, FPSR and
+ *     q0..q31 (spec M19) -- decodes ESR_EL1, and dispatches either `do_ipc`
+ *     (EC = SVC64) or `do_page_fault` (every other EC).
+ *   - Returning to EL0. `switch_to_user`, the SVC and page-fault tails here,
+ *     and the IRQ tail in `interrupt.S` all branch to `el1_return_to_user`,
+ *     which restores the same set from the `tpidr_el1`-pointed frame and erets.
  *
  * Calling convention:
  *   - TPIDR_EL1 always holds `&mut CURRENT_PROC->regs` while we are running
@@ -159,10 +162,14 @@ el0_64_sync_entry:
  * Used by:
  *   - proc::sched::switch_to_user (first entry into EL0).
  *   - SVC tail (after do_ipc returns).
+ *   - Page-fault tail (after do_page_fault returns).
+ *   - IRQ tail in `interrupt.S` (after do_irq returns).
  *
- * Both paths leave TPIDR_EL1 pointing at the frame. x9 stays the base
- * throughout; x8 and x9 are restored last (otherwise loading into x9
- * would clobber the base).
+ * Restores the system registers, TPIDR_EL0, FPCR/FPSR and q0..q31, then the
+ * GPRs. Every path leaves TPIDR_EL1 pointing at the frame -- possibly a
+ * different proc's than the one that trapped, if the tail rescheduled. x9
+ * stays the base throughout; x8 and x9 are restored last (otherwise loading
+ * into x9 would clobber the base).
  */
     .global el1_return_to_user
     .type el1_return_to_user, %function

@@ -5,7 +5,8 @@
  *
  * Wired in `vectors.S` vector slot 9 (`el0_64_irq`) — the IRQ vector for an
  * exception taken from a Lower EL using AArch64. Mirrors the save/restore
- * idiom from `el0_64_sync_entry` (slice 2.3): user state goes into the
+ * idiom from `el0_64_sync_entry` (slice 2.3): the whole user state — GPRs,
+ * return state, TPIDR_EL0 and FP/SIMD — goes into the
  * `tpidr_el1`-pointed `ArchRegisterFrame`, the Rust dispatcher runs with
  * the frame pointer in x0, then the tail returns to whichever EL0 context
  * `tpidr_el1` still points at — possibly a *different* proc if `do_irq`
@@ -40,8 +41,10 @@
  * Same calling convention as el0_64_sync_entry: spill the user's x29/x30 to
  * the kernel stack to free two scratch registers, load the frame pointer
  * from TPIDR_EL1 into x29, save x0..x28 directly, then recover x29/x30 from
- * the kernel stack and store into the frame. Finally save SP_EL0, ELR_EL1,
- * SPSR_EL1 and tail-call do_irq.
+ * the kernel stack and store into the frame. Then save SP_EL0, ELR_EL1,
+ * SPSR_EL1, TPIDR_EL0 (spec M18) and FPCR, FPSR and q0..q31 (spec M19) --
+ * the same set, in the same order, as the sync entry -- call do_irq, and
+ * branch to el1_return_to_user, which restores all of it.
  */
     .global el0_64_irq_entry
     .type el0_64_irq_entry, %function

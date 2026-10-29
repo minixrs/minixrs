@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 // REGS_*_OFFSET constants are the canonical source for the mirrored `.equ`
-// directives in trap.S; they're consumed by assembly, not by Rust callers,
-// so the dead-code lint would otherwise fire. The size + align asserts at
-// the bottom of this file are the active guards.
+// directives in trap.S and interrupt.S; they're consumed by assembly, not by
+// Rust callers, so the dead-code lint would otherwise fire. The `offset_of!`,
+// size and align asserts at the bottom of this file are the active guards.
 #![allow(dead_code)]
 
 //! Process register frame — saved on entry to EL1 and restored on `eret`.
 //!
 //! Slice 2.2 defined the layout; slice 2.3 wires up the SVC entry path that
 //! actually populates and restores it. The field order matches what an EL0
-//! → EL1 trap saves (general-purpose registers, then SP_EL0 and the two EL1
-//! system registers that carry the return state). Field offsets are mirrored
-//! into `trap.S` and `interrupt.S` via `.equ` directives; the `size_of`
-//! and `offset_of!` asserts below catch accidental drift.
+//! → EL1 trap saves: the general-purpose registers, SP_EL0 and the two EL1
+//! system registers that carry the return state, then TPIDR_EL0 (spec M18)
+//! and the FP/SIMD state, FPCR, FPSR and q0–q31 (spec M19). Field offsets
+//! are mirrored into `trap.S` and `interrupt.S` via `.equ` directives. Each
+//! mirrored offset has its own `offset_of!` assert below, so a field moving
+//! is caught wherever it sits. The `size_of` assert pins only the total: it
+//! fails when a field is added or resized — the prompt to update the stubs —
+//! but cannot say which offset moved.
 
 /// Saved register state for a user-mode process, captured at EL1 exception
 /// entry. Layout matches the load/store sequence in `trap.S`.
@@ -68,8 +72,10 @@ impl ArchRegisterFrame {
 // ----- Offsets mirrored into trap.S and interrupt.S -------------------------
 //
 // trap.S and interrupt.S each declare matching `.equ REGS_*_OFFSET, …` lines.
-// If you change the layout, update all three; the `size_of` and `offset_of!`
-// asserts below catch drift on the Rust side.
+// If you change the layout, update all three. The asserts below catch drift
+// on the Rust side only — a field's `offset_of!` against its constant, the
+// `size_of` against the total — and nothing checks the `.equ` copies, so the
+// stubs must be edited by hand to match.
 
 /// Offset of `x[0]` within [`ArchRegisterFrame`].
 pub const REGS_X_OFFSET: usize = 0;

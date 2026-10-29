@@ -56,8 +56,8 @@ whole-project picture.
   Without the recursive checkout the job silently tests the `worker`-as-`hello` fallback
 - **Which `hello` flavor a job builds is decided by whether it builds the musl sysroot**:
   `qemu-smoke` does, so it builds **`musl`** — which is why that flavor is a real dependency rather
-  than a fallback, since `tests/qemu-boot.expected` requires the five C markers. `clippy-kernel`
-  does not, so it builds **`worker`**. No job builds the SDK flavor at all — see
+  than a fallback, since `tests/qemu-boot.expected` requires the C programs' markers.
+  `clippy-kernel` does not, so it builds **`worker`**. No job builds the SDK flavor at all — see
   [The SDK flavor has zero CI coverage](#the-sdk-flavor-has-zero-ci-coverage) below for what that
   costs and the local mitigation
 - `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner: boots the kernel for 600 s wall clock via

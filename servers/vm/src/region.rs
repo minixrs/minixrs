@@ -185,10 +185,10 @@ impl ClientRegions {
     /// region as `[heap_origin, page_align_up(new_break))`. Returns the exact
     /// `new_break` (not the aligned region end). `new_break == 0` is a query
     /// (M3): it changes nothing and returns the current break, the exact break
-    /// last set or else the heap origin. Errors: `EINVAL` if `new_break` is below this process's
-    /// heap origin, the page-aligned break would overflow `u64`, or no region
-    /// slot is free for a new heap; `ENOMEM` if the break would carry the heap
-    /// past [`REGION_LIMIT`] into the stack's guard page.
+    /// last set or else the heap origin. Errors: `EINVAL` if `new_break` is
+    /// below this process's heap origin, the page-aligned break would overflow
+    /// `u64`, or no region slot is free for a new heap; `ENOMEM` if the break
+    /// would carry the heap past [`REGION_LIMIT`] into the stack's guard page.
     fn set_brk(&mut self, new_break: u64) -> Result<u64, i32> {
         // The origin is read once, up front: the free-slot loop below borrows
         // `self.regions` mutably, so `self.heap_origin` cannot be read inside it.
@@ -409,9 +409,12 @@ pub fn contains(nr: i32, addr: u64) -> bool {
 
 /// Set process `nr`'s program break to `new_break`, growing or creating its
 /// heap region as `[heap_origin, page_align_up(new_break))`. Returns the exact
-/// `new_break` on success (`0` queries the current break and changes nothing), or `EINVAL` if `nr` is untrackable or
-/// `new_break` is below that process's heap origin — the legacy [`HEAP_BASE`]
-/// until a `VM_EXEC` records an image-relative one.
+/// `new_break` on success (`0` queries the current break and changes nothing).
+/// Errors: `EINVAL` if `nr` is untrackable, `new_break` is below that process's
+/// heap origin — the legacy [`HEAP_BASE`] until a `VM_EXEC` records an
+/// image-relative one — the aligned break would overflow, or no region slot is
+/// free for a new heap; `ENOMEM` if the heap would grow past [`REGION_LIMIT`]
+/// into the stack's guard page. A refused request changes nothing.
 ///
 /// No frames are mapped here — pages fault in lazily on first touch and are
 /// resolved through [`contains`] in the fault path.
