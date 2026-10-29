@@ -29,7 +29,7 @@ one item that is simply *done* is recorded as chunk 1 so the reasoning is not lo
 - [x] **Chunk 2** — user VA map: high stack, larger stack, image-relative brk
 - [x] **Chunk 3** — `SYS_IRQCTL` design note
 - [x] **Chunk 4** — Phase 6 tracker + slicing session
-- [ ] **Chunk 5** — musl syscall surface
+- [x] **Chunk 5** — musl syscall surface
 - [ ] **Chunk 6** — SDK flavor CI coverage
 
 ---
@@ -224,6 +224,28 @@ call numbers: `writev`, `write`, `exit`, `exit_group`, `set_tid_address`, `ioctl
 **Proof:** a C program that opens a file on the MinixFS root, reads it, and prints its contents —
 through musl, not through an `init` probe.
 
+**Design:**
+[`2026-10-28-musl-syscall-surface-design.md`](../superpowers/specs/2026-10-28-musl-syscall-surface-design.md)
+— decisions `M1…M19`, with the deferred cleanups in its §4 (carried into the Deferred table below).
+
+**Plan:**
+[`2026-10-28-musl-syscall-surface.md`](../superpowers/plans/2026-10-28-musl-syscall-surface.md) —
+tasks 1–9 plus 7a and 8a, all landed on `feature/musl-syscall-surface`. The proof is `/bin/fileio`
+(`userland/fileio/`), a second C program on the root filesystem; the book's
+[libc chapter](../../book/src/libc/overview.md) describes the surface it exercises.
+
+**Execution found and fixed two pre-existing kernel bugs** that hit every user process, not just
+this chunk's: the kernel never saved `TPIDR_EL0` per process (`M18`, task 7a), and never saved the
+FP/SIMD registers across a trap (`M19`, task 8a). Both are now part of the per-process register
+frame.
+
+**Tooling hand-off — outstanding.** The musl fork change is commit `4501ccf` on the fork's
+`feature/chunk5-syscall-surface`, which must be pushed before this PR merges (D8: fork bump and
+submodule bump land together). The SDK sysroot at `$MINIXRS_SDK` was built from the pre-shim fork
+(`6010533f`), so three-boot-matrix row 1 cannot pass until tooling rebuilds it — see
+[`2026-10-28-musl-syscall-surface-tooling.md`](../superpowers/plans/2026-10-28-musl-syscall-surface-tooling.md).
+Chunk 5's box is checked for the OS-side work; that plan, not the box, tracks the rebuild.
+
 ## Chunk 6: SDK flavor CI coverage
 
 `MINIXRS_SDK` appears **zero** times in `.github/workflows/ci.yml`, so the SDK `hello` flavor is
@@ -263,9 +285,12 @@ same number at the merge base — and think in the *ratio*, not the wall-clock s
 
 ## Carried from Phase 5: two unproven write-back orderings
 
-5.10a and 5.10b left two write-back orderings **correct but unproven by any boot marker**. Probe
-them in whatever slice adds `lseek` or a second truncate consumer; the detail is in
-[`phase-5-musl-fs.md`](phase-5-musl-fs.md).
+5.10a and 5.10b left two write-back orderings **correct but unproven by any boot marker** —
+`do_trunc`'s write-back-then-free and `create`'s inode-before-dirent. **Chunk 5's `lseek` did not
+close them, and no seek can:** each needs a failure injected *between* two steps of one FS
+operation, and `lseek` only moves a descriptor's offset. Probe them in a slice that can fail an FS
+operation midway (a fault-injecting BDEV is the natural vehicle — Phase 6's block driver is the
+first place one exists); the detail is in [`phase-5-musl-fs.md`](phase-5-musl-fs.md).
 
 ## Explicit non-goals for the pre-6 window
 
@@ -291,6 +316,28 @@ them in whatever slice adds `lseek` or a second truncate consumer; the detail is
 | `GETDENTS` / `stat` on the FS band | No consumer until a shell lists a directory               |
 | Dynamic linking                    | Far future                                                |
 | x86_64                             | Phase 8                                                   |
+
+Chunk 5 took the cheap fix in each of the following by the user's ruling; each row names the proper
+fix a later slice owes.
+
+| Cheap fix taken in chunk 5 (spec §4)      | Proper fix owed later                                                                                                    |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| M15: the musl shim pre-faults buffers     | The kernel copy engine asks VM to map a missing page and retries (MINIX's VM-request path); then drop the shim pre-fault |
+| M17: kill the faulter on `PT_MAP` failure | A per-process memory cap in VM, so one process cannot exhaust guest memory for everyone                                  |
+| M7: `VM_PAGEFAULT` left ungated           | A kernel "from kernel" IPC status flag (MINIX's `IPC_FLG_MSG_FROM_KERNEL`) so VM can refuse a forged fault               |
+| M4: `prot` ignored, `MAP_FIXED` refused   | `PROT_NONE`/`mprotect`, so mallocng's guard pages actually guard                                                         |
+| `SEEK_END` → `EINVAL`                     | An FS-band size/stat request, with `fstat` as its consumer                                                               |
+| M19: eager FP/SIMD save on every trap     | Lazy FP switching (trap first FP use via `CPACR_EL1`), so a process that never touches FP pays nothing                   |
+| M16: descriptor rows reset on exit        | `fork` duplicates the parent's descriptors (POSIX)                                                                       |
+
+Found during execution rather than planned:
+
+| Item                                                      | Why it matters / the fix                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Kernel image grew ~531 KiB (~543 KB)                      | The 816 B frame made `Proc::EMPTY` larger and it is non-zero, so `PROC_TABLE` lives in `.data`, and Limine reads it from the FAT ESP. A zero-initialisable `EMPTY` moves it to `.bss`                                                                                             |
+| `/bin/fileio` is 259,624 B against `VFS_EXEC_MAX` 262,144 | 2.5 KB of headroom, and ~110 KB of the image is `.symtab`/`.strtab`. The build asserts the ceiling, so growth fails loudly; stripping would buy ~110 KB but costs `llvm-nm` on the binary, which is how M18 was found. A larger exec path (or a streaming loader) is the real fix |
+| `/etc/seekhole` is shared mutable state                   | Every fileio run truncates and rewrites it; two overlapping runs could race on it. Serial today (one fileio per init cycle), but a second concurrent consumer would flake                                                                                                         |
+| No dedicated TPIDR_EL0 / FP-SIMD regression marker        | Only scheduling overlap (M18) and clang's vectorising of fileio's fill loops (M19) pin them; FPCR/FPSR restore is unmutated. A probe that holds a `v` register across an `svc` would pin it directly                                                                              |
 
 ---
 

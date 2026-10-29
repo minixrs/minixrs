@@ -113,7 +113,8 @@ children are allocated from a pool (`[FORK_POOL_BASE, NR_MPROCS)`) where a slot'
 child's kernel proc number.
 
 User processes drive their whole lifecycle through PM — the POSIX shape, *user → server, never user
-→ kernel* (the shared user privilege opens `ipc_to` edges to PM and VFS, and nothing else):
+→ kernel* (the shared user privilege opens `ipc_to` edges to PM, VFS and VM, and nothing else; the
+VM edge is for `brk`/`mmap`, and VM answers `EPERM` to any non-PM caller of its PM-only requests):
 
 - **`PM_GETPID`** replies with the caller's pid (`m_type` *is* the pid, MINIX result-is-pid), parent
   pid in the payload.
@@ -465,7 +466,7 @@ that shadowed the original entry with a second one.
 above. Unlike the demo stubs it replaced, it is a genuine boot module: `build.rs` packs it into the
 MXBI archive with its true proc number (`INIT_PROC_NR = 10`), and the ordinary boot loop loads it
 and makes it runnable — PM does not hand-release it. It runs at user grade, sharing the
-`USER_PRIV_ID` privilege (SENDREC to PM and VFS, no kernel calls) with every forked child.
+`USER_PRIV_ID` privilege (SENDREC to PM, VFS and VM, no kernel calls) with every forked child.
 
 Since slice 5.4 it also speaks. Before the respawn loop it writes to fd 1 and fd 2 through VFS,
 which is the whole POSIX write path exercised from the one place that proves it matters: a process

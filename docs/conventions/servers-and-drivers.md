@@ -193,8 +193,8 @@ above it needs no VM edit — see [kernel.md](./kernel.md).
 **A user process drives its whole lifecycle through PM, never through the kernel.** That is the
 POSIX shape — user → PM for `PM_FORK`/`PM_EXIT`/`PM_WAIT`/`PM_EXEC`, and PM issues the kernel calls
 on the caller's behalf. The shared `USER_PRIV_ID` was opened `ipc_to = {PM}` alone for exactly that
-reason (widened to `{PM, VFS}` in slice 5.4) (slice 4.6b — see
-[phase-4-servers.md](../plans/phase-4-servers.md)).
+reason (widened to `{PM, VFS}` in slice 5.4 and to `{PM, VFS, VM}` in pre-Phase-6 chunk 5) (slice
+4.6b — see [phase-4-servers.md](../plans/phase-4-servers.md)).
 
 ### `handle_fork`: a fixed order the frozen-child invariant depends on
 

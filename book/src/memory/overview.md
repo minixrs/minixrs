@@ -158,10 +158,23 @@ the kill surfaces in the kernel signal trace.
 
 ### `brk`
 
-`VM_BRK(new_break)` sets the caller's program break. VM page-aligns the request and grows (or first
-creates) the caller's `Heap` region to `[HEAP_BASE, new_break)`, replying with the resulting break.
-No frames are mapped eagerly — pages fault in lazily on first touch and are then satisfied by the
-region check above.
+`VM_BRK(new_break)` sets the caller's program break. VM grows (or first creates) the caller's `Heap`
+region to `[origin, new_break)` — where origin is the page-aligned image end recorded by `VM_EXEC` —
+and replies with the **exact** break requested; the region's own end stays page-aligned internally.
+`VM_BRK(0)` is a query: it replies with the current break (the heap origin if none was ever set) and
+changes nothing, which is what musl's `brk(0)` needs. A refused request changes nothing. No frames
+are mapped eagerly — pages fault in lazily on first touch and are then satisfied by the region check
+above.
+
+Since pre-Phase-6 chunk 5 an ordinary C process reaches VM directly: the shared user privilege
+carries an `ipc_to` edge to VM (and the reverse edge for the reply). `VM_FORK` and `VM_EXEC` rewrite
+another process's bookkeeping, so they are **PM-only** and answer `EPERM` to anyone else, and a
+request VM does not know is answered `ENOSYS` rather than dropped, since every client reaches VM by
+`SENDREC` and a dropped request would block its caller forever. `VM_PAGEFAULT` stays ungated: it is
+keyed on the kernel-stamped `m_source`, so a caller can only ever map a page for itself, inside a
+region VM already granted. When `VMCTL_PT_MAP` fails (out of frames, a bad address) VM raises
+`SIGSEGV` on the faulter instead of clearing the fault, since the process would otherwise re-execute
+the access and fault forever.
 
 ### `mmap` / `munmap`
 

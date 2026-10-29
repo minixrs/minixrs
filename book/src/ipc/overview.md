@@ -175,9 +175,10 @@ IPC and kernel operations it may perform. User processes share one user-class sl
   User processes typically hold only `SENDREC`; servers hold `SEND`/`RECEIVE`/`NOTIFY`/… (This is
   also why `SENDA`, bit 16, is unreachable.)
 - **`ipc_to`** — bitmap of which other privileged slots this process may send to. A user process can
-  reach only the servers it needs: the shared user slot opens `ipc_to = {PM, VFS}` — the process
-  lifecycle and the file descriptors, and nothing else. Each entry is really a *pair* of bits,
-  because the server needs the reverse edge to reply; `populate_user_priv` opens both.
+  reach only the servers it needs: the shared user slot opens `ipc_to = {PM, VFS, VM}` — the process
+  lifecycle, the file descriptors, and (since pre-Phase-6 chunk 5) the heap and anonymous mappings
+  behind `brk`/`mmap`, and nothing else. Each entry is really a *pair* of bits, because the server
+  needs the reverse edge to reply; `populate_user_priv` opens both.
 - **`k_call_mask`** — bitmap of permitted kernel calls (empty for user processes). See
   [System Calls & ABI](../reference/syscalls.md).
 - **`notify_pending` / `asyn_pending`** — per-source bitmaps of deferred notifications and async
