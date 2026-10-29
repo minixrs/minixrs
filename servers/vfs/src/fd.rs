@@ -70,7 +70,8 @@
 
 use minixrs_kernel_shared::callnr::CDEV_MINOR_CONSOLE;
 use minixrs_kernel_shared::com::NR_SERVED_PROCS;
-use minixrs_kernel_shared::error::{EBADF, EMFILE};
+use minixrs_kernel_shared::error::{EBADF, EINVAL, EMFILE, ESPIPE};
+use minixrs_kernel_shared::fcntl::{SEEK_CUR, SEEK_SET};
 
 use core::cell::UnsafeCell;
 
@@ -268,6 +269,44 @@ pub fn advance_in(rows: &mut [FdRow], proc_nr: i32, fd: i32, n: u64) {
     }
 }
 
+/// Reposition a file descriptor (`lseek`), returning the new position.
+///
+/// `SEEK_END` is `EINVAL`: VFS holds no file size (MFS owns it) and the position
+/// is a plain cursor. A console or device descriptor is `ESPIPE`. Seeking past
+/// EOF is legal, so no upper bound is checked. The sum is `checked_add` on `i64`
+/// — a result that would wrap, or go negative, is `EINVAL` rather than a panic
+/// or a silent wrap — and a stored position above `i64::MAX` (unreachable, since
+/// every seek lands at or below it, but `advance_in` saturates at `u64::MAX`)
+/// is treated as overflow. Nothing changes unless the whole seek succeeds.
+pub fn seek_in(
+    rows: &mut [FdRow],
+    proc_nr: i32,
+    fd: i32,
+    whence: i32,
+    offset: i64,
+) -> Result<u64, i32> {
+    let cur = match resolve_in(rows, proc_nr, fd)? {
+        Fd::File { pos, .. } => pos,
+        Fd::CharDev { .. } => return Err(ESPIPE),
+        Fd::Unused => return Err(EBADF),
+    };
+    let base = match whence {
+        SEEK_SET => 0,
+        SEEK_CUR => i64::try_from(cur).map_err(|_| EINVAL)?,
+        _ => return Err(EINVAL),
+    };
+    let new = u64::try_from(base.checked_add(offset).ok_or(EINVAL)?).map_err(|_| EINVAL)?;
+    // Cannot miss: `resolve_in` just succeeded for this (proc_nr, fd).
+    if let Some(Fd::File { pos, .. }) = usize::try_from(proc_nr)
+        .ok()
+        .zip(usize::try_from(fd).ok())
+        .and_then(|(slot, idx)| rows.get_mut(slot).and_then(|row| row.get_mut(idx)))
+    {
+        *pos = new;
+    }
+    Ok(new)
+}
+
 /// Resolve `(proc_nr, fd)` against the live table.
 pub fn resolve(proc_nr: i32, fd: i32) -> Result<Fd, i32> {
     // SAFETY: single-mutator invariant (see the module note). The borrow is taken
@@ -294,9 +333,16 @@ pub fn advance(proc_nr: i32, fd: i32, n: u64) {
     advance_in(unsafe { &mut *ROWS.0.get() }, proc_nr, fd, n)
 }
 
+/// Reposition a descriptor in the live table.
+pub fn seek(proc_nr: i32, fd: i32, whence: i32, offset: i64) -> Result<u64, i32> {
+    // SAFETY: as `resolve` — one mutator, and the borrow does not escape.
+    seek_in(unsafe { &mut *ROWS.0.get() }, proc_nr, fd, whence, offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use minixrs_kernel_shared::fcntl::SEEK_END;
 
     const CONSOLE: Fd = Fd::CharDev {
         dev: CharDriver::Tty,
@@ -547,6 +593,112 @@ mod tests {
                 pos: u64::MAX
             })
         );
+    }
+
+    #[test]
+    fn seek_set_moves_a_file_and_returns_the_position() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, FILE), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_SET, 31), Ok(31));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: 31 }));
+    }
+
+    #[test]
+    fn seek_cur_is_relative() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, Fd::File { ino: 5, pos: 10 }), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, -4), Ok(6));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: 6 }));
+    }
+
+    #[test]
+    fn seek_end_is_einval() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, Fd::File { ino: 5, pos: 7 }), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_END, 0), Err(EINVAL));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: 7 }));
+    }
+
+    #[test]
+    fn unknown_whence_is_einval() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, FILE), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, 3, 0), Err(EINVAL));
+        assert_eq!(seek_in(&mut r, 0, 3, -1, 0), Err(EINVAL));
+    }
+
+    #[test]
+    fn negative_result_is_einval() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, Fd::File { ino: 5, pos: 2 }), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, -3), Err(EINVAL));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_SET, -1), Err(EINVAL));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: 2 }));
+    }
+
+    #[test]
+    fn overflow_is_einval_not_a_panic() {
+        let mut r = rows();
+        let top = i64::MAX as u64;
+        assert_eq!(alloc_in(&mut r, 0, Fd::File { ino: 5, pos: top }), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, 1), Err(EINVAL));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: top }));
+        assert_eq!(close_in(&mut r, 0, 3), Ok(()));
+        assert_eq!(alloc_in(&mut r, 0, FILE), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, i64::MIN), Err(EINVAL));
+        // A position above i64::MAX is unreachable but must not wrap negative.
+        assert_eq!(close_in(&mut r, 0, 3), Ok(()));
+        assert_eq!(
+            alloc_in(
+                &mut r,
+                0,
+                Fd::File {
+                    ino: 5,
+                    pos: u64::MAX
+                }
+            ),
+            Ok(3)
+        );
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, 0), Err(EINVAL));
+    }
+
+    #[test]
+    fn past_eof_is_legal() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, FILE), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_SET, 1 << 40), Ok(1 << 40));
+        assert_eq!(
+            resolve_in(&r, 0, 3),
+            Ok(Fd::File {
+                ino: 5,
+                pos: 1 << 40
+            })
+        );
+    }
+
+    #[test]
+    fn console_is_espipe() {
+        let mut r = rows();
+        assert_eq!(seek_in(&mut r, 0, 1, SEEK_SET, 0), Err(ESPIPE));
+        assert_eq!(
+            alloc_in(
+                &mut r,
+                0,
+                Fd::CharDev {
+                    dev: CharDriver::Memory,
+                    minor: 0
+                }
+            ),
+            Ok(3)
+        );
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_SET, 0), Err(ESPIPE));
+    }
+
+    #[test]
+    fn closed_fd_is_ebadf() {
+        let mut r = rows();
+        assert_eq!(seek_in(&mut r, 0, 4, SEEK_SET, 0), Err(EBADF));
+        assert_eq!(seek_in(&mut r, 0, -1, SEEK_SET, 0), Err(EBADF));
     }
 
     #[test]

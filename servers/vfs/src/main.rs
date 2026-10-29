@@ -137,7 +137,8 @@ use minixrs_kernel_shared::callnr::{
     FS_PATH_OFF, FS_POS_OFF, FS_READ, FS_READSUPER, FS_RQ_BASE, FS_SIZE_OFF,
     FS_SUPER_BLOCK_SIZE_OFF, FS_SUPER_BLOCKS_OFF, FS_SUPER_MINOR_OFF, FS_SUPER_ROOT_OFF, FS_TRUNC,
     FS_WRITE, NR_FS_MSGS, PM_GRANT_TEST, SYS_GETINFO_NAME_LEN, VFS_CLOSE, VFS_EXEC_GRANT_OFF,
-    VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_OPEN, VFS_READ, VFS_WRITE,
+    VFS_EXEC_MAX, VFS_EXEC_STAGE, VFS_FD_OFF, VFS_LSEEK, VFS_OFFSET_OFF, VFS_OPEN, VFS_POS_OFF,
+    VFS_READ, VFS_WHENCE_OFF, VFS_WRITE,
 };
 use minixrs_kernel_shared::com::{
     MEM_PROC_NR, MFS_PROC_NR, PM_PROC_NR, TTY_PROC_NR, boot_endpoint,
@@ -151,8 +152,8 @@ use minixrs_kernel_shared::rootfs::{
     ROOTFS_DENY_DIR, ROOTFS_DENY_PATH, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
 };
 use minixrs_server_rt::{
-    GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, sef_publish_to_ds, sef_retrieve_from_ds,
-    sef_startup, sys_copy, wr_i32, wr_u64,
+    GrantPool, SefConfig, buf_addr, diag_fmt, rd_i32, rd_u64, sef_publish_to_ds,
+    sef_retrieve_from_ds, sef_startup, sys_copy, wr_i32, wr_u64,
 };
 
 use fd::{CharDriver, Fd};
@@ -352,6 +353,7 @@ fn main() -> ! {
             VFS_OPEN => do_open(caller_e, &msg, &mut mount, mfs),
             VFS_READ => do_read(caller_e, &msg, &mut grants, tty, mem, mfs),
             VFS_CLOSE => do_close(caller_e, &msg),
+            VFS_LSEEK => do_lseek(caller_e, &mut msg),
             VFS_EXEC_STAGE => do_exec_stage(
                 caller_e,
                 &mut msg,
@@ -980,6 +982,27 @@ fn do_close(caller_e: Endpoint, msg: &Message) -> i32 {
     let req = rw::parse(msg);
     match fd::close(endpoint_proc(caller_e).get(), req.fd) {
         Ok(()) => OK,
+        Err(e) => e,
+    }
+}
+
+/// Serve one `VFS_LSEEK`. Returns `OK` (the new position is in the reply payload
+/// at [`VFS_POS_OFF`] as a `u64`), or `EBADF` / `ESPIPE` / `EINVAL`.
+///
+/// Pure bookkeeping in the descriptor table — nothing is sent to MFS, which keeps
+/// no per-open state. `reply()` overwrites only `m_type`/`m_source`, so the
+/// position written here survives to the caller.
+#[cfg_attr(test, allow(dead_code))]
+fn do_lseek(caller_e: Endpoint, msg: &mut Message) -> i32 {
+    let fd = rd_i32(msg, VFS_FD_OFF);
+    let whence = rd_i32(msg, VFS_WHENCE_OFF);
+    // The wire carries a signed 64-bit offset; `rd_u64` is the same 8 bytes.
+    let offset = rd_u64(msg, VFS_OFFSET_OFF) as i64;
+    match fd::seek(endpoint_proc(caller_e).get(), fd, whence, offset) {
+        Ok(pos) => {
+            wr_u64(msg, VFS_POS_OFF, pos);
+            OK
+        }
         Err(e) => e,
     }
 }
