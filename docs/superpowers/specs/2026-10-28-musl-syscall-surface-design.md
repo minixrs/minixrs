@@ -11,7 +11,7 @@ to the rest, so a C program can print but cannot read a file, and `malloc` has n
 This chunk closes that gap far enough for **one C program to read a MinixFS file twice over — once
 through raw descriptors, once through `fopen` and malloc — and to seek inside it.**
 
-Decisions are labelled `M1…M18`: chunk-local, distinct from the phase-level `D1…D13` (which stay
+Decisions are labelled `M1…M19`: chunk-local, distinct from the phase-level `D1…D13` (which stay
 locked) and from chunk 2's `V*` and chunk 3's `I*`.
 
 ---
@@ -376,6 +376,25 @@ already resets the frame to `EMPTY` (thread pointer 0) and `do_fork` already cop
 mutation that drops the restore and brings back the `SIGSEGV` — scheduler-dependent, so the commit
 says so.
 
+### M19 — the kernel saves and restores FP/SIMD state per process (found during execution)
+
+Added when Task 8's stub-free boot failed. The saved frame carries no `v0`–`v31`, `FPCR` or `FPSR`,
+so any EL0 process's vector registers are whatever the last runner left. `fileio`'s clang-vectorised
+fill loop keeps loop-carried values in `v0`–`v4` across the page fault its first store takes; VM —
+Rust built with `+neon`, whose `Message` copies use `q` registers — runs in between, and every byte
+past the first 32 comes back wrong (`mmap FAIL verify rc=32`). Like M18, **a pre-existing kernel
+bug** that every EL0 process has (the Rust servers included) and that chunk 5 is merely the first to
+observe.
+
+**Eager save/restore** (my call): both entry stubs store the 32 `q` registers plus `FPCR`/`FPSR`
+into the frame before any kernel Rust runs, and `el1_return_to_user` reloads them. Lazy switching
+(trapping first FP use through `CPACR_EL1`) is the cheaper design and is deferred (§4); eager is the
+one that is obviously correct and is what makes this chunk green. Cost: ~528 more bytes moved per
+trap, which the boot-budget measurement in Task 8 must see. `do_exec` resets the frame and `do_fork`
+copies it, so a fresh image starts with zeroed FP state and a child inherits its parent's. Proof:
+`fileio`'s `mmap ok` / `malloc ok` stub-free — deterministic, since the fault is self-inflicted —
+plus a mutation dropping the restore.
+
 ---
 
 ## 4. Deferred cleanup — a later slice owes these
@@ -390,6 +409,7 @@ The user's ruling was to take the cheap fix now and clean up later. Each item be
 | M7: `VM_PAGEFAULT` left ungated           | A kernel "from kernel" IPC status flag (MINIX's `IPC_FLG_MSG_FROM_KERNEL`) so VM can refuse a forged fault                          |
 | M4: `prot` ignored, `MAP_FIXED` refused   | `PROT_NONE`/`mprotect`, so mallocng's guard pages guard                                                                             |
 | `SEEK_END` → `EINVAL`                     | An FS-band size/stat request, with `fstat` as its consumer                                                                          |
+| M19: eager FP/SIMD save on every trap     | Lazy FP switching (trap first FP use via `CPACR_EL1`), so a process that never touches FP pays nothing                              |
 | M16: rows reset on exit                   | `fork` duplicates the parent's descriptors (POSIX)                                                                                  |
 
 ---

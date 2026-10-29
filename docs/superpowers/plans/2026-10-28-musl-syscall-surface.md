@@ -18,7 +18,7 @@ aarch64, QEMU, `dprint`.
 
 **Spec:**
 [`../specs/2026-10-28-musl-syscall-surface-design.md`](../specs/2026-10-28-musl-syscall-surface-design.md)
-— decisions `M1…M18`. Read it before Task 1; every task argues from it. Where this plan and the spec
+— decisions `M1…M19`. Read it before Task 1; every task argues from it. Where this plan and the spec
 disagree, **the spec wins** and the plan gets corrected.
 
 ## Global Constraints
@@ -393,6 +393,36 @@ thread pointer. Its report (`.superpowers/sdd/2026-10-28-musl-syscall-surface/ta
 - [ ] **Step 4: Mutation:** drop the restore → the fault and missing markers return. Record it, and
       that the proof depends on the stubs overlapping two C programs.
 - [ ] **Step 5: Commit** `kernel: save and restore TPIDR_EL0 per process`.
+
+### Task 8a: Kernel — save and restore FP/SIMD state per process (spec M19)
+
+Added during execution, **before Task 8 finishes**: Task 8's stub-free boot showed vector registers
+clobbered across a page fault. Task 8's report
+(`.superpowers/sdd/2026-10-28-musl-syscall-surface/task-8-report.md`, "Blocker") holds the diagnosis
+and the reverted experiment. Task 8's uncommitted `fileio.c`, `*.ld` and marker-file edits are in
+the working tree — **do not stage or modify them**; this task commits kernel files only.
+
+**Files:**
+
+- Modify: `kernel/src/arch/aarch64/context.rs`, `kernel/src/arch/aarch64/trap.S`,
+  `kernel/src/arch/aarch64/interrupt.S`
+
+**Interfaces:**
+
+- Produces: `ArchRegisterFrame` gains the FP/SIMD state (`q0`–`q31` as `[u128; 32]` or equivalent,
+  `fpcr`, `fpsr`) at named offsets mirrored as `.equ`s, with `offset_of!` guards, the 7a pattern.
+
+- [ ] **Step 1:** Stub-free boot at HEAD with Task 8's working tree: record `mmap FAIL verify rc=32`
+      / `malloc FAIL large-verify` (the RED).
+- [ ] **Step 2: Implement** the save in both entry stubs before any Rust runs, the restore in
+      `el1_return_to_user`. Check: 16-byte alignment of the `q` save area; `CPACR_EL1.FPEN` permits
+      EL1 FP access at those points; whether kernel Rust itself uses FP/SIMD (state why the save
+      placement covers it either way); `do_exec` resets and `do_fork` copies with no change.
+- [ ] **Step 3:** Stub-free boot → `mmap ok` and `malloc ok` present, no `FAIL`. Default-features
+      `timeout 300` boot with Task 8's tree → `check-boot-log.sh` PASS. Kernel clippy both feature
+      sets.
+- [ ] **Step 4: Mutation:** drop the `q` restore → `mmap FAIL verify` returns.
+- [ ] **Step 5: Commit** (kernel files only) `kernel: save and restore FP/SIMD state per process`.
 
 ### Task 8: `/bin/fileio` — stdio, brk, mmap, malloc, exit reset
 
