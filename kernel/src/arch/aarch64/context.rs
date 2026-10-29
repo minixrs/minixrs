@@ -12,7 +12,7 @@
 //! actually populates and restores it. The field order matches what an EL0
 //! → EL1 trap saves (general-purpose registers, then SP_EL0 and the two EL1
 //! system registers that carry the return state). Field offsets are mirrored
-//! into `trap.S` via `.equ` directives; the `assert!(size_of == 272)` canary
+//! into `trap.S` via `.equ` directives; the `assert!(size_of == 288)` canary
 //! below catches accidental drift.
 
 /// Saved register state for a user-mode process, captured at EL1 exception
@@ -28,6 +28,11 @@ pub struct ArchRegisterFrame {
     pub elr_el1: u64,
     /// `SPSR_EL1` — saved processor state to restore on `eret`.
     pub spsr_el1: u64,
+    /// `TPIDR_EL0` — the user thread pointer (musl's `__set_thread_area` is
+    /// `msr tpidr_el0`). Saved by both entry stubs, restored by
+    /// `el1_return_to_user`; without it every C process shares one thread
+    /// pointer (spec M18).
+    pub tpidr_el0: u64,
 }
 
 impl ArchRegisterFrame {
@@ -37,6 +42,7 @@ impl ArchRegisterFrame {
         sp_el0: 0,
         elr_el1: 0,
         spsr_el1: 0,
+        tpidr_el0: 0,
     };
 }
 
@@ -54,6 +60,14 @@ pub const REGS_SP_EL0_OFFSET: usize = 31 * 8;
 pub const REGS_ELR_OFFSET: usize = 31 * 8 + 8;
 /// Offset of `spsr_el1` within [`ArchRegisterFrame`].
 pub const REGS_SPSR_OFFSET: usize = 31 * 8 + 16;
+/// Offset of `tpidr_el0` within [`ArchRegisterFrame`].
+pub const REGS_TPIDR_EL0_OFFSET: usize = 31 * 8 + 24;
 
-const _: () = assert!(core::mem::size_of::<ArchRegisterFrame>() == 32 * 8 + 16);
+// 34 u64 slots = 272 bytes + tpidr_el0 = 280, rounded up to the 16-byte alignment.
+const _: () = assert!(core::mem::size_of::<ArchRegisterFrame>() == 288);
+const _: () = assert!(core::mem::offset_of!(ArchRegisterFrame, x) == REGS_X_OFFSET);
+const _: () = assert!(core::mem::offset_of!(ArchRegisterFrame, sp_el0) == REGS_SP_EL0_OFFSET);
+const _: () = assert!(core::mem::offset_of!(ArchRegisterFrame, elr_el1) == REGS_ELR_OFFSET);
+const _: () = assert!(core::mem::offset_of!(ArchRegisterFrame, spsr_el1) == REGS_SPSR_OFFSET);
+const _: () = assert!(core::mem::offset_of!(ArchRegisterFrame, tpidr_el0) == REGS_TPIDR_EL0_OFFSET);
 const _: () = assert!(core::mem::align_of::<ArchRegisterFrame>() == 16);

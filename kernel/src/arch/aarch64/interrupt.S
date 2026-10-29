@@ -27,6 +27,7 @@
     .equ REGS_SP_EL0_OFFSET, 248
     .equ REGS_ELR_OFFSET,    256
     .equ REGS_SPSR_OFFSET,   264
+    .equ REGS_TPIDR_EL0_OFFSET, 272
 
     .section .text.interrupt, "ax", %progbits
 
@@ -75,6 +76,11 @@ el0_64_irq_entry:
     mrs     x11, spsr_el1
     stp     x9,  x10, [x29, #REGS_SP_EL0_OFFSET]
     str     x11,      [x29, #REGS_SPSR_OFFSET]
+
+    // Save TPIDR_EL0 (the user thread pointer). x13 is free: every GPR is
+    // already in the frame.
+    mrs     x13, tpidr_el0
+    str     x13,      [x29, #REGS_TPIDR_EL0_OFFSET]
 
     // do_irq(&mut frame). May update tpidr_el1 if a context switch happens.
     mov     x0, x29

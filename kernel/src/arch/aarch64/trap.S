@@ -17,7 +17,7 @@
  *     never clear it.
  *   - Field offsets below must match `kernel/src/arch/aarch64/context.rs`.
  *     The .equ block is mirrored from the Rust REGS_*_OFFSET constants; the
- *     `const _: () = assert!(size_of::<ArchRegisterFrame> == 272)` canary in
+ *     `const _: () = assert!(size_of::<ArchRegisterFrame> == 288)` canary in
  *     context.rs catches drift in the trailing fields.
  */
 
@@ -25,6 +25,7 @@
     .equ REGS_SP_EL0_OFFSET, 248
     .equ REGS_ELR_OFFSET,    256
     .equ REGS_SPSR_OFFSET,   264
+    .equ REGS_TPIDR_EL0_OFFSET, 272
 
     .equ ESR_EC_SVC64,       0x15
 
@@ -85,6 +86,11 @@ el0_64_sync_entry:
     stp     x9,  x10, [x29, #REGS_SP_EL0_OFFSET]
     str     x11,      [x29, #REGS_SPSR_OFFSET]
 
+    // Save TPIDR_EL0 (the user thread pointer). x13 is free: every GPR is
+    // already in the frame.
+    mrs     x13, tpidr_el0
+    str     x13,      [x29, #REGS_TPIDR_EL0_OFFSET]
+
     // Decode ESR_EL1 EC and dispatch.
     mrs     x12, esr_el1
     lsr     x13, x12, #26
@@ -137,6 +143,8 @@ el1_return_to_user:
     msr     sp_el0,   x10
     msr     elr_el1,  x11
     msr     spsr_el1, x12
+    ldr     x13,      [x9, #REGS_TPIDR_EL0_OFFSET]
+    msr     tpidr_el0, x13
 
     // GPRs. Skip x8/x9 here — they'd clobber the base mid-restore.
     ldp     x0,  x1,  [x9, #REGS_X_OFFSET + 0x00]
