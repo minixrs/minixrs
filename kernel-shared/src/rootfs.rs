@@ -83,6 +83,13 @@ pub const IMAGE_HDR_LEN: usize = 32;
 /// Path of the C milestone program inside the root image. Slice 5.9 execs it.
 pub const ROOTFS_HELLO_PATH: &str = "/bin/hello";
 
+/// Path of the C file-I/O proof inside the root image (pre-Phase-6 chunk 5).
+///
+/// Built and packed exactly like [`ROOTFS_HELLO_PATH`] — the same toolchain
+/// flavour, and in the sysroot-absent fallback the same `worker` ELF under this
+/// name — and exec'd out of the filesystem by init in the same rotation.
+pub const ROOTFS_FILEIO_PATH: &str = "/bin/fileio";
+
 /// Path of the greppable message-of-the-day file.
 pub const ROOTFS_MOTD_PATH: &str = "/etc/motd";
 
@@ -237,6 +244,38 @@ pub const fn rootfs_holey_byte(i: usize) -> u8 {
 /// What init writes at position 0 of [`ROOTFS_HOLEY_PATH`], filling the hole.
 pub const ROOTFS_HOLEY_TEXT: &[u8] = b"minix.rs holey: filled at zero\n";
 
+/// A file that is **not** in the image, which `/bin/fileio` creates at runtime
+/// (pre-Phase-6 chunk 5) to prove a write past end of file through `lseek`.
+///
+/// `fileio` opens it `O_CREAT | O_TRUNC` — every exec, so the truncate comes
+/// first and the file is the same shape each time — seeks to
+/// [`ROOTFS_SEEKHOLE_OFFSET`], writes [`ROOTFS_SEEKHOLE_TAIL_LEN`] bytes, and
+/// reads the whole file back: a leading block of zeros MFS never allocated, then
+/// the tail. Its own file rather than [`ROOTFS_HOLEY_PATH`], which is init's
+/// write-back proof and ships with its hole already in place.
+pub const ROOTFS_SEEKHOLE_PATH: &str = "/etc/seekhole";
+
+/// Where `fileio`'s one write to [`ROOTFS_SEEKHOLE_PATH`] lands: one whole block
+/// in, so the file's first block is a hole. The C program carries it as a
+/// literal (the C headers do not emit this module) with a comment naming it.
+pub const ROOTFS_SEEKHOLE_OFFSET: usize = BDEV_BLOCK_SIZE;
+
+/// Bytes `fileio` writes at [`ROOTFS_SEEKHOLE_OFFSET`] — a C literal too.
+pub const ROOTFS_SEEKHOLE_TAIL_LEN: usize = 8;
+
+/// Zones [`ROOTFS_SEEKHOLE_PATH`] holds once `fileio` has written it: the blocks
+/// its data touches, and not the hole before it. One, as laid out today.
+pub const ROOTFS_SEEKHOLE_ZONES: usize = (ROOTFS_SEEKHOLE_OFFSET + ROOTFS_SEEKHOLE_TAIL_LEN)
+    .div_ceil(BDEV_BLOCK_SIZE)
+    - ROOTFS_SEEKHOLE_OFFSET / BDEV_BLOCK_SIZE;
+
+// The hole is whole blocks — so MFS allocates nothing for it — and the file stays
+// inside the seven direct zones, so this proves the hole, not the indirect arm.
+const _: () = assert!(ROOTFS_SEEKHOLE_OFFSET.is_multiple_of(BDEV_BLOCK_SIZE));
+const _: () = assert!(ROOTFS_SEEKHOLE_OFFSET > 0);
+const _: () = assert!(ROOTFS_SEEKHOLE_TAIL_LEN > 0);
+const _: () = assert!(ROOTFS_SEEKHOLE_OFFSET + ROOTFS_SEEKHOLE_TAIL_LEN <= 7 * BDEV_BLOCK_SIZE);
+
 /// The directory the **destructive** denial probes aim at.
 ///
 /// It holds [`ROOTFS_DENY_PATH`] and nothing else, which is its entire purpose.
@@ -308,15 +347,18 @@ pub const ROOTFS_LEAK_PROBES: usize = ROOTFS_IMAGE_BLOCKS as usize;
 /// `/etc/scratch`'s eight data blocks and its indirect block
 /// ([`ROOTFS_SCRATCH_GROWTH_ZONES`]), plus one each for `/etc/new`,
 /// `/full/new`, `/etc/holey`'s filled hole and `/etc/leak`'s one good write, plus
-/// one for `/full`'s second directory block. Checked against the *built* image by
-/// `kernel/build.rs`, for the reason that check already carries: the image's
-/// largest file is `/bin/hello`, whose size is a property of the toolchain
-/// flavour, so no unit test over a fixture measures this image.
-pub const ROOTFS_RUNTIME_ZONES: usize = ROOTFS_SCRATCH_GROWTH_ZONES + 5;
+/// one for `/full`'s second directory block, plus `/etc/seekhole`'s data
+/// ([`ROOTFS_SEEKHOLE_ZONES`] — one zone, since its first block is a hole; it is
+/// truncated and rewritten every `fileio` exec, so it never holds more). Checked
+/// against the *built* image by `kernel/build.rs`, for the reason that check
+/// already carries: the image's largest files are `/bin/hello` and
+/// `/bin/fileio`, whose sizes are a property of the toolchain flavour, so no unit
+/// test over a fixture measures this image.
+pub const ROOTFS_RUNTIME_ZONES: usize = ROOTFS_SCRATCH_GROWTH_ZONES + 5 + ROOTFS_SEEKHOLE_ZONES;
 
 /// Inodes the boot-time probes allocate at runtime: `/etc/new`, `/full/new` and
-/// `/etc/leak`.
-pub const ROOTFS_RUNTIME_INODES: usize = 3;
+/// `/etc/leak` (init's), and `/etc/seekhole` (`fileio`'s).
+pub const ROOTFS_RUNTIME_INODES: usize = 4;
 
 // C10: `.` + `..` + the filler files must be exactly one block of entries. One
 // short and the create finds a free slot; one over and mkfs has already grown the
@@ -533,11 +575,15 @@ mod tests {
 
     #[test]
     fn every_image_path_is_absolute_and_distinct() {
+        // `/etc/seekhole` is not shipped, but it is created beside these and
+        // must not collide with any of them.
         let paths = [
             ROOTFS_HELLO_PATH,
+            ROOTFS_FILEIO_PATH,
             ROOTFS_MOTD_PATH,
             ROOTFS_PATTERN_PATH,
             ROOTFS_SCRATCH_PATH,
+            ROOTFS_SEEKHOLE_PATH,
         ];
         for p in paths {
             assert!(p.starts_with('/'), "{p} is not absolute");
@@ -548,6 +594,18 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn the_seek_hole_file_holds_one_zone_after_a_hole() {
+        // fileio writes one block in, so the leading block is a hole and only
+        // the tail's block is allocated -- the `+ 1` ROOTFS_RUNTIME_ZONES gained
+        // for it.
+        assert_eq!(ROOTFS_SEEKHOLE_OFFSET, 4096);
+        assert_eq!(ROOTFS_SEEKHOLE_TAIL_LEN, 8);
+        assert_eq!(ROOTFS_SEEKHOLE_ZONES, 1);
+        assert_eq!(ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_GROWTH_ZONES + 6);
+        assert_ne!(ROOTFS_SEEKHOLE_PATH, ROOTFS_HOLEY_PATH);
     }
 
     #[test]

@@ -131,7 +131,7 @@ No CI job installs the minix.rs SDK (an LLVM build is hours), so `$MINIXRS_SDK` 
 runner and the SDK `hello` flavor is never exercised — a regression in the patched clang driver
 ships green.
 
-The mitigation is local. Run the **three-boot matrix** when touching `build_hello*`:
+The mitigation is local. Run the **three-boot matrix** when touching `build_c_*`:
 
 | Row | How to force it                                                      | Flavour reached       |
 | --- | -------------------------------------------------------------------- | --------------------- |
@@ -142,31 +142,33 @@ The mitigation is local. Run the **three-boot matrix** when touching `build_hell
 - Run at least one `clippy-kernel` invocation with `MINIXRS_SDK=/nonexistent`, so the path CI
   compiles is the one you linted.
 - **Row 3's sysroot is `target/musl-sysroot`, inside the repo** — not `~/toolchains/minixrs/sysroot`
-  or anything else under `$MINIXRS_SDK`. `kernel/build.rs`'s `build_hello_musl` looks there and
-  nowhere else. This file used to say only "moved-aside sysroot", which reads as the SDK's, and sent
-  the user-VA-map slice's dispatcher to the wrong directory — with `MINIXRS_SDK=/nonexistent` the
+  or anything else under `$MINIXRS_SDK`. `kernel/build.rs`'s `build_c_musl` looks there and nowhere
+  else. This file used to say only "moved-aside sysroot", which reads as the SDK's, and sent the
+  user-VA-map slice's dispatcher to the wrong directory — with `MINIXRS_SDK=/nonexistent` the
   selector never consults the SDK prefix at all, so moving *that* aside silently re-runs the musl
   row and tests nothing. Name the path when you record the row.
 - **Row 3 needs `MINIXRS_SDK=/nonexistent` too.** On a machine that has a usable SDK the flavor
   selector never reaches the sysroot, so moving it aside alone re-runs the SDK row — 5.10a nearly
   recorded that as a passing fourth row.
 - **A correct row 3 FAILS `check-boot-log.sh`, by design.** The fallback packs `worker` under the
-  name `hello`, so the five C markers cannot appear. Exactly five expected markers go missing and
-  nothing else: `hello: Hello from C!`, `hello: stderr works`, `hello: errno ok`, `iov-end`, and
-  `hello: iov ok match=1`. Any *other* missing marker is a real regression — and a **110/110 on row
-  3 means the fallback did not engage**, so what you measured was the musl row again. Rows 1 and 2
-  must be fully clean.
+  names `hello` and `fileio`, so the C programs' own markers cannot appear. Exactly eleven expected
+  markers go missing and nothing else — `hello`'s five (`hello: Hello from C!`, `hello: stderr
+  works`, `hello: errno ok`, `iov-end`, `hello: iov ok match=1`) and `fileio`'s six (`fileio: read`,
+  `lseek ok`, `lseek deny ok`, `readv ok`, `fresh-buf ok`, `seek-hole ok`). The two exec-trace
+  markers still match, because `worker` is exec'd under those names. Any *other* missing marker is a
+  real regression — and a **125/125 on row 3 means the fallback did not engage**, so what you
+  measured was the musl row again. Rows 1 and 2 must be fully clean.
 
-Identify the flavour from the **build-script warnings**, never from the boot log: the five C markers
-are byte-identical across the SDK and musl flavours, so the log physically cannot tell them apart.
+Identify the flavour from the **build-script warnings**, never from the boot log: the C markers are
+byte-identical across the SDK and musl flavours, so the log physically cannot tell them apart.
 
-| Flavour               | Warning on the build                                                     |
-| --------------------- | ------------------------------------------------------------------------ |
-| `HelloFlavor::Sdk`    | `hello: built with the minix.rs SDK at <prefix> (<stamp>)`               |
-| `HelloFlavor::Musl`   | **none** — silent by design                                              |
-| `HelloFlavor::Worker` | "no C toolchain for hello; packing worker under that name" (grep for it) |
+| Flavour               | Warning on the build                                                                |
+| --------------------- | ----------------------------------------------------------------------------------- |
+| `HelloFlavor::Sdk`    | `hello, fileio: built with the minix.rs SDK at <prefix> (<stamp>)`                  |
+| `HelloFlavor::Musl`   | **none** — silent by design                                                         |
+| `HelloFlavor::Worker` | "no C toolchain for hello or fileio; packing worker under both names" (grep for it) |
 
-`Musl` is silent on purpose (`kernel/build.rs:298`): it is what every CI job builds, and warning on
+`Musl` is silent on purpose (`kernel/build.rs:321`): it is what every CI job builds, and warning on
 the norm is how people learn to ignore build-script warnings, which would cost us the two that mean
 something. **An empty flavour line is the musl result, not a failed grep** — do not go hunting for a
 warning that was never meant to exist.

@@ -68,10 +68,11 @@ use minixrs_kernel_shared::execstack::EXEC_STACK_PROBE_PASS;
 use minixrs_kernel_shared::fcntl::{O_CREAT, O_RDWR, O_TRUNC, O_UNKNOWN_BIT};
 use minixrs_kernel_shared::message::USER_VA_TOP;
 use minixrs_kernel_shared::rootfs::{
-    ROOTFS_CREATE_PATH, ROOTFS_CREATE_TEXT, ROOTFS_DIRGROW_TEXT, ROOTFS_FULL_NEW_PATH,
-    ROOTFS_HELLO_PATH, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_HOLEY_TEXT, ROOTFS_LEAK_PATH,
-    ROOTFS_LEAK_PROBES, ROOTFS_LEAK_TEXT, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_SCRATCH_LEN,
-    ROOTFS_SCRATCH_PATH, ROOTFS_SCRATCH_PERIOD, rootfs_holey_byte, rootfs_scratch_byte,
+    ROOTFS_CREATE_PATH, ROOTFS_CREATE_TEXT, ROOTFS_DIRGROW_TEXT, ROOTFS_FILEIO_PATH,
+    ROOTFS_FULL_NEW_PATH, ROOTFS_HELLO_PATH, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH,
+    ROOTFS_HOLEY_TEXT, ROOTFS_LEAK_PATH, ROOTFS_LEAK_PROBES, ROOTFS_LEAK_TEXT, ROOTFS_MOTD,
+    ROOTFS_MOTD_PATH, ROOTFS_SCRATCH_LEN, ROOTFS_SCRATCH_PATH, ROOTFS_SCRATCH_PERIOD,
+    rootfs_holey_byte, rootfs_scratch_byte,
 };
 use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
 
@@ -173,10 +174,15 @@ const _: () = assert!(UNMAPPED_VA < USER_DEVICE_WINDOW_BASE);
 /// to come off the filesystem to prove the VA ceiling is gone, and keeping it
 /// out of the rootfs leaves the image size and the boot budget untouched.
 ///
+/// [`ROOTFS_FILEIO_PATH`] is fourth (pre-Phase-6 chunk 5): the C file-I/O
+/// proof, an absolute path like `hello` and through the same chain. Appended
+/// rather than inserted, so the three before it keep their positions — `worker`
+/// first above all.
+///
 /// Rotating rather than switching outright is still the point: retiring
-/// `worker` would take the exec-ABI proof down with it. All three traces land
+/// `worker` would take the exec-ABI proof down with it. All four traces land
 /// inside the `[ksys SYS_EXEC]` head carve-out (6 calls), so all are observable.
-const EXEC_TARGETS: [&str; 3] = ["worker", ROOTFS_HELLO_PATH, "bigprog"];
+const EXEC_TARGETS: [&str; 4] = ["worker", ROOTFS_HELLO_PATH, "bigprog", ROOTFS_FILEIO_PATH];
 
 // Each target has to fit the `PM_EXEC` payload field, which is a whole path's
 // worth since slice 5.9 — a module name that fit the old 16-byte field still

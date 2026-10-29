@@ -27,8 +27,8 @@ minix.rs hello: Hello from C!
 | SDK compiler            | `$MINIXRS_SDK/bin/clang` (the `minixrs/llvm-minixrs` fork)             |
 | SDK sysroot             | `$MINIXRS_SDK/sysroot/usr/{include,lib}` + `sysroot/.stamp`            |
 | The C program           | `userland/hello/hello.c` (and `hello.ld`, **musl flavor only**)        |
-| Flavor selection        | `kernel/build.rs`'s `build_hello`                                      |
-| Compile + link          | `build_hello_sdk` / `build_hello_musl`                                 |
+| Flavor selection        | `kernel/build.rs`'s `build_c_program`                                  |
+| Compile + link          | `build_c_sdk` / `build_c_musl`                                         |
 | Generated ABI headers   | `cargo gen-c-headers` → `target/gen-c-headers/include/minixrs/`        |
 
 ## Two toolchains, one program
@@ -219,8 +219,8 @@ library on this host, so those symbols would be undefined at link time.
 In the **musl flavor** they come from the pinned Rust toolchain's own `compiler_builtins`, built for
 the custom `aarch64-unknown-minixrs` target by the server builds that run first. Note that the
 *prebuilt* `aarch64-unknown-none` rlib in the rustup sysroot does **not** export the C-ABI names —
-only the `-Zbuild-std` one does, which is why `build_hello_musl` globs the nested target dir rather
-than the sysroot.
+only the `-Zbuild-std` one does, which is why `build_c_musl` globs the nested target dir rather than
+the sysroot.
 
 In the **SDK flavor** the driver links `libclang_rt.builtins.a` from its own resource dir and the
 problem simply does not arise. That archive lives under

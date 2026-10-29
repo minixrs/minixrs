@@ -75,3 +75,15 @@ minix.rs init: vm.deny FAIL
 # zero, which is another address space's data leaking into this one rather than
 # merely a fixture that did not load.
 bigprog FAIL
+# Pre-Phase-6 chunk 5: a fileio raw-section check ran and disagreed. Distinct
+# from the marker simply going missing (fileio never ran, or never got there):
+# these mean the call executed and produced the wrong answer, and the word after
+# FAIL names the step, with rc= and errno= as returned -- `read FAIL open
+# rc=-1 errno=22` is an open flag VFS refused (O_LARGEFILE leaking through the
+# shim), `fresh-buf FAIL read ... errno=14` is the pre-fault gone.
+minix.rs fileio: read FAIL
+minix.rs fileio: lseek FAIL
+minix.rs fileio: lseek deny FAIL
+minix.rs fileio: readv FAIL
+minix.rs fileio: fresh-buf FAIL
+minix.rs fileio: seek-hole FAIL
