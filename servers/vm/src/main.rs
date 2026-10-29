@@ -378,9 +378,10 @@ fn handle_fork(msg: &mut Message) {
 /// PM-only (M7): any other sender gets `EPERM` before the payload is read.
 ///
 /// The marker is unconditional rather than sampled. exec is rare — a handful per
-/// boot — and this line is the proof that the heap origin follows the image;
-/// `VM_BRK(0)` now lets a user process read the origin back too, but only once
-/// the USER privilege has an `ipc_to` bit for VM.
+/// boot — and this line is the exec-side proof that the heap origin follows the
+/// image. It is no longer the only witness: the USER privilege reaches VM since
+/// chunk 5, so a C process can read the origin back through `brk(0)` (the
+/// `VM_BRK(0)` query), which the `fileio` proof exercises.
 fn handle_exec(msg: &mut Message) {
     let caller_e = msg.m_source;
     if !from_pm(caller_e) {
