@@ -217,9 +217,12 @@ call numbers: `writev`, `write`, `exit`, `exit_group`, `set_tid_address`, `ioctl
 - Real `brk` / `mmap` / `munmap` onto VM — widening USER's `ipc_to` to include VM, **with the
   reverse reply edge**; the 5.4 lesson is that each entry costs a *pair* of bits.
 - Re-verify musl's `__init_tls` and arena assumptions against the new heap origin.
-- **D8 applies.** Any new request number or payload field is an ABI bump touching both repos, and
-  the fork branch is force-pushed — so the fork bump and the `external/musl` submodule bump land in
-  the **same** PR. See [`abi.md`](../conventions/abi.md).
+- **D8 applies.** Any new request number or payload field is an ABI bump touching both repos, so the
+  fork bump and the `external/musl` submodule bump land in the **same** PR. The fork commit is a
+  plain commit on top of the fork's `minixrs` branch — no rebase, so no force-push (spec M12) — and
+  it merges there with a **merge commit, not a squash**: `.gitmodules` tracks `branch = minixrs`,
+  and a squash would leave the submodule pinning a commit the branch never contains. See
+  [`abi.md`](../conventions/abi.md).
 
 **Proof:** a C program that opens a file on the MinixFS root, reads it, and prints its contents —
 through musl, not through an `init` probe.

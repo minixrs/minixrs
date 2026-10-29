@@ -68,9 +68,36 @@ grep -rn '6010533f\|musl-minixrs' ~/src/tooling --include='*.sh' --include='*.md
 
 If a script, a manifest or a docs table pins `6010533f…`, move it to the new commit in the same
 change. If nothing pins it (the expectation: `build-sysroot.sh` reads the fork's checked-out `HEAD`
-and writes the SHA to the stamp), say so in the tooling commit message and change nothing.
+and writes the SHA to the stamp), say so in the tooling commit message — but see step 3: a SHA pin
+is not the only record tooling keeps of the fork.
 
-### 3. Verification, in the tooling repo
+### 3. Export the fork commit as `patches/musl/0002-*.patch`
+
+Tooling records each fork as a `git format-patch` series under `patches/`, and the musl series today
+is one patch, `patches/musl/0001-slice-5.6a-port-musl-to-minix.rs-IPC-aarch64.patch` — fork commit
+`f1db256f`. Without this step the tooling repo's record of the fork stops at the pre-shim port even
+after the sysroot is rebuilt from the new one.
+
+With the forks-volume checkout (`$MINIXRS_FORKS_DIR/musl-minixrs`) at the commit the sysroot was
+built from — `minixrs` after the merge of `4501ccf` — run:
+
+```sh
+scripts/export-patches.sh musl     # format-patch of ${MINIXRS_MUSL_BASE:-v1.2.6}..HEAD
+```
+
+Expect `export-patches: musl → 2 patch(es)`: `0001-…` unchanged in content (only the trailing git
+version line may churn, which tooling's `CLAUDE.md` calls noise) and a new
+`0002-minixrs-openat-read-readv-close-lseek-brk-mmap-munma.patch` — `format-patch` derives the name
+from `4501ccf`'s subject and truncates it, so the missing `p` is not a typo. `format-patch` skips
+merge commits, so the `6010533f`-style merge on `minixrs` contributes no patch. Commit the new file
+in the same tooling change as the sysroot rebuild.
+
+One mismatch to know about, not to fix here: tooling's `CLAUDE.md` and `export-patches.sh` describe
+the forks as rebase-maintained and force-pushed. This chunk did not rebase — `4501ccf` is a plain
+commit on top of `minixrs` and merges with a merge commit (spec M12), which is why the series only
+grows by one patch and `0001` keeps its content.
+
+### 4. Verification, in the tooling repo
 
 1. `verify/check-driver.sh` — green, unchanged: this chunk does not touch the driver.
 2. `verify/check-brand.sh` and `verify/check-image.sh` over an SDK-built `fileio` and `hello` — both
@@ -96,6 +123,16 @@ warning reading `hello, fileio: built with the minix.rs SDK at <prefix> (<stamp>
 One thing differs from the musl flavour and is expected, not a defect: the SDK images load at lld's
 default base (`0x200000`) rather than `0x100000`, so the exec trace's `image_end` for `fileio` is
 not `0x128000`.
+
+**One risk to check before the boot: the rebuilt SDK `fileio` may not fit `VFS_EXEC_MAX`.** VFS
+stages a whole image in a fixed buffer of `callnr::VFS_EXEC_MAX` (256 KiB), and the musl-flavour
+`fileio` already sits at 259,752 B of 262,144 — 2.3 KB of headroom. The SDK image linked against the
+pre-shim sysroot was ~48 KB, so the rebuilt one is expected to fit easily, but nobody has linked it
+against the shim yet. Over the ceiling is loud, not silent: `kernel/build.rs` panics with `fileio is
+N bytes, past VFS's staging buffer`. The remedy is a minixrs change, not a tooling one — raise
+`callnr::VFS_EXEC_MAX` (bounded above by `execimage::MAX_IMAGE_BYTES`, asserted in `callnr.rs`, and
+pinned by a host test there that moves with it). It is not emitted into the C headers, so raising it
+is not a D8 bump and needs no sysroot rebuild.
 
 ## Optional follow-up — not a tooling task
 
