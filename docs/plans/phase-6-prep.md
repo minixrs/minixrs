@@ -242,12 +242,13 @@ this chunk's: the kernel never saved `TPIDR_EL0` per process (`M18`, task 7a), a
 FP/SIMD registers across a trap (`M19`, task 8a). Both are now part of the per-process register
 frame.
 
-**Tooling hand-off — outstanding.** The musl fork change is commit `4501ccf` on the fork's
-`feature/chunk5-syscall-surface`, which must be pushed before this PR merges (D8: fork bump and
-submodule bump land together). The SDK sysroot at `$MINIXRS_SDK` was built from the pre-shim fork
-(`6010533f`), so three-boot-matrix row 1 cannot pass until tooling rebuilds it — see
-[`2026-10-28-musl-syscall-surface-tooling.md`](../superpowers/plans/2026-10-28-musl-syscall-surface-tooling.md).
-Chunk 5's box is checked for the OS-side work; that plan, not the box, tracks the rebuild.
+**Tooling hand-off — done.** The fork change `4501ccf` merged into the fork's `minixrs` as
+`ff8769a`; tooling rebuilt the SDK sysroot from it and exported it as `patches/musl/0002-*` (per
+[`2026-10-28-musl-syscall-surface-tooling.md`](../superpowers/plans/2026-10-28-musl-syscall-surface-tooling.md)).
+Three-boot-matrix row 1 then failed one check, `brk FAIL not-advanced`: the SDK flavour compiles
+`fileio.c` hosted at `-O2`, and clang deleted `check_brk`'s null-checked-then-freed `malloc(16)`, so
+the break never moved. The musl flavour is `-ffreestanding` and could not show it. With `p` made
+`volatile`, rows 1 and 2 pass all 135 checks — a case for chunk 6.
 
 ## Chunk 6: SDK flavor CI coverage
 

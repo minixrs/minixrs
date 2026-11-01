@@ -616,7 +616,10 @@ static void check_brk(uintptr_t origin)
 	volatile unsigned char *last;
 	uintptr_t cur;
 	long r;
-	void *p;
+	/* volatile: p is only null-checked and freed, and a hosted -O2 build
+	 * (the SDK flavour; musl's is -ffreestanding) deletes such a
+	 * malloc/free pair outright, so the break never moves. */
+	void *volatile p;
 
 	if (origin != want) {
 		fail("brk", "origin", (long)origin, 0);
