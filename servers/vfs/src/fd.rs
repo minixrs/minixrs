@@ -48,29 +48,23 @@
 //!
 //! ## What this table still does not know about
 //!
-//! **Nothing resets a row when a process exits, and proc numbers are recycled.**
-//! Rows became mutable in slice 5.8, so a [`Fd::File`] entry outlives the process
-//! that opened it: PM hands the fork pool's proc numbers back out every init
-//! cycle, and VFS is told nothing about exit (`signal_handler: None`, and no
-//! PM→VFS request exists). Today only init opens files, so no row is ever
-//! inherited — but the first forked child that calls `open` would leave a live
-//! descriptor onto an arbitrary inode for whatever process lands on that slot
-//! next. **`fork` also does not duplicate the parent's descriptors**, which POSIX
-//! requires.
+//! **Exit is handled; fork is not.** Proc numbers are recycled, so a [`Fd::File`]
+//! entry would outlive the process that opened it. PM therefore sends
+//! [`VFS_PM_EXIT`] on every exit path (`PM_EXIT` and the signal/kill path), and
+//! [`reset`] returns the dead process's row to [`DEFAULT_ROW`] before the proc
+//! number can be handed out again. **`fork` still does not duplicate the parent's
+//! descriptors**, which POSIX requires; that debt stays open (see the musl
+//! syscall-surface design, section 4). Today exec-from-FS resolves a binary by
+//! *inode* through [`VFS_EXEC_STAGE`], so no forked child holds a descriptor it
+//! did not open itself.
 //!
-//! **Slice 5.9 was predicted to force this and did not.** exec-from-FS resolves a
-//! binary by *inode*, through [`VFS_EXEC_STAGE`], with PM staging on the child's
-//! behalf — so no forked child ever holds a descriptor and no row is inherited by
-//! anything. The debt is real and still deferred; what changed is that it now has
-//! no scheduled forcing slice, and closing it needs a PM→VFS exit notification the
-//! ABI does not have. The first thing that will force it is a program that opens a
-//! file *after* being exec'd.
-//!
+//! [`VFS_PM_EXIT`]: minixrs_kernel_shared::callnr::VFS_PM_EXIT
 //! [`VFS_EXEC_STAGE`]: minixrs_kernel_shared::callnr::VFS_EXEC_STAGE
 
 use minixrs_kernel_shared::callnr::CDEV_MINOR_CONSOLE;
 use minixrs_kernel_shared::com::NR_SERVED_PROCS;
-use minixrs_kernel_shared::error::{EBADF, EMFILE};
+use minixrs_kernel_shared::error::{EBADF, EINVAL, EMFILE, ESPIPE};
+use minixrs_kernel_shared::fcntl::{SEEK_CUR, SEEK_SET};
 
 use core::cell::UnsafeCell;
 
@@ -268,6 +262,68 @@ pub fn advance_in(rows: &mut [FdRow], proc_nr: i32, fd: i32, n: u64) {
     }
 }
 
+/// Reposition a file descriptor (`lseek`), returning the new position.
+///
+/// `SEEK_END` is `EINVAL`: VFS holds no file size (MFS owns it) and the position
+/// is a plain cursor. A console or device descriptor is `ESPIPE`. Seeking past
+/// EOF is legal, so no upper bound is checked. The sum is `checked_add` on `i64`
+/// — a result that would wrap, or go negative, is `EINVAL` rather than a panic
+/// or a silent wrap — and a stored position above `i64::MAX` (unreachable, since
+/// every seek lands at or below it, but `advance_in` saturates at `u64::MAX`)
+/// is treated as overflow. Nothing changes unless the whole seek succeeds.
+pub fn seek_in(
+    rows: &mut [FdRow],
+    proc_nr: i32,
+    fd: i32,
+    whence: i32,
+    offset: i64,
+) -> Result<u64, i32> {
+    let cur = match resolve_in(rows, proc_nr, fd)? {
+        Fd::File { pos, .. } => pos,
+        Fd::CharDev { .. } => return Err(ESPIPE),
+        Fd::Unused => return Err(EBADF),
+    };
+    let base = match whence {
+        SEEK_SET => 0,
+        SEEK_CUR => i64::try_from(cur).map_err(|_| EINVAL)?,
+        _ => return Err(EINVAL),
+    };
+    let new = u64::try_from(base.checked_add(offset).ok_or(EINVAL)?).map_err(|_| EINVAL)?;
+    // Cannot miss: `resolve_in` just succeeded for this (proc_nr, fd).
+    if let Some(Fd::File { pos, .. }) = usize::try_from(proc_nr)
+        .ok()
+        .zip(usize::try_from(fd).ok())
+        .and_then(|(slot, idx)| rows.get_mut(slot).and_then(|row| row.get_mut(idx)))
+    {
+        *pos = new;
+    }
+    Ok(new)
+}
+
+/// Reset `proc_nr`'s row to [`DEFAULT_ROW`] (the process is gone), returning how
+/// many descriptors were open beyond the defaults.
+///
+/// "Open beyond the defaults" counts every entry that differs from its default
+/// and is not `Unused` — a [`Fd::File`], or a console descriptor that was
+/// re-pointed — so a closed 0/1/2 (which the reset *re-opens*) is not counted as
+/// a leak. An out-of-range `proc_nr` is `0` and touches nothing: a stray
+/// `VFS_PM_EXIT` cannot corrupt a neighbour's row.
+pub fn reset_in(rows: &mut [FdRow], proc_nr: i32) -> usize {
+    let Some(row) = usize::try_from(proc_nr)
+        .ok()
+        .and_then(|slot| rows.get_mut(slot))
+    else {
+        return 0;
+    };
+    let leaked = row
+        .iter()
+        .zip(DEFAULT_ROW.iter())
+        .filter(|(have, default)| have != default && **have != Fd::Unused)
+        .count();
+    *row = DEFAULT_ROW;
+    leaked
+}
+
 /// Resolve `(proc_nr, fd)` against the live table.
 pub fn resolve(proc_nr: i32, fd: i32) -> Result<Fd, i32> {
     // SAFETY: single-mutator invariant (see the module note). The borrow is taken
@@ -294,9 +350,22 @@ pub fn advance(proc_nr: i32, fd: i32, n: u64) {
     advance_in(unsafe { &mut *ROWS.0.get() }, proc_nr, fd, n)
 }
 
+/// Reposition a descriptor in the live table.
+pub fn seek(proc_nr: i32, fd: i32, whence: i32, offset: i64) -> Result<u64, i32> {
+    // SAFETY: as `resolve` — one mutator, and the borrow does not escape.
+    seek_in(unsafe { &mut *ROWS.0.get() }, proc_nr, fd, whence, offset)
+}
+
+/// Reset a process's row in the live table.
+pub fn reset(proc_nr: i32) -> usize {
+    // SAFETY: as `resolve` — one mutator, and the borrow does not escape.
+    reset_in(unsafe { &mut *ROWS.0.get() }, proc_nr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use minixrs_kernel_shared::fcntl::SEEK_END;
 
     const CONSOLE: Fd = Fd::CharDev {
         dev: CharDriver::Tty,
@@ -314,6 +383,34 @@ mod tests {
     /// be aliasing UB (see the module note).
     fn rows() -> [FdRow; NR_FD_ROWS] {
         [DEFAULT_ROW; NR_FD_ROWS]
+    }
+
+    #[test]
+    fn reset_restores_the_default_row_and_counts() {
+        let mut r = rows();
+        r[2][3] = Fd::File { ino: 7, pos: 9 };
+        r[2][5] = Fd::File { ino: 8, pos: 0 };
+        r[3][3] = Fd::File { ino: 9, pos: 1 };
+        assert_eq!(reset_in(&mut r, 2), 2);
+        assert_eq!(r[2], DEFAULT_ROW);
+        assert_eq!(r[3][3], Fd::File { ino: 9, pos: 1 }, "other rows untouched");
+    }
+
+    #[test]
+    fn reset_of_a_default_row_counts_zero() {
+        let mut r = rows();
+        assert_eq!(reset_in(&mut r, 4), 0);
+        assert_eq!(r[4], DEFAULT_ROW);
+    }
+
+    #[test]
+    fn reset_of_an_out_of_range_proc_is_zero_and_harmless() {
+        let mut r = rows();
+        r[0][3] = FILE;
+        assert_eq!(reset_in(&mut r, -2), 0);
+        assert_eq!(reset_in(&mut r, NR_SERVED_PROCS as i32), 0);
+        assert_eq!(r[0][3], FILE);
+        assert_eq!(r[1], DEFAULT_ROW);
     }
 
     #[test]
@@ -547,6 +644,112 @@ mod tests {
                 pos: u64::MAX
             })
         );
+    }
+
+    #[test]
+    fn seek_set_moves_a_file_and_returns_the_position() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, FILE), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_SET, 31), Ok(31));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: 31 }));
+    }
+
+    #[test]
+    fn seek_cur_is_relative() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, Fd::File { ino: 5, pos: 10 }), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, -4), Ok(6));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: 6 }));
+    }
+
+    #[test]
+    fn seek_end_is_einval() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, Fd::File { ino: 5, pos: 7 }), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_END, 0), Err(EINVAL));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: 7 }));
+    }
+
+    #[test]
+    fn unknown_whence_is_einval() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, FILE), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, 3, 0), Err(EINVAL));
+        assert_eq!(seek_in(&mut r, 0, 3, -1, 0), Err(EINVAL));
+    }
+
+    #[test]
+    fn negative_result_is_einval() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, Fd::File { ino: 5, pos: 2 }), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, -3), Err(EINVAL));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_SET, -1), Err(EINVAL));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: 2 }));
+    }
+
+    #[test]
+    fn overflow_is_einval_not_a_panic() {
+        let mut r = rows();
+        let top = i64::MAX as u64;
+        assert_eq!(alloc_in(&mut r, 0, Fd::File { ino: 5, pos: top }), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, 1), Err(EINVAL));
+        assert_eq!(resolve_in(&r, 0, 3), Ok(Fd::File { ino: 5, pos: top }));
+        assert_eq!(close_in(&mut r, 0, 3), Ok(()));
+        assert_eq!(alloc_in(&mut r, 0, FILE), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, i64::MIN), Err(EINVAL));
+        // A position above i64::MAX is unreachable but must not wrap negative.
+        assert_eq!(close_in(&mut r, 0, 3), Ok(()));
+        assert_eq!(
+            alloc_in(
+                &mut r,
+                0,
+                Fd::File {
+                    ino: 5,
+                    pos: u64::MAX
+                }
+            ),
+            Ok(3)
+        );
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_CUR, 0), Err(EINVAL));
+    }
+
+    #[test]
+    fn past_eof_is_legal() {
+        let mut r = rows();
+        assert_eq!(alloc_in(&mut r, 0, FILE), Ok(3));
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_SET, 1 << 40), Ok(1 << 40));
+        assert_eq!(
+            resolve_in(&r, 0, 3),
+            Ok(Fd::File {
+                ino: 5,
+                pos: 1 << 40
+            })
+        );
+    }
+
+    #[test]
+    fn console_is_espipe() {
+        let mut r = rows();
+        assert_eq!(seek_in(&mut r, 0, 1, SEEK_SET, 0), Err(ESPIPE));
+        assert_eq!(
+            alloc_in(
+                &mut r,
+                0,
+                Fd::CharDev {
+                    dev: CharDriver::Memory,
+                    minor: 0
+                }
+            ),
+            Ok(3)
+        );
+        assert_eq!(seek_in(&mut r, 0, 3, SEEK_SET, 0), Err(ESPIPE));
+    }
+
+    #[test]
+    fn closed_fd_is_ebadf() {
+        let mut r = rows();
+        assert_eq!(seek_in(&mut r, 0, 4, SEEK_SET, 0), Err(EBADF));
+        assert_eq!(seek_in(&mut r, 0, -1, SEEK_SET, 0), Err(EBADF));
     }
 
     #[test]

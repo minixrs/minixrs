@@ -157,6 +157,11 @@ struct ClientRegions {
     /// Origin of this process's heap. The legacy [`HEAP_BASE`] until a
     /// `VM_EXEC` records the image end.
     heap_origin: u64,
+    /// The exact program break last accepted by `set_brk`; `0` means never set
+    /// (so the break is the origin). Kept apart from the heap region's `end`,
+    /// which is the page-aligned ceiling: libc's `brk` wants the exact value
+    /// back (M3). A refused request never writes it.
+    brk: u64,
     /// Next free VA for an anonymous mmap. Bump-only: munmap never returns
     /// addresses here (matches a trivial mmap allocator; reuse waits for a real
     /// per-process VM layout).
@@ -167,6 +172,7 @@ impl ClientRegions {
     const EMPTY: Self = Self {
         regions: [Region::EMPTY; MAX_REGIONS],
         heap_origin: HEAP_BASE,
+        brk: 0,
         mmap_next: MMAP_BASE,
     };
 
@@ -176,15 +182,20 @@ impl ClientRegions {
     }
 
     /// Set the program break to `new_break`, growing or creating the heap
-    /// region as `[heap_origin, page_align_up(new_break))`. Returns the
-    /// resulting break. Errors: `EINVAL` if `new_break` is below this process's
-    /// heap origin, the page-aligned break would overflow `u64`, or no region
-    /// slot is free for a new heap; `ENOMEM` if the break would carry the heap
-    /// past [`REGION_LIMIT`] into the stack's guard page.
+    /// region as `[heap_origin, page_align_up(new_break))`. Returns the exact
+    /// `new_break` (not the aligned region end). `new_break == 0` is a query
+    /// (M3): it changes nothing and returns the current break, the exact break
+    /// last set or else the heap origin. Errors: `EINVAL` if `new_break` is
+    /// below this process's heap origin, the page-aligned break would overflow
+    /// `u64`, or no region slot is free for a new heap; `ENOMEM` if the break
+    /// would carry the heap past [`REGION_LIMIT`] into the stack's guard page.
     fn set_brk(&mut self, new_break: u64) -> Result<u64, i32> {
         // The origin is read once, up front: the free-slot loop below borrows
         // `self.regions` mutably, so `self.heap_origin` cannot be read inside it.
         let origin = self.heap_origin;
+        if new_break == 0 {
+            return Ok(if self.brk == 0 { origin } else { self.brk });
+        }
         if new_break < origin {
             return Err(EINVAL);
         }
@@ -207,7 +218,8 @@ impl ClientRegions {
         for r in self.regions.iter_mut() {
             if r.kind == Kind::Heap {
                 r.end = end;
-                return Ok(end);
+                self.brk = new_break;
+                return Ok(new_break);
             }
         }
         // Otherwise claim a free slot for a fresh heap region.
@@ -218,7 +230,8 @@ impl ClientRegions {
                     end,
                     kind: Kind::Heap,
                 };
-                return Ok(end);
+                self.brk = new_break;
+                return Ok(new_break);
             }
         }
         Err(EINVAL)
@@ -311,6 +324,7 @@ impl ClientRegions {
             .count();
         self.regions = [Region::EMPTY; MAX_REGIONS];
         self.heap_origin = image_end;
+        self.brk = 0;
         // Saturating rather than checked: an image_end near u64::MAX cannot come
         // out of the loader (every segment passed `check_va`), and an arena
         // origin above REGION_LIMIT simply makes every mmap answer ENOMEM, which
@@ -394,10 +408,13 @@ pub fn contains(nr: i32, addr: u64) -> bool {
 }
 
 /// Set process `nr`'s program break to `new_break`, growing or creating its
-/// heap region as `[heap_origin, page_align_up(new_break))`. Returns the
-/// resulting break on success, or `EINVAL` if `nr` is untrackable or
-/// `new_break` is below that process's heap origin — the legacy [`HEAP_BASE`]
-/// until a `VM_EXEC` records an image-relative one.
+/// heap region as `[heap_origin, page_align_up(new_break))`. Returns the exact
+/// `new_break` on success (`0` queries the current break and changes nothing).
+/// Errors: `EINVAL` if `nr` is untrackable, `new_break` is below that process's
+/// heap origin — the legacy [`HEAP_BASE`] until a `VM_EXEC` records an
+/// image-relative one — the aligned break would overflow, or no region slot is
+/// free for a new heap; `ENOMEM` if the heap would grow past [`REGION_LIMIT`]
+/// into the stack's guard page. A refused request changes nothing.
 ///
 /// No frames are mapped here — pages fault in lazily on first touch and are
 /// resolved through [`contains`] in the fault path.
@@ -500,7 +517,8 @@ mod tests {
     fn set_brk_rounds_break_up_to_page() {
         let mut c = ClientRegions::EMPTY;
         let brk = c.set_brk(HEAP_BASE + 1).unwrap();
-        assert_eq!(brk, HEAP_BASE + PAGE_SIZE);
+        // The reply is the exact break; only the region end is page-aligned.
+        assert_eq!(brk, HEAP_BASE + 1);
         assert!(c.contains(HEAP_BASE + PAGE_SIZE - 1));
         assert!(!c.contains(HEAP_BASE + PAGE_SIZE));
     }
@@ -515,7 +533,67 @@ mod tests {
     fn set_brk_below_heap_base_is_einval() {
         let mut c = ClientRegions::EMPTY;
         assert_eq!(c.set_brk(HEAP_BASE - 1), Err(EINVAL));
-        assert_eq!(c.set_brk(0), Err(EINVAL));
+        // `set_brk(0)` is the query (M3), no longer an error; see the brk_zero tests.
+        assert_eq!(c.set_brk(1), Err(EINVAL));
+    }
+
+    #[test]
+    fn brk_zero_before_any_set_returns_the_origin() {
+        let mut c = ClientRegions::EMPTY;
+        assert_eq!(c.set_brk(0), Ok(HEAP_BASE));
+        // A query creates nothing.
+        assert!(c.regions.iter().all(|r| r.kind == Kind::Unused));
+        // ...and an exec'd image's origin is reported, not the legacy one.
+        c.exec(0x0030_2000);
+        assert_eq!(c.set_brk(0), Ok(0x0030_2000));
+    }
+
+    #[test]
+    fn brk_zero_after_a_set_returns_the_exact_break() {
+        let mut c = ClientRegions::EMPTY;
+        let b = HEAP_BASE + 0x1234;
+        c.set_brk(b).unwrap();
+        assert_eq!(c.set_brk(0), Ok(b));
+        // The region end is still page-aligned.
+        assert!(c.contains(HEAP_BASE + 0x1FFF));
+        assert!(!c.contains(HEAP_BASE + 0x2000));
+    }
+
+    #[test]
+    fn set_brk_replies_the_exact_unaligned_break() {
+        let mut c = ClientRegions::EMPTY;
+        assert_eq!(c.set_brk(HEAP_BASE + 0x1234), Ok(HEAP_BASE + 0x1234));
+        // Shrinking to an unaligned break replies it exactly too.
+        assert_eq!(c.set_brk(HEAP_BASE + 0x77), Ok(HEAP_BASE + 0x77));
+        assert_eq!(c.set_brk(0), Ok(HEAP_BASE + 0x77));
+    }
+
+    #[test]
+    fn refused_brk_leaves_the_break_unchanged() {
+        let mut c = ClientRegions::EMPTY;
+        let b = HEAP_BASE + 0x1234;
+        c.set_brk(b).unwrap();
+        assert_eq!(c.set_brk(HEAP_BASE - 1), Err(EINVAL));
+        assert_eq!(c.set_brk(REGION_LIMIT + 1), Err(ENOMEM));
+        assert_eq!(c.set_brk(u64::MAX), Err(EINVAL));
+        assert_eq!(c.set_brk(0), Ok(b));
+    }
+
+    #[test]
+    fn exec_resets_the_break() {
+        let mut c = ClientRegions::EMPTY;
+        c.set_brk(HEAP_BASE + 0x1234).unwrap();
+        c.exec(0x0030_2000);
+        assert_eq!(c.set_brk(0), Ok(0x0030_2000));
+    }
+
+    #[test]
+    fn fork_copies_the_break() {
+        let mut p = ClientRegions::EMPTY;
+        p.set_brk(HEAP_BASE + 0x1234).unwrap();
+        let child = p; // fork is a whole-struct copy
+        let mut child = child;
+        assert_eq!(child.set_brk(0), Ok(HEAP_BASE + 0x1234));
     }
 
     #[test]
@@ -630,7 +708,11 @@ mod tests {
 
         // The page-align-up must not be able to carry a break over the bound.
         let mut c = ClientRegions::EMPTY;
-        assert_eq!(c.set_brk(REGION_LIMIT - PAGE_SIZE + 1), Ok(REGION_LIMIT));
+        assert_eq!(
+            c.set_brk(REGION_LIMIT - PAGE_SIZE + 1),
+            Ok(REGION_LIMIT - PAGE_SIZE + 1)
+        );
+        assert!(c.contains(REGION_LIMIT - 1));
         assert_eq!(
             c.set_brk(REGION_LIMIT - PAGE_SIZE + 1 + PAGE_SIZE),
             Err(ENOMEM)

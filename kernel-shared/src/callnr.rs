@@ -629,9 +629,41 @@ pub const VFS_CLOSE: i32 = VFS_RQ_BASE + 3;
 /// serialises exec, so there is never a second staged image alive at once.
 pub const VFS_EXEC_STAGE: i32 = VFS_RQ_BASE + 4;
 
+/// EL0 → VFS: reposition a descriptor's file offset (`lseek`).
+///
+/// Payload: the descriptor in [`VFS_FD_OFF`]`..+4` (i32), the whence in
+/// [`VFS_WHENCE_OFF`]`..+4` (i32, [`crate::fcntl`]'s `SEEK_SET` / `SEEK_CUR` /
+/// `SEEK_END`, Linux's 0/1/2), and the offset in [`VFS_OFFSET_OFF`]`..+8` (i64).
+///
+/// Reply: `m_type = OK` and the **new position** in [`VFS_POS_OFF`]`..+8` (u64).
+/// The position does not ride in `m_type` because it can exceed `i32` — the
+/// asymmetry with [`VFS_READ`]'s count is deliberate. Errors are in `m_type`,
+/// with the position unchanged:
+///
+/// - `EBADF` — the descriptor is not open;
+/// - `ESPIPE` — the descriptor is not a file (the console and every `/dev` node);
+/// - `EINVAL` — whence is `SEEK_END` (**until a stat request has a consumer**:
+///   VFS knows no file size), or is none of the three, or the result would be
+///   negative or overflow `i64`.
+///
+/// Seeking past end of file is legal: VFS knows no size to refuse it with. A
+/// later read there returns 0 and a later write leaves a hole.
+pub const VFS_LSEEK: i32 = VFS_RQ_BASE + 5;
+
+/// PM → VFS: a process is gone; reset its descriptor row.
+///
+/// Payload: the exiting endpoint in [`VFS_PM_EXIT_PROC_OFF`]`..+4` (i32). Reply
+/// `m_type = OK`. **PM-only**: VFS checks the kernel-stamped `m_source` (as it
+/// does for [`VFS_EXEC_STAGE`]) and answers `EPERM` to anyone else. VFS resets
+/// that process's row to `DEFAULT_ROW` — the state a fresh process starts in
+/// (0/1/2 on the console, everything else closed) — so a recycled proc number
+/// never inherits a dead process's descriptors. Not used by C; its header row
+/// exists because the band's member-count test requires one.
+pub const VFS_PM_EXIT: i32 = VFS_RQ_BASE + 6;
+
 /// Number of VFS server requests defined so far. Locks VFS's dispatch coverage
 /// the way `NR_DS_REQUESTS` locks the DS server.
-pub const NR_VFS_MSGS: usize = 5;
+pub const NR_VFS_MSGS: usize = 7;
 
 /// Offset of the file descriptor in a `VFS_WRITE` / `VFS_READ` / `VFS_CLOSE`
 /// payload (i32).
@@ -681,6 +713,16 @@ pub const VFS_PATH_LEN_OFF: usize = 8;
 /// request rather than a new request, so [`NR_VFS_MSGS`] does not move.
 pub const VFS_FLAGS_OFF: usize = 12;
 
+/// Offset of the whence in a [`VFS_LSEEK`] request (i32).
+pub const VFS_WHENCE_OFF: usize = 4;
+/// Offset of the offset in a [`VFS_LSEEK`] request (i64, and 8-aligned within
+/// the message for the reason [`VFS_BUF_OFF`] gives).
+pub const VFS_OFFSET_OFF: usize = 8;
+/// Offset of the new position in a [`VFS_LSEEK`] **reply** (u64).
+pub const VFS_POS_OFF: usize = 0;
+/// Offset of the exiting endpoint in a [`VFS_PM_EXIT`] request (i32).
+pub const VFS_PM_EXIT_PROC_OFF: usize = 0;
+
 // The VFS range sits strictly above the PM range and strictly below FS's (and
 // therefore every other server request range) and the NOTIFY marker.
 const _: () = assert!(VFS_RQ_BASE > PM_RQ_BASE + (NR_PM_MSGS as i32 - 1));
@@ -701,6 +743,16 @@ const _: () = assert!(VFS_PATH_OFF + 8 <= VFS_PATH_LEN_OFF);
 const _: () = assert!(VFS_PATH_LEN_OFF + 4 <= VFS_FLAGS_OFF);
 const _: () = assert!(VFS_FLAGS_OFF + 4 <= 96);
 const _: () = assert!((8 + VFS_PATH_OFF).is_multiple_of(8));
+
+// The `VFS_LSEEK` request: fd (shared `VFS_FD_OFF`), whence, then an 8-wide offset.
+// The reply's position and `VFS_PM_EXIT`'s endpoint are separate messages.
+const _: () = assert!(VFS_FD_OFF + 4 <= VFS_WHENCE_OFF);
+const _: () = assert!(VFS_WHENCE_OFF + 4 <= VFS_OFFSET_OFF);
+const _: () = assert!(VFS_OFFSET_OFF + 8 <= 96);
+const _: () = assert!((8 + VFS_OFFSET_OFF).is_multiple_of(8));
+const _: () = assert!(VFS_POS_OFF + 8 <= 96);
+const _: () = assert!((8 + VFS_POS_OFF).is_multiple_of(8));
+const _: () = assert!(VFS_PM_EXIT_PROC_OFF + 4 <= 96);
 
 // The `VFS_EXEC_STAGE` request's inline path and its reply's grant id each fill
 // their own message, so both may start at byte 0.
@@ -1236,10 +1288,18 @@ pub const VM_RQ_BASE: i32 = 0xC00;
 pub const VM_PAGEFAULT: i32 = VM_RQ_BASE;
 
 /// EL0 → VM: set the caller's program break to `new_break` (payload `0..8`,
-/// u64). VM grows or creates the caller's heap region to `[HEAP_BASE,
-/// new_break)`; pages fault in lazily on first touch (no eager mapping). The
-/// reply carries `m_type = OK` and the resulting break in payload `0..8`, or a
-/// negative error in `m_type`. (slice 3.5)
+/// u64). VM grows or creates the caller's heap region to `[origin, new_break)`,
+/// where origin is the per-process heap origin `VM_EXEC` records; pages fault in
+/// lazily on first touch (no eager mapping). The reply carries `m_type = OK` and
+/// the resulting break in payload `0..8`, or a negative error in `m_type`.
+/// (slice 3.5)
+///
+/// - **`new_break == 0` is a query**: VM replies `OK` with the current break —
+///   the exact break last set, or the heap origin if the process never set one —
+///   and changes nothing. (musl's `brk(0)` needs this.)
+/// - The reply carries the **exact** break requested, not its page-aligned
+///   rounding; the heap region's end stays page-aligned internally.
+/// - A refused request changes nothing.
 pub const VM_BRK: i32 = VM_RQ_BASE + 1;
 
 /// EL0 → VM: anonymous mmap. The caller requests `len` bytes (payload `0..8`,
@@ -1797,6 +1857,8 @@ mod tests {
                 VFS_READ,
                 VFS_CLOSE,
                 VFS_EXEC_STAGE,
+                VFS_LSEEK,
+                VFS_PM_EXIT,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1880,6 +1942,8 @@ mod tests {
                 VFS_READ,
                 VFS_CLOSE,
                 VFS_EXEC_STAGE,
+                VFS_LSEEK,
+                VFS_PM_EXIT,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -1918,7 +1982,15 @@ mod tests {
     fn vfs_msgs_contiguous_from_base() {
         // VFS requests are contiguous from VFS_RQ_BASE; NR_VFS_MSGS locks the
         // VFS server's dispatch coverage.
-        let msgs = [VFS_WRITE, VFS_OPEN, VFS_READ, VFS_CLOSE, VFS_EXEC_STAGE];
+        let msgs = [
+            VFS_WRITE,
+            VFS_OPEN,
+            VFS_READ,
+            VFS_CLOSE,
+            VFS_EXEC_STAGE,
+            VFS_LSEEK,
+            VFS_PM_EXIT,
+        ];
         for (i, m) in msgs.iter().enumerate() {
             assert_eq!(*m, VFS_RQ_BASE + i as i32);
         }
@@ -1927,12 +1999,32 @@ mod tests {
     }
 
     #[test]
+    fn vfs_lseek_and_pm_exit_are_the_two_new_requests() {
+        assert_eq!(VFS_LSEEK, 0x805);
+        assert_eq!(VFS_PM_EXIT, 0x806);
+        assert_eq!(NR_VFS_MSGS, 7);
+        // lseek: request fd/whence/offset, reply position at byte 0.
+        assert_eq!(VFS_WHENCE_OFF, 4);
+        assert_eq!(VFS_OFFSET_OFF, 8);
+        assert_eq!(VFS_POS_OFF, 0);
+        assert_eq!(VFS_PM_EXIT_PROC_OFF, 0);
+    }
+
+    #[test]
     fn vfs_msgs_distinct_from_other_ranges() {
         // Each VFS request must stay distinct from every other band and the
         // KERNEL_CALL range, and below NOTIFY_MESSAGE — so a server's m_type
         // dispatcher and the SEF classifier never collide. VFS sits between PM
         // and CDEV, which is what its two bounds assert.
-        for m in [VFS_WRITE, VFS_OPEN, VFS_READ, VFS_CLOSE, VFS_EXEC_STAGE] {
+        for m in [
+            VFS_WRITE,
+            VFS_OPEN,
+            VFS_READ,
+            VFS_CLOSE,
+            VFS_EXEC_STAGE,
+            VFS_LSEEK,
+            VFS_PM_EXIT,
+        ] {
             for other in [
                 PM_GETPID,
                 PM_FORK,
@@ -2145,6 +2237,8 @@ mod tests {
                 VFS_READ,
                 VFS_CLOSE,
                 VFS_EXEC_STAGE,
+                VFS_LSEEK,
+                VFS_PM_EXIT,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,
@@ -2260,6 +2354,8 @@ mod tests {
                 VFS_READ,
                 VFS_CLOSE,
                 VFS_EXEC_STAGE,
+                VFS_LSEEK,
+                VFS_PM_EXIT,
                 BDEV_READ,
                 BDEV_WRITE,
                 CDEV_WRITE,
@@ -2456,6 +2552,8 @@ mod tests {
                 VFS_READ,
                 VFS_CLOSE,
                 VFS_EXEC_STAGE,
+                VFS_LSEEK,
+                VFS_PM_EXIT,
                 FS_READSUPER,
                 FS_LOOKUP,
                 FS_READ,

@@ -391,8 +391,9 @@ with and without the disk, each with a marker file that requires its own backend
 drops the `IRQ_ENABLE` hangs the disk boot at its second request.
 
 The two write-back orderings [`phase-6-prep.md`](phase-6-prep.md) carries from Phase 5 are **not**
-discharged by this slice or by 6.4's persistence proof: no slice here adds `lseek` or a second
-truncate consumer, which is what probing them needs. They stay owed on that tracker.
+discharged by this slice or by 6.4's persistence proof. `lseek` itself landed in pre-Phase-6 chunk 5
+and does not reach them (they need a failure injected between two steps of one FS operation, not a
+seek), and no slice here adds that. They stay owed on that tracker.
 
 ### Slice 6.4: `tools/mkimage` — one GPT disk — sub-milestone: disk root
 

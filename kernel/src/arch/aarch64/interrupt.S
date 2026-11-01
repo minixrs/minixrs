@@ -5,7 +5,8 @@
  *
  * Wired in `vectors.S` vector slot 9 (`el0_64_irq`) — the IRQ vector for an
  * exception taken from a Lower EL using AArch64. Mirrors the save/restore
- * idiom from `el0_64_sync_entry` (slice 2.3): user state goes into the
+ * idiom from `el0_64_sync_entry` (slice 2.3): the whole user state — GPRs,
+ * return state, TPIDR_EL0 and FP/SIMD — goes into the
  * `tpidr_el1`-pointed `ArchRegisterFrame`, the Rust dispatcher runs with
  * the frame pointer in x0, then the tail returns to whichever EL0 context
  * `tpidr_el1` still points at — possibly a *different* proc if `do_irq`
@@ -27,6 +28,10 @@
     .equ REGS_SP_EL0_OFFSET, 248
     .equ REGS_ELR_OFFSET,    256
     .equ REGS_SPSR_OFFSET,   264
+    .equ REGS_TPIDR_EL0_OFFSET, 272
+    .equ REGS_FPCR_OFFSET,   280
+    .equ REGS_FPSR_OFFSET,   288
+    .equ REGS_Q_OFFSET,      304
 
     .section .text.interrupt, "ax", %progbits
 
@@ -36,8 +41,10 @@
  * Same calling convention as el0_64_sync_entry: spill the user's x29/x30 to
  * the kernel stack to free two scratch registers, load the frame pointer
  * from TPIDR_EL1 into x29, save x0..x28 directly, then recover x29/x30 from
- * the kernel stack and store into the frame. Finally save SP_EL0, ELR_EL1,
- * SPSR_EL1 and tail-call do_irq.
+ * the kernel stack and store into the frame. Then save SP_EL0, ELR_EL1,
+ * SPSR_EL1, TPIDR_EL0 (spec M18) and FPCR, FPSR and q0..q31 (spec M19) --
+ * the same set, in the same order, as the sync entry -- call do_irq, and
+ * branch to el1_return_to_user, which restores all of it.
  */
     .global el0_64_irq_entry
     .type el0_64_irq_entry, %function
@@ -75,6 +82,40 @@ el0_64_irq_entry:
     mrs     x11, spsr_el1
     stp     x9,  x10, [x29, #REGS_SP_EL0_OFFSET]
     str     x11,      [x29, #REGS_SPSR_OFFSET]
+
+    // Save TPIDR_EL0 (the user thread pointer). x13 is free: every GPR is
+    // already in the frame.
+    mrs     x13, tpidr_el0
+    str     x13,      [x29, #REGS_TPIDR_EL0_OFFSET]
+
+    // Save FPCR/FPSR and q0..q31 (spec M19) before any Rust runs: the kernel
+    // target enables NEON, so kernel code itself clobbers `q` registers.
+    // x13/x14 are free for the same reason as above. These EL1 FP accesses
+    // do not trap: the kernel never writes CPACR_EL1, and FPEN arrives as
+    // 0b11 from UEFI/Limine — the only encoding under which both the kernel's
+    // own NEON code (EL1) and the servers' (EL0) run, which they do. The
+    // QEMU virt machine has no EL2/EL3, so no CPTR_EL2/EL3 trap applies.
+    // REGS_Q_OFFSET is 16-aligned and the last pair's +0x1E0 stays within
+    // stp's +1008 reach (both asserted in context.rs).
+    mrs     x13, fpcr
+    mrs     x14, fpsr
+    stp     x13, x14, [x29, #REGS_FPCR_OFFSET]
+    stp     q0,  q1,  [x29, #REGS_Q_OFFSET + 0x000]
+    stp     q2,  q3,  [x29, #REGS_Q_OFFSET + 0x020]
+    stp     q4,  q5,  [x29, #REGS_Q_OFFSET + 0x040]
+    stp     q6,  q7,  [x29, #REGS_Q_OFFSET + 0x060]
+    stp     q8,  q9,  [x29, #REGS_Q_OFFSET + 0x080]
+    stp     q10, q11, [x29, #REGS_Q_OFFSET + 0x0A0]
+    stp     q12, q13, [x29, #REGS_Q_OFFSET + 0x0C0]
+    stp     q14, q15, [x29, #REGS_Q_OFFSET + 0x0E0]
+    stp     q16, q17, [x29, #REGS_Q_OFFSET + 0x100]
+    stp     q18, q19, [x29, #REGS_Q_OFFSET + 0x120]
+    stp     q20, q21, [x29, #REGS_Q_OFFSET + 0x140]
+    stp     q22, q23, [x29, #REGS_Q_OFFSET + 0x160]
+    stp     q24, q25, [x29, #REGS_Q_OFFSET + 0x180]
+    stp     q26, q27, [x29, #REGS_Q_OFFSET + 0x1A0]
+    stp     q28, q29, [x29, #REGS_Q_OFFSET + 0x1C0]
+    stp     q30, q31, [x29, #REGS_Q_OFFSET + 0x1E0]
 
     // do_irq(&mut frame). May update tpidr_el1 if a context switch happens.
     mov     x0, x29

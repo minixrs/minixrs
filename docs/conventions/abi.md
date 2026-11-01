@@ -114,6 +114,28 @@ Phase-4 pinned several exact call numbers and payload shapes within these bands:
   previous time-left; it needs no new `kernel-shared` constants, reusing `NOTIFY_MESSAGE` + `CLOCK`
   (slice 4.4 — see [phase-4-servers.md](../plans/phase-4-servers.md)).
 
+Pre-Phase-6 chunk 5 added two more, in the one deliberate ABI bump that the freeze below allows:
+
+- `VFS_LSEEK` is `VFS_RQ_BASE + 5 = 0x805` and `VFS_PM_EXIT` is `VFS_RQ_BASE + 6 = 0x806`, bumping
+  `NR_VFS_MSGS` 5→7. `VFS_LSEEK`'s payload is the fd (`VFS_FD_OFF`), the whence (`VFS_WHENCE_OFF`,
+  4, i32) and an 8-aligned i64 offset (`VFS_OFFSET_OFF`, 8); the reply carries the new position at
+  `VFS_POS_OFF` (0, u64). Whence is `fcntl.rs`'s `SEEK_SET`/`SEEK_CUR`/`SEEK_END` (Linux's 0/1/2);
+  `SEEK_END` answers `EINVAL` until an FS-band size request has a consumer. `VFS_PM_EXIT` is
+  **PM-only** (`EPERM` otherwise, off the kernel-stamped `m_source`), carries the exiting endpoint
+  at `VFS_PM_EXIT_PROC_OFF` (0, i32), and is not used by C — its header row exists because the
+  band's member-count test demands one.
+- `VM_BRK`'s argument `0` is now a **query** (current break, nothing changed), and the reply carries
+  the exact break requested rather than its page rounding. That is a semantic change to a frozen
+  call, not a new number. `VM_FORK` and `VM_EXEC` are PM-only, and VM answers `ENOSYS` to a request
+  it does not know instead of dropping it.
+- **Not emitted into the generated C headers:** `FS_PATH_MAX` and the `VM_BRK`/`VM_MMAP`/`VM_MUNMAP`
+  payload offsets. The musl shim hand-spells them (`minixrs_internal.h`, with the existing
+  `PM_EXIT_STATUS_OFF` as precedent), so a change to either is a two-repo edit that no CI gate
+  catches. Emitting them from `callnr_h.rs` is an optional follow-up.
+
+(pre-Phase-6 chunk 5 — see
+[the design](../superpowers/specs/2026-10-28-musl-syscall-surface-design.md))
+
 ## Grant ABI (D4)
 
 `kernel-shared/src/grant.rs` defines the cross-address-space copy ABI: a flat `#[repr(C)]`

@@ -62,13 +62,15 @@ const STDERR: i32 = 2;
 /// under. The kernel copies the `SYS_EXEC` name field into the frame, so this
 /// checks the exact bytes it wrote, which is the point of the probe.
 ///
-/// Two entries, not one, and the second is not hypothetical. Since slice 5.6 the
-/// exec target is named by the caller (`init`'s `EXEC_TARGETS`), and when the
-/// musl sysroot is absent `kernel/build.rs` packs **this** ELF under the name
-/// `hello` as its fallback — so the same binary really does run as either name.
+/// Three entries, not one, and the others are not hypothetical. Since slice 5.6
+/// the exec target is named by the caller (`init`'s `EXEC_TARGETS`), and when
+/// the musl sysroot is absent `kernel/build.rs` packs **this** ELF under the
+/// names of the C programs, `hello` and (since pre-Phase-6 chunk 5) `fileio`, as
+/// its fallback — so the same binary really does run under any of the three.
 /// Hardcoding `worker` made that fallback print `stack FAIL`, which is on the
 /// forbidden list: a missing sysroot would have looked like a broken exec ABI.
-const ARGV0_NAMES: [&[u8]; 2] = [b"worker", b"hello"];
+/// Every C program `build_c_program` packs needs its name here.
+const ARGV0_NAMES: [&[u8]; 3] = [b"worker", b"hello", b"fileio"];
 
 /// Link base of this image (`user.ld`). `AT_PHDR` must point into the first
 /// `PT_LOAD`, whose `p_vaddr` is exactly this.

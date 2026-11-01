@@ -4,12 +4,15 @@
  * minix.rs aarch64 EL0 → EL1 trap entry + eret stub.
  *
  * Used for:
- *   - EL0 SVC traps (vector slot 8). `vectors.S` branches here unconditionally
- *     for that slot; this stub saves user state into CURRENT_PROC->regs,
- *     decodes ESR_EL1, and dispatches either `do_ipc` (EC = SVC64) or the
- *     unexpected-sync panic helper.
- *   - Returning to EL0. `switch_to_user` and the SVC tail both branch to
- *     `el1_return_to_user`, which restores `tpidr_el1`-pointed regs and erets.
+ *   - EL0 synchronous exceptions (vector slot 8). `vectors.S` branches here
+ *     unconditionally for that slot; this stub saves the whole user context
+ *     into CURRENT_PROC->regs -- x0..x30, SP_EL0, ELR_EL1, SPSR_EL1, the
+ *     TPIDR_EL0 thread pointer (spec M18) and the FP/SIMD state, FPCR, FPSR and
+ *     q0..q31 (spec M19) -- decodes ESR_EL1, and dispatches either `do_ipc`
+ *     (EC = SVC64) or `do_page_fault` (every other EC).
+ *   - Returning to EL0. `switch_to_user`, the SVC and page-fault tails here,
+ *     and the IRQ tail in `interrupt.S` all branch to `el1_return_to_user`,
+ *     which restores the same set from the `tpidr_el1`-pointed frame and erets.
  *
  * Calling convention:
  *   - TPIDR_EL1 always holds `&mut CURRENT_PROC->regs` while we are running
@@ -17,14 +20,18 @@
  *     never clear it.
  *   - Field offsets below must match `kernel/src/arch/aarch64/context.rs`.
  *     The .equ block is mirrored from the Rust REGS_*_OFFSET constants; the
- *     `const _: () = assert!(size_of::<ArchRegisterFrame> == 272)` canary in
- *     context.rs catches drift in the trailing fields.
+ *     `const _: () = assert!(size_of::<ArchRegisterFrame> == 816)` and `offset_of!`
+ *     asserts in context.rs catch drift.
  */
 
     .equ REGS_X_OFFSET,      0
     .equ REGS_SP_EL0_OFFSET, 248
     .equ REGS_ELR_OFFSET,    256
     .equ REGS_SPSR_OFFSET,   264
+    .equ REGS_TPIDR_EL0_OFFSET, 272
+    .equ REGS_FPCR_OFFSET,   280
+    .equ REGS_FPSR_OFFSET,   288
+    .equ REGS_Q_OFFSET,      304
 
     .equ ESR_EC_SVC64,       0x15
 
@@ -85,6 +92,40 @@ el0_64_sync_entry:
     stp     x9,  x10, [x29, #REGS_SP_EL0_OFFSET]
     str     x11,      [x29, #REGS_SPSR_OFFSET]
 
+    // Save TPIDR_EL0 (the user thread pointer). x13 is free: every GPR is
+    // already in the frame.
+    mrs     x13, tpidr_el0
+    str     x13,      [x29, #REGS_TPIDR_EL0_OFFSET]
+
+    // Save FPCR/FPSR and q0..q31 (spec M19) before any Rust runs: the kernel
+    // target enables NEON, so kernel code itself clobbers `q` registers.
+    // x13/x14 are free for the same reason as above. These EL1 FP accesses
+    // do not trap: the kernel never writes CPACR_EL1, and FPEN arrives as
+    // 0b11 from UEFI/Limine — the only encoding under which both the kernel's
+    // own NEON code (EL1) and the servers' (EL0) run, which they do. The
+    // QEMU virt machine has no EL2/EL3, so no CPTR_EL2/EL3 trap applies.
+    // REGS_Q_OFFSET is 16-aligned and the last pair's +0x1E0 stays within
+    // stp's +1008 reach (both asserted in context.rs).
+    mrs     x13, fpcr
+    mrs     x14, fpsr
+    stp     x13, x14, [x29, #REGS_FPCR_OFFSET]
+    stp     q0,  q1,  [x29, #REGS_Q_OFFSET + 0x000]
+    stp     q2,  q3,  [x29, #REGS_Q_OFFSET + 0x020]
+    stp     q4,  q5,  [x29, #REGS_Q_OFFSET + 0x040]
+    stp     q6,  q7,  [x29, #REGS_Q_OFFSET + 0x060]
+    stp     q8,  q9,  [x29, #REGS_Q_OFFSET + 0x080]
+    stp     q10, q11, [x29, #REGS_Q_OFFSET + 0x0A0]
+    stp     q12, q13, [x29, #REGS_Q_OFFSET + 0x0C0]
+    stp     q14, q15, [x29, #REGS_Q_OFFSET + 0x0E0]
+    stp     q16, q17, [x29, #REGS_Q_OFFSET + 0x100]
+    stp     q18, q19, [x29, #REGS_Q_OFFSET + 0x120]
+    stp     q20, q21, [x29, #REGS_Q_OFFSET + 0x140]
+    stp     q22, q23, [x29, #REGS_Q_OFFSET + 0x160]
+    stp     q24, q25, [x29, #REGS_Q_OFFSET + 0x180]
+    stp     q26, q27, [x29, #REGS_Q_OFFSET + 0x1A0]
+    stp     q28, q29, [x29, #REGS_Q_OFFSET + 0x1C0]
+    stp     q30, q31, [x29, #REGS_Q_OFFSET + 0x1E0]
+
     // Decode ESR_EL1 EC and dispatch.
     mrs     x12, esr_el1
     lsr     x13, x12, #26
@@ -121,10 +162,14 @@ el0_64_sync_entry:
  * Used by:
  *   - proc::sched::switch_to_user (first entry into EL0).
  *   - SVC tail (after do_ipc returns).
+ *   - Page-fault tail (after do_page_fault returns).
+ *   - IRQ tail in `interrupt.S` (after do_irq returns).
  *
- * Both paths leave TPIDR_EL1 pointing at the frame. x9 stays the base
- * throughout; x8 and x9 are restored last (otherwise loading into x9
- * would clobber the base).
+ * Restores the system registers, TPIDR_EL0, FPCR/FPSR and q0..q31, then the
+ * GPRs. Every path leaves TPIDR_EL1 pointing at the frame -- possibly a
+ * different proc's than the one that trapped, if the tail rescheduled. x9
+ * stays the base throughout; x8 and x9 are restored last (otherwise loading
+ * into x9 would clobber the base).
  */
     .global el1_return_to_user
     .type el1_return_to_user, %function
@@ -137,6 +182,31 @@ el1_return_to_user:
     msr     sp_el0,   x10
     msr     elr_el1,  x11
     msr     spsr_el1, x12
+    ldr     x13,      [x9, #REGS_TPIDR_EL0_OFFSET]
+    msr     tpidr_el0, x13
+
+    // FP/SIMD state (spec M19). Nothing but this stub runs between here and
+    // eret, so the reloaded q registers reach EL0 untouched. x13/x14 are
+    // reloaded by the GPR ldp below.
+    ldp     x13, x14, [x9, #REGS_FPCR_OFFSET]
+    msr     fpcr,     x13
+    msr     fpsr,     x14
+    ldp     q0,  q1,  [x9, #REGS_Q_OFFSET + 0x000]
+    ldp     q2,  q3,  [x9, #REGS_Q_OFFSET + 0x020]
+    ldp     q4,  q5,  [x9, #REGS_Q_OFFSET + 0x040]
+    ldp     q6,  q7,  [x9, #REGS_Q_OFFSET + 0x060]
+    ldp     q8,  q9,  [x9, #REGS_Q_OFFSET + 0x080]
+    ldp     q10, q11, [x9, #REGS_Q_OFFSET + 0x0A0]
+    ldp     q12, q13, [x9, #REGS_Q_OFFSET + 0x0C0]
+    ldp     q14, q15, [x9, #REGS_Q_OFFSET + 0x0E0]
+    ldp     q16, q17, [x9, #REGS_Q_OFFSET + 0x100]
+    ldp     q18, q19, [x9, #REGS_Q_OFFSET + 0x120]
+    ldp     q20, q21, [x9, #REGS_Q_OFFSET + 0x140]
+    ldp     q22, q23, [x9, #REGS_Q_OFFSET + 0x160]
+    ldp     q24, q25, [x9, #REGS_Q_OFFSET + 0x180]
+    ldp     q26, q27, [x9, #REGS_Q_OFFSET + 0x1A0]
+    ldp     q28, q29, [x9, #REGS_Q_OFFSET + 0x1C0]
+    ldp     q30, q31, [x9, #REGS_Q_OFFSET + 0x1E0]
 
     // GPRs. Skip x8/x9 here — they'd clobber the base mid-restore.
     ldp     x0,  x1,  [x9, #REGS_X_OFFSET + 0x00]

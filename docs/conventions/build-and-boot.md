@@ -184,3 +184,6 @@ gates, not `build`.)
   at `$MINIXRS_SDK` → the in-tree musl sysroot → the `worker` ELF packed under the name `hello`.
   Never write inside `$MINIXRS_SDK`; all output this repo produces goes to `target/hello/`. A usable
   SDK that fails to build **panics rather than demoting** to the next flavor.
+- A C program's linker script ends with `PROVIDE(_end = .)` after `.bss`: lld defines `_end` only
+  for a link with no `SECTIONS` command, so the musl flavour fails with "undefined symbol: _end"
+  without it. `hello.ld` and `fileio.ld` stay identical below their headers (chunk 5).

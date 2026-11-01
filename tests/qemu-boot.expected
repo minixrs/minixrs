@@ -212,19 +212,32 @@ vfs-loop-end
 # integer anyway (no server-rt, so no diag_fmt).
 minix.rs init: vfs.long ok match=1
 
-# Four refusals, then the summary on fd 2 (so that descriptor is proven too).
+# Five refusals, then the summary on fd 2 (so that descriptor is proven too).
 # Each probe is well-formed but for one field: descriptor 3 (in range of the fd
-# row, not open -> EBADF), a request number one past VFS_WRITE (-> ENOSYS, and the
-# reply itself is the assertion -- a dropped unknown request would block init
+# row, not open -> EBADF), a request number one past the VFS band (-> ENOSYS, and
+# the reply itself is the assertion -- a dropped unknown request would block init
 # forever and hang the boot), an unmapped buffer (-> EFAULT from the kernel's
 # page-table walk, relayed back through TTY and VFS unflattened; it costs init no
-# page fault, since the copy engine walks rather than dereferences), and a negative
-# length (-> EINVAL, which unchecked would widen into a ~16 EiB u64 on the grant).
+# page fault, since the copy engine walks rather than dereferences), a negative
+# length (-> EINVAL, which unchecked would widen into a ~16 EiB u64 on the grant),
+# and VFS_PM_EXIT sent by init rather than PM (-> EPERM; chunk 5's M16 gate on a
+# request that resets a process's descriptor row -- without the gate VFS answers
+# OK). n=5 is the probe count, recomputed from deny_probes' table, not copied.
 # A missing check makes its probe succeed and turns this into
 # `vfs.deny FAIL <name>`. A zero-length write is deliberately not probed here --
 # it is a legal no-op, not a denial, and `write::validate` covers it (and the
 # check order that keeps it from issuing a grant) in host tests.
-minix.rs init: vfs.deny ok n=4
+minix.rs init: vfs.deny ok n=5
+
+# init's SENDRECs to VM, which the shared USER privilege reaches since chunk 5.
+# VM_FORK and VM_EXEC rewrite another process's bookkeeping and are PM-only, so
+# both must answer EPERM to init; the third probe is the top of VM's request band,
+# which must answer ENOSYS rather than be dropped (a dropped request would hang
+# init here and take every later init marker with it). The gate payloads are
+# deliberately invalid -- with a gate missing VM answers EINVAL, which this
+# marker's absence names as `vm.deny FAIL <fork-gate|exec-gate>`, and no real
+# process's bookkeeping is touched.
+minix.rs init: vm.deny ok n=3
 
 # ---------------------------------------------------------------------------
 # Slice 5.5: the exec ABI -- a SysV initial stack, so musl's crt runs unpatched.
@@ -745,10 +758,10 @@ minix.rs init: fs.leak ok n=256
 # VM is now told about every exec (VM_EXEC) and reports the map it derived:
 # `heap` equal to `image_end`, and unequal to the legacy 0x0100_0000 origin.
 # The line is unconditional rather than sampled, because exec is rare and this
-# is the ONLY available proof that the heap follows the image -- the shared USER
-# privilege has no ipc_to bit for VM (kernel/src/proc/table.rs's USER_IPC_TO),
-# so no user program can call VM_BRK and no end-to-end brk proof exists until
-# chunk 5 opens that edge.
+# is the ONLY available proof that the heap follows the image from the exec
+# side. (The shared USER privilege now has an ipc_to bit for VM, so a user
+# program can read the origin back with VM_BRK(0); this marker stays the
+# exec-side proof.)
 #
 # Deliberately no `nr=` value, no image_end and no dropped count: expectations
 # are first-occurrence-only, so this matches whichever exec happens first, and
@@ -765,3 +778,131 @@ minix.rs init: fs.leak ok n=256
 # last .bss page before printing, so the marker also proves the loader really
 # mapped ceil(p_memsz / PAGE_SIZE) pages rather than believing a program header.
 bigprog ok: bss pages mapped
+
+# ---------------------------------------------------------------------------
+# Pre-Phase-6 chunk 5: /bin/fileio -- C file I/O through the musl fork.
+# ---------------------------------------------------------------------------
+#
+# fileio's RAW section: open/read/readv/lseek/write/close, every line reported
+# through write(2) on fd 1 directly, so these land before stdio or malloc has
+# run at all. Each prints only when its check passed; every one has a FAIL form
+# on the forbidden list. In the sysroot-absent fallback `worker` is packed as
+# /bin/fileio too, so all but the exec line below go missing -- the same way
+# hello's do.
+
+# The exec form, as for hello: `name=fileio src=grant` proves fileio came off
+# the MinixFS root through VFS's stage-and-grant chain (it is not a boot-archive
+# module), and keying on name+src rather than the `target=` slot keeps the
+# marker config-independent. init's rotation is four targets now, and all four
+# execs land inside do_exec's 6-call head carve-out.
+name=fileio src=grant entry=
+
+# open + read of /etc/motd, the bytes READ written to fd 1 behind the prefix --
+# printed only if they equal ROOTFS_MOTD, and only if read(fd, NULL, 0) also
+# answered 0 (a zero-length read must not pre-fault its buffer, or a NULL one
+# would kill the process). THE PREFIX IS REQUIRED: init already prints
+# ROOTFS_MOTD verbatim, and expectations match first occurrences, so a bare motd
+# line would be satisfied by init whether or not fileio ever ran. Mutation-
+# tested: a shim that stops stripping musl's O_LARGEFILE gets EINVAL from VFS's
+# O_KNOWN check on every open, and this turns into `read FAIL open`.
+minix.rs fileio: read minix.rs rootfs: motd from MFS
+
+# VFS_LSEEK end to end from C: SEEK_CUR reports the 31 bytes the read consumed,
+# SEEK_SET 0 plus a re-read returns identical bytes, and a seek 1 MiB past end
+# of file is legal and the read there returns 0. Mutation-tested: a shim that
+# ignores whence (sends SEEK_SET) answers 0 for the SEEK_CUR query -- `lseek
+# FAIL cur rc=0` -- and the SEEK_END refusal below goes with it.
+minix.rs fileio: lseek ok
+
+# Five refusals, each as -1 AND the right errno through syscall_ret: SEEK_END,
+# whence 3 and a negative result are EINVAL; fd 1 (the console) is ESPIPE; a
+# descriptor just closed is EBADF. n=5 is the probe count.
+minix.rs fileio: lseek deny ok n=5
+
+# readv across a short read in the MIDDLE of a file: iov[0] asks /etc/pattern
+# for 5000 bytes, more than one FS transfer carries, so VFS answers short and
+# readv must stop there -- iov[0] holds that many rootfs_pattern_byte()s and
+# iov[1], pre-filled with 0xAA, is untouched. n= is the first transfer's count,
+# FS_MAX_IO == BDEV_BLOCK_SIZE == 4096 (kernel-shared callnr.rs); C prints the
+# count rather than comparing it, since FS_MAX_IO is not in the C headers, so
+# this line is what pins it. Measured, not assumed: VFS does not loop to hide
+# the short read. Mutation-tested: a shim readv that continues past a short read
+# fills iov[1] and prints `readv FAIL iov1-touched rc=4196`.
+minix.rs fileio: readv ok n=4096
+
+# read() into a freshly mmap'd page fileio has never touched returns motd's
+# bytes -- the probe design M15's pre-fault exists for: VM backs mmap pages
+# lazily, and the kernel copy engine answers EFAULT for an unmapped page rather
+# than asking VM, so without the shim's one-load-per-page touch the read fails.
+# Also a read into .rodata answers -1/EFAULT: the pre-fault only loads, which a
+# read-only page allows, so the copy's write-permission check still refuses it
+# (and the process lives). Mutation-tested: removing prefault() from the shim's
+# read turns this into `fresh-buf FAIL read rc=-1 errno=14`.
+minix.rs fileio: fresh-buf ok
+
+# The first write past end of file through lseek, from anything: /etc/seekhole
+# is opened O_CREAT|O_TRUNC and must read empty straight away, fileio seeks one
+# block in (ROOTFS_SEEKHOLE_OFFSET), writes 8 bytes, seeks back and reads 4104
+# -- 4096 zeros (a hole MFS never allocated) then the tail -- and a further read
+# returns 0, so the size reached the inode. Its one data zone is in
+# ROOTFS_RUNTIME_ZONES. The empty-on-open check is what makes O_TRUNC
+# observable at all: every run writes the same bytes, so a lost truncate would
+# otherwise read back correct. Mutation-tested: a shim that drops O_TRUNC passes
+# the first run and prints `seek-hole FAIL not-truncated` on every later one.
+minix.rs fileio: seek-hole ok
+
+# fileio's MEMORY AND STDIO section, after the raw one. Still reported through
+# write(2) -- all but `stdio ok`, which is printf's own proof -- so a broken
+# stdio costs one marker rather than four.
+
+# The heap origin, observed from C. fileio reads sbrk(0) as the first statement
+# of main, before anything can malloc, and requires it to equal the linker's
+# _end rounded up to a page -- the image end the kernel's exec measured and PM
+# handed VM_EXEC, derived here independently. Then brk below the origin answers
+# the unchanged break with errno untouched (Linux semantics, Review Focus 4);
+# the first malloc advances the break (mallocng took the brk path, not its mmap
+# fallback); and an UNALIGNED break, cur + 0x123, comes back exactly and its
+# last byte is writable. mallocng only ever asks for page-aligned breaks, so
+# that last probe is the only thing telling VM's exact break from its aligned
+# region end. Mutation-tested: VM replying the aligned end prints `brk FAIL
+# unaligned`; VM refusing the brk(0) query makes the shim answer 0 and prints
+# `brk FAIL origin rc=0`.
+minix.rs fileio: brk ok
+
+# fopen("/etc/motd") + fgets returns the motd line, then rewind + an fread of
+# all 31 bytes returns them again, and fclose answers 0 -- printed with printf
+# and fflushed. fgets refills through a plain read() into the FILE's buffer;
+# the fread is what reaches readv through stdio (musl's __stdio_read hands it
+# the caller's buffer less one byte plus the FILE's buffer, so motd's last
+# byte arrives through the second iovec). Then rewind + fgets into an 8-byte
+# buffer (7 bytes consumed, the rest left in the FILE's buffer) + fflush, after
+# which the descriptor's lseek(0, SEEK_CUR) must be 7: fflush handed the unread
+# bytes back with a NEGATIVE SEEK_CUR, the one seek stdio makes on its own.
+# Mutation-tested: a shim lseek that sends every whence as SEEK_SET prints
+# `stdio FAIL pos rc=0`, and skipping the fflush prints `stdio FAIL pos rc=31`.
+minix.rs fileio: stdio ok
+
+# A four-page anonymous mmap, every byte filled and read back, munmap answers
+# 0, and a second munmap of the same base answers -1/EINVAL -- which only VM can
+# say, so the first one really reached it. Then MAP_FIXED, which VM cannot
+# honour, answers -1/ENOSYS rather than a mapping somewhere else.
+minix.rs fileio: mmap ok
+
+# malloc(64) and malloc(256 KiB) -- the second past mallocng's mmap threshold
+# (131052 bytes), so both of its allocation paths run -- each filled, read back
+# and freed.
+minix.rs fileio: malloc ok
+
+# The exit reset (design M16): fileio's last act is to open /etc/motd and exit
+# without closing it, and VFS, told of the exit by PM's VFS_PM_EXIT, resets the
+# row and reports closing exactly one descriptor. VFS prints this, so it is not
+# `fileio:`-prefixed; it is silent when a reset closed nothing, so ordinary
+# exits never print it. fileio checks the leaked descriptor is 3, the lowest
+# above the console's 0/1/2 (open returns the lowest free one), so `closed=1`
+# is that one leak and not an earlier check's. NR_FDS is 8, so `closed=1` is
+# never a prefix of a longer count. But the marker matches ANY occurrence, from
+# any run: a fileio that died mid-check (killed, say) with one descriptor open
+# satisfies it too, so it proves the reset, not that the leak was the deliberate
+# one -- the fd-3 check speaks only for runs that got that far. Mutation-tested:
+# PM not sending VFS_PM_EXIT makes the line vanish.
+[diag vfs] pm-exit reset closed=1

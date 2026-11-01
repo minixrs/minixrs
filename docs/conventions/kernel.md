@@ -241,6 +241,9 @@ follows is the engine and the policy.
   both ranges, then walk-and-`memcpy` per `dual_page_chunks` — **all-or-nothing on the
   destination**, and its `Prot::writable` check is load-bearing, because a granter may *lie* about
   writability and the HHDM alias is a kernel mapping the MMU's EL0 bits do not police
+- The engine does **not** demand-fault: a lazily backed user page VM has not mapped yet is `EFAULT`,
+  even inside a valid region. Until that kernel gap closes, a client hands over only buffers it has
+  touched — the musl shim reads one byte per page before every `read`/`write` (chunk 5, M15)
 - `verify_grant` (`system/do_safecopy.rs`) checks, **in MINIX's order**: `okendpt` the granter;
   table registered + idx in range; the entry reads back (a walk miss is hidden as **`EPERM`, not
   `EFAULT`**, so a grantee cannot probe the granter's address space); `CPF_USED|CPF_VALID`; `seq`
@@ -352,6 +355,18 @@ follows is the engine and the policy.
   `spsr_el1 = STUB_SPSR_EL0`), swaps `(ttbr0_pa, asid)`, tears down the **old** image via
   `do_exit::teardown_addrspace` (safe, because target ≠ caller), then `sched::rts_unset`s
   `RTS_RECEIVING` to resume it at `_start`
+- **The per-process frame carries more than the integer registers.** `ArchRegisterFrame` (816 B)
+  holds x0–x30, `SP_EL0`, `ELR_EL1`, `SPSR_EL1`, the user thread pointer `TPIDR_EL0` (musl's
+  `__set_thread_area` writes it directly) and the FP/SIMD state — `q0`–`q31`, `FPCR`, `FPSR`. Both
+  entry stubs (`trap.S`, `interrupt.S`) save all of it on **every** EL0 entry and
+  `el1_return_to_user` restores it; the `REGS_*_OFFSET` consts are mirrored as `.equ`s in the
+  assembly and pinned by `offset_of!` asserts. Without them two C programs alive at once share one
+  thread pointer and one vector file, which corrupts `errno` and any value a vectorised loop holds
+  across a page fault. The frame is the first field of `Proc`, and `Proc::EMPTY` is non-zero, so the
+  proc table sits in `.data` rather than `.bss` — growing the frame grew the kernel image by about
+  531 KiB (~543 KB). Eager save is the cheap fix; lazy FP switching is deferred (see
+  [`phase-6-prep.md`](../plans/phase-6-prep.md)). `do_exec` resets the frame to `EMPTY`, so a fresh
+  image starts with a zero thread pointer and zeroed vectors; `do_fork` copies the whole frame.
 - **exec preserves pid, priv and scheduler.** The target gets **no reply on success** — the kernel
   resumes it at the new entry — and an errno reply on failure, which is why PM's `handle_exec`
   replies only on `rc != OK`

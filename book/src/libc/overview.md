@@ -19,17 +19,17 @@ minix.rs hello: Hello from C!
 
 ## Where the pieces live
 
-| Piece                   | Location                                                               |
-| ----------------------- | ---------------------------------------------------------------------- |
-| The libc fork           | `external/musl` (submodule → `minixrs/musl-minixrs`, branch `minixrs`) |
-| In-tree sysroot builder | `tools/build-musl.sh` → `target/musl-sysroot`                          |
-| SDK prefix              | `$MINIXRS_SDK`, default `$HOME/toolchains/minixrs`                     |
-| SDK compiler            | `$MINIXRS_SDK/bin/clang` (the `minixrs/llvm-minixrs` fork)             |
-| SDK sysroot             | `$MINIXRS_SDK/sysroot/usr/{include,lib}` + `sysroot/.stamp`            |
-| The C program           | `userland/hello/hello.c` (and `hello.ld`, **musl flavor only**)        |
-| Flavor selection        | `kernel/build.rs`'s `build_hello`                                      |
-| Compile + link          | `build_hello_sdk` / `build_hello_musl`                                 |
-| Generated ABI headers   | `cargo gen-c-headers` → `target/gen-c-headers/include/minixrs/`        |
+| Piece                   | Location                                                                                             |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| The libc fork           | `external/musl` (submodule → `minixrs/musl-minixrs`, branch `minixrs`)                               |
+| In-tree sysroot builder | `tools/build-musl.sh` → `target/musl-sysroot`                                                        |
+| SDK prefix              | `$MINIXRS_SDK`, default `$HOME/toolchains/minixrs`                                                   |
+| SDK compiler            | `$MINIXRS_SDK/bin/clang` (the `minixrs/llvm-minixrs` fork)                                           |
+| SDK sysroot             | `$MINIXRS_SDK/sysroot/usr/{include,lib}` + `sysroot/.stamp`                                          |
+| The C programs          | `userland/hello/hello.c`, `userland/fileio/fileio.c` (each with its own `.ld`, **musl flavor only**) |
+| Flavor selection        | `kernel/build.rs`'s `build_c_program`                                                                |
+| Compile + link          | `build_c_sdk` / `build_c_musl`                                                                       |
+| Generated ABI headers   | `cargo gen-c-headers` → `target/gen-c-headers/include/minixrs/`                                      |
 
 ## Two toolchains, one program
 
@@ -41,8 +41,8 @@ minix.rs hello: Hello from C!
 3. **`Worker`** — no C toolchain: the `worker` ELF is packed *under the name* `hello`.
 
 `Musl` is **not** a fallback. CI's blocking `qemu-smoke` job cannot install an SDK — an LLVM build
-is hours — while `tests/qemu-boot.expected` *requires* the five C markers, so the in-tree sysroot is
-that gate's real dependency. Only `Worker` loses markers.
+is hours — while `tests/qemu-boot.expected` *requires* the C programs' markers (`hello`'s and
+`fileio`'s), so the in-tree sysroot is that gate's real dependency. Only `Worker` loses markers.
 
 An SDK is "usable" when exactly three files exist:
 
@@ -95,25 +95,36 @@ The port resolves this in **one file**. `arch/aarch64/syscall_arch.h` normally e
 the syscall number in `x8`; in the fork, every `__syscallN` instead calls `__minixrs_syscall`, which
 switches on the Linux number and issues the corresponding server round-trip:
 
-| Linux syscall        | minix.rs mapping                         |
-| -------------------- | ---------------------------------------- |
-| `writev`             | one `VFS_WRITE` per iovec, counts summed |
-| `write`              | one `VFS_WRITE`                          |
-| `exit_group`, `exit` | `PM_EXIT` (does not return)              |
-| `set_tid_address`    | constant tid `1`                         |
-| `ioctl`              | `-ENOTTY`                                |
-| everything else      | `-ENOSYS`                                |
+| Linux syscall        | minix.rs mapping                                              |
+| -------------------- | ------------------------------------------------------------- |
+| `writev`             | one `VFS_WRITE` per iovec, counts summed                      |
+| `write`              | one `VFS_WRITE`                                               |
+| `read`               | one `VFS_READ`                                                |
+| `readv`              | one `VFS_READ` per iovec, stopping at the first short read    |
+| `openat`             | `VFS_OPEN` (see [Files and memory](#files-and-memory-from-c)) |
+| `close`              | `VFS_CLOSE`                                                   |
+| `lseek`              | `VFS_LSEEK`                                                   |
+| `brk`                | `VM_BRK`, with Linux's return convention                      |
+| `mmap`               | `VM_MMAP`, anonymous private read-write only                  |
+| `munmap`             | `VM_MUNMAP`                                                   |
+| `exit_group`, `exit` | `PM_EXIT` (does not return)                                   |
+| `set_tid_address`    | constant tid `1`                                              |
+| `ioctl`              | `-ENOTTY`                                                     |
+| everything else      | `-ENOSYS`                                                     |
 
 Keeping musl's ~297 call sites unmodified is what lets the other ~1900 source files stay
 byte-identical to upstream — and therefore rebase for free onto the next release. The **entire**
 fork delta is `arch/aarch64/syscall_arch.h`, `src/minixrs/`, a brand block in `crt/crt1.c`, and a
 `MINIXRS.md`.
 
-Six syscalls is enough only because musl's startup path avoids the rest: with
+The table grew from six rows to the fourteen above in pre-Phase-6 chunk 5. Startup still issues
+exactly **one** of them, because musl's startup path avoids the rest: with
 `AT_UID`/`AT_GID`/`AT_SECURE` absent from the auxv, `__init_libc` takes an early return that skips
 its `ppoll`; `__init_ssp(NULL)` derives the stack canary arithmetically; and `__init_tls` uses its
-static `builtin_tls` because the program has no `PT_TLS`. The fork's `MINIXRS.md` records each of
-those facts, re-derived against v1.2.6 rather than assumed.
+static `builtin_tls` because the program has no `PT_TLS` (a program whose `PT_TLS` outgrew
+`builtin_tls` would reach the `mmap` arm before `main`; neither C program here has one). The shim's
+header comment in `src/minixrs/_syscall.c` records each of those facts, re-derived against v1.2.6
+rather than assumed.
 
 ### `ioctl` is load-bearing
 
@@ -121,6 +132,84 @@ Answering `-ENOTTY` is not merely harmless. `__stdout_write` sets `f->lbf = -1` 
 fails, which makes stdout **fully buffered** — so `printf` output does not appear when it is called,
 but when `exit()` runs `__stdio_exit`. A boot log containing `Hello from C!` therefore proves the
 flush path too, not just formatting.
+
+## Files and memory from C
+
+Everything above this heading was enough to print. Opening a file and calling `malloc` need more,
+and the shim now supplies it in the same file, as a translation onto requests that already existed —
+`VFS_LSEEK` is the one request chunk 5 added for it. The shim's header comment holds the full v1.2.6
+fact-check; the consequences a program author meets are these.
+
+**Paths and descriptors.** `openat` ignores the directory fd (there is no working directory; paths
+are absolute), strips the `O_LARGEFILE` bit musl ORs into every open (VFS's `O_KNOWN` would refuse
+it), and bounds the path scan at the VFS path limit so an unterminated string cannot run off a page.
+A NULL path is `-EFAULT`. Descriptors are VFS's: `NR_FDS = 8`, with 0/1/2 pre-opened to the console.
+`lseek` supports `SEEK_SET` and `SEEK_CUR`; **`SEEK_END` is `-EINVAL`**, because VFS holds no file
+size and an FS-band size request has no consumer yet. `fclose` on a partly read stream seeks back by
+a negative `SEEK_CUR`, which is why `lseek` was not optional.
+
+**`brk`.** mallocng calls the raw `brk` syscall — `brk(0)` for the current break, then `brk(cur + 2
+pages)` — and treats anything but exactly the value it asked for as failure. The `brk` arm therefore
+follows Linux, not MINIX: it returns the new break on success and the *current* break on refusal,
+never an errno. VM's heap now starts at the page-aligned end of the exec'd image (`VM_BRK(0)` reads
+it back) and replies the exact break, so the arithmetic mallocng does on the result holds.
+
+**`mmap` and `munmap`.** `mmap` is honoured only for what VM can do: anonymous, private, placed by
+VM, read-write. `MAP_NORESERVE` and `MAP_STACK` are accepted as inert; `MAP_FIXED`, file-backed,
+`MAP_SHARED` and the other flag bits get `-ENOSYS`. **`prot` is ignored**, so the `PROT_NONE` guard
+pages mallocng asks for are ordinary read-write memory and do not guard. mallocng's one `MAP_FIXED`
+call (a guard on the first page of a freshly grown brk area) gets `-ENOSYS` and is ignored, which
+leaves `errno` at `ENOSYS` after a first `malloc` that succeeded. Each live mapping costs one of
+VM's 16 per-process region slots, shared with the heap and the stack, so **at most 14 mappings are
+live at once**; mallocng mmaps every large allocation and many groups, and a program holding many of
+them meets `ENOMEM` long before it meets a shortage of memory. `munmap` must name the base and
+length of a mapping `mmap` returned — mallocng only ever does — and VM's arena is bump-only, so an
+unmapped range is not reused.
+
+**What stays `-ENOSYS`.** Everything not in the table. The ones a real program will notice are
+`mprotect` (mallocng tolerates its `ENOSYS`), `mremap` (`realloc` falls back to malloc, copy, free),
+`fstat`/`stat` (no FS-band request exists), `dup`/`pipe`/`fcntl`, `getdents`, and time and signal
+calls. `madvise` is never issued: mallocng's `USE_MADV_FREE` is 0.
+
+**Every buffer is pre-faulted.** VM backs heap and mmap pages lazily, on the owner's first touch,
+but VFS reaches a caller's buffer through the kernel's copy engine, which answers `EFAULT` for an
+unmapped page rather than asking VM to map it. mallocng never touches fresh mmap memory (`calloc`
+included — it is already zero), so a `read()` into memory `malloc` just returned would fail or
+succeed by page-layout luck. The shim therefore issues **one volatile load per 4 KiB page** of each
+buffer before the request that names it: `read`, every `readv` and `writev` iovec, and `write`. A
+load is enough, because VM maps every fault read-write, and it leaves the bytes alone, so one helper
+serves both directions.
+
+This is a workaround for a kernel gap, carried in libc, and it has a deviation: a **bad buffer
+pointer now kills the process** — the load faults outside every region, VM raises `SIGSEGV` — where
+POSIX says `EFAULT`. A *mapped but read-only* destination still gets VFS's `EFAULT`, since the
+pre-fault only reads. The proper fix (the copy engine asks VM to map the page and retries) is owed;
+see the Deferred table in `docs/plans/phase-6-prep.md`.
+
+**The proof.** `/bin/fileio` (`userland/fileio/fileio.c`) is a second C program on the root
+filesystem, exec'd by `init` next to `hello`. It exercises, through musl: raw `read`, `lseek`
+(including the `SEEK_END` refusal), `readv`, a read into a never-touched mmap'd buffer, a write past
+end of file that leaves a hole (`/etc/seekhole`), `brk` against the heap origin, `fopen`, `fgets`,
+`fread` and the negative `SEEK_CUR` that `fflush` issues on a partly read stream, a verified `mmap`,
+a large verified `malloc`, and finally a descriptor deliberately left open at exit so that VFS's
+`VFS_PM_EXIT` row reset is visible (`[diag vfs] pm-exit reset closed=1`). Each step prints its own
+`minix.rs fileio: … ok` marker; the list lives in `tests/qemu-boot.expected`. Every run truncates
+and rewrites `/etc/seekhole`, so `init` keeps at most one `fileio` alive at a time — it skips that
+slot of its rotation until the running one is reaped — while still letting `hello` and `fileio`
+overlap.
+
+Two kernel defects surfaced while building it, and both were fixed in this chunk because they hit
+every user process, not just fileio. The kernel never saved the user **thread pointer**
+(`TPIDR_EL0`) per process, so with two C programs alive at once each wrote `errno` through the
+other's TLS address and was killed by `SIGSEGV`. It also never saved the **FP/SIMD registers**
+across a trap, so a vectorised loop that took a page fault on the lazily mapped buffer resumed with
+its loop-carried vectors overwritten by whatever ran in between: `memset`/`memcpy`-shaped code
+silently produced wrong bytes after the first fault. Both are now part of the per-process register
+frame, saved on every EL0 entry — see `docs/conventions/kernel.md`.
+
+**Size.** `/bin/fileio` links all of stdio and mallocng and is about 259 KB against the 256 KiB
+`VFS_EXEC_MAX` ceiling that VFS stages an exec image through; around 110 KB of it is the symbol
+table. The build asserts the ceiling, so growth fails loudly.
 
 ## What a `write` actually does
 
@@ -219,8 +308,8 @@ library on this host, so those symbols would be undefined at link time.
 In the **musl flavor** they come from the pinned Rust toolchain's own `compiler_builtins`, built for
 the custom `aarch64-unknown-minixrs` target by the server builds that run first. Note that the
 *prebuilt* `aarch64-unknown-none` rlib in the rustup sysroot does **not** export the C-ABI names —
-only the `-Zbuild-std` one does, which is why `build_hello_musl` globs the nested target dir rather
-than the sysroot.
+only the `-Zbuild-std` one does, which is why `build_c_musl` globs the nested target dir rather than
+the sysroot.
 
 In the **SDK flavor** the driver links `libclang_rt.builtins.a` from its own resource dir and the
 problem simply does not arise. That archive lives under

@@ -97,11 +97,12 @@ fn main() {
     }
 }
 
-/// Which toolchain built the packed `hello` module, in strict preference order.
+/// Which toolchain built the C programs (`hello`, `fileio`), in strict
+/// preference order. One flavor per build, applied to every C program.
 ///
 /// `Musl` is **not** a fallback, and the distinction matters. CI's blocking
 /// `qemu-smoke` job cannot install an SDK — an LLVM build is hours — while
-/// `tests/qemu-boot.expected` *requires* the five C markers, so the in-tree
+/// `tests/qemu-boot.expected` *requires* the C markers, so the in-tree
 /// `tools/build-musl.sh` sysroot is that gate's real dependency and has to keep
 /// working. Selection is genuinely three-way: SDK, then in-tree musl, then no C
 /// toolchain at all.
@@ -113,9 +114,10 @@ enum HelloFlavor {
     /// host-side report — the boot log cannot distinguish flavors.
     Sdk { prefix: PathBuf, stamp: String },
     /// `target/musl-sysroot` (slice 5.6): the stand-in triple
-    /// `aarch64-unknown-linux-musl`, `hello.ld`, and an explicit `rust-lld` line.
+    /// `aarch64-unknown-linux-musl`, `<name>.ld`, and an explicit `rust-lld` line.
     Musl,
-    /// No C toolchain: the `worker` ELF packed *under the name* `hello`.
+    /// No C toolchain: the `worker` ELF packed *under the names* `hello` and
+    /// `fileio`.
     Worker,
 }
 
@@ -258,81 +260,106 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
         modules.push((*proc_nr, name.to_string(), bytes));
     }
 
-    // `hello` — the first C program (slice 5.6), built from userland/hello rather
-    // than by cargo. Packed under proc_nr -1 like `worker`: resolvable by name for
-    // SYS_EXEC, never boot-loaded.
+    // The C programs: `hello` — the first one (slice 5.6) — and `fileio`, the
+    // file-I/O proof (pre-Phase-6 chunk 5). Each is built from
+    // `userland/<name>/<name>.c` rather than by cargo, and neither is a
+    // boot-archive module: both are packed only into the rootfs image below.
     //
     // With neither C toolchain available, fall back to packing the `worker` ELF
-    // *under the name* `hello`. Presence-checking the SYSROOTS rather than the
-    // musl submodule is deliberate: a fresh clone that ran `git submodule update`
-    // but not `tools/build-musl.sh` would otherwise trigger a multi-minute musl
-    // build from inside a cargo build script. The fallback keeps every boot green
-    // with no feature flag — only the hello-specific markers go missing.
-    let src = workspace.join("userland/hello/hello.c");
-    println!("cargo:rerun-if-changed={}", src.display());
-    let (hello_flavor, hello_bytes) = match build_hello(workspace, &src) {
-        Some(pair) => pair,
-        None => {
-            let bytes = modules
-                .iter()
-                .find(|(_, name, _)| name == "worker")
-                .map(|(_, _, bytes)| bytes.clone())
-                .expect("worker must be packed before the hello fallback");
-            (HelloFlavor::Worker, bytes)
+    // *under both names*. Presence-checking the SYSROOTS rather than the musl
+    // submodule is deliberate: a fresh clone that ran `git submodule update` but
+    // not `tools/build-musl.sh` would otherwise trigger a multi-minute musl build
+    // from inside a cargo build script. The fallback keeps every boot green with
+    // no feature flag — only the C programs' own markers go missing.
+    //
+    // **One flavour for both.** Selection is presence-based (an SDK prefix, then
+    // the in-tree sysroot), and nothing about it depends on the program, so two
+    // calls that disagree mean the selector itself is broken — `fileio` built
+    // with the SDK beside an in-tree `hello` would make every row of the
+    // three-boot matrix test half of what it claims. Both arms of the mismatch
+    // panic rather than pick one.
+    let worker_bytes = modules
+        .iter()
+        .find(|(_, name, _)| name == "worker")
+        .map(|(_, _, bytes)| bytes.clone())
+        .expect("worker must be packed before the C-program fallback");
+    let (c_flavor, hello_bytes, fileio_bytes) = match (
+        build_c_program(workspace, "hello"),
+        build_c_program(workspace, "fileio"),
+    ) {
+        (Some((hello_flavor, hello)), Some((fileio_flavor, fileio))) => {
+            assert!(
+                std::mem::discriminant(&hello_flavor) == std::mem::discriminant(&fileio_flavor),
+                "`hello` and `fileio` were built by different C toolchain flavours; the \
+                 selection is presence-based, so this is a bug in `build_c_program`"
+            );
+            (hello_flavor, hello, fileio)
         }
+        (None, None) => (HelloFlavor::Worker, worker_bytes.clone(), worker_bytes),
+        (hello, fileio) => panic!(
+            "one C program found a toolchain and the other did not (hello: {}, fileio: \
+             {}); the selection is presence-based, so this is a bug in `build_c_program`",
+            hello.is_some(),
+            fileio.is_some(),
+        ),
     };
 
-    // Which toolchain built it, reported **host-side only**. There is deliberately
-    // no boot marker and no kernel change: the five C markers are byte-identical
-    // across the SDK and musl flavors, so the log physically cannot distinguish
-    // them and these lines plus the host-side ELF checks are what do.
+    // Which toolchain built them, reported **host-side only**. There is
+    // deliberately no boot marker and no kernel change: the C markers are
+    // byte-identical across the SDK and musl flavors, so the log physically
+    // cannot distinguish them and these lines plus the host-side ELF checks are
+    // what do.
     //
     // `Musl` stays silent on purpose. It is what every CI job builds, and warning
     // on the norm is how people learn to ignore build-script warnings — which
     // would cost us the two that actually mean something.
-    match &hello_flavor {
+    match &c_flavor {
         HelloFlavor::Sdk { prefix, stamp } => println!(
-            "cargo::warning=hello: built with the minix.rs SDK at {} ({stamp})",
+            "cargo::warning=hello, fileio: built with the minix.rs SDK at {} ({stamp})",
             prefix.display()
         ),
         HelloFlavor::Musl => {}
         HelloFlavor::Worker => println!(
-            "cargo::warning=no C toolchain for `hello`; packing `worker` under that name. \
-             Run tools/build-musl.sh for the in-tree musl sysroot, or install the SDK and \
-             set $MINIXRS_SDK (slice 5.6 / P3c)."
+            "cargo::warning=no C toolchain for `hello` or `fileio`; packing `worker` under \
+             both names. Run tools/build-musl.sh for the in-tree musl sysroot, or install \
+             the SDK and set $MINIXRS_SDK (slice 5.6 / P3c)."
         ),
     }
-    // Same pack-time brand gate the servers get. For the real C build this is
-    // what turns a regressed crt1.c brand block into a *build* failure rather
-    // than a boot failure.
-    //
-    // (The gate is written out at all three sites rather than factored into a
-    // per-module helper on purpose: the `rootfs` blob below is NOT an ELF, and a
-    // helper that branded every module would panic on it.)
-    //
-    // Note this is now the *only* pack-time check `hello` gets, and it no longer
-    // covers the copy that runs: slice 5.9 execs `/bin/hello` out of the
-    // filesystem, where the runtime `scan_brand` in `elf::load_into` is the sole
-    // gate. It stays because the two copies are the same bytes, so a regressed
-    // `crt1.c` brand block is still a *build* failure rather than a boot one.
-    if let Err(e) = minixrs_kernel_shared::brand::scan_brand(&hello_bytes) {
-        panic!("hello: missing/bad minixrs brand: {e:?}");
-    }
 
-    // **`hello` is deliberately NOT packed as a boot-archive module** (slice 5.9).
-    // It was, from 5.6 until now, and keeping it would have made the C markers
-    // unable to distinguish a boot-archive exec from a filesystem one — the same
-    // bytes reach the console either way, which is the 5.5/5.6 "byte-identical
-    // markers" trap. With the module gone, `/bin/hello` in the image below is the
-    // only copy, so `minix.rs hello: Hello from C!` is now *proof* that the whole
-    // stage-and-grant chain worked. `worker` stays boot-embedded as the name-form
-    // regression, which is why `EXEC_ONLY_PROC_NR` is still in use.
-    assert!(
-        hello_bytes.len() <= VFS_EXEC_MAX,
-        "hello is {} bytes, past VFS's staging buffer ({VFS_EXEC_MAX}). \
-         Raise `callnr::VFS_EXEC_MAX` — it is the one constant that bounds this.",
-        hello_bytes.len(),
-    );
+    for (name, bytes) in [("hello", &hello_bytes), ("fileio", &fileio_bytes)] {
+        // Same pack-time brand gate the servers get. For the real C build this is
+        // what turns a regressed crt1.c brand block into a *build* failure rather
+        // than a boot failure.
+        //
+        // (The gate is written out at each site rather than factored into a
+        // per-module helper on purpose: the `rootfs` blob below is NOT an ELF,
+        // and a helper that branded every module would panic on it.)
+        //
+        // Note this is the *only* pack-time check the C programs get, and it does
+        // not cover the copy that runs: slice 5.9 execs them out of the
+        // filesystem, where the runtime `scan_brand` in `elf::load_into` is the
+        // sole gate. It stays because the two copies are the same bytes, so a
+        // regressed `crt1.c` brand block is still a *build* failure rather than a
+        // boot one.
+        if let Err(e) = minixrs_kernel_shared::brand::scan_brand(bytes) {
+            panic!("{name}: missing/bad minixrs brand: {e:?}");
+        }
+
+        // **Neither C program is packed as a boot-archive module** (slice 5.9).
+        // `hello` was, from 5.6 until then, and keeping it would have made the C
+        // markers unable to distinguish a boot-archive exec from a filesystem
+        // one — the same bytes reach the console either way, which is the
+        // 5.5/5.6 "byte-identical markers" trap. With the module gone, the copy
+        // in the image below is the only one, so a C marker is *proof* that the
+        // whole stage-and-grant chain worked. `worker` stays boot-embedded as the
+        // name-form regression, which is why `EXEC_ONLY_PROC_NR` is still in use.
+        assert!(
+            bytes.len() <= VFS_EXEC_MAX,
+            "{name} is {} bytes, past VFS's staging buffer ({VFS_EXEC_MAX}). \
+             Raise `callnr::VFS_EXEC_MAX` — it is the one constant that bounds this.",
+            bytes.len(),
+        );
+    }
 
     // The root filesystem image (slice 5.7, decision D3): a MinixFS v3 image built
     // here and packed as a non-ELF blob, which the kernel copies into RAM frames
@@ -341,16 +368,16 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
     // Deliberately a separate statement outside the server loop, and with **no**
     // `scan_brand` gate: it is not an ELF and has no `.note.minixrs.ident`.
     //
-    // `hello_bytes` is reused rather than calling `build_hello` a second time.
-    // Building it twice would let two copies disagree in the musl-sysroot-absent
-    // configuration, where `build_hello` returns `None` and the fallback
+    // The C programs' bytes are reused rather than building them a second time.
+    // Building twice would let two copies disagree in the musl-sysroot-absent
+    // configuration, where `build_c_program` returns `None` and the fallback
     // substitutes the `worker` ELF — the image would then hold whichever one the
     // second call produced. As of slice 5.9 the image is the *only* copy, so this
     // is the one that runs.
     modules.push((
         -1,
         "rootfs".to_string(), // com::ROOTFS_MODULE_NAME
-        build_rootfs(&hello_bytes),
+        build_rootfs(&hello_bytes, &fileio_bytes),
     ));
 
     let archive = pack_mxbi(&modules);
@@ -364,13 +391,18 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 /// The image is a **fixed** 1 MiB regardless of its contents (see
 /// `kernel_shared::rootfs::ROOTFS_IMAGE_BLOCKS`), so every size-derived boot
 /// marker is a literal in every build configuration — including the one where
-/// `build_hello` fell back to the 15 KB `worker` ELF.
+/// `build_c_program` fell back to the 15 KB `worker` ELF.
 ///
-/// Three files, and each earns its place:
+/// The files that earn their place:
 ///
 ///   * `/bin/hello` — what slice 5.9 execs out of the filesystem. Passed in rather
-///     than rebuilt, so the image and the archive's `hello` module can never
-///     disagree.
+///     than rebuilt: the caller built it once, brand-checked and size-checked
+///     it, and this image is the only place it goes — no boot-archive copy has
+///     existed since 5.9 dropped the `hello` module.
+///   * `/bin/fileio` — the C file-I/O proof (pre-Phase-6 chunk 5), exec'd the
+///     same way and passed in for the same reason. It *creates*
+///     `/etc/seekhole` at runtime, which is why that file is not in the
+///     manifest but is in `ROOTFS_RUNTIME_ZONES` / `ROOTFS_RUNTIME_INODES`.
 ///   * `/etc/motd` — a greppable line for slice 5.8's read proof, which needs a
 ///     file whose *contents* it can assert on rather than just its length.
 ///   * `/etc/pattern` — 40 KiB, and **mandatory rather than filler**. It is what
@@ -385,12 +417,13 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
 /// BDEV and compares, so its `fs.selfcheck` / `fs.indirect` boot markers are a
 /// *check* rather than a transcription — the failure mode where both sides get
 /// edited together and the proof keeps passing while the content silently changed.
-fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
+fn build_rootfs(hello_bytes: &[u8], fileio_bytes: &[u8]) -> Vec<u8> {
     use minixrs_kernel_shared::rootfs::{
-        ROOTFS_DENY_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES, ROOTFS_HELLO_PATH,
-        ROOTFS_HOLEY_HOLE, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_LEAK_PROBES, ROOTFS_MOTD,
-        ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH, ROOTFS_RUNTIME_INODES,
-        ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_PATH, rootfs_holey_byte, rootfs_pattern_byte,
+        ROOTFS_DENY_PATH, ROOTFS_FILEIO_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES,
+        ROOTFS_HELLO_PATH, ROOTFS_HOLEY_HOLE, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH,
+        ROOTFS_LEAK_PROBES, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
+        ROOTFS_RUNTIME_INODES, ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_PATH, rootfs_holey_byte,
+        rootfs_pattern_byte,
     };
     use minixrs_mkfs_mfs::Manifest;
 
@@ -400,6 +433,7 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
     let mut manifest = Manifest::new();
     manifest
         .add(ROOTFS_HELLO_PATH, hello_bytes.to_vec())
+        .add(ROOTFS_FILEIO_PATH, fileio_bytes.to_vec())
         .add(ROOTFS_MOTD_PATH, ROOTFS_MOTD.to_vec())
         .add(ROOTFS_PATTERN_PATH, pattern)
         .add(ROOTFS_SCRATCH_PATH, Vec::new())
@@ -427,12 +461,14 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
 
     // The scratch file ships empty, so every zone it ends up with is allocated by
     // MFS at *runtime*. Checked here, against the bytes just built, because it
-    // cannot be settled anywhere else: the image's largest file is `/bin/hello`,
-    // whose size is a property of the toolchain flavour (~200 KB with in-tree
-    // musl, ~47 KB with the SDK, ~15 KB in the sysroot-absent fallback), so a unit
-    // test over a fixture manifest would be measuring something that is not this
-    // image. Without it, contents growing past the headroom is `ENOSPC` on the
-    // first write and surfaces only as `fs.write FAIL short` in a QEMU boot.
+    // cannot be settled anywhere else: the image's largest files are `/bin/hello`
+    // and `/bin/fileio`, whose sizes are a property of the toolchain flavour
+    // (`hello` ~230 KB with in-tree musl and ~47 KB with the SDK; `fileio`
+    // ~260 KB with in-tree musl, stdio and mallocng linked in, and ~48 KB with
+    // the SDK; both ~15 KB in the sysroot-absent fallback), so a unit test over
+    // a fixture manifest would be measuring something that is not this image.
+    // Without it, contents growing past the headroom is `ENOSPC` on the first
+    // write and surfaces only as `fs.write FAIL short` in a QEMU boot.
     let free = minixrs_mkfs_mfs::verify::free_zones(&img)
         .expect("the image just built decodes its own layout");
     assert!(
@@ -482,13 +518,22 @@ fn build_rootfs(hello_bytes: &[u8]) -> Vec<u8> {
 /// names those itself, and one driver invocation never mentions the version
 /// component, which is tooling's rule: derive it, never hard-code the `22`. A
 /// sysroot missing them is a *broken* SDK, and a broken SDK must fail loudly
-/// rather than quietly demote to another flavor (see `build_hello_sdk`).
+/// rather than quietly demote to another flavor (see `build_c_sdk`).
 ///
 /// An **explicitly set** but unusable `MINIXRS_SDK` warns once and falls through
 /// — which is also how `MINIXRS_SDK=/nonexistent` forces the musl flavor. An
 /// unset variable whose default prefix does not exist stays silent, since that is
 /// the ordinary case for everyone without an SDK.
+///
+/// Decided **once per build** and cached: every C program asks, and the answer
+/// must not differ between them — nor should the warning print once per program.
 fn usable_sdk() -> Option<PathBuf> {
+    static SDK: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    SDK.get_or_init(probe_sdk).clone()
+}
+
+/// [`usable_sdk`]'s uncached probe.
+fn probe_sdk() -> Option<PathBuf> {
     println!("cargo:rerun-if-env-changed=MINIXRS_SDK");
 
     let explicit = std::env::var_os("MINIXRS_SDK");
@@ -526,31 +571,36 @@ fn usable_sdk() -> Option<PathBuf> {
     Some(prefix)
 }
 
-/// Pick a `hello` flavor and build it: the SDK if one is usable, else the in-tree
-/// musl sysroot. `None` means no C toolchain at all, and the caller substitutes
-/// the `worker` ELF.
-fn build_hello(
-    workspace: &std::path::Path,
-    src: &std::path::Path,
-) -> Option<(HelloFlavor, Vec<u8>)> {
+/// Pick a flavor for the C program `name` and build it: the SDK if one is
+/// usable, else the in-tree musl sysroot. `None` means no C toolchain at all,
+/// and the caller substitutes the `worker` ELF.
+///
+/// The program is `userland/<name>/<name>.c` (plus `<name>.ld` for the musl
+/// flavor's link), and its outputs land in `target/<name>/`. Every C program is
+/// built this way, which is what keeps one flavor decision per build applying to
+/// all of them: nothing here depends on `name` except paths.
+fn build_c_program(workspace: &std::path::Path, name: &str) -> Option<(HelloFlavor, Vec<u8>)> {
+    let src = workspace.join(format!("userland/{name}/{name}.c"));
+    println!("cargo:rerun-if-changed={}", src.display());
+
     if let Some(prefix) = usable_sdk() {
         let stamp_path = prefix.join("sysroot/.stamp");
         let stamp = std::fs::read_to_string(&stamp_path)
             .unwrap_or_else(|e| panic!("reading the SDK stamp {}: {e}", stamp_path.display()))
             .trim()
             .to_string();
-        let bytes = build_hello_sdk(&prefix, workspace, src, &stamp);
+        let bytes = build_c_sdk(&prefix, workspace, name, &src, &stamp);
         return Some((HelloFlavor::Sdk { prefix, stamp }, bytes));
     }
-    build_hello_musl(workspace, src).map(|bytes| (HelloFlavor::Musl, bytes))
+    build_c_musl(workspace, name, &src).map(|bytes| (HelloFlavor::Musl, bytes))
 }
 
-/// Build `userland/hello` with the minix.rs SDK: **one** driver invocation that
+/// Build `userland/<name>` with the minix.rs SDK: **one** driver invocation that
 /// compiles and links, on the real triple.
 ///
 /// ```text
 ///   <sdk>/bin/clang --target=aarch64-unknown-minixrs -O2 -Wall -Wextra -Werror \
-///       -o target/hello/hello userland/hello/hello.c
+///       -o target/<name>/<name> userland/<name>/<name>.c
 /// ```
 ///
 /// That is the entire command, and the absences are the milestone. The patched
@@ -561,7 +611,7 @@ fn build_hello(
 /// segment-by-segment with per-segment permissions); `crt1.o`/`crti.o`/`crtn.o`
 /// and `-lc` out of `<sdk>/sysroot/usr/lib`; and `libclang_rt.builtins.a` from
 /// its own resource dir, which is where this flavor gets the soft-float
-/// `binary128` helpers that `build_hello_musl` has to scrape out of a nested
+/// `binary128` helpers that `build_c_musl` has to scrape out of a nested
 /// `compiler_builtins` rlib.
 ///
 /// So there is no `-T`, `-nostdinc`, `-isystem`, `--sysroot`, `-L`, `-static`,
@@ -575,16 +625,17 @@ fn build_hello(
 /// `HelloFlavor::Musl`. The boot markers are byte-identical across flavors, so a
 /// silent demotion would turn "your patched clang regressed" into "nothing looks
 /// wrong" — the one outcome that makes this whole path untestable.
-fn build_hello_sdk(
+fn build_c_sdk(
     prefix: &std::path::Path,
     workspace: &std::path::Path,
+    name: &str,
     src: &std::path::Path,
     stamp: &str,
 ) -> Vec<u8> {
     let clang = prefix.join("bin/clang");
-    let out = workspace.join("target/hello");
-    std::fs::create_dir_all(&out).expect("creating target/hello");
-    let elf = out.join("hello");
+    let out = workspace.join(format!("target/{name}"));
+    std::fs::create_dir_all(&out).unwrap_or_else(|e| panic!("creating {}: {e}", out.display()));
+    let elf = out.join(name);
 
     let status = clang_command(&clang)
         .args([
@@ -602,7 +653,7 @@ fn build_hello_sdk(
 
     if !status.success() {
         panic!(
-            "the minix.rs SDK failed to build userland/hello.\n\
+            "the minix.rs SDK failed to build userland/{name}.\n\
              \x20 SDK prefix: {prefix}\n\
              \x20 SDK stamp:  {stamp}\n\
              A usable SDK never falls back to the in-tree musl sysroot: the boot \
@@ -623,19 +674,19 @@ fn build_hello_sdk(
     std::fs::read(&elf).unwrap_or_else(|e| panic!("reading {}: {e}", elf.display()))
 }
 
-/// Build `userland/hello` — the slice-5.6 C milestone — against the **in-tree
-/// musl sysroot** (`tools/build-musl.sh` → `target/musl-sysroot`), returning the
-/// linked ELF's bytes.
+/// Build `userland/<name>` — `hello`, the slice-5.6 C milestone, or `fileio` —
+/// against the **in-tree musl sysroot** (`tools/build-musl.sh` →
+/// `target/musl-sysroot`), returning the linked ELF's bytes.
 ///
 /// This is the stand-in-triple flavor: `--target=aarch64-unknown-linux-musl`, a
-/// hand-written `hello.ld`, a `compiler_builtins` rlib scraped out of the nested
+/// hand-written `<name>.ld`, a `compiler_builtins` rlib scraped out of the nested
 /// build dir, and a hand-assembled `rust-lld` line. It is what CI's blocking
 /// `qemu-smoke` job builds, which makes it a real dependency rather than a
 /// fallback: that job cannot install an SDK, and `tests/qemu-boot.expected`
-/// requires the five C markers.
+/// requires the C markers.
 ///
 /// Returns `None` when the sysroot is missing or stale, so the caller can fall
-/// back to packing `worker` under the name `hello`. It deliberately does **not**
+/// back to packing `worker` under the C programs' names. It deliberately does **not**
 /// build the sysroot itself: that is `tools/build-musl.sh`'s job, and kicking off
 /// a multi-minute musl build from inside a cargo build script would turn a fresh
 /// clone's first `cargo kernel-aarch64` into a mystery.
@@ -645,8 +696,8 @@ fn build_hello_sdk(
 /// foreign libc. clang is already a hard build requirement (the kernel's `.S`
 /// files go through it) and `rust-lld` ships with the pinned toolchain, so no
 /// platform linker and no Homebrew LLVM are involved.
-fn build_hello_musl(workspace: &std::path::Path, src: &std::path::Path) -> Option<Vec<u8>> {
-    let script = workspace.join("userland/hello/hello.ld");
+fn build_c_musl(workspace: &std::path::Path, name: &str, src: &std::path::Path) -> Option<Vec<u8>> {
+    let script = workspace.join(format!("userland/{name}/{name}.ld"));
     let sysroot = workspace.join("target/musl-sysroot");
     let stamp = sysroot.join(".stamp");
 
@@ -660,10 +711,10 @@ fn build_hello_musl(workspace: &std::path::Path, src: &std::path::Path) -> Optio
 
     let sysroot_inc = sysroot.join("include");
     let lib = sysroot.join("lib");
-    let out = workspace.join("target/hello");
-    std::fs::create_dir_all(&out).expect("creating target/hello");
-    let obj = out.join("hello.o");
-    let elf = out.join("hello");
+    let out = workspace.join(format!("target/{name}"));
+    std::fs::create_dir_all(&out).unwrap_or_else(|e| panic!("creating {}: {e}", out.display()));
+    let obj = out.join(format!("{name}.o"));
+    let elf = out.join(name);
 
     // -nostdinc + -isystem <sysroot>/include: the fork's headers and nothing
     // else. The host libc must not creep in — its errno values differ.
@@ -676,10 +727,10 @@ fn build_hello_musl(workspace: &std::path::Path, src: &std::path::Path) -> Optio
         .arg(&obj)
         .arg(src)
         .status()
-        .expect("running clang for userland/hello");
+        .unwrap_or_else(|e| panic!("running clang for userland/{name}: {e}"));
     assert!(
         cc.success(),
-        "clang failed to compile userland/hello/hello.c"
+        "clang failed to compile userland/{name}/{name}.c"
     );
 
     // musl's vfprintf pulls in soft-float binary128 helpers (__multf3,
@@ -715,10 +766,10 @@ fn build_hello_musl(workspace: &std::path::Path, src: &std::path::Path) -> Optio
             "separate-loadable-segments",
         ])
         .status()
-        .expect("running rust-lld for userland/hello");
-    assert!(link.success(), "rust-lld failed to link userland/hello");
+        .unwrap_or_else(|e| panic!("running rust-lld for userland/{name}: {e}"));
+    assert!(link.success(), "rust-lld failed to link userland/{name}");
 
-    Some(std::fs::read(&elf).expect("reading the linked hello ELF"))
+    Some(std::fs::read(&elf).unwrap_or_else(|e| panic!("reading {}: {e}", elf.display())))
 }
 
 /// Locate the `compiler_builtins` rlib the nested `-Zbuild-std` builds produced.

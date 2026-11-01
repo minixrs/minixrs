@@ -52,7 +52,8 @@ use minixrs_kernel_shared::callnr::{
     PM_EXEC_PATH_OFF, PM_EXIT, PM_FORK, PM_GETPID, PM_GRANT_TEST, PM_WAIT, PRIVCTL_SET_USER,
     SAFECOPY_FROM, SAFECOPY_TO, SCHEDULING_START, SCHEDULING_STOP, SYS_ENDKSIG, SYS_EXEC, SYS_EXIT,
     SYS_FORK, SYS_GETINFO_NAME_LEN, SYS_GETKSIG, SYS_PRIVCTL, VFS_EXEC_GRANT_OFF,
-    VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE, VM_EXEC, VM_EXEC_IMAGE_END_OFF, VM_EXEC_PROC_OFF, VM_FORK,
+    VFS_EXEC_PATH_OFF, VFS_EXEC_STAGE, VFS_PM_EXIT, VFS_PM_EXIT_PROC_OFF, VM_EXEC,
+    VM_EXEC_IMAGE_END_OFF, VM_EXEC_PROC_OFF, VM_FORK,
 };
 use minixrs_kernel_shared::com::{
     INIT_PROC_NR, SCHED_PROC_NR, SYSTEM, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
@@ -160,10 +161,10 @@ fn main() -> ! {
             // from SYSTEM. RS heartbeat pings are also NOTIFYs but are
             // consumed inside `sef.receive` (classified `Ping`), so a NOTIFY
             // from any other source here is simply ignored.
-            NOTIFY_MESSAGE if msg.m_source == system => drain_ksigs(system),
+            NOTIFY_MESSAGE if msg.m_source == system => drain_ksigs(system, vfs),
             PM_GETPID => handle_getpid(&mut msg),
             PM_FORK => handle_fork(system, vm, sched, &mut msg),
-            PM_EXIT => handle_exit(system, sched, &mut msg),
+            PM_EXIT => handle_exit(system, sched, vfs, &mut msg),
             PM_WAIT => handle_wait(&mut msg),
             PM_EXEC => handle_exec(system, vfs, vm, &mut msg),
             PM_GRANT_TEST => handle_grant_test(own_e, &mut grants, &msg),
@@ -288,7 +289,7 @@ fn handle_fork(system: Endpoint, vm: Endpoint, sched: Endpoint, msg: &mut Messag
 /// otherwise the zombie waits for the parent's next `wait()`. PM sends the
 /// exiting child no reply — it is gone.
 #[cfg_attr(test, allow(dead_code))]
-fn handle_exit(system: Endpoint, sched: Endpoint, msg: &mut Message) {
+fn handle_exit(system: Endpoint, sched: Endpoint, vfs: Endpoint, msg: &mut Message) {
     let child_e = msg.m_source;
     let status = rd_i32(msg, 0);
     let Some(child_slot) = usize::try_from(endpoint_proc(child_e).get()).ok() else {
@@ -306,7 +307,11 @@ fn handle_exit(system: Endpoint, sched: Endpoint, msg: &mut Message) {
     let parent_slot = mproc::parent_of(child_slot).unwrap_or(child_slot);
 
     let _ = sched_stop(sched, child_e);
-    let _ = sys_exit(system, child_e);
+    if sys_exit(system, child_e) == OK {
+        // The child can issue no further request now; tell VFS before its proc
+        // number can be reused.
+        let _ = vfs_pm_exit(vfs, child_e);
+    }
     mproc::set_zombie(child_slot, encode_status(status));
 
     // Notify a waiting parent directly — no async SIGCHLD in Phase 4 (the kernel
@@ -673,7 +678,7 @@ fn encode_status(status: i32) -> i32 {
 /// it falls back to `SYS_ENDKSIG` to clear the RTS signal state, keeping the
 /// dispose-exactly-once invariant even when teardown can't proceed.
 #[cfg_attr(test, allow(dead_code))]
-fn drain_ksigs(system: Endpoint) {
+fn drain_ksigs(system: Endpoint, vfs: Endpoint) {
     loop {
         let mut m = Message {
             m_source: 0,
@@ -706,6 +711,8 @@ fn drain_ksigs(system: Endpoint) {
             // thus disposed of exactly once.
             if sys_exit(system, target_e) != OK {
                 sys_endksig(system, target_e);
+            } else {
+                let _ = vfs_pm_exit(vfs, target_e);
             }
         } else {
             sys_endksig(system, target_e);
@@ -971,6 +978,33 @@ fn vm_exec(vm: Endpoint, target_e: Endpoint, image_end: u64) -> i32 {
     wr_i32(&mut m, VM_EXEC_PROC_OFF, target_e);
     wr_u64(&mut m, VM_EXEC_IMAGE_END_OFF, image_end);
     let rc = ipc_sendrec(vm, &mut m);
+    if rc != OK { rc } else { m.m_type }
+}
+
+/// `VFS_PM_EXIT` — tell VFS that `target_e` is gone so it resets that process's
+/// descriptor row (SENDREC to VFS).
+///
+/// Returns VFS's reply `m_type`. **The caller ignores it**: this runs after a
+/// successful `SYS_EXIT`, so there is nothing to roll back — a diagnostic-only
+/// helper, like [`vm_exec`].
+///
+/// Deadlock check: a PM->VFS SENDREC blocks PM until VFS replies, so it is safe
+/// only if VFS can never be blocked sending *to PM* when a user process exits.
+/// VFS's only `ipc_send` to PM outside replies is `grant_test` at VFS startup,
+/// before VFS enters its receive loop and hence before any user process can run
+/// or exit; every other VFS send is a SENDREC to MFS, TTY, or the memory driver
+/// (none of which call PM) or a reply to a client already blocked in SENDREC.
+/// So VFS is always either in its loop or waiting on a non-PM server when PM
+/// sends here.
+#[cfg_attr(test, allow(dead_code))]
+fn vfs_pm_exit(vfs: Endpoint, target_e: Endpoint) -> i32 {
+    let mut m = Message {
+        m_source: 0,
+        m_type: VFS_PM_EXIT,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, VFS_PM_EXIT_PROC_OFF, target_e);
+    let rc = ipc_sendrec(vfs, &mut m);
     if rc != OK { rc } else { m.m_type }
 }
 
