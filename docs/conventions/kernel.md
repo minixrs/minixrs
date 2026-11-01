@@ -241,6 +241,9 @@ follows is the engine and the policy.
   both ranges, then walk-and-`memcpy` per `dual_page_chunks` — **all-or-nothing on the
   destination**, and its `Prot::writable` check is load-bearing, because a granter may *lie* about
   writability and the HHDM alias is a kernel mapping the MMU's EL0 bits do not police
+- The engine does **not** demand-fault: a lazily backed user page VM has not mapped yet is `EFAULT`,
+  even inside a valid region. Until that kernel gap closes, a client hands over only buffers it has
+  touched — the musl shim reads one byte per page before every `read`/`write` (chunk 5, M15)
 - `verify_grant` (`system/do_safecopy.rs`) checks, **in MINIX's order**: `okendpt` the granter;
   table registered + idx in range; the entry reads back (a walk miss is hidden as **`EPERM`, not
   `EFAULT`**, so a grantee cannot probe the granter's address space); `CPF_USED|CPF_VALID`; `seq`

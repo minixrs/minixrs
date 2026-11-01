@@ -573,6 +573,8 @@ load it by grant. Four rules:
 - **Nothing releases the stage grant.** Re-granting per request bumps the sequence and kills the
   previous id, and PM serialises exec (slice 5.9 — see
   [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+- **256 KiB is nearly full for a C program**: `/bin/fileio` (stdio + malloc) is 259,752 B, about 2.3
+  KB under the cap. Check `ls -l target/fileio/fileio` before a C program grows (chunk 5).
 
 ### Prologue ordering
 
@@ -687,6 +689,11 @@ A server's probe battery is how these rules stay proved. Three rules for writing
 - **Never aim a "must be refused" probe at a file or block whose accidental write would destroy
   something**, and retire a probe visibly — decrement the `n=` in its marker so the retirement is a
   diff rather than a deletion nobody reviews.
+- **A C probe sets `errno = 0` before every errno-checked call.** mallocng's ignored `MAP_FIXED`
+  guard `mmap` leaves `ENOSYS` behind after the first `malloc`/`fopen` (chunk 5).
+- **With the boot stubs on, two copies of one C program can run at once.** A probe that mutates
+  filesystem state must be serialised (init skips the `fileio` slot while a `fileio` pid lives) or
+  keep its state per pid.
 
 Report through the path under test where that is what is being proved: a client's write proof must
 be written **through** the descriptor under test (e.g. `/dev/console`, never fd 1), because the
