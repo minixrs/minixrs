@@ -508,7 +508,7 @@ static void check_seek_hole(void)
 	memset(sh, POISON, sizeof sh);
 
 	errno = 0;
-	fd = open(seekhole_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+	fd = open(seekhole_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0) {
 		fail("seek-hole", "open", fd, errno);
 		return;
