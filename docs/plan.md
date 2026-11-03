@@ -613,7 +613,7 @@ land before any virtio code; chunk 4 gates starting Phase 6 proper.
 - [x] **Chunk 3** — `SYS_IRQCTL` design note
 - [x] **Chunk 4** — Phase 6 tracker + slicing session
 - [x] **Chunk 5** — musl syscall surface
-- [ ] **Chunk 6** — SDK flavor CI coverage
+- [x] **Chunk 6** — SDK flavor CI coverage (gap kept; CI job deferred)
 
 ### Phase 6: VirtIO Drivers
 

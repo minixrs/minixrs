@@ -30,7 +30,7 @@ one item that is simply *done* is recorded as chunk 1 so the reasoning is not lo
 - [x] **Chunk 3** — `SYS_IRQCTL` design note
 - [x] **Chunk 4** — Phase 6 tracker + slicing session
 - [x] **Chunk 5** — musl syscall surface
-- [ ] **Chunk 6** — SDK flavor CI coverage
+- [x] **Chunk 6** — SDK flavor CI coverage (gap kept; CI job deferred)
 
 ---
 
@@ -261,6 +261,32 @@ three-boot matrix. The rule and the full local mitigation live in
 [`ci.md`](../conventions/ci.md#the-sdk-flavor-has-zero-ci-coverage) — this file does not restate
 them.
 
+**Outcome (2026-11-02): the gap is kept, by the user's ruling.** The local three-boot matrix in
+[`ci.md`](../conventions/ci.md#the-sdk-flavor-has-zero-ci-coverage) stays the mitigation, and the CI
+job is deferred rather than rejected — the goal is still that an SDK-only breakage fails **on the
+minixrs PR that causes it**. Every route there cost more than this chunk was worth:
+
+- **A self-hosted runner is out.** Both `minixrs/minixrs` and `minixrs/tooling` are public, so a
+  fork PR could run arbitrary code on the machine that hosts the SDK.
+- **Building LLVM in minixrs CI is out.** A cold build is hours on every cache miss.
+- **The SDK that exists cannot run on a runner.** `~/toolchains/minixrs` is a 4 GB macOS build, and
+  tooling's scripts are macOS-only (`build-rust.sh` hard-codes `HOST=aarch64-apple-darwin`;
+  `build-compiler-rt.sh` assumes Darwin builtins), so even a hand-built Linux SDK in a container
+  would first need tooling-side porting.
+
+**The shape sketched for later**, so the reasoning is not lost: tooling publishes a stripped SDK
+slice — `bin/clang`, the linker it invokes, compiler-rt builtins and `sysroot/`, no `rust/` — as a
+release asset tagged by its SDK stamp; minixrs pins the URL plus a sha256, caches it by that hash,
+and runs a **blocking** `qemu-smoke-sdk` job on the full 600 s boot against the same marker files.
+The job must assert the embedded `hello` is the SDK size (~47 KB), because the markers are
+byte-identical across flavours and a silent fall-back to musl would otherwise pass. It must boot,
+not just compile: chunk 5's `brk FAIL not-advanced` was a runtime failure. Bumping the pin is then
+the minixrs PR on which a patched-clang-driver regression surfaces.
+
+**Revisit when** tooling builds the SDK on a real Linux (x86_64) host — that removes the porting
+step and makes the artifact above a packaging job rather than a project. Tracked in the Deferred
+table below.
+
 ---
 
 ## Sequencing: keep the ramdisk until virtio-blk is green
@@ -308,18 +334,19 @@ first place one exists); the detail is in [`phase-5-musl-fs.md`](phase-5-musl-fs
 
 ## Deferred: do not block Phase 6 on these
 
-| Item                               | Why it can wait                                           |
-| ---------------------------------- | --------------------------------------------------------- |
-| `SENDA` + `trap_mask: u32`         | musl uses SENDREC; the README already qualifies the claim |
-| `SYS_TIMES`                        | Nice for `time(1)`; not needed for a disk boot            |
-| CoW fork                           | Performance, not correctness                              |
-| PFS / pipes                        | Phase 7 shell                                             |
-| Indirect grants                    | No re-granting consumer yet                               |
-| Signal dispositions / `SIGCHLD`    | Shell / job control                                       |
-| Orphan reparent to init            | Multi-process userland                                    |
-| `GETDENTS` / `stat` on the FS band | No consumer until a shell lists a directory               |
-| Dynamic linking                    | Far future                                                |
-| x86_64                             | Phase 8                                                   |
+| Item                               | Why it can wait                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------------------ |
+| `SENDA` + `trap_mask: u32`         | musl uses SENDREC; the README already qualifies the claim                            |
+| `SYS_TIMES`                        | Nice for `time(1)`; not needed for a disk boot                                       |
+| CoW fork                           | Performance, not correctness                                                         |
+| PFS / pipes                        | Phase 7 shell                                                                        |
+| Indirect grants                    | No re-granting consumer yet                                                          |
+| Signal dispositions / `SIGCHLD`    | Shell / job control                                                                  |
+| Orphan reparent to init            | Multi-process userland                                                               |
+| `GETDENTS` / `stat` on the FS band | No consumer until a shell lists a directory                                          |
+| Dynamic linking                    | Far future                                                                           |
+| x86_64                             | Phase 8                                                                              |
+| SDK-flavour CI job (chunk 6)       | Waits for a Linux-hosted SDK build; the local three-boot matrix covers it until then |
 
 Chunk 5 took the cheap fix in each of the following by the user's ruling; each row names the proper
 fix a later slice owes.
