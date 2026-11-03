@@ -131,6 +131,12 @@ No CI job installs the minix.rs SDK (an LLVM build is hours), so `$MINIXRS_SDK` 
 runner and the SDK `hello` flavor is never exercised — a regression in the patched clang driver
 ships green.
 
+**This is a deliberate, tracked decision, not an oversight.** Pre-Phase-6 chunk 6 kept the gap and
+deferred an SDK CI job until tooling builds the SDK on a Linux host; the reasons, the job's sketched
+shape and the revisit trigger are in
+[`phase-6-prep.md`](../plans/phase-6-prep.md#chunk-6-sdk-flavor-ci-coverage). Until then the matrix
+below is the only thing that exercises the SDK flavour, so skipping it is shipping untested.
+
 The mitigation is local. Run the **three-boot matrix** when touching `build_c_*`:
 
 | Row | How to force it                                                      | Flavour reached       |
