@@ -187,3 +187,6 @@ gates, not `build`.)
 - A C program's linker script ends with `PROVIDE(_end = .)` after `.bss`: lld defines `_end` only
   for a link with no `SECTIONS` command, so the musl flavour fails with "undefined symbol: _end"
   without it. `hello.ld` and `fileio.ld` stay identical below their headers (chunk 5).
+- The SDK flavour compiles C programs hosted at `-O2`; the in-tree musl flavour is `-ffreestanding`.
+  A hosted build may delete a `malloc`/`free` pair whose result is never used, so a probe must make
+  the allocation observable (`void *volatile p`).
