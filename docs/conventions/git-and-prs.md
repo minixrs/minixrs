@@ -33,6 +33,11 @@ Branching, signing, sign-off, and what a PR owes the plan trackers.
   lands before *or* after `Signed-off-by:` depending on timing — both orderings are in the history
   and neither is wrong. Verify with `git log -1 --format='%(trailers:key=Signed-off-by)'` before
   pushing, especially after a `git commit --amend` that omitted `-s`
+- **Entire settings the service must see go in the committed `.entire/settings.json`**, never only
+  in the git-ignored `.entire/settings.local.json`: entire.io reads the committed file, so a
+  local-only `checkpoint_remote` left sessions unindexed from 2026-09-18 (per Entire support).
+  Checkpoints are `refs/entire/checkpoints/*` refs on `minixrs/development-log`, mirrored on Entire;
+  the pre-push hook pushes them on any `git push`, so never hand-push that refspec
 - PRs land by **regular merge commit** (never squash; rebase merge only for a solo series where a
   linear history is specifically wanted). A merge preserves every commit object byte-for-byte, so
   both the `Signed-off-by:` trailer **and** the author's GPG signature reach `main` intact — the
