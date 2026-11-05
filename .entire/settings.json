@@ -1,5 +1,17 @@
 {
   "enabled": true,
   "telemetry": false,
-  "external_agents": true
+  "external_agents": true,
+  "strategy_options": {
+    "checkpoint_remote": {
+      "provider": "github",
+      "repo": "minixrs/development-log"
+    },
+    "push_sessions": true
+  },
+  "checkpoints": {
+    "primary": {
+      "type": "git-refs"
+    }
+  }
 }
