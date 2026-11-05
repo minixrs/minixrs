@@ -60,6 +60,17 @@ whole-project picture.
   `clippy-kernel` does not, so it builds **`worker`**. No job builds the SDK flavor at all — see
   [The SDK flavor has zero CI coverage](#the-sdk-flavor-has-zero-ci-coverage) below for what that
   costs and the local mitigation
+- **`qemu-smoke` skips on docs-only PRs.** A `boot-scope` job runs `tools/boot-relevant.sh` on the
+  PR's three-dot range and the boot runs only if something outside the skip list changed — the
+  script names what is *safe to skip* (`*.md`, `book/`, `docs/`, `.entire/`, `.claude/`,
+  `dprint.json`, `LICENSE`, `docs.yml`) and everything else boots, renames split so a file moved
+  into `docs/` still counts its old path. Pushes to `main` always boot. Two traps the design avoids,
+  so keep them avoided when editing: a workflow-level `paths-ignore` would leave the *required*
+  "QEMU boot smoke" check never reporting, so docs PRs would hang pending — a job skipped by its
+  `if:` reports success instead; and since a skipped required check is a pass, `qemu-smoke` boots
+  whenever `boot-scope` did not *succeed*, so a broken classifier costs a boot rather than waving
+  every PR through. Add a path to the skip list only if the kernel build provably never reads it,
+  and add a self-test case with it
 - `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner: boots the kernel for 600 s wall clock via
   the cargo runner (asserting exit 124, the timeout status a healthy run must produce), then
   `tools/check-boot-log.sh` greps the serial log against the two marker files. **Blocking** as of

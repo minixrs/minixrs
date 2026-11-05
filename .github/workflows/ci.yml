@@ -271,8 +271,56 @@ jobs:
           -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm -p minixrs-tty
           -p minixrs-mfs -p minixrs-mkfs-mfs -p minixrs-memory
 
+  # Decides whether qemu-smoke has anything to prove. A docs-only PR cannot
+  # change the boot, and the boot is the slowest gate by far (it always burns
+  # its full 600 s timeout), so it skips there -- see tools/boot-relevant.sh
+  # for what counts as docs-only. Pushes to main always boot.
+  #
+  # This cannot be a workflow-level `paths-ignore`: "QEMU boot smoke" is a
+  # required check, and a workflow that never starts never reports it, so a
+  # docs PR would sit pending forever. A job skipped by its `if:` reports
+  # success instead, which is what branch protection needs.
+  boot-scope:
+    name: boot scope
+    runs-on: ubuntu-latest
+    outputs:
+      boot: ${{ steps.scope.outputs.boot }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # The three-dot range needs the merge base, which a shallow clone
+          # does not have.
+          fetch-depth: 0
+      - name: Self-test the classifier
+        run: tools/boot-relevant.sh --self-test
+      # SHAs and the event name go through the environment rather than being
+      # interpolated into the script (expression-injection guard, as in dco).
+      - name: Classify the change
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            boot=$(tools/boot-relevant.sh "$BASE_SHA...$HEAD_SHA")
+          else
+            boot=true
+          fi
+          echo "boot=$boot" | tee -a "$GITHUB_OUTPUT"
+
   qemu-smoke:
     name: QEMU boot smoke
+    needs: boot-scope
+    # Boot unless boot-scope *succeeded* and said docs-only. A failed or
+    # skipped boot-scope must not skip the boot: a skipped required check
+    # reports success, so a broken classifier would otherwise wave every PR
+    # through untested. `!cancelled()` stops `needs` from skipping this job
+    # when boot-scope fails.
+    if: >-
+      !cancelled() &&
+      (needs.boot-scope.result != 'success' ||
+       needs.boot-scope.outputs.boot == 'true')
     # Free arm64 runner for public repos; native-ISA TCG (no KVM available).
     runs-on: ubuntu-24.04-arm
     # Blocking as of phase-5-prep chunk 7: it stayed green across PRs #33–#37,
