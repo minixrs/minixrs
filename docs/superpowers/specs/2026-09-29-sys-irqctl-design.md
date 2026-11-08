@@ -9,12 +9,16 @@ Phase 6's first kernel work is delivering a hardware interrupt to an EL0 driver 
 that virtio-blk is never tempted into a poll loop. **It designs; it implements nothing.** Slice 6.1
 implements it, from its own plan document.
 
-Decisions are labelled `I1…I13`: slice-local, distinct from the phase-level `D1…D13`.
+Decisions are labelled `I1…I14`: slice-local, distinct from the phase-level `D1…D13`.
 
 **Amended for slices 6.2 onward** by decision H2 of
 [`phase-6-virtio.md`](../../plans/phase-6-virtio.md): the kernel, not the driver, finds a driver's
 virtio-mmio slot, and the allow-list holds that one line. I4 and I9 below have been rewritten to say
 so. Nothing in 6.1's own scope changes.
+
+**Amended 2026-11-08 by slice 6.1's measurements** (I11): the empty run queue is *not* reachable in
+today's boot, so the idle path cannot be observed without help. I14 adds the opt-in `idle-probe`
+feature that makes it observable, and records the CI gap it leaves as debt to correct.
 
 ---
 
@@ -289,6 +293,18 @@ which the single-threaded-EL1 invariant every `// SAFETY:` comment cites current
 2. establish that `wfi` **returns** on this QEMU with `PSTATE.I` set and the virtual timer pending.
    The architecture says it does; the whole design rests on it, so it is observed, not assumed.
 
+**Measured 2026-11-08**, with temporary probes on `feature/6.1-irqctl`, since reverted:
+
+1. **Not reached.** A one-shot probe in `schedule_next`'s `None` arm never fired in a 90 s
+   `--no-default-features` boot, across hundreds of `hello` cycles. `init`'s fork → exec → `wait`
+   rotation never ends, and a chain of `SENDREC`s always has a runnable end. So the slice-level
+   split the phase plan allowed (idle path as its own PR) does not apply: 6.1 is one PR.
+2. **`wfi` returns.** Placed after `timer::init` in `kmain`, with `DAIF = 0x3c0` (`I` set), five
+   consecutive `wfi`s each returned with INTID 27 pending, and `ack` / `rearm` / `eoi` behaved as in
+   IRQ context.
+
+Measurement 1 means no boot exercises the idle loop. I14 closes that for 6.1's proof.
+
 ---
 
 ## 4. The driver side
@@ -380,6 +396,48 @@ Mutations 6.1 owes, each observed and reverted:
 Host-testable logic — the subcode decode, the range and allow-list predicates, the hook-table
 find/replace/free — goes in `kernel-shared`, under the standing carve-out for pure predicates the
 kernel crate cannot test.
+
+### I14 — the idle path is proved under an opt-in `idle-probe` feature
+
+I11's measurement 1 found the empty run queue unreachable: `init`'s rotation always leaves something
+runnable, so neither the default nor the stub-free boot ever enters the idle loop. Shipping it
+unobserved would break the "a marker not observed moving has not been proved" rule. Changing
+`init`'s rotation in every boot was considered and rejected for this slice: the rotation carries
+ordering and overlap invariants (`worker` first, one `fileio` at a time, `hello` overlapping
+`fileio`) that are not 6.1's to reopen.
+
+- **The feature.** `kernel/Cargo.toml` gains `idle-probe = []`, off by default. `kernel/build.rs`
+  reads `CARGO_FEATURE_IDLE_PROBE` and builds `minixrs-init` with `--features idle-probe`, the
+  `boot-stubs` → PM precedent. The stubs spin forever, so the queue can never empty with them on:
+  `build.rs` **refuses** `idle-probe` together with `boot-stubs`, with a message naming
+  `--no-default-features`, rather than producing a boot that silently proves nothing.
+- **`init` under the feature** runs its rotation until each of the four targets has been exec'd
+  once, then stops forking, reaps until it has no children left, and blocks indefinitely in a call
+  that never completes. Nothing user-side is then runnable except on a wake-up. The exact stop
+  condition and the blocking call are the plan's to fix.
+- **The wake source already exists.** RS arms `SYS_SETALARM` periodically, so `clock::tick` fires an
+  alarm during idle, `CLOCK` notifies RS, and `pick_proc` yields it. No new timer is needed, and the
+  wake is a real one: a hardware tick through the I11 loop's `do_irq` call.
+- **The marker is unconditional.** The kernel prints a one-shot `[diag sched] idle ok` the first
+  time the I11 loop exits with a process picked after at least one `wfi`. It is compiled into every
+  boot, not gated on the feature: the default boot never reaches it today, and when one does (see
+  the debt below) the marker is already there to move into the required list.
+
+Proof, in addition to I13's: an `idle-probe` boot (`--no-default-features --features idle-probe`)
+shows `[diag sched] idle ok` and, in the same log, `[diag tty] irq ok`, with nothing from the
+forbidden list. Mutations, each observed and reverted under `idle-probe`:
+
+- restore `None => return` in `schedule_next` → the marker never prints;
+- drop the idling-flag check in `clock::tick` → re-entry from inside the idle loop. What that looks
+  like (stack death, a fault, per-tick bytes) is observed, not predicted.
+
+**Debt: CI does not exercise the idle path.** CI boots the default configuration, which never idles,
+so a regression in I11 lands green. This is a known gap to correct, not a settled state. Correct it
+when the default boot first reaches the empty queue: at the latest when Phase 7 replaces `init`'s
+rotation with a shell blocking in `read(0)`, sooner if a slice gives the rotation an end. That PR
+moves `[diag sched] idle ok` into the required marker list and deletes `idle-probe`, both the
+feature and its `init` arm. Tracked under slice 6.1 in
+[`phase-6-virtio.md`](../../plans/phase-6-virtio.md).
 
 ---
 

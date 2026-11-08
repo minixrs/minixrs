@@ -646,6 +646,9 @@ framebuffer console plus a keyboard driver inside the milestone bar.
 - `userland/coreutils/`: Multi-call binary -- ls, cat, cp, mv, rm, mkdir, rmdir, echo, wc, head,
   tail, grep, chmod, pwd, env, sleep, date, uname, kill, ps, true, false, test
 - **Milestone:** Login, navigate filesystem, run scripts
+- **Debt carried in from 6.1:** once the default boot idles, which `init`'s rotation prevents today,
+  make `[diag sched] idle ok` a required marker and delete the `idle-probe` feature
+  ([I14](superpowers/specs/2026-09-29-sys-irqctl-design.md#i14--the-idle-path-is-proved-under-an-opt-in-idle-probe-feature))
 
 ### Phase 8: x86_64 Port
 
