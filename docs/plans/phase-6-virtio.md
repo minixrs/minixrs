@@ -350,14 +350,14 @@ splitting a slice whose halves prove different things.
 
 **Proof:** `[diag tty] irq ok` after two interrupt rounds; `do_irq: unexpected INTID` forbidden; the
 four mutations of I13, each observed and reverted. Under the opt-in `idle-probe` feature (I14),
-`[diag sched] idle ok` plus I14's two idle-path mutations.
+`[idle] wake ok` plus I14's two idle-path mutations.
 
 **Measured (2026-11-08):** the empty run queue is unreachable in today's boot, and `wfi` returns
 with `PSTATE.I` set. So 6.1 is one PR, not split.
 
 **Debt carried: CI does not exercise the idle path.** It is proved only under `idle-probe`, which CI
 does not build. Correct it when the default boot first idles, at the latest Phase 7's shell: promote
-`[diag sched] idle ok` to a required marker and delete `idle-probe`. Details in I14.
+`[idle] wake ok` to a required marker and delete `idle-probe`. Details in I14.
 
 ### Slice 6.2: `driver-rt` — transport, virtqueues, DMA, driver slots
 

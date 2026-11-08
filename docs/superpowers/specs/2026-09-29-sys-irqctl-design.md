@@ -418,14 +418,14 @@ ordering and overlap invariants (`worker` first, one `fileio` at a time, `hello`
 - **The wake source already exists.** RS arms `SYS_SETALARM` periodically, so `clock::tick` fires an
   alarm during idle, `CLOCK` notifies RS, and `pick_proc` yields it. No new timer is needed, and the
   wake is a real one: a hardware tick through the I11 loop's `do_irq` call.
-- **The marker is unconditional.** The kernel prints a one-shot `[diag sched] idle ok` the first
-  time the I11 loop exits with a process picked after at least one `wfi`. It is compiled into every
-  boot, not gated on the feature: the default boot never reaches it today, and when one does (see
-  the debt below) the marker is already there to move into the required list.
+- **The marker is unconditional.** The kernel prints a one-shot `[idle] wake ok` the first time the
+  I11 loop exits with a process picked after at least one `wfi`. It is compiled into every boot, not
+  gated on the feature: the default boot never reaches it today, and when one does (see the debt
+  below) the marker is already there to move into the required list.
 
 Proof, in addition to I13's: an `idle-probe` boot (`--no-default-features --features idle-probe`)
-shows `[diag sched] idle ok` and, in the same log, `[diag tty] irq ok`, with nothing from the
-forbidden list. Mutations, each observed and reverted under `idle-probe`:
+shows `[idle] wake ok` and, in the same log, `[diag tty] irq ok`, with nothing from the forbidden
+list. Mutations, each observed and reverted under `idle-probe`:
 
 - restore `None => return` in `schedule_next` → the marker never prints;
 - drop the idling-flag check in `clock::tick` → re-entry from inside the idle loop. What that looks
@@ -435,9 +435,8 @@ forbidden list. Mutations, each observed and reverted under `idle-probe`:
 so a regression in I11 lands green. This is a known gap to correct, not a settled state. Correct it
 when the default boot first reaches the empty queue: at the latest when Phase 7 replaces `init`'s
 rotation with a shell blocking in `read(0)`, sooner if a slice gives the rotation an end. That PR
-moves `[diag sched] idle ok` into the required marker list and deletes `idle-probe`, both the
-feature and its `init` arm. Tracked under slice 6.1 in
-[`phase-6-virtio.md`](../../plans/phase-6-virtio.md).
+moves `[idle] wake ok` into the required marker list and deletes `idle-probe`, both the feature and
+its `init` arm. Tracked under slice 6.1 in [`phase-6-virtio.md`](../../plans/phase-6-virtio.md).
 
 ---
 
