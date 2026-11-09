@@ -311,6 +311,11 @@ an RS heartbeat spin). Re-entry needs both gates removed, which originally hung 
 27 acked but not EOI'd. `schedule_next` now `assert!`s `!irq::in_dispatch()` before idling, so that
 case panics loudly instead.
 
+**Measured during 6.1 execution (2026-11-08).** I7's take-and-zero of `int_pending` happens at the
+two `HARDWARE` build sites (`deliver_irq`'s immediate path and `mini_receive`'s deferred build), not
+inside `build_notify_message`, which takes the bitmap as an argument. Behaviour is identical. Any
+future `HARDWARE` builder must take the bitmap too.
+
 ---
 
 ## 4. The driver side
@@ -473,4 +478,6 @@ its `init` arm. Tracked under slice 6.1 in [`phase-6-virtio.md`](../../plans/pha
 - **Narrowing the boot servers' `k_call_mask`.** A separate hardening change; I4's allow-list is
   what makes it non-urgent.
 - **Shared lines, edge-triggered lines, SMP routing, x86_64.** No consumer.
-- **Dynamic drivers' allow-lists via RS / `SYS_PRIVCTL`.** When RS first starts a driver.
+- **Dynamic drivers' allow-lists via RS / `SYS_PRIVCTL`.** When RS first starts a driver. The slice
+  that reuses dedicated privilege slots must also clear `Priv::irqs` on exit and at exec's point of
+  no return; 6.1 never does (only `USER_PRIV_ID` is assigned at runtime), contradicting I4.

@@ -225,8 +225,8 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
   ([I11](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i11--the-kernel-needs-an-idle-path))
 - **`tick` does only timekeeping while idling.** The idling flag (not the `IDLE` slot) makes
   `clock::tick` advance uptime and fire due alarms and nothing else: no `putc`, no quantum
-  accounting, no `reschedule`; `reschedule`'s first line checks the flag too. Both gates are needed
-  — removing only one is absorbed by the other (I11)
+  accounting, no `reschedule`; `reschedule`'s first line checks the flag too. Keep both: either
+  alone prevents re-entry (defence in depth), and 6.1 observed re-entry only with both removed (I11)
 - **Release on exit/exec.** `SYS_EXIT` and `SYS_EXEC` call `irq_hooks::release_owner`, which masks
   each of the owner's lines before freeing its hook, so a stale endpoint is never notified
   ([I8](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i8--a-dead-or-execd-owner-releases-its-lines))

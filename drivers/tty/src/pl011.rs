@@ -21,8 +21,8 @@
 //! `kernel/src/arch/aarch64/uart.rs` declares the same three constants, and as of
 //! slice 6.1 the same [`PL011_INTID`]. They are not shared, and cannot be: the
 //! kernel crate is bare-metal-only and pinned to `aarch64-unknown-none` by
-//! `forced-target`, so it can never be a dependency of a user-space crate. Moving them into `kernel-shared` was considered and rejected —
-//! a PL011 register layout is not a shared *ABI*, it is a hardware fact that two
+//! `forced-target`, so it can never be a dependency of a user-space crate. Moving them into
+//! `kernel-shared` was considered and rejected — a PL011 register layout is not a shared *ABI*, it is a hardware fact that two
 //! independent drivers happen to both know. The duplication is noted in both files.
 //!
 //! ## Why this is the crate's only `unsafe`

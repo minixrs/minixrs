@@ -3,7 +3,7 @@
 Produced by the chunk-4 design session ([`phase-6-prep.md`](phase-6-prep.md)), 2026-09-30. Every
 design decision below is **locked** (decided with rationale, alternatives recorded); the slice list
 is the working decomposition. Decisions are labelled `H1…H12` — distinct from Phase 5's `D1…D13`,
-chunk 2's `V1…V14` and chunk 3's `I1…I13`, all of which stay in force and are cited by their own
+chunk 2's `V1…V14` and chunk 3's `I1…I14`, all of which stay in force and are cited by their own
 labels.
 
 > **Status convention.** A slice's status is a GFM checkbox — `- [ ]` not started, `- [x]` done —
@@ -341,7 +341,7 @@ file links to them as they land and does not restate them.
 
 **Design:**
 [`2026-09-29-sys-irqctl-design.md`](../superpowers/specs/2026-09-29-sys-irqctl-design.md), decisions
-`I1…I13`. H2 amends I4 and I9 for slices 6.2 onward; 6.1 itself is unaffected — its one allow-list
+`I1…I14`. H2 amends I4 and I9 for slices 6.2 onward; 6.1 itself is unaffected — its one allow-list
 entry is INTID 33 on TTY.
 
 **Scope:** as the design's §1 table. The idle path (I11) may land as its own PR ahead of the call if
@@ -369,6 +369,10 @@ does not build. Correct it when the default boot first idles, at the latest Phas
   blocked — 6.3 (virtio-blk) or 6.5 (TTY RX). That slice should name a mutation that moves on it.
 - 6.5 must retire or rescope TTY's post-proof `irq FAIL extra` guard, since RX interrupts will
   legitimately arrive after the TX proof.
+- `Priv::irqs` is never cleared on exit or exec, contradicting I4 ("the allow-list follows the
+  mapping"). Unreachable today: only `USER_PRIV_ID` is assigned at runtime and no device owner
+  execs. The slice that reuses dedicated slots must clear `irqs` on exit and at exec's point of no
+  return.
 - 6.2: the TTY battery's "free slot" row uses `claimed + 1`, which assumes TTY is the sole claimer;
   revisit when virtio drivers claim lines.
 

@@ -26,7 +26,8 @@ grouped under [Planned](#planned) so the table never points at a file that isn't
 | `kernel/system/do_fork.c`                 | `kernel/src/system/do_fork.rs`                                 |
 | `kernel/system/do_exec.c`                 | `kernel/src/system/do_exec.rs`                                 |
 | `kernel/system/do_vmctl.c`                | `kernel/src/system/do_vmctl.rs`                                |
-| `kernel/system/do_copy.c`, `do_irqctl.c`  | `kernel/src/system/stubs.rs` (stub handlers)                   |
+| `kernel/system/do_copy.c`                 | `kernel/src/system/do_copy.rs`                                 |
+| `kernel/system/do_irqctl.c`               | `kernel/src/system/do_irqctl.rs`                               |
 | `kernel/clock.c`                          | `kernel/src/clock.rs`                                          |
 | `kernel/interrupt.c`                      | `kernel/src/arch/aarch64/irq.rs`, `gic.rs`                     |
 | `kernel/main.c` — `kmain`                 | `kernel/src/main.rs`                                           |

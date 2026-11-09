@@ -360,7 +360,7 @@ pub const IRQCTL_NOTIFY_ID_OFF: usize = 12;
 /// `IRQ_SETPOLICY`, request field for the other three subcodes. Same offset as
 /// [`IRQCTL_NOTIFY_ID_OFF`], as in MINIX.
 pub const IRQCTL_HOOK_ID_OFF: usize = 12;
-/// Payload offset (u32) of the pending-interrupt bitmap in an `HARDWARE`
+/// Payload offset (u32) of the pending-interrupt bitmap in a `HARDWARE`
 /// notification: bit `notify_id` is set per pending hook. Read-and-clear (I7).
 pub const NOTIFY_IRQ_PENDING_OFF: usize = 0;
 

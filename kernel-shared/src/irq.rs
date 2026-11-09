@@ -220,6 +220,12 @@ mod tests {
     }
 
     #[test]
+    fn decode_fails_closed_before_gic_init() {
+        // nr_intids == 0 until the GIC is probed: every vector must be refused.
+        assert_eq!(decode(IRQ_SETPOLICY, 33, 0, 0, 0), Err(EINVAL));
+    }
+
+    #[test]
     fn decode_rejects_sgi_ppi_and_out_of_range() {
         for v in [0, 27, 31, 288, -1] {
             assert_eq!(decode(IRQ_SETPOLICY, v, 0, 0, N), Err(EINVAL), "vector {v}");
