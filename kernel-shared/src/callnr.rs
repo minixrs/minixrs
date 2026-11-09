@@ -331,6 +331,40 @@ pub const DIAG_TEXT_MAX: usize = 96 - DIAG_TEXT_OFF;
 const _: () = assert!(DIAG_TEXT_OFF + DIAG_TEXT_MAX == 96);
 
 // ---------------------------------------------------------------------------
+// `SYS_IRQCTL` subcodes and payload layout (slice 6.1, design I1/I2/I10).
+
+/// `SYS_IRQCTL` subcode: claim an interrupt line. Allocates a hook, configures
+/// the line, leaves it unmasked. MINIX 3 `include/minix/com.h` value.
+pub const IRQ_SETPOLICY: i32 = 1;
+/// `SYS_IRQCTL` subcode: release a hook — mask the line, free the slot.
+pub const IRQ_RMPOLICY: i32 = 2;
+/// `SYS_IRQCTL` subcode: unmask the hook's line. Doubles as the acknowledgement
+/// of a delivered interrupt (I7).
+pub const IRQ_ENABLE: i32 = 3;
+/// `SYS_IRQCTL` subcode: mask the hook's line.
+pub const IRQ_DISABLE: i32 = 4;
+/// MINIX's `policy` bit asking the kernel to unmask the line itself after
+/// notifying. Defined at MINIX's value but **refused**: `policy` must be 0, so
+/// any non-zero word (this bit included) answers `EINVAL` (I10).
+pub const IRQ_REENABLE: i32 = 0x001;
+/// `SYS_IRQCTL` payload: the subcode (i32), all subcodes.
+pub const IRQCTL_REQUEST_OFF: usize = 0;
+/// `SYS_IRQCTL` payload: the raw GIC INTID (i32), `IRQ_SETPOLICY` only.
+pub const IRQCTL_VECTOR_OFF: usize = 4;
+/// `SYS_IRQCTL` payload: the policy word (i32, must be 0), `IRQ_SETPOLICY` only.
+pub const IRQCTL_POLICY_OFF: usize = 8;
+/// `SYS_IRQCTL` payload: on the way in to `IRQ_SETPOLICY`, the driver's own
+/// `notify_id` (`0..=31`, the bit it will see set in its pending word).
+pub const IRQCTL_NOTIFY_ID_OFF: usize = 12;
+/// `SYS_IRQCTL` payload: the kernel's 1-based hook id — reply on a successful
+/// `IRQ_SETPOLICY`, request field for the other three subcodes. Same offset as
+/// [`IRQCTL_NOTIFY_ID_OFF`], as in MINIX.
+pub const IRQCTL_HOOK_ID_OFF: usize = 12;
+/// Payload offset (u32) of the pending-interrupt bitmap in an `HARDWARE`
+/// notification: bit `notify_id` is set per pending hook. Read-and-clear (I7).
+pub const NOTIFY_IRQ_PENDING_OFF: usize = 0;
+
+// ---------------------------------------------------------------------------
 // `SYS_VMCTL` subcalls.
 //
 // `SYS_VMCTL` mediates all user-space page-table changes: the kernel owns the

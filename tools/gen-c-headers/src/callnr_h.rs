@@ -258,6 +258,22 @@ pub fn render() -> String {
     f.define_dec("DIAG_TEXT_OFF", callnr::DIAG_TEXT_OFF as i64);
     f.define_dec("DIAG_TEXT_MAX", callnr::DIAG_TEXT_MAX as i64);
 
+    f.section("irq: SYS_IRQCTL");
+    f.define_dec("IRQ_SETPOLICY", callnr::IRQ_SETPOLICY as i64);
+    f.define_dec("IRQ_RMPOLICY", callnr::IRQ_RMPOLICY as i64);
+    f.define_dec("IRQ_ENABLE", callnr::IRQ_ENABLE as i64);
+    f.define_dec("IRQ_DISABLE", callnr::IRQ_DISABLE as i64);
+    f.define_dec("IRQ_REENABLE", callnr::IRQ_REENABLE as i64);
+    f.define_dec("IRQCTL_REQUEST_OFF", callnr::IRQCTL_REQUEST_OFF as i64);
+    f.define_dec("IRQCTL_VECTOR_OFF", callnr::IRQCTL_VECTOR_OFF as i64);
+    f.define_dec("IRQCTL_POLICY_OFF", callnr::IRQCTL_POLICY_OFF as i64);
+    f.define_dec("IRQCTL_NOTIFY_ID_OFF", callnr::IRQCTL_NOTIFY_ID_OFF as i64);
+    f.define_dec("IRQCTL_HOOK_ID_OFF", callnr::IRQCTL_HOOK_ID_OFF as i64);
+    f.define_dec(
+        "NOTIFY_IRQ_PENDING_OFF",
+        callnr::NOTIFY_IRQ_PENDING_OFF as i64,
+    );
+
     f.section("grants: SYS_SETGRANT / SYS_SAFECOPY");
     f.block_comment(&[
         "The grant ABI (slice 5.2). The grant-entry layout itself is deliberately",
