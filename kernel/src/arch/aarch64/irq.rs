@@ -23,6 +23,21 @@ use crate::clock;
 use crate::uart::Uart;
 
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Set for the whole of [`irq_dispatch`]: from before the `ack` until after the
+/// matching `eoi` (or the spurious early return). While it is set an interrupt
+/// may be acknowledged and not yet EOI'd, which masks it at the GIC — so
+/// `proc::sched::schedule_next` asserts it clear before it would idle, turning
+/// a `wfi` that can never wake into a loud panic. Single-CPU, DAIF.I-masked:
+/// `Relaxed` is enough.
+static IN_DISPATCH: AtomicBool = AtomicBool::new(false);
+
+/// True while [`irq_dispatch`] is running — an interrupt may be acknowledged
+/// and not yet EOI'd. See [`IN_DISPATCH`].
+pub(crate) fn in_dispatch() -> bool {
+    IN_DISPATCH.load(Ordering::Relaxed)
+}
 
 /// IRQ dispatch entry — called from `interrupt.S`'s `el0_64_irq_entry`.
 ///
@@ -48,6 +63,18 @@ pub extern "C" fn do_irq(_frame: &mut ArchRegisterFrame) {
 /// reference into `PROC_TABLE` or the run queue, since `clock::tick` borrows
 /// both.
 pub(crate) unsafe fn irq_dispatch() {
+    // Bracketing the body in one place covers every return path inside it —
+    // the spurious early return as well as the EOI'd tail.
+    IN_DISPATCH.store(true, Ordering::Relaxed);
+    // SAFETY: forwarded — the caller's contract is this function's.
+    unsafe { dispatch_one() };
+    IN_DISPATCH.store(false, Ordering::Relaxed);
+}
+
+/// The body of [`irq_dispatch`], which brackets it with [`IN_DISPATCH`].
+///
+/// SAFETY: as [`irq_dispatch`].
+unsafe fn dispatch_one() {
     // SAFETY: forwarded — the caller is in IRQ context or the idle poll, both
     // DAIF.I-masked and single-threaded, which is `ack`'s contract.
     let intid = unsafe { gic::ack() };

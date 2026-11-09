@@ -310,16 +310,18 @@ unsafe fn set_tpidr_to(p: &mut Proc) {
 /// alone until a real process is picked. A due alarm, fired from the polled
 /// `clock::tick`, is what makes something runnable again.
 ///
-/// **The idle loop must not be entered from inside `irq_dispatch`.** There the
-/// interrupt being serviced is acknowledged but not yet EOI'd (and the timer
-/// not yet rearmed), so it masks itself at the GIC and the nested `wfi` never
-/// wakes: the kernel hangs silently. The one such path is `clock::tick` →
+/// **The idle loop must not be entered from inside `irq_dispatch`, and this is
+/// enforced:** the loop `assert!`s `!irq::in_dispatch()` before it idles. There
+/// the interrupt being serviced is acknowledged but not yet EOI'd (and the
+/// timer not yet rearmed), so it masks itself at the GIC and the nested `wfi`
+/// would never wake — a silent hang, which the assert turns into a kernel
+/// panic naming the invariant. The one such path is `clock::tick` →
 /// `reschedule` → here, and it reaches an empty queue only if the
 /// quantum-expired process leaves nothing runnable behind it — which today it
 /// cannot, since a kernel-scheduled one is re-enqueued and a delegated one
-/// wakes SCHED. The `idling()` gates in `tick` and `reschedule` close the
-/// idle-time version of the same path; slice 6.1 observed the hang with both
-/// removed.
+/// wakes or queues on SCHED. The `idling()` gates in `tick` and `reschedule`
+/// close the idle-time version of the same path; with both removed, slice 6.1
+/// observed first the silent hang and, once the assert landed, the panic.
 ///
 /// Kernel tasks are never enqueued — only `arch::aarch64::userland` calls
 /// [`enqueue`] — so `pick_proc` yields only processes with an address space,
@@ -335,6 +337,11 @@ pub unsafe fn schedule_next() {
         if let Some(nr) = pick_proc() {
             break nr;
         }
+        assert!(
+            !crate::arch::aarch64::irq::in_dispatch(),
+            "schedule_next: idling inside irq_dispatch — an acked, un-EOI'd interrupt \
+             blocks wfi forever",
+        );
         IDLING.store(true, Ordering::Relaxed);
         // SAFETY: `wfi` only suspends the core until an interrupt is pending;
         // it touches no memory or register state. With DAIF.I set it returns
