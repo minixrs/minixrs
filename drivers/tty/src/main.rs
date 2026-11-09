@@ -51,6 +51,7 @@
 minixrs_abi_note::brand!();
 
 mod cdev;
+mod irq;
 mod pl011;
 
 use minixrs_ipc::ipc_send;
@@ -98,6 +99,12 @@ fn main() -> ! {
             core::hint::spin_loop()
         }
     });
+
+    // Claim the PL011's interrupt line and prove the call's refusals (slice
+    // 6.1). A failure prints its own `[diag tty] irq…FAIL` line and TTY carries
+    // on serving TX, which never needed the line. The hook id is held for the
+    // interrupt-delivery path, which re-arms the line with `IRQ_ENABLE`.
+    let _irq_hook = irq::claim_and_probe();
 
     // The staging buffer lives in `main`'s frame, not in a static and not in
     // `tty_init`'s frame — the same rule `GrantPool` follows, and for the same

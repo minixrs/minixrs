@@ -906,3 +906,19 @@ minix.rs fileio: malloc ok
 # one -- the fd-3 check speaks only for runs that got that far. Mutation-tested:
 # PM not sending VFS_PM_EXIT makes the line vanish.
 [diag vfs] pm-exit reset closed=1
+
+# ---------------------------------------------------------------------------
+# Slice 6.1: SYS_IRQCTL -- a driver claims its interrupt line.
+# ---------------------------------------------------------------------------
+
+# TTY claims the PL011's line (INTID 33, the one entry in the tree's IRQ
+# allow-list, pushed by `load_boot_server`), then runs a denial battery through
+# `sys_irqctl`: a line not on its allow-list (EPERM), an SGI/PPI and an
+# out-of-range INTID, a nonzero policy word (IRQ_REENABLE), a second notify_id on
+# its own claimed line (EBUSY), notify_ids outside 0..=31, hook ids 0, past the
+# table and naming a free slot, and an unknown subcode (all EINVAL). It ends with
+# the I6 replacement: the same claim again must answer OK. n= is computed from the
+# table length plus that positive case, so the substring stops before it. Drop
+# the kernel's allow-list check and case 0 succeeds instead, turning this into
+# `irq.deny FAIL case=0`.
+[diag tty] irq.deny ok n=

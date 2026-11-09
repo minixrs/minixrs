@@ -74,7 +74,15 @@ pub struct Priv {
     // ----- Resource ownership ---------------------------------------------
     pub io_ranges: ArrayVec<IoRange, NR_IO_RANGE>,
     pub mem_ranges: ArrayVec<MemRange, NR_MEM_RANGE>,
+    /// The `SYS_IRQCTL` allow-list (slice 6.1, spec I4): the raw GIC INTIDs this
+    /// process may claim with `IRQ_SETPOLICY`. Always checked — an empty list
+    /// denies every line. Filled at boot by `load_boot_server`, never by the
+    /// process itself.
     pub irqs: ArrayVec<u32, NR_IRQ>,
+    /// Interrupts fired and not yet collected (MINIX `s_int_pending`, spec I6):
+    /// bit `notify_id` is set when the owner's hook with that `notify_id` fires.
+    /// Cleared on exit and exec with the owner's hooks (I8).
+    pub int_pending: u32,
 
     /// Address of the grant table within the owner's address space (set by
     /// `SYS_SETGRANT`); slice 2.6 starts honoring this.
@@ -98,6 +106,7 @@ impl Priv {
         io_ranges: ArrayVec::new_const(),
         mem_ranges: ArrayVec::new_const(),
         irqs: ArrayVec::new_const(),
+        int_pending: 0,
         grant_table: 0,
         grant_entries: 0,
     };

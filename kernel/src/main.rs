@@ -22,6 +22,7 @@ mod arch;
 mod boot_image;
 mod clock;
 mod ipc;
+mod irq_hooks;
 mod mm;
 mod panic;
 mod proc;

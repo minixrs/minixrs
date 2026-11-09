@@ -7,8 +7,9 @@
 //! EL1. Scope is deliberately narrow:
 //!
 //! - Single CPU (CPU 0). No MPIDR routing, no SGI broadcasts.
-//! - PPIs only. SPI configuration (IRQ ≥ 32) lands when device drivers
-//!   arrive in Phase 6.
+//! - PPIs for the kernel's own timer, plus SPIs (INTID ≥ 32) on behalf of
+//!   `SYS_IRQCTL` (slice 6.1, spec I9): [`enable_spi`], [`mask_spi`],
+//!   [`unmask_spi`], with [`nr_intids`] bounding which lines exist.
 //! - Group 1 non-secure interrupts only.
 //!
 //! Register layout reference: ARM IHI 0069H, §12 (Distributor) and §13
@@ -26,7 +27,9 @@
 //! map, so we reach them through `HHDM_offset + phys`.
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+use minixrs_kernel_shared::irq::FIRST_SPI;
 
 use super::limine;
 
@@ -43,6 +46,20 @@ const GICD_CTLR: usize = 0x0000;
 const GICD_CTLR_RWP_BIT: u32 = 1 << 31;
 const GICD_CTLR_ENABLE_GRP1_NS: u32 = 1 << 1;
 const GICD_CTLR_ARE_NS: u32 = 1 << 4;
+const GICD_TYPER: usize = 0x0004;
+/// `GICD_TYPER.ITLinesNumber`, bits [4:0]: the distributor implements
+/// `32 * (N + 1)` INTIDs.
+const GICD_TYPER_ITLINES_MASK: u32 = 0x1F;
+// SPI banks: one bit per INTID (32 per word) unless noted.
+const GICD_IGROUPR: usize = 0x0080;
+const GICD_ISENABLER: usize = 0x0100;
+const GICD_ICENABLER: usize = 0x0180;
+const GICD_IPRIORITYR: usize = 0x0400; // 8 bits per INTID.
+const GICD_ICFGR: usize = 0x0C00; // 2 bits per INTID.
+const GICD_IROUTER: usize = 0x6000; // 64 bits per INTID; SPIs only.
+/// INTID 1020..1023 are special (1023 is spurious); no distributor implements
+/// an SPI there, whatever `ITLinesNumber` says.
+const MAX_INTIDS: u32 = 1020;
 
 // GICR (RD page) register offsets.
 const GICR_WAKER: usize = 0x0014;
@@ -65,6 +82,9 @@ pub const INTID_SPURIOUS: u32 = 1023;
 
 static GICD_VBASE: AtomicUsize = AtomicUsize::new(0);
 static GICR_VBASE: AtomicUsize = AtomicUsize::new(0);
+/// INTIDs the distributor implements, from `GICD_TYPER` in `init`. 0 until
+/// then, so every SPI range check fails closed before the GIC is up.
+static NR_INTIDS: AtomicU32 = AtomicU32::new(0);
 
 fn gicd() -> usize {
     GICD_VBASE.load(Ordering::Acquire)
@@ -96,6 +116,14 @@ pub unsafe fn init() {
     GICR_VBASE.store(hhdm + GICR_PHYS_BASE, Ordering::Release);
 
     // ----- Distributor -----------------------------------------------------
+    // How many INTIDs exist (spec I9): `SYS_IRQCTL`'s range check uses this
+    // rather than a constant, so a claim on a line the distributor does not
+    // implement is `EINVAL`, never a write to a reserved register.
+    // SAFETY: `gicd()` was resolved to the distributor's HHDM alias just above;
+    // `GICD_TYPER` is a read-only ID register with no side effects.
+    let itlines = unsafe { read32(gicd() + GICD_TYPER) } & GICD_TYPER_ITLINES_MASK;
+    NR_INTIDS.store((32 * (itlines + 1)).min(MAX_INTIDS), Ordering::Release);
+
     // Disable while configuring, wait for RWP to clear.
     unsafe { write32(gicd() + GICD_CTLR, 0) };
     wait_gicd_rwp();
@@ -191,6 +219,103 @@ pub unsafe fn enable_ppi(intid: u32, priority: u8) {
     unsafe { write32(gicr_sgi() + GICR_SGI_ISENABLER0, bit) };
 }
 
+/// Number of INTIDs the distributor implements:
+/// `min(32 * (GICD_TYPER.ITLinesNumber + 1), 1020)`, read once in [`init`].
+/// The claimable SPIs are `FIRST_SPI..nr_intids()` (spec I3).
+pub fn nr_intids() -> u32 {
+    NR_INTIDS.load(Ordering::Acquire)
+}
+
+/// Panic unless `intid` is an implemented SPI. Every SPI register write goes
+/// through this, so a bad INTID reaching here is a kernel bug (the handler's
+/// `decode` already answered `EINVAL`), never a write past the SPI banks.
+fn assert_spi(intid: u32) {
+    assert!(
+        intid >= FIRST_SPI && intid < nr_intids(),
+        "gic: intid {intid} is not an implemented SPI",
+    );
+}
+
+/// Configure and enable a Shared Peripheral Interrupt (spec I9): group 1 NS,
+/// `priority`, level-triggered, routed to CPU 0, then unmasked.
+///
+/// The line is disabled first and only re-enabled after configuration:
+/// `GICD_ICFGR` is UNPREDICTABLE to change while the line is enabled, and an
+/// `IRQ_SETPOLICY` replacement re-runs this on a line that already is.
+///
+/// SAFETY: `init` must have completed; single-threaded EL1 with IRQs masked
+/// (a kernel call or boot). `intid` must be an implemented SPI (asserted).
+pub unsafe fn enable_spi(intid: u32, priority: u8) {
+    assert_spi(intid);
+    let i = intid as usize;
+    let word = (i / 32) * 4;
+    let bit = 1u32 << (i % 32);
+
+    // SAFETY: `init` resolved `gicd()` to the HHDM alias of the distributor,
+    // and `assert_spi` bounds every offset computed below inside the
+    // implemented SPI banks; the caller's single-threaded, IRQs-masked context
+    // means nothing else touches these registers meanwhile.
+    unsafe {
+        // Disable while configuring; RWP covers the ICENABLER write.
+        write32(gicd() + GICD_ICENABLER + word, bit);
+        wait_gicd_rwp();
+
+        // Group 1 non-secure.
+        let grp = read32(gicd() + GICD_IGROUPR + word);
+        write32(gicd() + GICD_IGROUPR + word, grp | bit);
+
+        // Priority: one byte per INTID; read-modify-write the containing word,
+        // as `enable_ppi` does for the redistributor's copy.
+        let pri_word = (i / 4) * 4;
+        let pri_shift = (i % 4) * 8;
+        let mut pri = read32(gicd() + GICD_IPRIORITYR + pri_word);
+        pri = (pri & !(0xFFu32 << pri_shift)) | ((priority as u32) << pri_shift);
+        write32(gicd() + GICD_IPRIORITYR + pri_word, pri);
+
+        // Configuration: level-triggered (0b00 in the 2-bit field). Every
+        // `virt` device line is level-triggered — the reason I7 masks before
+        // EOI.
+        let cfg_word = (i / 16) * 4;
+        let cfg_shift = (i % 16) * 2;
+        let cfg = read32(gicd() + GICD_ICFGR + cfg_word);
+        write32(
+            gicd() + GICD_ICFGR + cfg_word,
+            cfg & !(0b11u32 << cfg_shift),
+        );
+
+        // Route to affinity 0.0.0.0 (CPU 0), IRM = 0. Required, not optional:
+        // with `ARE_NS` on, an SPI's target comes only from `GICD_IROUTER<n>`.
+        write64(gicd() + GICD_IROUTER + 8 * i, 0);
+
+        // Enable.
+        write32(gicd() + GICD_ISENABLER + word, bit);
+    }
+}
+
+/// Mask an SPI at the distributor (`GICD_ICENABLER`) and wait for
+/// `GICD_CTLR.RWP` to clear, so the line is provably disabled on return —
+/// the property I7's mask-before-EOI depends on.
+///
+/// SAFETY: as [`enable_spi`].
+pub unsafe fn mask_spi(intid: u32) {
+    assert_spi(intid);
+    let i = intid as usize;
+    // SAFETY: `init` resolved `gicd()`; `assert_spi` bounds the offset.
+    unsafe { write32(gicd() + GICD_ICENABLER + (i / 32) * 4, 1u32 << (i % 32)) };
+    wait_gicd_rwp();
+}
+
+/// Unmask an SPI at the distributor (`GICD_ISENABLER`). The line keeps the
+/// configuration [`enable_spi`] gave it.
+///
+/// SAFETY: as [`enable_spi`].
+pub unsafe fn unmask_spi(intid: u32) {
+    assert_spi(intid);
+    let i = intid as usize;
+    // SAFETY: `init` resolved `gicd()`; `assert_spi` bounds the offset.
+    unsafe { write32(gicd() + GICD_ISENABLER + (i / 32) * 4, 1u32 << (i % 32)) };
+}
+
 /// Acknowledge the highest-priority pending Group-1 interrupt. Returns the
 /// INTID; `INTID_SPURIOUS` (1023) means no interrupt was actually pending.
 ///
@@ -249,6 +374,12 @@ unsafe fn read32(addr: usize) -> u32 {
 unsafe fn write32(addr: usize, value: u32) {
     // SAFETY: as above; caller establishes the addr/register validity.
     unsafe { write_volatile(addr as *mut u32, value) }
+}
+
+unsafe fn write64(addr: usize, value: u64) {
+    // SAFETY: as above. `GICD_IROUTER<n>` is a 64-bit register and supports
+    // 64-bit single-copy-atomic access (IHI 0069H §12.1.3).
+    unsafe { write_volatile(addr as *mut u64, value) }
 }
 
 fn wait_gicd_rwp() {

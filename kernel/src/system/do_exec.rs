@@ -34,7 +34,8 @@
 //!
 //! Target-taking (routed beside `SYS_FORK` in `kernel_call_dispatch`); trust
 //! model identical to `do_fork` — the `k_call_mask` gate is the only check.
-//! Takes `priv_table` to drop the old image's grant-table registration.
+//! Takes `priv_table` to drop the old image's grant-table registration and, as
+//! of slice 6.1, its interrupt state (spec I8).
 //!
 //! ## The two source forms (slice 5.9, decision D6)
 //!
@@ -77,7 +78,7 @@ use minixrs_kernel_shared::callnr::{
     EXEC_GRANT_OFF, EXEC_GRANTER_OFF, EXEC_IMAGE_END_OFF, EXEC_LEN_OFF, EXEC_NAME_LEN,
     EXEC_SRC_GRANT, EXEC_SRC_NAME, EXEC_SRC_OFF,
 };
-use minixrs_kernel_shared::com::NR_SYS_PROCS;
+use minixrs_kernel_shared::com::{HARDWARE, NR_SYS_PROCS};
 use minixrs_kernel_shared::endpoint::{Endpoint, NONE, SELF};
 use minixrs_kernel_shared::error::{E2BIG, EINVAL, ENOENT, OK};
 use minixrs_kernel_shared::execimage::MAX_IMAGE_BYTES;
@@ -88,6 +89,7 @@ use minixrs_kernel_shared::message::{Message, USER_PAGE_SIZE};
 use crate::arch::aarch64::context::ArchRegisterFrame;
 use crate::arch::aarch64::userland;
 use crate::boot_image::elf::ElfSource;
+use crate::proc::bitmap::clear_sys_bit;
 use crate::proc::flags::{MF_DELIVERMSG, RTS_RECEIVING, RTS_SENDING};
 use crate::proc::proc_struct::PROC_NAME_LEN;
 use crate::proc::table::{N_PROC_SLOTS, proc_index};
@@ -232,11 +234,27 @@ pub(super) fn do_exec(
     // dedicated slot is cleared — a shared one (`USER_PRIV_ID`) belongs to every
     // user process collectively and can hold no table anyway (`do_setgrant`
     // rejects it). Same reasoning, and same guard, as `do_exit`'s slot teardown.
+    //
+    // Interrupt state goes the same way (slice 6.1, spec I8): the slot
+    // survives exec, but the new image holds none of the old image's hook ids,
+    // so its lines are masked and its hooks freed (keyed by endpoint, which
+    // exec preserves — and only a dedicated slot can own a hook, I5). Its
+    // uncollected `int_pending` bits go too, and so does `HARDWARE`'s bit in
+    // its `notify_pending`: unlike `do_exit`, exec does not zero that map, so a
+    // deferred interrupt notification would otherwise reach the new image's
+    // first `RECEIVE` — an empty bitmap for a line it never claimed.
+    crate::irq_hooks::release_owner(proc_table[target_idx].endpoint);
     if let Some(pid) = proc_table[target_idx].priv_id {
         let pidx = pid.as_usize();
         if pidx < NR_SYS_PROCS && priv_table[pidx].proc_nr == Some(proc_table[target_idx].nr) {
             priv_table[pidx].grant_table = 0;
             priv_table[pidx].grant_entries = 0;
+            priv_table[pidx].int_pending = 0;
+            let hardware_idx = proc_index(HARDWARE).expect("HARDWARE in proc table");
+            let hardware_priv_id = proc_table[hardware_idx]
+                .priv_id
+                .expect("HARDWARE priv populated by proc::init");
+            clear_sys_bit(&mut priv_table[pidx].notify_pending, hardware_priv_id);
         }
     }
 

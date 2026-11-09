@@ -16,10 +16,10 @@
 //!
 //! ## Register offsets are deliberately re-declared
 //!
-//! `kernel/src/arch/aarch64/uart.rs` declares the same three constants. They are
-//! not shared, and cannot be: the kernel crate is bare-metal-only and pinned to
-//! `aarch64-unknown-none` by `forced-target`, so it can never be a dependency of a
-//! user-space crate. Moving them into `kernel-shared` was considered and rejected —
+//! `kernel/src/arch/aarch64/uart.rs` declares the same three constants, and as of
+//! slice 6.1 the same [`PL011_INTID`]. They are not shared, and cannot be: the
+//! kernel crate is bare-metal-only and pinned to `aarch64-unknown-none` by
+//! `forced-target`, so it can never be a dependency of a user-space crate. Moving them into `kernel-shared` was considered and rejected —
 //! a PL011 register layout is not a shared *ABI*, it is a hardware fact that two
 //! independent drivers happen to both know. The duplication is noted in both files.
 //!
@@ -43,6 +43,12 @@ const DR_OFFSET: u64 = 0x00;
 const FR_OFFSET: u64 = 0x18;
 /// `FR` bit 5: transmit FIFO full. Poll until clear before storing to `DR`.
 const FR_TXFF: u32 = 1 << 5;
+
+/// The PL011's GIC INTID on QEMU `virt` (SPI 1), which TTY claims with
+/// `SYS_IRQCTL` (slice 6.1). Duplicated, like the offsets above, in
+/// `kernel/src/arch/aarch64/uart.rs`, where it is the one entry the kernel
+/// puts on TTY's IRQ allow-list — see the module docs for why it is not shared.
+pub const PL011_INTID: u32 = 33;
 
 /// Transmit one byte, blocking while the TX FIFO is full.
 ///
