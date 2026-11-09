@@ -917,8 +917,9 @@ minix.rs fileio: malloc ok
 # out-of-range INTID, a nonzero policy word (IRQ_REENABLE), a second notify_id on
 # its own claimed line (EBUSY), notify_ids outside 0..=31, hook ids 0, past the
 # table and naming a free slot, and an unknown subcode (all EINVAL). It ends with
-# the I6 replacement: the same claim again must answer OK. n= is computed from the
-# table length plus that positive case, so the substring stops before it. Drop
-# the kernel's allow-list check and case 0 succeeds instead, turning this into
-# `irq.deny FAIL case=0`.
-[diag tty] irq.deny ok n=
+# the I6 replacement: the same claim again must answer OK with the same hook id.
+# n=12 is deterministic -- TTY prints `CASES.len() + 1`, the 11 refusals plus that
+# positive case -- so it is asserted, like the sibling deny markers: delete a row
+# from the battery and this line stops matching. Drop the kernel's allow-list
+# check and case 0 succeeds instead, turning this into `irq.deny FAIL case=0`.
+[diag tty] irq.deny ok n=12
