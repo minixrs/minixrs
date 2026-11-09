@@ -21,7 +21,7 @@
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::endpoint::{Endpoint, NONE};
@@ -52,6 +52,26 @@ pub const NR_SCHED_QUEUES: usize = 16;
 pub static CURRENT_PROC_NR: AtomicI32 = AtomicI32::new(i32::MIN);
 
 const NO_PROC: i32 = i32::MIN;
+
+/// Set while [`schedule_next`] is parked in its empty-run-queue loop (slice
+/// 6.1, spec I11). The idle sentinel is this flag, **not** the `IDLE` slot:
+/// `IDLE` is a kernel task with no address space, and parking it in
+/// [`CURRENT_PROC_NR`] would make it look like a process to everything that
+/// reads current. While this is set, `CURRENT_PROC_NR` still names the last
+/// process that ran, and nothing may act on it — see [`idling`].
+static IDLING: AtomicBool = AtomicBool::new(false);
+
+/// One-shot latch for the `[idle] wake ok` marker: the first exit from the idle
+/// loop in a boot prints it, every later one is silent.
+static IDLE_WAKE_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// True while the kernel is idling — no process is current, whatever
+/// [`CURRENT_PROC_NR`] still says. `clock::tick` and [`reschedule`] consult it
+/// so a timer interrupt polled from the idle loop does its timekeeping and
+/// nothing else.
+pub fn idling() -> bool {
+    IDLING.load(Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // Run-queue storage.
@@ -278,26 +298,60 @@ unsafe fn set_tpidr_to(p: &mut Proc) {
 ///
 /// Does *not* touch the run queue — `rts_set`/`rts_unset` keep blocked
 /// procs off, and `reschedule` handles the quantum-rotation case
-/// separately. If `pick_proc` finds nothing runnable, the previous
-/// current stays current.
+/// separately.
 ///
-/// TODO(slice 2.6+): once IDLE is enqueued at boot, an empty run queue
-/// becomes an invariant violation rather than the expected
-/// "both-stubs-briefly-blocked" state we see in slice 2.5. At that
-/// point, add `debug_assert!(pick_proc().is_some(), "run queue empty
-/// — IDLE missing?")` so a regression that dequeues IDLE blows up
-/// loudly. Today only stubs A/B are enqueued (see
-/// `arch/aarch64/userland.rs::userland_bootstrap`), so the assert
-/// would fire spuriously.
+/// **If `pick_proc` finds nothing runnable, this idles** (slice 6.1, spec
+/// I11): it sets [`IDLING`], executes `wfi`, polls the GIC through
+/// `irq_dispatch` on the kernel stack, and tries `pick_proc` again — and it
+/// does not return towards `eret` until a process is picked. `wfi` wakes on a
+/// pending interrupt even with `PSTATE.I` set, and the interrupt is serviced by
+/// polling, so IRQs stay masked throughout: `el1h_irq` is still the fatal
+/// vector and no nested exception frame ever exists. `CURRENT_PROC_NR` is left
+/// alone until a real process is picked. A due alarm, fired from the polled
+/// `clock::tick`, is what makes something runnable again.
+///
+/// **The idle loop must not be entered from inside `irq_dispatch`.** There the
+/// interrupt being serviced is acknowledged but not yet EOI'd (and the timer
+/// not yet rearmed), so it masks itself at the GIC and the nested `wfi` never
+/// wakes: the kernel hangs silently. The one such path is `clock::tick` →
+/// `reschedule` → here, and it reaches an empty queue only if the
+/// quantum-expired process leaves nothing runnable behind it — which today it
+/// cannot, since a kernel-scheduled one is re-enqueued and a delegated one
+/// wakes SCHED. The `idling()` gates in `tick` and `reschedule` close the
+/// idle-time version of the same path; slice 6.1 observed the hang with both
+/// removed.
+///
+/// Kernel tasks are never enqueued — only `arch::aarch64::userland` calls
+/// [`enqueue`] — so `pick_proc` yields only processes with an address space,
+/// and there is no `IDLE` process to fall back on. Keep it that way: the
+/// `debug_assert!` below, and `switch_ttbr0_with_asid`'s unconditional one,
+/// would fire on a kernel task.
 ///
 /// SAFETY: caller must hold the single-threaded / IRQ-masked invariant
 /// and must not hold any other reference into `PROC_TABLE` while this
 /// runs.
 pub unsafe fn schedule_next() {
-    let next_nr = match pick_proc() {
-        Some(nr) => nr,
-        None => return,
+    let next_nr = loop {
+        if let Some(nr) = pick_proc() {
+            break nr;
+        }
+        IDLING.store(true, Ordering::Relaxed);
+        // SAFETY: `wfi` only suspends the core until an interrupt is pending;
+        // it touches no memory or register state. With DAIF.I set it returns
+        // without taking the exception, which `irq_dispatch` then services.
+        unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
+        // SAFETY: the idle poll — EL1 with DAIF.I set, which is one of the two
+        // contexts `gic::ack` admits. No PROC_TABLE or RUNQ borrow is live (the
+        // `pick_proc` snapshot above has ended). `clock::tick` sees `IDLING`
+        // and neither touches current nor calls `reschedule`.
+        unsafe { crate::arch::aarch64::irq::irq_dispatch() };
     };
+    if IDLING.swap(false, Ordering::Relaxed) && !IDLE_WAKE_REPORTED.swap(true, Ordering::Relaxed) {
+        // The idle path's proof (spec I14): the first exit with a process
+        // picked after at least one `wfi`. Unconditional, so it is already in
+        // place for the day the default boot first reaches an empty queue.
+        let _ = writeln!(Uart::new(), "[idle] wake ok");
+    }
     CURRENT_PROC_NR.store(next_nr.get(), Ordering::Relaxed);
     // SAFETY: next_nr came from the run queue; single-borrow.
     unsafe {
@@ -356,6 +410,12 @@ pub unsafe fn run() -> ! {
 /// SAFETY: caller holds the single-threaded invariant; called only from
 /// IRQ context with no other PROC_TABLE / RUNQ borrows live.
 pub unsafe fn reschedule() {
+    // Defence in depth behind `clock::tick`'s own check (spec I11): while
+    // idling, `CURRENT_PROC_NR` names a process that is not running, and the
+    // `schedule_next` below would re-enter the idle loop from inside itself.
+    if idling() {
+        return;
+    }
     let cur_raw = CURRENT_PROC_NR.load(Ordering::Relaxed);
     if cur_raw != NO_PROC {
         let cur_nr = ProcNr::new(cur_raw);

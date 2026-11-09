@@ -32,6 +32,15 @@ forced-target = "aarch64-unknown-none"
 # which would make it impossible to turn off. `NR_STUB_PROCS` stays constant.
 default = ["boot-stubs"]
 boot-stubs = []
+# `idle-probe` (off by default) makes the kernel idle path observable (slice
+# 6.1, spec I14). No stock boot ever empties the run queue — init's fork/exec
+# rotation never ends — so `build.rs` reads `CARGO_FEATURE_IDLE_PROBE` and builds
+# init with `--features idle-probe`, whose rotation stops after one pass and
+# parks. Only meaningful stub-free: the stubs spin, so the queue never empties,
+# and `build.rs` refuses the combination. Use
+# `--no-default-features --features idle-probe`. Deleted, with init's arm, once
+# the default boot reaches the empty queue on its own.
+idle-probe = []
 
 [[bin]]
 name = "minixrs-kernel"

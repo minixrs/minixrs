@@ -194,7 +194,18 @@ pub unsafe fn enable_ppi(intid: u32, priority: u8) {
 /// Acknowledge the highest-priority pending Group-1 interrupt. Returns the
 /// INTID; `INTID_SPURIOUS` (1023) means no interrupt was actually pending.
 ///
-/// SAFETY: must only be called from IRQ context.
+/// SAFETY: exactly two callers are sound, both through
+/// `arch::aarch64::irq::irq_dispatch`, and both exclusive:
+///
+/// - **IRQ context** — the `el0_64_irq_entry` stub's `do_irq`, which runs with
+///   `PSTATE.DAIF.I` set until `eret`;
+/// - **the idle poll** — `proc::sched::schedule_next`'s empty-run-queue loop,
+///   at EL1 after a `wfi` with `DAIF.I` still set (slice 6.1, spec I11). No
+///   exception is taken, but nothing can preempt it either, so it is as
+///   exclusive as IRQ context.
+///
+/// Any other caller could take an acknowledge that one of those two paths then
+/// never sees, leaving the INTID active with no matching `eoi`.
 pub unsafe fn ack() -> u32 {
     let intid: u64;
     // SAFETY: ICC_IAR1_EL1 is the documented EL1 IRQ acknowledge register

@@ -2,9 +2,15 @@
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! aarch64 IRQ dispatcher.
 //!
-//! Called from the assembly entry stub `el0_64_irq_entry` (`interrupt.S`)
-//! with the interrupted EL0 register frame pointer in x0. We read the
-//! pending INTID from the GIC, dispatch by ID, then signal EOI.
+//! Two callers reach [`irq_dispatch`], which reads the pending INTID from the
+//! GIC, dispatches by ID, then signals EOI:
+//!
+//! - the assembly entry stub `el0_64_irq_entry` (`interrupt.S`), through
+//!   [`do_irq`], with the interrupted EL0 register frame pointer in x0;
+//! - the kernel idle loop in `proc::sched::schedule_next` (slice 6.1, spec
+//!   I11), which polls it at EL1 after a `wfi`, with `DAIF.I` still set. No
+//!   exception is taken on that path, so there is no frame — which is why the
+//!   dispatcher takes none.
 //!
 //! Slice 2.4 recognizes exactly one source: the EL1 virtual timer
 //! (PPI 27). Any other INTID is a bug — there is no other configured
@@ -28,7 +34,22 @@ use core::fmt::Write;
 pub extern "C" fn do_irq(_frame: &mut ArchRegisterFrame) {
     // SAFETY: IRQ context — single async writer; the assembly stub guards
     // against re-entry by leaving PSTATE.DAIF.I set until eret restores
-    // the saved SPSR.
+    // the saved SPSR. No PROC_TABLE borrow is live on IRQ entry.
+    unsafe { irq_dispatch() }
+}
+
+/// Acknowledge, dispatch and EOI one pending interrupt.
+///
+/// The whole of what `do_irq` did before slice 6.1, split out so the idle
+/// loop can call it without an exception frame.
+///
+/// SAFETY: caller must be in one of the two contexts [`gic::ack`] names —
+/// IRQ context, or the idle poll at EL1 with `DAIF.I` set — and must hold no
+/// reference into `PROC_TABLE` or the run queue, since `clock::tick` borrows
+/// both.
+pub(crate) unsafe fn irq_dispatch() {
+    // SAFETY: forwarded — the caller is in IRQ context or the idle poll, both
+    // DAIF.I-masked and single-threaded, which is `ack`'s contract.
     let intid = unsafe { gic::ack() };
 
     if intid == gic::INTID_SPURIOUS {
@@ -38,7 +59,7 @@ pub extern "C" fn do_irq(_frame: &mut ArchRegisterFrame) {
 
     match intid {
         timer::INTID_VIRT_TIMER => {
-            // SAFETY: IRQ context invariant — no other PROC_TABLE borrows live.
+            // SAFETY: forwarded — no other PROC_TABLE borrows live.
             unsafe { clock::tick() };
             // SAFETY: same — timer module is single-CPU.
             unsafe { timer::rearm() };
