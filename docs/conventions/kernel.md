@@ -230,6 +230,10 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
 - **Release on exit/exec.** `SYS_EXIT` and `SYS_EXEC` call `irq_hooks::release_owner`, which masks
   each of the owner's lines before freeing its hook, so a stale endpoint is never notified
   ([I8](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i8--a-dead-or-execd-owner-releases-its-lines))
+- **An unhooked interrupt logs `do_irq: unexpected INTID <n>`** from `irq_dispatch` and, when it is
+  an SPI, is masked too, so a line nobody owns cannot storm. The prefix keeps the `do_irq:` name for
+  historical reasons (the code moved into `irq_dispatch` in 6.1), and it is in
+  `tests/qemu-boot.forbidden`, so it must stay byte-for-byte
 - **`HARDWARE` notifications carry the taken `int_pending` bitmap** at payload `0..4`; every other
   notification builds an all-zero payload (`build_notify_message`'s `irq_pending` argument)
 
