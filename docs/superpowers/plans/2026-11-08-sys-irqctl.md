@@ -300,10 +300,11 @@ case=<i> rc=<rc>` on the first mismatch. Cases, in order:
 Then one positive case: SETPOLICY 33 with notify_id 0 again must return `OK` (the I6 replacement),
 and TTY adopts the returned hook id. Count it in `n`. TTY does **not** set `TXIM` in this task.
 
-- [ ] **Step 1: Add the markers first.** Add `[diag tty] irq.deny ok n=` to
-      `tests/qemu-boot.expected` (the substring stops before the count, per the file's rule). Add
-      `[diag tty] irq.deny FAIL` and `[diag tty] irq FAIL` to `tests/qemu-boot.forbidden`. Boot and
-      confirm `check-boot-log.sh` reports `irq.deny ok` MISSING.
+- [ ] **Step 1: Add the markers first.** Add `[diag tty] irq.deny ok n=12` to
+      `tests/qemu-boot.expected` (the count is deterministic, so it is asserted like the sibling
+      deny markers — corrected during execution). Add `[diag tty] irq.deny FAIL` and `[diag tty] irq
+      FAIL` to `tests/qemu-boot.forbidden`. Boot and confirm `check-boot-log.sh` reports `irq.deny
+      ok` MISSING.
 - [ ] **Step 2: Implement** the GIC functions, `irq_hooks.rs`, `do_irqctl.rs` and the dispatch move.
       Keep the `NR_KERN_CALLS == 18` const assert and update its comment list. Add `int_pending`,
       the exit/exec release, the TTY allow-list push (via `priv_slot_mut` on TTY's priv id), and
@@ -376,8 +377,8 @@ NOTIFY_MESSAGE` goes to `irq::on_notify(bits)` and then `continue`, with no repl
       0, 0, 0, …]` and asserts that `classify` returns the application variant, not `Ping` or a
       signal. Run `cargo test -p minixrs-server-rt classify`. Expected: PASS already; it pins
       today's behaviour, which this task relies on. Fix the doc comment.
-- [ ] **Step 2: Add the marker** `[diag tty] irq ok rounds=` to `tests/qemu-boot.expected`. Boot and
-      confirm it is MISSING.
+- [ ] **Step 2: Add the marker** `[diag tty] irq ok rounds=2` (the count is asserted — corrected
+      during execution) to `tests/qemu-boot.expected`. Boot and confirm it is MISSING.
 - [ ] **Step 3: Implement** the kernel delivery path and TTY's proof as above.
 - [ ] **Step 4: Verify the stub-free boot.** Expected: `[diag tty] irq ok rounds=2`, `irq.deny ok`,
       no `do_irq: unexpected INTID`, and all `fs.*` / `hello` markers present.
