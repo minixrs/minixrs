@@ -625,7 +625,7 @@ virtio-mmio only; the root backend is chosen by whether a virtio disk is attache
 kept as the second backend for the whole phase; one GPT disk built by a host Rust tool; and a
 framebuffer console plus a keyboard driver inside the milestone bar.
 
-- [ ] **6.1** `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
+- [x] **6.1** `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
 - [ ] **6.2** `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 - [ ] **6.3** `virtio-blk` behind BDEV + root backend selection
 - [ ] **6.4** `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**

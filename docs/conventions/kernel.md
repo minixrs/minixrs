@@ -203,6 +203,36 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
   the MINIX `retreg` idiom `do_exit::unblock_dependents` uses) for the deferred flush, which also
   sets/clears `MF_MSGFAILED`
 
+## Interrupts and the idle loop
+
+(slice 6.1 — design in
+[`2026-09-29-sys-irqctl-design.md`](../superpowers/specs/2026-09-29-sys-irqctl-design.md))
+
+- **One owner per line.** The hook table (`kernel/src/irq_hooks.rs`, logic in `kernel-shared::irq`)
+  maps an SPI to at most one hook; a second claimant is `EBUSY`, and only a claim under the same
+  `(owner, notify_id)` replaces. The per-line allow-list (`Priv::irqs`) has no opt-out: an empty
+  list denies every line
+  ([I4, I6](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i4--privilege-two-gates-and-the-allow-list-has-no-opt-out))
+- **Mask before EOI.** `irq_dispatch` masks a hooked SPI at the distributor *before* it EOIs, and
+  only the owner's `IRQ_ENABLE` — sent after it has quiesced the device — unmasks it. The line is
+  level-triggered; an EOI on an unmasked line re-enters at once
+  ([I7](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i7--delivery-and-masking-while-a-notify-is-in-flight))
+- **The idle loop never returns towards EL0 without a picked process.** When `pick_proc` is `None`,
+  `schedule_next` loops in place: `wfi`, `irq_dispatch` polled on the kernel stack with `DAIF.I`
+  still set, `pick_proc` again. `el1h_irq` stays the fatal vector. The loop `assert!`s
+  `!irq::in_dispatch()`, because an acked-but-un-EOI'd interrupt masks itself and the nested `wfi`
+  would never wake
+  ([I11](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i11--the-kernel-needs-an-idle-path))
+- **`tick` does only timekeeping while idling.** The idling flag (not the `IDLE` slot) makes
+  `clock::tick` advance uptime and fire due alarms and nothing else: no `putc`, no quantum
+  accounting, no `reschedule`; `reschedule`'s first line checks the flag too. Both gates are needed
+  — removing only one is absorbed by the other (I11)
+- **Release on exit/exec.** `SYS_EXIT` and `SYS_EXEC` call `irq_hooks::release_owner`, which masks
+  each of the owner's lines before freeing its hook, so a stale endpoint is never notified
+  ([I8](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i8--a-dead-or-execd-owner-releases-its-lines))
+- **`HARDWARE` notifications carry the taken `int_pending` bitmap** at payload `0..4`; every other
+  notification builds an all-zero payload (`build_notify_message`'s `irq_pending` argument)
+
 ## How a server prints: `SYS_DIAGCTL`
 
 (slice 5.1, D2 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))

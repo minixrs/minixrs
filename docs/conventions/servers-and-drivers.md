@@ -437,6 +437,12 @@ Beyond the shared contracts above, two driver-specific rules:
   Phase 6 makes that move, plus the `kernel/build.rs` watch entry (slice 5.3 — see
   [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
+- **A driver identifies an interrupt by `m_source == boot_endpoint(HARDWARE)`, never by payload,**
+  and re-arms with `IRQ_ENABLE` only after draining and acknowledging at the device — the kernel
+  leaves the line masked until then, and a re-enable before the device is quiet re-enters at once
+  (slice 6.1 — see
+  [I12](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i12--one-pattern-for-tty-rx-virtio-console-and-virtio-blk))
+
 ### Block drivers
 
 - **A block driver must not depend on the filesystem format.** The `memory` driver's init check is

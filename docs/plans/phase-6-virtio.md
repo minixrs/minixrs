@@ -23,7 +23,7 @@ milestone bar rather than after it.
 
 ## Status
 
-- [ ] **6.1** — `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
+- [x] **6.1** — `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
 - [ ] **6.2** — `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 - [ ] **6.3** — `virtio-blk` behind BDEV + root backend selection
 - [ ] **6.4** — `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
@@ -355,9 +355,22 @@ four mutations of I13, each observed and reverted. Under the opt-in `idle-probe`
 **Measured (2026-11-08):** the empty run queue is unreachable in today's boot, and `wfi` returns
 with `PSTATE.I` set. So 6.1 is one PR, not split.
 
+**Plan:** [`2026-11-08-sys-irqctl.md`](../superpowers/plans/2026-11-08-sys-irqctl.md). **Status:
+done** (checked in the Status list above).
+
 **Debt carried: CI does not exercise the idle path.** It is proved only under `idle-probe`, which CI
 does not build. Correct it when the default boot first idles, at the latest Phase 7's shell: promote
 `[idle] wake ok` to a required marker and delete `idle-probe`. Details in I14.
+
+**Debt carried: three items from 6.1's execution.**
+
+- `deliver_irq`'s immediate-delivery path (owner `RECEIVE`-blocked when the line fires) is verified
+  by reading only. Its first real exercise is a device interrupt arriving while its driver is
+  blocked — 6.3 (virtio-blk) or 6.5 (TTY RX). That slice should name a mutation that moves on it.
+- 6.5 must retire or rescope TTY's post-proof `irq FAIL extra` guard, since RX interrupts will
+  legitimately arrive after the TX proof.
+- 6.2: the TTY battery's "free slot" row uses `claimed + 1`, which assumes TTY is the sole claimer;
+  revisit when virtio drivers claim lines.
 
 ### Slice 6.2: `driver-rt` — transport, virtqueues, DMA, driver slots
 

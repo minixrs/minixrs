@@ -71,8 +71,12 @@ uses — send a request to a server and block for the reply.
 **NOTIFY** — if the target is waiting, a synthetic notification message (`m_type == NOTIFY_MESSAGE`,
 `0x1000`) is delivered immediately; otherwise a bit is set in the target's `notify_pending` bitmap.
 `NOTIFY` never blocks, and repeated notifications from the same source coalesce into one bit. Used
-for timer expiry (`CLOCK` → server), kernel-raised signals (`SYSTEM` → PM), and — in the driver era
-— hardware-interrupt delivery.
+for timer expiry (`CLOCK` → server), kernel-raised signals (`SYSTEM` → PM), and hardware-interrupt
+delivery (`HARDWARE` → driver).
+
+A `NOTIFY` from `HARDWARE` is the one notification with a payload: the owner's `int_pending` bitmap
+sits at payload `0..4`, one bit per `notify_id` that fired, taken (read and zeroed) when the message
+is built. Every other notification is all-zero. A receiver identifies it by `m_source` alone.
 
 **SENDNB** — `SEND` semantics, but returns an error rather than blocking when the destination is not
 ready to receive.

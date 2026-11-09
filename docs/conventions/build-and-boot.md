@@ -54,6 +54,14 @@ timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 # stubs A-D): add --no-default-features to disable the `boot-stubs` feature.
 timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
 
+# Prove the kernel idle loop (slice 6.1, spec I14): the opt-in `idle-probe` feature builds init so
+# its rotation ends and it parks, letting the run queue empty. Only meaningful stub-free --
+# `build.rs` refuses it together with the default-on `boot-stubs` (the stubs spin forever, so the
+# queue could never empty) with a message naming `--no-default-features`. Expect `[idle] wake ok`
+# and `[diag tty] irq ok` in the log. CI does not build this configuration.
+timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+  --no-default-features --features idle-probe
+
 # Inspect a built user ELF's segments (macOS ships no `readelf`; the pinned
 # toolchain ships llvm-readobj, and --elf-output-style=GNU matches readelf's
 # output). Mandatory whenever a `user.ld` changes -- a segment layout claim

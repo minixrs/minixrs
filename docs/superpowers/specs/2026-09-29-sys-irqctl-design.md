@@ -305,6 +305,12 @@ which the single-threaded-EL1 invariant every `// SAFETY:` comment cites current
 
 Measurement 1 means no boot exercises the idle loop. I14 closes that for 6.1's proof.
 
+**Measured during 6.1 execution (2026-11-08).** Dropping only `clock::tick`'s idling gate does not
+re-enter the idle loop: `reschedule`'s own gate absorbs it (observed: stale-current tick bytes and
+an RS heartbeat spin). Re-entry needs both gates removed, which originally hung silently with INTID
+27 acked but not EOI'd. `schedule_next` now `assert!`s `!irq::in_dispatch()` before idling, so that
+case panics loudly instead.
+
 ---
 
 ## 4. The driver side
@@ -397,6 +403,21 @@ Host-testable logic — the subcode decode, the range and allow-list predicates,
 find/replace/free — goes in `kernel-shared`, under the standing carve-out for pure predicates the
 kernel crate cannot test.
 
+**Measured during 6.1 execution (2026-11-08).** Two of the predictions above did not hold; the
+decisions stand, the reasoning is corrected here.
+
+1. **The PL011 has no TX FIFO under QEMU 11.0.3.** `INT_TX` latches on every `DR` write and a
+   `UARTICR` write clears it, so the "level condition while the FIFO is empty" reasoning, and
+   mutation 3's predicted storm, do not hold. Observed: with `UARTICR` in place of clearing `TXIM`
+   there were 83,741 INTID-33 interrupts in 60 s and `irq ok` still printed. TTY now treats any
+   notification after `IRQ_PROOF_ROUNDS` as `[diag tty] irq FAIL extra` and leaves the line masked;
+   with that guard, mutation 3 gives exactly one `irq FAIL extra` (a forbidden marker) and 3
+   interrupts. Clearing `TXIM` remains the acknowledgement 6.1 uses.
+2. **"Immediate path passes 0" moved nothing.** TTY raises its own line while it is running, so both
+   rounds take the deferred path (the bitmap is built in `mini_receive`). The deferred-path mutation
+   (4b: zero the bitmap there) gives `irq FAIL bits=0x0`. `deliver_irq`'s immediate path is
+   unexercised in 6.1 — tracked debt in [`phase-6-virtio.md`](../../plans/phase-6-virtio.md).
+
 ### I14 — the idle path is proved under an opt-in `idle-probe` feature
 
 I11's measurement 1 found the empty run queue unreachable: `init`'s rotation always leaves something
@@ -422,6 +443,10 @@ ordering and overlap invariants (`worker` first, one `fileio` at a time, `hello`
   I11 loop exits with a process picked after at least one `wfi`. It is compiled into every boot, not
   gated on the feature: the default boot never reaches it today, and when one does (see the debt
   below) the marker is already there to move into the required list.
+
+**Measured during 6.1 execution (2026-11-08).** `init`'s park is a `SENDREC` to PM typed
+`NOTIFY_MESSAGE`, which PM drops unanswered: init's shared user privilege admits `SENDREC` only, and
+`RECEIVE` answers `ETRAPDENIED`.
 
 Proof, in addition to I13's: an `idle-probe` boot (`--no-default-features --features idle-probe`)
 shows `[idle] wake ok` and, in the same log, `[diag tty] irq ok`, with nothing from the forbidden
