@@ -937,7 +937,8 @@ minix.rs fileio: malloc ok
 # mask_spi and the boot storms (this line never prints); drop TTY's IRQ_ENABLE
 # and round 2 never arrives; zero the bitmap mini_receive hands over and TTY
 # prints `irq FAIL bits=0x0` (forbidden above, as `[diag tty] irq FAIL`). Writing
-# UARTICR.TXIC in place of clearing TXIM does NOT move this line: it still
-# prints, and the cost -- tens of thousands of extra INTID 33 interrupts, one per
-# burst of console output -- shows only in a QEMU trace.
+# UARTICR.TXIC in place of clearing TXIM does NOT move this line -- it still
+# prints -- but the interrupt that follows the proof does: a healthy boot sees
+# exactly IRQ_PROOF_ROUNDS notifications, so TTY reports any extra one as
+# `[diag tty] irq FAIL extra bits=` (forbidden above) and leaves the line masked.
 [diag tty] irq ok rounds=2

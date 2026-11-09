@@ -269,6 +269,13 @@ pub(crate) fn deliver_irq(
     if will_receive(owner, hardware_e) && owner.misc_flags & MF_REPLY_PEND == 0 {
         // Immediate delivery — synthesize the notification, carrying the
         // bitmap (taken, so it is zeroed), and unblock.
+        //
+        // No 6.1 boot exercises this arm: TTY raises its proof interrupt
+        // itself, with an `IMSC` store, so the interrupt is taken while TTY is
+        // running and both rounds defer. The deferred path is the one proved
+        // (mutation 4b: zeroing `mini_receive`'s bitmap gives `irq FAIL
+        // bits=0x0`). The first real exercise is a device interrupt arriving
+        // while its driver is blocked in `RECEIVE` (slice 6.3 / 6.5).
         build_notify_message(
             owner,
             hardware_e,

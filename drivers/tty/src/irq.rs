@@ -28,8 +28,6 @@
 // (which drops `_start` and `main`) it would read as dead code.
 #![cfg_attr(test, allow(dead_code))]
 
-use core::cmp::Ordering;
-
 use minixrs_kernel_shared::callnr::{IRQ_ENABLE, IRQ_REENABLE, IRQ_SETPOLICY};
 use minixrs_kernel_shared::error::{EBUSY, EINVAL, EPERM, OK};
 use minixrs_kernel_shared::irq::NR_IRQ_HOOKS;
@@ -144,6 +142,8 @@ pub struct IrqProof {
     hook: i32,
     /// Notifications serviced so far.
     rounds: u32,
+    /// Whether a notification past the proof has already been reported.
+    extra_reported: bool,
 }
 
 impl IrqProof {
@@ -156,7 +156,11 @@ impl IrqProof {
             return None;
         }
         pl011::set_txim(true);
-        Some(Self { hook, rounds: 0 })
+        Some(Self {
+            hook,
+            rounds: 0,
+            extra_reported: false,
+        })
     }
 
     /// Service one `HARDWARE` notification, whose payload carried `bits`.
@@ -165,9 +169,21 @@ impl IrqProof {
     /// line), *then* re-arm the line at the GIC. Re-arming first would take the
     /// still-asserted line again at once. Prints `[diag tty] irq ok` when the
     /// last round is in, or one `[diag tty] irq FAIL …` line — and leaves the
-    /// line masked — if a round goes wrong. A notification after the proof
-    /// (none is expected: `TXIM` is clear) is serviced the same way, quietly.
+    /// line masked — if a round goes wrong.
+    ///
+    /// A notification after the proof is a failure too. A healthy boot sees
+    /// exactly [`IRQ_PROOF_ROUNDS`]: with `TXIM` clear and the rest of
+    /// `UARTIMSC` zero, the PL011 cannot raise its line. So an extra one prints
+    /// `[diag tty] irq FAIL extra bits=…` — once, so a storm cannot flood the
+    /// log — and is not re-armed: the line stays masked.
     pub fn on_notify(&mut self, bits: u32) {
+        if self.rounds >= IRQ_PROOF_ROUNDS {
+            if !self.extra_reported {
+                self.extra_reported = true;
+                diag_fmt(format_args!("irq FAIL extra bits={bits:#x}"));
+            }
+            return;
+        }
         if bits & (1u32 << TTY_IRQ_NOTIFY_ID) == 0 {
             diag_fmt(format_args!("irq FAIL bits={bits:#x}"));
             return;
@@ -179,12 +195,12 @@ impl IrqProof {
             return;
         }
         self.rounds = self.rounds.saturating_add(1);
-        match self.rounds.cmp(&IRQ_PROOF_ROUNDS) {
+        if self.rounds < IRQ_PROOF_ROUNDS {
             // Raise the line again; the next notification is the next round.
-            Ordering::Less => pl011::set_txim(true),
+            pl011::set_txim(true);
+        } else {
             // TXIM stays clear (I13): see the module docs.
-            Ordering::Equal => diag_fmt(format_args!("irq ok rounds={IRQ_PROOF_ROUNDS}")),
-            Ordering::Greater => {}
+            diag_fmt(format_args!("irq ok rounds={IRQ_PROOF_ROUNDS}"));
         }
     }
 }
