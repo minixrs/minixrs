@@ -10,9 +10,11 @@
 //! VM-mediated `VMCTL_MAP_PHYS` to Phase 6 — a driver has no way to ask for a
 //! physical mapping yet.
 //!
-//! **TX only, polled, no interrupts.** RX needs `SYS_IRQCTL` and an interrupt
-//! path, which is Phase 6. Polling `FR.TXFF` before each `DR` store is the
-//! documented send sequence (ARM PL011 TRM r1p5 §3.3).
+//! **TX only, polled.** RX needs an input path, which is Phase 6. Polling
+//! `FR.TXFF` before each `DR` store is the documented send sequence (ARM PL011
+//! TRM r1p5 §3.3). The one interrupt TTY touches is the TX interrupt, and only
+//! for slice 6.1's delivery proof ([`set_txim`]; see `irq.rs`) — transmission
+//! itself never waits on it.
 //!
 //! ## Register offsets are deliberately re-declared
 //!
@@ -26,8 +28,8 @@
 //! ## Why this is the crate's only `unsafe`
 //!
 //! Everything else in the driver is message parsing (`cdev.rs`) or IPC through
-//! `minixrs-ipc`. The two volatile accesses here are what `#![forbid(unsafe_code)]`
-//! on `server-rt` exists to keep out of shared code.
+//! `minixrs-ipc`. The volatile register accesses here are what
+//! `#![forbid(unsafe_code)]` on `server-rt` exists to keep out of shared code.
 
 // Only `main.rs`'s `not(test)`-gated paths reach these, so under `cargo test`
 // (which drops `_start` and `main`) they would read as dead code.
@@ -43,12 +45,39 @@ const DR_OFFSET: u64 = 0x00;
 const FR_OFFSET: u64 = 0x18;
 /// `FR` bit 5: transmit FIFO full. Poll until clear before storing to `DR`.
 const FR_TXFF: u32 = 1 << 5;
+/// Interrupt mask set/clear register (`UARTIMSC`): a set bit lets that
+/// interrupt reach the PL011's output line.
+const IMSC_OFFSET: u64 = 0x038;
+/// `UARTIMSC` bit 5: the transmit interrupt mask (`TXIM`).
+const IMSC_TXIM: u32 = 1 << 5;
 
 /// The PL011's GIC INTID on QEMU `virt` (SPI 1), which TTY claims with
 /// `SYS_IRQCTL` (slice 6.1). Duplicated, like the offsets above, in
 /// `kernel/src/arch/aarch64/uart.rs`, where it is the one entry the kernel
 /// puts on TTY's IRQ allow-list — see the module docs for why it is not shared.
 pub const PL011_INTID: u32 = 33;
+
+/// Set (`on`) or clear `UARTIMSC.TXIM`, leaving the other mask bits as they
+/// are (a read-modify-write).
+///
+/// With `TXIM` set the PL011 asserts its line — INTID 33, level-triggered —
+/// while its transmit interrupt is raised, which after any byte has been sent
+/// is at once. Clearing `TXIM` is what keeps the line down (spec I13).
+/// Writing `UARTICR.TXIC` instead clears the raised interrupt only until the
+/// next transmitted byte raises it again — QEMU 11's PL011 latches `INT_TX` on
+/// every `DR` write — and the kernel's polled console transmits constantly, so
+/// the line would keep re-asserting.
+pub fn set_txim(on: bool) {
+    let imsc = (TTY_UART_VA + IMSC_OFFSET) as *mut u32;
+    // SAFETY: as in `putc` — `TTY_UART_VA` maps the PL011's whole register
+    // block (`UARTIMSC` at 0x038 is inside the page) into this single-threaded
+    // process only. Volatile because each access is a device register access
+    // the compiler must neither cache nor elide.
+    unsafe {
+        let v = read_volatile(imsc);
+        write_volatile(imsc, if on { v | IMSC_TXIM } else { v & !IMSC_TXIM });
+    }
+}
 
 /// Transmit one byte, blocking while the TX FIFO is full.
 ///

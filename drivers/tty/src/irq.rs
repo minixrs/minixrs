@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! TTY's interrupt line: the `SYS_IRQCTL` claim and its denial battery
-//! (slice 6.1, spec I3–I6, I10).
+//! TTY's interrupt line: the `SYS_IRQCTL` claim, its denial battery, and the
+//! two-round delivery proof (slice 6.1, spec I3–I7, I10, I13).
 //!
 //! TTY claims the PL011's line, INTID 33 — the one entry the kernel puts on its
 //! allow-list at boot — under [`TTY_IRQ_NOTIFY_ID`], then drives the call's
@@ -10,22 +10,39 @@
 //! ends with the one positive case, the I6 replacement: the same claim again
 //! answers `OK` with the same hook id, which TTY adopts.
 //!
-//! Nothing fires yet. TTY leaves the PL011's own interrupt mask (`UARTIMSC`)
-//! alone, so the claimed line stays quiet at the device.
+//! Then [`IrqProof`] makes the line fire for real (I13). TTY sets the PL011's
+//! `UARTIMSC.TXIM`, the device raises its level-triggered TX interrupt, and the
+//! kernel masks the line, records bit [`TTY_IRQ_NOTIFY_ID`] in TTY's pending
+//! word and notifies TTY from `HARDWARE` with that word in the payload. TTY
+//! acknowledges at the device by clearing `TXIM` and re-arms the line with
+//! `IRQ_ENABLE` — twice, so `IRQ_ENABLE` is seen to work rather than merely
+//! return — and then leaves `TXIM` clear: the kernel's own polled console
+//! writes the same UART, and every byte it sends raises the TX interrupt again,
+//! so a set `TXIM` would keep raising a line TTY has no reason to service.
+//! (That is also why the acknowledgement is clearing `TXIM` and not writing
+//! `UARTICR.TXIC`: the next transmitted byte undoes the latter.) This
+//! is a one-shot proof, deliberately not the steady-state pattern (I12) that RX
+//! will use.
 
 // Only `main.rs`'s `not(test)`-gated paths reach this, so under `cargo test`
 // (which drops `_start` and `main`) it would read as dead code.
 #![cfg_attr(test, allow(dead_code))]
+
+use core::cmp::Ordering;
 
 use minixrs_kernel_shared::callnr::{IRQ_ENABLE, IRQ_REENABLE, IRQ_SETPOLICY};
 use minixrs_kernel_shared::error::{EBUSY, EINVAL, EPERM, OK};
 use minixrs_kernel_shared::irq::NR_IRQ_HOOKS;
 use minixrs_server_rt::{diag_fmt, sys_irqctl};
 
-use crate::pl011::PL011_INTID;
+use crate::pl011::{self, PL011_INTID};
 
-/// The bit TTY's interrupt notifications will carry in their pending bitmap.
+/// The bit TTY's interrupt notifications carry in their pending bitmap.
 pub const TTY_IRQ_NOTIFY_ID: i32 = 0;
+
+/// How many interrupts [`IrqProof`] takes before it reports: the second one
+/// can only arrive if the first round's `IRQ_ENABLE` really unmasked the line.
+const IRQ_PROOF_ROUNDS: u32 = 2;
 
 /// The battery's last argument word: a literal, or "the slot after TTY's own
 /// hook", which only exists once the claim has answered.
@@ -118,4 +135,56 @@ pub fn claim_and_probe() -> i32 {
     }
     diag_fmt(format_args!("irq.deny ok n={}", CASES.len() + 1));
     hook
+}
+
+/// The I13 delivery proof: [`IRQ_PROOF_ROUNDS`] real PL011 TX interrupts, each
+/// acknowledged at the device and re-armed with `IRQ_ENABLE`.
+pub struct IrqProof {
+    /// The hook id `claim_and_probe` adopted — what `IRQ_ENABLE` names.
+    hook: i32,
+    /// Notifications serviced so far.
+    rounds: u32,
+}
+
+impl IrqProof {
+    /// Start the proof on `hook` (the result of [`claim_and_probe`]) by
+    /// setting `TXIM`, which makes the PL011 raise its line. A negative `hook`
+    /// is a failed claim, already reported: there is no line to prove, so
+    /// `TXIM` stays clear and `None` comes back.
+    pub fn start(hook: i32) -> Option<Self> {
+        if hook <= 0 {
+            return None;
+        }
+        pl011::set_txim(true);
+        Some(Self { hook, rounds: 0 })
+    }
+
+    /// Service one `HARDWARE` notification, whose payload carried `bits`.
+    ///
+    /// The order is I12's: quiesce the device (clear `TXIM`, which drops the
+    /// line), *then* re-arm the line at the GIC. Re-arming first would take the
+    /// still-asserted line again at once. Prints `[diag tty] irq ok` when the
+    /// last round is in, or one `[diag tty] irq FAIL …` line — and leaves the
+    /// line masked — if a round goes wrong. A notification after the proof
+    /// (none is expected: `TXIM` is clear) is serviced the same way, quietly.
+    pub fn on_notify(&mut self, bits: u32) {
+        if bits & (1u32 << TTY_IRQ_NOTIFY_ID) == 0 {
+            diag_fmt(format_args!("irq FAIL bits={bits:#x}"));
+            return;
+        }
+        pl011::set_txim(false);
+        let (rc, _) = sys_irqctl(IRQ_ENABLE, 0, 0, self.hook);
+        if rc != OK {
+            diag_fmt(format_args!("irq FAIL enable rc={rc}"));
+            return;
+        }
+        self.rounds = self.rounds.saturating_add(1);
+        match self.rounds.cmp(&IRQ_PROOF_ROUNDS) {
+            // Raise the line again; the next notification is the next round.
+            Ordering::Less => pl011::set_txim(true),
+            // TXIM stays clear (I13): see the module docs.
+            Ordering::Equal => diag_fmt(format_args!("irq ok rounds={IRQ_PROOF_ROUNDS}")),
+            Ordering::Greater => {}
+        }
+    }
 }

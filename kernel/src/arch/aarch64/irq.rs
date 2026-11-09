@@ -12,9 +12,15 @@
 //!   exception is taken on that path, so there is no frame — which is why the
 //!   dispatcher takes none.
 //!
-//! Slice 2.4 recognizes exactly one source: the EL1 virtual timer
-//! (PPI 27). Any other INTID is a bug — there is no other configured
-//! interrupt source.
+//! Two kinds of source are recognized. The EL1 virtual timer (PPI 27, slice
+//! 2.4) drives `clock::tick`. A **hooked SPI** — a line a driver claimed with
+//! `SYS_IRQCTL` (slice 6.1, spec I7) — is masked at the distributor, recorded
+//! in its owner's `int_pending`, and delivered as a `NOTIFY` from `HARDWARE`;
+//! the driver unmasks it again with `IRQ_ENABLE` once it has quiesced the
+//! device. Anything else is a bug and says so — and if it is an SPI it is
+//! masked too, so a line nobody owns cannot storm.
+
+use minixrs_kernel_shared::irq::FIRST_SPI;
 
 use crate::arch::ArchRegisterFrame;
 use crate::arch::aarch64::gic;
@@ -92,13 +98,35 @@ unsafe fn dispatch_one() {
             unsafe { timer::rearm() };
         }
         other => {
-            let _ = writeln!(
-                Uart::new(),
-                "do_irq: unexpected INTID {other} (only PPI 27 is configured)",
-            );
+            if let Some(hook) = crate::irq_hooks::lookup(other) {
+                // Spec I7: mask before EOI. The line is level-triggered and
+                // stays asserted until the driver quiesces the device, which
+                // it cannot do until it runs; EOI on the unmasked line would
+                // re-enter here at once, forever. Masked, it is taken exactly
+                // once per `IRQ_ENABLE`.
+                // SAFETY: IRQ context or the idle poll, both single-threaded
+                // with DAIF.I set — `mask_spi`'s contract; a hooked INTID
+                // passed `decode`'s SPI range check when it was claimed.
+                unsafe { gic::mask_spi(other) };
+                // Only unblocks the owner — never schedules — so nothing
+                // here can reach `schedule_next` with this interrupt un-EOI'd.
+                crate::ipc::fire_irq(hook.owner, hook.notify_id);
+            } else {
+                // The prefix `do_irq: unexpected INTID` is in
+                // tests/qemu-boot.forbidden — keep it byte-for-byte.
+                let _ = writeln!(Uart::new(), "do_irq: unexpected INTID {other}");
+                if (FIRST_SPI..gic::nr_intids()).contains(&other) {
+                    // A line nobody owns must not be able to storm either.
+                    // SAFETY: as the hooked arm's `mask_spi`; the range check
+                    // is `mask_spi`'s own assertion, made here so a stray
+                    // non-SPI INTID logs instead of panicking.
+                    unsafe { gic::mask_spi(other) };
+                }
+            }
         }
     }
 
-    // SAFETY: matches the `ack` above; the GIC enforces the pairing.
+    // SAFETY: matches the `ack` above; the GIC enforces the pairing. Last, after
+    // any `mask_spi` (I7).
     unsafe { gic::eoi(intid) };
 }

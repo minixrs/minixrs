@@ -9,10 +9,19 @@
 //! `deliver_msg` and unblocks them. Otherwise it sets a bit in the
 //! destination's `priv.notify_pending` bitmap so the next `RECEIVE` will
 //! collect the deferred notification.
+//!
+//! Three kernel tasks also originate notifications, with no `ipc_to` check:
+//! `CLOCK` for an expired alarm ([`deliver_alarm`]), `SYSTEM` for a pending
+//! kernel signal ([`deliver_ksig`]), and `HARDWARE` for a hooked interrupt
+//! ([`deliver_irq`], slice 6.1) — the one notification whose payload is not
+//! all-zero.
 
 use core::sync::atomic::Ordering;
 
-use minixrs_kernel_shared::com::{CLOCK, NR_SYS_PROCS, PM_PROC_NR, SYSTEM};
+use minixrs_kernel_shared::callnr::NOTIFY_IRQ_PENDING_OFF;
+use minixrs_kernel_shared::com::{
+    CLOCK, HARDWARE, NR_SYS_PROCS, PM_PROC_NR, SYSTEM, boot_endpoint,
+};
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
 use minixrs_kernel_shared::error::{EBADSRCDST, ECALLDENIED, OK};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
@@ -37,12 +46,22 @@ pub(crate) fn will_receive(dst: &Proc, src_e: Endpoint) -> bool {
 
 /// Build a notification message into `dst.deliver_msg`. Mirrors MINIX 3
 /// `BuildNotifyMessage` (proc.h:99-115): zero the message, stamp
-/// `m_type = NOTIFY_MESSAGE`, leave payload zero.
-pub(crate) fn build_notify_message(dst: &mut Proc, source_e: Endpoint) {
+/// `m_type = NOTIFY_MESSAGE`, and write `irq_pending` little-endian at
+/// [`NOTIFY_IRQ_PENDING_OFF`].
+///
+/// `irq_pending` is non-zero only for a `HARDWARE` notification (slice 6.1,
+/// spec I7), whose builders pass the destination's `int_pending` *taken* — read
+/// and zeroed in one step — so bits from several lines coalesce into one
+/// message and no bit is delivered twice. Every other notification passes `0`,
+/// keeping MINIX's all-zero payload.
+pub(crate) fn build_notify_message(dst: &mut Proc, source_e: Endpoint, irq_pending: u32) {
+    let mut payload = [0u8; 96];
+    payload[NOTIFY_IRQ_PENDING_OFF..NOTIFY_IRQ_PENDING_OFF + 4]
+        .copy_from_slice(&irq_pending.to_le_bytes());
     dst.deliver_msg = Message {
         m_source: source_e,
         m_type: NOTIFY_MESSAGE,
-        payload: [0; 96],
+        payload,
     };
 }
 
@@ -84,7 +103,7 @@ pub fn mini_notify(
 
     if will_receive(dst, caller_endpoint) && dst.misc_flags & MF_REPLY_PEND == 0 {
         // Immediate delivery — synthesize the notification and unblock.
-        build_notify_message(dst, caller_endpoint);
+        build_notify_message(dst, caller_endpoint, 0);
         dst.misc_flags |= MF_DELIVERMSG;
         // SAFETY: single-threaded SVC/IRQ-masked invariant; no other
         // borrow into `proc_table` is live (we hold the exclusive `dst`
@@ -133,7 +152,7 @@ pub(crate) fn deliver_alarm(
     let owner = &mut proc_table[owner_idx];
     if will_receive(owner, clock_e) && owner.misc_flags & MF_REPLY_PEND == 0 {
         // Immediate delivery — synthesize the notification and unblock.
-        build_notify_message(owner, clock_e);
+        build_notify_message(owner, clock_e, 0);
         owner.misc_flags |= MF_DELIVERMSG;
         // SAFETY: single-threaded IRQ/clock context; the exclusive `owner`
         // borrow ends (NLL) as `rts_unset` captures `nr`, so no other
@@ -187,7 +206,7 @@ pub(crate) fn deliver_ksig(
     let pm = &mut proc_table[pm_idx];
     if will_receive(pm, system_e) && pm.misc_flags & MF_REPLY_PEND == 0 {
         // Immediate delivery — synthesize the notification and unblock.
-        build_notify_message(pm, system_e);
+        build_notify_message(pm, system_e, 0);
         pm.misc_flags |= MF_DELIVERMSG;
         // SAFETY: single-threaded EL1 context; the exclusive `pm` borrow ends
         // (NLL) as `rts_unset` captures `nr`, so no other PROC_TABLE borrow
@@ -203,4 +222,68 @@ pub(crate) fn deliver_ksig(
         &mut priv_table[pm_priv_id.as_usize()].notify_pending,
         system_priv_id,
     );
+}
+
+/// Kernel-originated interrupt notification (slice 6.1, spec I7). Deliver a
+/// `NOTIFY` from the `HARDWARE` kernel task to the proc at `owner_idx`, whose
+/// hooked SPI just fired and whose `int_pending` bit for it the caller
+/// ([`super::fire_irq`]) has already set.
+///
+/// The [`deliver_alarm`] shape: the source is a kernel task and there is **no
+/// `ipc_to` check** — the kernel originates the notification, and routing
+/// through [`mini_notify`] would in fact *fail* because HARDWARE's `ipc_to`
+/// bitmap is empty.
+///
+/// Immediate delivery if the owner is `RECEIVE`-blocked and would accept from
+/// `HARDWARE`: the message carries the owner's `int_pending`, taken. Otherwise
+/// the bit is recorded in the owner's `notify_pending` against HARDWARE's priv
+/// slot, and the bitmap stays in `int_pending` — accumulating any further
+/// lines that fire meanwhile — until the owner's next `RECEIVE` takes it in
+/// [`super::receive`].
+///
+/// Runs inside `irq_dispatch`, so it must not reach `schedule_next`: it only
+/// unblocks (`rts_unset` enqueues), and the owner runs at the next scheduling
+/// point.
+pub(crate) fn deliver_irq(
+    proc_table: &mut [Proc; N_PROC_SLOTS],
+    priv_table: &mut [Priv; NR_SYS_PROCS],
+    owner_idx: usize,
+) {
+    // HARDWARE is a boot-time kernel task: `proc::init` always populates its
+    // slot and priv id, so a missing entry is a structural bug — halt loudly
+    // rather than silently drop the interrupt.
+    let hardware_e = boot_endpoint(HARDWARE);
+    let hardware_idx = proc_index(HARDWARE).expect("HARDWARE in proc table");
+    let hardware_priv_id = proc_table[hardware_idx]
+        .priv_id
+        .expect("HARDWARE priv populated by proc::init");
+
+    // Only a dedicated privilege slot can own a hook (I5), so an owner without
+    // one cannot have got here; drop rather than notify with no bitmap.
+    let Some(owner_priv_id) = proc_table[owner_idx].priv_id else {
+        return;
+    };
+    let owner_priv = &mut priv_table[owner_priv_id.as_usize()];
+
+    let owner = &mut proc_table[owner_idx];
+    if will_receive(owner, hardware_e) && owner.misc_flags & MF_REPLY_PEND == 0 {
+        // Immediate delivery — synthesize the notification, carrying the
+        // bitmap (taken, so it is zeroed), and unblock.
+        build_notify_message(
+            owner,
+            hardware_e,
+            core::mem::take(&mut owner_priv.int_pending),
+        );
+        owner.misc_flags |= MF_DELIVERMSG;
+        // SAFETY: single-threaded IRQ context (DAIF.I masked); the exclusive
+        // `owner` borrow ends (NLL) as `rts_unset` captures `nr`, so no other
+        // PROC_TABLE borrow aliases. `rts_unset` only enqueues — it never
+        // schedules — which is what `irq_dispatch`'s caller requires.
+        unsafe { sched::rts_unset(owner, RTS_RECEIVING) };
+        return;
+    }
+
+    // Deferred — record against HARDWARE's priv slot in the owner's bitmap;
+    // `int_pending` keeps the bits for the owner's next RECEIVE to take.
+    set_sys_bit(&mut owner_priv.notify_pending, hardware_priv_id);
 }

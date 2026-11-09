@@ -56,10 +56,16 @@ mod pl011;
 
 use minixrs_ipc::ipc_send;
 use minixrs_kernel_shared::Message;
-use minixrs_kernel_shared::callnr::{CDEV_MAX_IO, CDEV_WRITE, SAFECOPY_FROM, SYS_GETINFO_NAME_LEN};
+use minixrs_kernel_shared::callnr::{
+    CDEV_MAX_IO, CDEV_WRITE, NOTIFY_IRQ_PENDING_OFF, SAFECOPY_FROM, SYS_GETINFO_NAME_LEN,
+};
+use minixrs_kernel_shared::com::{HARDWARE, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{ENOSYS, OK};
-use minixrs_server_rt::{SefConfig, buf_addr, sef_publish_to_ds, sef_startup, sys_safecopy};
+use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
+use minixrs_server_rt::{
+    SefConfig, buf_addr, rd_i32, sef_publish_to_ds, sef_startup, sys_safecopy,
+};
 
 /// The banner TTY writes straight to the UART once its device mapping is proven
 /// usable from EL0.
@@ -100,11 +106,10 @@ fn main() -> ! {
         }
     });
 
-    // Claim the PL011's interrupt line and prove the call's refusals (slice
-    // 6.1). A failure prints its own `[diag tty] irq…FAIL` line and TTY carries
-    // on serving TX, which never needed the line. The hook id is held for the
-    // interrupt-delivery path, which re-arms the line with `IRQ_ENABLE`.
-    let _irq_hook = irq::claim_and_probe();
+    // Claim the PL011's interrupt line and prove the call's refusals, then make
+    // the line fire (slice 6.1). A failure prints its own `[diag tty] irq…FAIL`
+    // line and TTY carries on serving TX, which never needed the line.
+    let mut irq_proof = irq::IrqProof::start(irq::claim_and_probe());
 
     // The staging buffer lives in `main`'s frame, not in a static and not in
     // `tty_init`'s frame — the same rule `GrantPool` follows, and for the same
@@ -120,6 +125,18 @@ fn main() -> ! {
     };
     loop {
         if sef.receive(&mut msg) != OK {
+            continue;
+        }
+        // An interrupt notification (slice 6.1, spec I12) is identified by the
+        // kernel-stamped source — `HARDWARE` cannot be forged by a process, a
+        // payload can — and gets no reply: nobody is waiting on one.
+        if msg.m_source == boot_endpoint(HARDWARE) && msg.m_type == NOTIFY_MESSAGE {
+            // The kernel writes the word little-endian; `rd_i32` reads native,
+            // which on aarch64 is the same thing.
+            let bits = rd_i32(&msg, NOTIFY_IRQ_PENDING_OFF) as u32;
+            if let Some(proof) = irq_proof.as_mut() {
+                proof.on_notify(bits);
+            }
             continue;
         }
         // Capture the caller *first*: it is both the reply target and the granter,

@@ -42,10 +42,7 @@ pub(crate) unsafe fn table_mut() -> &'static mut HookTable {
 }
 
 /// The hook claiming `intid`, if any — copied out, so no borrow of the table
-/// outlives the call.
-// Consumed by slice 6.1 Task 4's hooked-SPI arm in `irq_dispatch`; until that
-// lands nothing interrupts on a claimed line, so nothing looks one up.
-#[allow(dead_code)]
+/// outlives the call. Read by `irq_dispatch`'s hooked-SPI arm.
 pub(crate) fn lookup(intid: u32) -> Option<IrqHook> {
     // SAFETY: single-threaded EL1 with IRQs masked (the `Sync` invariant); the
     // shared borrow ends at the end of this expression.

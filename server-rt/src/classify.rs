@@ -33,9 +33,12 @@ pub enum SefEvent {
 /// Every control event is gated on `m_source`, not `m_type` alone, so a client
 /// that merely holds an `ipc_to` bit to the server cannot spoof one:
 ///
-/// - **Ping** — an RS-sourced [`NOTIFY_MESSAGE`]. NOTIFY carries no payload to
-///   distinguish senders, so the source *is* the discriminator; any other
-///   NOTIFY is application traffic.
+/// - **Ping** — an RS-sourced [`NOTIFY_MESSAGE`]. The source *is* the
+///   discriminator, never the payload: most notifications carry an all-zero
+///   one, but a `HARDWARE` interrupt notification carries its pending-interrupt
+///   bitmap (slice 6.1, `NOTIFY_IRQ_PENDING_OFF`), and a payload is not
+///   something a sender can be identified by. Any other NOTIFY — `HARDWARE`'s,
+///   whatever its payload, included — is application traffic.
 /// - **Signal** — `SEF_SIGNAL` from PM (POSIX signal delivery, slice 4.5) or RS
 ///   (lifecycle, e.g. a shutdown `SIGTERM`). From any other source it is treated
 ///   as application traffic, so an untrusted client cannot drive the registered
@@ -68,8 +71,10 @@ pub fn classify(msg: &Message) -> SefEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use minixrs_kernel_shared::callnr::{VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT};
-    use minixrs_kernel_shared::com::{SYSTEM, VM_PROC_NR};
+    use minixrs_kernel_shared::callnr::{
+        NOTIFY_IRQ_PENDING_OFF, VM_BRK, VM_MMAP, VM_MUNMAP, VM_PAGEFAULT,
+    };
+    use minixrs_kernel_shared::com::{HARDWARE, SYSTEM, VM_PROC_NR};
     use minixrs_kernel_shared::endpoint::Endpoint;
 
     fn msg(m_source: Endpoint, m_type: i32) -> Message {
@@ -106,6 +111,19 @@ mod tests {
         // Application traffic — if the classifier ever swallowed it, PM would
         // never drain SYS_GETKSIG and every signal would strand.
         let m = msg(boot_endpoint(SYSTEM), NOTIFY_MESSAGE);
+        assert_eq!(classify(&m), SefEvent::Application);
+    }
+
+    #[test]
+    fn hardware_notify_is_application_traffic() {
+        // A driver's interrupt notification (slice 6.1, spec I7/I12) is a
+        // NOTIFY stamped from HARDWARE whose payload is *not* zero: it carries
+        // the pending-interrupt bitmap. It must reach the driver's own loop as
+        // Application traffic — not a Ping, and not a Signal decoded from the
+        // bitmap's first word — or no driver would ever see an interrupt.
+        let mut m = msg(boot_endpoint(HARDWARE), NOTIFY_MESSAGE);
+        m.payload[NOTIFY_IRQ_PENDING_OFF..NOTIFY_IRQ_PENDING_OFF + 4]
+            .copy_from_slice(&1u32.to_le_bytes());
         assert_eq!(classify(&m), SefEvent::Application);
     }
 

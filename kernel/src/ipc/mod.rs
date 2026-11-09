@@ -42,7 +42,9 @@ use minixrs_kernel_shared::ipc_const::{NOTIFY, RECEIVE, SEND, SENDA, SENDNB, SEN
 use crate::arch::ArchRegisterFrame;
 use crate::proc::flags::{MF_DELIVERMSG, MF_MSGFAILED, MF_REPLY_PEND};
 use crate::proc::sched::{self, CURRENT_PROC_NR};
-use crate::proc::table::{N_PROC_SLOTS, priv_table_mut_slice, proc_index, proc_table_mut_slice};
+use crate::proc::table::{
+    N_PROC_SLOTS, okendpt, priv_table_mut_slice, proc_index, proc_table_mut_slice,
+};
 use crate::proc::{Priv, Proc};
 use crate::uart::Uart;
 
@@ -421,6 +423,44 @@ pub fn fire_expired_alarms(now: u64) {
     }
 
     crate::clock::set_earliest_alarm(next_earliest);
+}
+
+/// Deliver one hooked interrupt to its owner (slice 6.1, spec I7): set bit
+/// `notify_id` in the owner's `Priv::int_pending`, then notify it from
+/// `HARDWARE` ([`notify::deliver_irq`]).
+///
+/// Called from `irq_dispatch`'s hooked-SPI arm, after the line has been masked
+/// at the distributor and before its EOI. `owner_e` is resolved with `okendpt`;
+/// a stale owner is dropped silently. That cannot happen — `SYS_EXIT` and
+/// `SYS_EXEC` free a process's hooks and mask their lines (I8) — but a dropped
+/// interrupt on a masked line is the safe failure, and a notification to a
+/// recycled slot's next occupant is not.
+///
+/// Materializes the proc/priv slices here — the same "only `ipc` materializes
+/// the tables for delivery" discipline as [`fire_expired_alarms`]. Must not
+/// reach `schedule_next` (`irq_dispatch` holds an un-EOI'd interrupt):
+/// `deliver_irq` only unblocks.
+pub fn fire_irq(owner_e: Endpoint, notify_id: u8) {
+    // SAFETY: IRQ context (or the idle poll) — single-threaded, DAIF.I masked.
+    // `irq_dispatch` has taken no PROC_TABLE/PRIV_TABLE borrow before calling
+    // us, and the hook it read was copied out of `IRQ_HOOKS`.
+    let proc_table = unsafe { proc_table_mut_slice() };
+    let priv_table = unsafe { priv_table_mut_slice() };
+
+    let Ok(owner_idx) = okendpt(proc_table, owner_e) else {
+        return;
+    };
+    let Some(owner_priv_id) = proc_table[owner_idx].priv_id else {
+        return;
+    };
+    // `notify_id` is in 0..=31 — `decode` refuses anything else at claim time —
+    // so `checked_shl` never declines; it only makes that explicit rather than
+    // letting an out-of-range shift wrap under `overflow-checks = false`.
+    let Some(bit) = 1u32.checked_shl(u32::from(notify_id)) else {
+        return;
+    };
+    priv_table[owner_priv_id.as_usize()].int_pending |= bit;
+    notify::deliver_irq(proc_table, priv_table, owner_idx);
 }
 
 /// Fold one still-armed deadline `at` into the running next-earliest, treating
