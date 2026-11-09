@@ -198,7 +198,12 @@ is the reason to leave idle.
   - count successful forks, and once that reaches `EXEC_TARGETS.len()`, leave the loop
   - reap with `PM_WAIT` until it answers an error (`ECHILD`)
   - print `minix.rs init: idle.park` through the existing console path
-  - then `loop { let _ = ipc_receive(ANY, &mut m); }`
+  - then park in a `SENDREC` to PM typed `NOTIFY_MESSAGE`, in a loop. PM's receive loop drops it
+    unanswered (`_ => {}`), so init stays blocked. **Corrected during execution:** the original
+    `ipc_receive(ANY)` cannot work, because init's shared user privilege admits `SENDREC` only and
+    `RECEIVE` answers `ETRAPDENIED`. The park depends on a user process being able to send a
+    `NOTIFY_MESSAGE`-typed message. If IPC is ever hardened to refuse that, the park spins, and the
+    sign is a missing `[idle] wake ok` in idle-probe builds.
 - [ ] **Step 4: Verify the default boot is unchanged.** Boot with `--no-default-features` (no
       probe). Expected: `grep -ac '\[idle\] wake ok'` = 0, and the `minix.rs hello: errno ok` and
       `fs.selfcheck ok` markers present.
