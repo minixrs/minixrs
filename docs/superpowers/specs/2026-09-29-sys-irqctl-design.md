@@ -9,12 +9,16 @@ Phase 6's first kernel work is delivering a hardware interrupt to an EL0 driver 
 that virtio-blk is never tempted into a poll loop. **It designs; it implements nothing.** Slice 6.1
 implements it, from its own plan document.
 
-Decisions are labelled `I1…I13`: slice-local, distinct from the phase-level `D1…D13`.
+Decisions are labelled `I1…I14`: slice-local, distinct from the phase-level `D1…D13`.
 
 **Amended for slices 6.2 onward** by decision H2 of
 [`phase-6-virtio.md`](../../plans/phase-6-virtio.md): the kernel, not the driver, finds a driver's
 virtio-mmio slot, and the allow-list holds that one line. I4 and I9 below have been rewritten to say
 so. Nothing in 6.1's own scope changes.
+
+**Amended 2026-11-08 by slice 6.1's measurements** (I11): the empty run queue is *not* reachable in
+today's boot, so the idle path cannot be observed without help. I14 adds the opt-in `idle-probe`
+feature that makes it observable, and records the CI gap it leaves as debt to correct.
 
 ---
 
@@ -289,6 +293,29 @@ which the single-threaded-EL1 invariant every `// SAFETY:` comment cites current
 2. establish that `wfi` **returns** on this QEMU with `PSTATE.I` set and the virtual timer pending.
    The architecture says it does; the whole design rests on it, so it is observed, not assumed.
 
+**Measured 2026-11-08**, with temporary probes on `feature/6.1-irqctl`, since reverted:
+
+1. **Not reached.** A one-shot probe in `schedule_next`'s `None` arm never fired in a 90 s
+   `--no-default-features` boot, across hundreds of `hello` cycles. `init`'s fork → exec → `wait`
+   rotation never ends, and a chain of `SENDREC`s always has a runnable end. So the slice-level
+   split the phase plan allowed (idle path as its own PR) does not apply: 6.1 is one PR.
+2. **`wfi` returns.** Placed after `timer::init` in `kmain`, with `DAIF = 0x3c0` (`I` set), five
+   consecutive `wfi`s each returned with INTID 27 pending, and `ack` / `rearm` / `eoi` behaved as in
+   IRQ context.
+
+Measurement 1 means no boot exercises the idle loop. I14 closes that for 6.1's proof.
+
+**Measured during 6.1 execution (2026-11-08).** Dropping only `clock::tick`'s idling gate does not
+re-enter the idle loop: `reschedule`'s own gate absorbs it (observed: stale-current tick bytes and
+an RS heartbeat spin). Re-entry needs both gates removed, which originally hung silently with INTID
+27 acked but not EOI'd. `schedule_next` now `assert!`s `!irq::in_dispatch()` before idling, so that
+case panics loudly instead.
+
+**Measured during 6.1 execution (2026-11-08).** I7's take-and-zero of `int_pending` happens at the
+two `HARDWARE` build sites (`deliver_irq`'s immediate path and `mini_receive`'s deferred build), not
+inside `build_notify_message`, which takes the bitmap as an argument. Behaviour is identical. Any
+future `HARDWARE` builder must take the bitmap too.
+
 ---
 
 ## 4. The driver side
@@ -381,6 +408,66 @@ Host-testable logic — the subcode decode, the range and allow-list predicates,
 find/replace/free — goes in `kernel-shared`, under the standing carve-out for pure predicates the
 kernel crate cannot test.
 
+**Measured during 6.1 execution (2026-11-08).** Two of the predictions above did not hold; the
+decisions stand, the reasoning is corrected here.
+
+1. **The PL011 has no TX FIFO under QEMU 11.0.3.** `INT_TX` latches on every `DR` write and a
+   `UARTICR` write clears it, so the "level condition while the FIFO is empty" reasoning, and
+   mutation 3's predicted storm, do not hold. Observed: with `UARTICR` in place of clearing `TXIM`
+   there were 83,741 INTID-33 interrupts in 60 s and `irq ok` still printed. TTY now treats any
+   notification after `IRQ_PROOF_ROUNDS` as `[diag tty] irq FAIL extra` and leaves the line masked;
+   with that guard, mutation 3 gives exactly one `irq FAIL extra` (a forbidden marker) and 3
+   interrupts. Clearing `TXIM` remains the acknowledgement 6.1 uses.
+2. **"Immediate path passes 0" moved nothing.** TTY raises its own line while it is running, so both
+   rounds take the deferred path (the bitmap is built in `mini_receive`). The deferred-path mutation
+   (4b: zero the bitmap there) gives `irq FAIL bits=0x0`. `deliver_irq`'s immediate path is
+   unexercised in 6.1 — tracked debt in [`phase-6-virtio.md`](../../plans/phase-6-virtio.md).
+
+### I14 — the idle path is proved under an opt-in `idle-probe` feature
+
+I11's measurement 1 found the empty run queue unreachable: `init`'s rotation always leaves something
+runnable, so neither the default nor the stub-free boot ever enters the idle loop. Shipping it
+unobserved would break the "a marker not observed moving has not been proved" rule. Changing
+`init`'s rotation in every boot was considered and rejected for this slice: the rotation carries
+ordering and overlap invariants (`worker` first, one `fileio` at a time, `hello` overlapping
+`fileio`) that are not 6.1's to reopen.
+
+- **The feature.** `kernel/Cargo.toml` gains `idle-probe = []`, off by default. `kernel/build.rs`
+  reads `CARGO_FEATURE_IDLE_PROBE` and builds `minixrs-init` with `--features idle-probe`, the
+  `boot-stubs` → PM precedent. The stubs spin forever, so the queue can never empty with them on:
+  `build.rs` **refuses** `idle-probe` together with `boot-stubs`, with a message naming
+  `--no-default-features`, rather than producing a boot that silently proves nothing.
+- **`init` under the feature** runs its rotation until each of the four targets has been exec'd
+  once, then stops forking, reaps until it has no children left, and blocks indefinitely in a call
+  that never completes. Nothing user-side is then runnable except on a wake-up. The exact stop
+  condition and the blocking call are the plan's to fix.
+- **The wake source already exists.** RS arms `SYS_SETALARM` periodically, so `clock::tick` fires an
+  alarm during idle, `CLOCK` notifies RS, and `pick_proc` yields it. No new timer is needed, and the
+  wake is a real one: a hardware tick through the I11 loop's `do_irq` call.
+- **The marker is unconditional.** The kernel prints a one-shot `[idle] wake ok` the first time the
+  I11 loop exits with a process picked after at least one `wfi`. It is compiled into every boot, not
+  gated on the feature: the default boot never reaches it today, and when one does (see the debt
+  below) the marker is already there to move into the required list.
+
+**Measured during 6.1 execution (2026-11-08).** `init`'s park is a `SENDREC` to PM typed
+`NOTIFY_MESSAGE`, which PM drops unanswered: init's shared user privilege admits `SENDREC` only, and
+`RECEIVE` answers `ETRAPDENIED`.
+
+Proof, in addition to I13's: an `idle-probe` boot (`--no-default-features --features idle-probe`)
+shows `[idle] wake ok` and, in the same log, `[diag tty] irq ok`, with nothing from the forbidden
+list. Mutations, each observed and reverted under `idle-probe`:
+
+- restore `None => return` in `schedule_next` → the marker never prints;
+- drop the idling-flag check in `clock::tick` → re-entry from inside the idle loop. What that looks
+  like (stack death, a fault, per-tick bytes) is observed, not predicted.
+
+**Debt: CI does not exercise the idle path.** CI boots the default configuration, which never idles,
+so a regression in I11 lands green. This is a known gap to correct, not a settled state. Correct it
+when the default boot first reaches the empty queue: at the latest when Phase 7 replaces `init`'s
+rotation with a shell blocking in `read(0)`, sooner if a slice gives the rotation an end. That PR
+moves `[idle] wake ok` into the required marker list and deletes `idle-probe`, both the feature and
+its `init` arm. Tracked under slice 6.1 in [`phase-6-virtio.md`](../../plans/phase-6-virtio.md).
+
 ---
 
 ## 6. Out of scope
@@ -391,4 +478,6 @@ kernel crate cannot test.
 - **Narrowing the boot servers' `k_call_mask`.** A separate hardening change; I4's allow-list is
   what makes it non-urgent.
 - **Shared lines, edge-triggered lines, SMP routing, x86_64.** No consumer.
-- **Dynamic drivers' allow-lists via RS / `SYS_PRIVCTL`.** When RS first starts a driver.
+- **Dynamic drivers' allow-lists via RS / `SYS_PRIVCTL`.** When RS first starts a driver. The slice
+  that reuses dedicated privilege slots must also clear `Priv::irqs` on exit and at exec's point of
+  no return; 6.1 never does (only `USER_PRIV_ID` is assigned at runtime), contradicting I4.

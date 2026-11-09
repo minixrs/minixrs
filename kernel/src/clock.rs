@@ -89,6 +89,14 @@ pub unsafe fn tick() {
         crate::ipc::fire_expired_alarms(now);
     }
 
+    // Idling (slice 6.1, spec I11): timekeeping and alarms only. No process is
+    // running, so there is nothing to `putc` and no quantum to charge — and the
+    // quantum path ends in `reschedule` → `schedule_next`, which from inside the
+    // idle loop is a re-entry per tick. A due alarm (above) is what wakes it.
+    if sched::idling() {
+        return;
+    }
+
     // SAFETY: forwarded — IRQ context with no overlapping borrows.
     let Some(cur) = (unsafe { sched::current_proc_mut() }) else {
         return;

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Kernel-call clients for the cross-address-space copy engine (slice 5.2's
-//! `SYS_SAFECOPY` / `SYS_COPY`).
+//! `SYS_SAFECOPY` / `SYS_COPY`), plus `SYS_GETINFO` and, as of slice 6.1,
+//! `SYS_IRQCTL`.
 //!
 //! Lifted out of PM in slice 5.3, when the TTY driver became the second holder of
 //! `SYS_SAFECOPY` and the marshaling would otherwise have been copied verbatim.
@@ -23,12 +24,15 @@
 //! BDEV, and FS bands.
 
 use minixrs_ipc::ipc_sendrec;
-use minixrs_kernel_shared::callnr::{SYS_COPY, SYS_GETINFO, SYS_SAFECOPY};
+use minixrs_kernel_shared::callnr::{
+    IRQCTL_HOOK_ID_OFF, IRQCTL_NOTIFY_ID_OFF, IRQCTL_POLICY_OFF, IRQCTL_REQUEST_OFF,
+    IRQCTL_VECTOR_OFF, SYS_COPY, SYS_GETINFO, SYS_IRQCTL, SYS_SAFECOPY,
+};
 use minixrs_kernel_shared::com::{SYSTEM, boot_endpoint};
 use minixrs_kernel_shared::error::OK;
 use minixrs_kernel_shared::{Endpoint, Message};
 
-use crate::payload::{wr_i32, wr_u64};
+use crate::payload::{rd_i32, wr_i32, wr_u64};
 
 /// `SYS_GETINFO` — ask the kernel for the introspection record named by
 /// `request` (`GET_WHOAMI`, `GET_RAMDISK`, …).
@@ -101,6 +105,32 @@ pub fn sys_copy(src_e: Endpoint, src_addr: u64, dst_e: Endpoint, dst_addr: u64, 
     wr_u64(&mut m, 24, dst_addr);
     wr_u64(&mut m, 32, bytes);
     sendrec_to_system(&mut m)
+}
+
+/// `SYS_IRQCTL` — claim, release, unmask or mask an interrupt line (slice 6.1).
+///
+/// `request` is the subcode (`IRQ_SETPOLICY` / `IRQ_RMPOLICY` / `IRQ_ENABLE` /
+/// `IRQ_DISABLE`). `vector` (the raw GIC INTID) and `policy` (which must be 0)
+/// matter only to `IRQ_SETPOLICY`. `id` is overloaded exactly as MINIX overloads
+/// it: the caller's own `notify_id` (`0..=31`) on the way in to
+/// `IRQ_SETPOLICY`, the kernel's 1-based hook id for the other three.
+///
+/// Returns `(result, word)`: the kernel-call result (`OK` or a negative errno),
+/// and the reply's word at `IRQCTL_HOOK_ID_OFF` — on a successful
+/// `IRQ_SETPOLICY`, the hook id to pass to the other three. The word is
+/// meaningless on any other outcome.
+pub fn sys_irqctl(request: i32, vector: i32, policy: i32, id: i32) -> (i32, i32) {
+    let mut m = Message {
+        m_source: 0,
+        m_type: SYS_IRQCTL,
+        payload: [0u8; 96],
+    };
+    wr_i32(&mut m, IRQCTL_REQUEST_OFF, request);
+    wr_i32(&mut m, IRQCTL_VECTOR_OFF, vector);
+    wr_i32(&mut m, IRQCTL_POLICY_OFF, policy);
+    wr_i32(&mut m, IRQCTL_NOTIFY_ID_OFF, id);
+    let rc = sendrec_to_system(&mut m);
+    (rc, rd_i32(&m, IRQCTL_HOOK_ID_OFF))
 }
 
 /// SENDREC a prepared kernel call to `SYSTEM` and flatten the two failure routes.

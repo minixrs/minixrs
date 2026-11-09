@@ -27,6 +27,7 @@ mod do_exec;
 pub(crate) mod do_exit;
 mod do_fork;
 mod do_getinfo;
+mod do_irqctl;
 mod do_privctl;
 mod do_safecopy;
 mod do_schedule;
@@ -190,7 +191,9 @@ pub fn kernel_call_sendrec(
 /// why `priv_table` is `&mut`). Slice 5.2's grant trio joins that arm for
 /// related but distinct reasons: `SYS_COPY` / `SYS_SAFECOPY` name other
 /// processes' address spaces, and `SYS_SETGRANT` — caller-local in effect —
-/// needs `&mut Priv`, which [`dispatch_caller_local`] cannot hand out. Every
+/// needs `&mut Priv`, which [`dispatch_caller_local`] cannot hand out. Slice
+/// 6.1's `SYS_IRQCTL` is caller-local for the same reason as `SYS_SETGRANT`:
+/// it refuses a shared slot and writes the caller's `Priv` (spec I5). Every
 /// other handler acts only on the caller, so it gets a single caller slot
 /// re-borrowed inside its arm (see [`dispatch_caller_local`]).
 fn kernel_call_dispatch(
@@ -238,6 +241,15 @@ fn kernel_call_dispatch(
                 msg,
             );
         }
+        SYS_IRQCTL => {
+            let caller_e = proc_table[caller_idx].endpoint;
+            return do_irqctl::do_irqctl(
+                &mut priv_table[caller_priv_id.as_usize()],
+                caller_nr,
+                caller_e,
+                msg,
+            );
+        }
         _ => {}
     }
 
@@ -259,12 +271,11 @@ fn dispatch_caller_local(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
     );
     match msg.m_type {
         SYS_GETINFO => do_getinfo::do_getinfo(caller, caller_priv, msg),
-        SYS_IRQCTL => stubs::do_irqctl(caller, caller_priv, msg),
         // SYS_VMCTL / SYS_SCHEDULE / SYS_SCHEDCTL / SYS_KILL / SYS_GETKSIG /
         // SYS_ENDKSIG / SYS_EXIT / SYS_FORK / SYS_EXEC / SYS_PRIVCTL / SYS_COPY /
-        // SYS_SAFECOPY / SYS_SETGRANT are handled in `kernel_call_dispatch` (they
-        // act on a target proc, or need the privilege table, so they need more
-        // than a single caller slot).
+        // SYS_SAFECOPY / SYS_SETGRANT / SYS_IRQCTL are handled in
+        // `kernel_call_dispatch` (they act on a target proc, or need the
+        // privilege table, so they need more than a single caller slot).
         SYS_SETALARM => do_setalarm::do_setalarm(caller, caller_priv, msg),
         SYS_TIMES => stubs::do_times(caller, caller_priv, msg),
         SYS_DIAGCTL => do_diagctl::do_diagctl(caller, caller_priv, msg),

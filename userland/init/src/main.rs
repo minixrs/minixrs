@@ -275,6 +275,10 @@ fn main() -> ! {
     // the fork that launched it, cleared by the `wait()` that reaps it; 0 is
     // "none" for the same reason as `probe_pid`.
     let mut fileio_pid = 0;
+    // `idle-probe` only: successful forks so far. One pass over
+    // [`EXEC_TARGETS`] execs each target once, then [`idle_park`] takes over.
+    #[cfg(feature = "idle-probe")]
+    let mut forks = 0usize;
 
     loop {
         // Chosen *before* the fork, so both halves of the SENDREC agree on it:
@@ -332,6 +336,13 @@ fn main() -> ! {
                     reported = true;
                     report_exec_stack(vfs, rd_i32(&w, 0));
                 }
+                #[cfg(feature = "idle-probe")]
+                {
+                    forks += 1;
+                    if forks == EXEC_TARGETS.len() {
+                        break;
+                    }
+                }
             }
             _ => {
                 // Transient fork failure (table full): back off briefly, retry.
@@ -340,6 +351,48 @@ fn main() -> ! {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "idle-probe")]
+    idle_park(pm, vfs)
+}
+
+/// The `idle-probe` ending (slice 6.1, spec I14): make the run queue empty.
+///
+/// The stock rotation never ends, so something user-side is always runnable
+/// and the kernel's idle loop is never entered. Under the feature, [`main`]
+/// stops forking after one pass over [`EXEC_TARGETS`] and lands here, which
+/// reaps every remaining child — `wait()` until PM answers an error, `ECHILD`
+/// once none is left — announces the park, and blocks in a call that never
+/// completes. From then on only a wake-up (RS's periodic alarm) makes anything
+/// runnable, which is what the kernel's `[idle] wake ok` marker proves.
+///
+/// **The blocking call is a `SENDREC` to PM that PM never answers.** It cannot
+/// be a `RECEIVE`: init holds the shared user privilege, whose trap mask admits
+/// `SENDREC` alone, so `RECEIVE(ANY)` fails at once with `ETRAPDENIED` and the
+/// park would spin. Nor is there a user call that legitimately suspends with
+/// nothing to wait on: `wait()` with no children answers `ECHILD`, and a
+/// console `read` answers `ENOSYS` until TTY has RX. So the message is
+/// `NOTIFY_MESSAGE`-typed, which PM's receive loop drops without a reply when
+/// it does not come from SYSTEM — a notification is never answered — leaving
+/// init blocked in the `SENDREC`'s receive half for good. It stays in a loop
+/// only so the park cannot fall through should that ever change; a spin here
+/// shows up as a missing `[idle] wake ok`.
+#[cfg(feature = "idle-probe")]
+fn idle_park(pm: Endpoint, vfs: Endpoint) -> ! {
+    use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
+
+    loop {
+        let mut w = pm_msg(PM_WAIT);
+        let rc = ipc_sendrec(pm, &mut w);
+        if rc != OK || w.m_type < 0 {
+            break;
+        }
+    }
+    report_line(vfs, b"minix.rs init: idle.park");
+    loop {
+        let mut m = pm_msg(NOTIFY_MESSAGE);
+        let _ = ipc_sendrec(pm, &mut m);
     }
 }
 

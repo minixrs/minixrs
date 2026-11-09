@@ -47,6 +47,19 @@ fn main() {
     // for enabled features. Off ⇒ skip `user_stub.S` assembly and build PM
     // stub-free so the two crates agree on `NR_STUB_PROCS`.
     let stubs = std::env::var_os("CARGO_FEATURE_BOOT_STUBS").is_some();
+    // The `idle-probe` feature (slice 6.1, spec I14) builds init with a
+    // rotation that ends, so the run queue can empty and the idle path is
+    // exercised. The demo stubs spin forever, so with them on the queue never
+    // empties and the boot would silently prove nothing: refuse the pair.
+    let idle_probe = std::env::var_os("CARGO_FEATURE_IDLE_PROBE").is_some();
+    if idle_probe && stubs {
+        panic!(
+            "the `idle-probe` feature needs a stub-free boot: build with \
+             `--no-default-features --features idle-probe`. The default-on \
+             `boot-stubs` demo stubs spin forever, so the run queue never empties \
+             and the idle path `idle-probe` exists to prove is never reached."
+        );
+    }
 
     match arch.as_str() {
         "aarch64" => {
@@ -88,7 +101,7 @@ fn main() {
             // the MXBI boot-image archive, and emit `BOOT_IMAGE_PATH` for
             // `boot_image` to `include_bytes!` (slice 4.2, generalizing the
             // slice-3.4 single-VM embed).
-            build_boot_image(&out_dir, stubs);
+            build_boot_image(&out_dir, stubs, idle_probe);
         }
         "x86_64" => {
             // Phase 8 territory -- nothing to assemble yet.
@@ -168,7 +181,7 @@ fn clang_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 /// which proc number; the proc numbers must match `kernel-shared/src/com.rs`.
 /// VM is built first so it takes ASID 1 and is enqueued first (its
 /// `RECEIVE(ANY)` blocks immediately, matching the pre-4.2 boot behavior).
-fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
+fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
     let manifest =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR unset"));
     let workspace = manifest.parent().expect("kernel manifest has no parent");
@@ -242,9 +255,11 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool) {
         //     `tools/mkfs-mfs` build-dependency — stays a one-dependency crate.
         //     Without this flag the nested build would produce a library and no
         //     ELF, and `build_server`'s existence assertion would fire.
+        //   * init's rotation ends under `idle-probe`, so the queue can empty.
         let extra: &[&str] = match *crate_name {
             "minixrs-pm" if !stubs => &["--no-default-features"],
             "minixrs-mfs" => &["--features", "server"],
+            "minixrs-init" if idle_probe => &["--features", "idle-probe"],
             _ => &[],
         };
         let elf = build_server(crate_name, crate_dir, workspace, extra);

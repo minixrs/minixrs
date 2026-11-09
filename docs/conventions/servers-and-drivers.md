@@ -267,7 +267,9 @@ into the MXBI archive like any server and the ordinary `userland.rs` load loop l
 `SRV_T`, and it is pointed at the shared user priv slot rather than a dedicated server-grade one
 (the `init_boot_image` special-case is in [kernel.md](./kernel.md)). So init SENDRECs its servers
 and **makes no kernel calls at all** — exactly the forked-child profile, which is what makes it a
-usable proof of the user-facing paths.
+usable proof of the user-facing paths. `USR_T` admits **SENDREC only**: a user-grade `ipc_receive`
+fails `ETRAPDENIED`. To block a user-grade process, SENDREC to a server that never replies (6.1's
+`idle_park`).
 
 `MF_PRIV_PROC` stays set on init's `mproc` seed (unkillable PID 1). That flag gates only the kill
 path — not fork, wait or getpid — so PM still serves init as an ordinary client.
@@ -427,15 +429,25 @@ that the obvious one-line version of it under-reports large frames by 7.5x (slic
 
 ### Replying, relaying, and register layouts
 
-Beyond the shared contracts above, two driver-specific rules:
+Beyond the shared contracts above, three driver-specific rules:
 
 - PL011 register offsets are **duplicated** in `kernel/src/arch/aarch64/uart.rs` and
   `drivers/tty/src/pl011.rs` and cannot be shared: the kernel crate is bare-metal-only and pinned by
   `forced-target`, so it can never be a user-space dependency, and a register layout is a hardware
   fact, not a shared ABI.
+- **QEMU 11.0.3's PL011 has no TX FIFO:** `INT_TX` is set on every `DR` write and cleared by a
+  `UARTICR` write. Acking with `UARTICR` instead of clearing `TXIM` re-fires on every byte printed
+  (83,741 interrupts in 60 s) while `irq ok` still prints; TTY's post-proof `irq FAIL extra` guard
+  is what catches it. Disarm it by clearing `TXIM`.
 - `drivers/tty` deliberately does **not** depend on `minixrs-driver-rt` (a 4-line placeholder) —
   Phase 6 makes that move, plus the `kernel/build.rs` watch entry (slice 5.3 — see
   [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+
+- **A driver identifies an interrupt by `m_source == boot_endpoint(HARDWARE)`, never by payload,**
+  and re-arms with `IRQ_ENABLE` only after draining and acknowledging at the device — the kernel
+  leaves the line masked until then, and a re-enable before the device is quiet re-enters at once
+  (slice 6.1 — see
+  [I12](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i12--one-pattern-for-tty-rx-virtio-console-and-virtio-blk))
 
 ### Block drivers
 

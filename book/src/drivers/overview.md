@@ -191,13 +191,62 @@ never clamp — a `CDEV_WRITE` longer than `CDEV_MAX_IO` still comes back report
 for `FS_READ`, so VFS sends one request and reports what came back. It existed only as a plan note
 until `/dev/zero` needed it: the 5.3 text said the two devices would be "new minors, not new
 requests", which is true of `/dev/null` and of writing `/dev/zero` and false of reading it. TTY does
-not serve it until Phase 6 gives it RX (`SYS_IRQCTL`), and answers it `ENOSYS` from its
-unknown-request arm until then — VFS routes a console `read()` there anyway, so Phase 6 changes TTY
-and nothing else.
+not serve it until Phase 6 gives it RX (slice 6.5; `SYS_IRQCTL` itself is live as of 6.1, see
+[Interrupts reach a driver](#interrupts-reach-a-driver-as-a-hardware-notification)), and answers it
+`ENOSYS` from its unknown-request arm until then — VFS routes a console `read()` there anyway, so
+Phase 6 changes TTY and nothing else.
 
 **Minors are a per-driver namespace.** TTY's console is 0; the memory driver's `/dev/null` and
 `/dev/zero` are CDEV minors 3 and 5 (MINIX 3's `NULL_DEV` and `ZERO_DEV`), on the same driver as
 BDEV minor 0's ramdisk. The request band, not the minor value, tells them apart.
+
+## Interrupts reach a driver as a `HARDWARE` notification
+
+Slice 6.1 gives a driver its interrupt line. The mechanism has three parts, all in the kernel, and
+one pattern in the driver.
+
+**Claiming.** A driver calls `SYS_IRQCTL` with `IRQ_SETPOLICY`, naming a raw GIC INTID (an SPI, `32
+<= vector < nr_intids`) and a `notify_id` in `0..=31`; the reply carries a 1-based hook id. Two
+gates apply: the caller's kernel-call mask must admit `SYS_IRQCTL`, and the vector must be on the
+caller's per-line allow-list (`Priv::irqs`), which the kernel fills at boot and which has no opt-out
+— an empty list denies every line. Today TTY holds exactly one entry, INTID 33 (the PL011). The hook
+table (`NR_IRQ_HOOKS` = 16) allows one owner per line, and a claim under the same `(owner,
+notify_id)` replaces that hook in place (answering with the same hook id). The claim unmasks the
+line at the GIC with priority `0x80`. A process sharing a privilege slot is refused (`EPERM`),
+because `int_pending` lives in the slot. `IRQ_RMPOLICY` masks the line and frees the hook;
+`IRQ_ENABLE` / `IRQ_DISABLE` unmask and mask it. `IRQ_REENABLE` (`0x001`) is defined but refused. A
+hook is also released, with its line masked, when its owner exits or `exec`s.
+
+**Delivery.** When a hooked SPI fires, `irq_dispatch` **masks the line at the distributor before the
+EOI**, sets the hook's `notify_id` bit in the owner's `int_pending`, and `deliver_irq` sends a
+`NOTIFY` from `HARDWARE`. The line is level-triggered; EOI on an unmasked line would re-enter
+immediately, and the driver cannot have quiesced the device yet. If the owner is blocked in
+`RECEIVE` the message is built at once; otherwise the notification is deferred through
+`notify_pending` and built by the owner's next `RECEIVE`. Either way the bitmap is *taken* — read
+and zeroed — so every line that fired in between arrives in one message, at payload `0..4`.
+
+**The driver pattern.** The line stays masked until the driver says otherwise, so the order inside
+the receive loop is load-bearing:
+
+```text
+m = receive(ANY)
+if m.m_source == boot_endpoint(HARDWARE) && m.m_type == NOTIFY_MESSAGE:
+    for each set bit in payload[0..4]:
+        drain the device           (RX FIFO until empty / walk the used ring)
+        acknowledge at the device  (whatever makes it drop its line)
+        irqctl(IRQ_ENABLE, hook)   (only now unmask)
+```
+
+A driver identifies the interrupt by the kernel-stamped `m_source`, never by payload: a process
+cannot forge `HARDWARE`, but it could set a payload bit. Re-enabling before the device is quiet
+would re-enter at once.
+
+**The kernel idles.** With the run queue empty, `schedule_next` no longer returns towards `eret`: it
+sets an idling flag, executes `wfi`, polls the GIC through `irq_dispatch` on the kernel stack with
+`PSTATE.I` still set, and tries again until a process is picked. The timer tick does only
+timekeeping while idling, and a due alarm is what wakes the system. The default boot never reaches
+this (init's rotation always leaves something runnable); the opt-in `idle-probe` kernel feature (a
+stub-free boot whose `init` parks) proves it with a one-shot `[idle] wake ok`.
 
 ## TTY
 

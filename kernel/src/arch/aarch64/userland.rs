@@ -67,9 +67,9 @@ use crate::proc::bitmap::{set_call_bit, set_sys_bit};
 #[cfg(feature = "boot-stubs")]
 use crate::proc::flags::{BILLABLE, PREEMPTIBLE, RTS_NO_PRIV, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
-use crate::proc::table::proc_slot_mut;
+use crate::proc::table::{priv_slot_mut, proc_slot_mut};
 #[cfg(feature = "boot-stubs")]
-use crate::proc::table::{priv_slot_mut, proc_index, proc_table_ref};
+use crate::proc::table::{proc_index, proc_table_ref};
 #[cfg(feature = "boot-stubs")]
 use crate::proc::{HeapWindow, Priv, Proc};
 
@@ -653,6 +653,25 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
             crate::arch::aarch64::uart::PL011_PHYS_BASE,
             mmu::device_attr_idx(),
         );
+
+        // The allow-list follows the mapping (slice 6.1, spec I4): the kernel
+        // decides which hardware a boot driver owns, so the one line TTY may
+        // claim with `SYS_IRQCTL` is pushed here, beside the page that makes
+        // that line's device reachable — the PL011's own SPI, INTID 33. The
+        // driver cannot widen it, and `do_irqctl` checks it unconditionally.
+        //
+        // SAFETY: single-threaded boot. The proc-slot borrow ends inside this
+        // statement (only the `priv_id` copy escapes), and `PRIV_TABLE` is a
+        // different static, so the `&mut Priv` below overlaps no other borrow.
+        let tty_priv_id = unsafe { proc_slot_mut(nr) }
+            .and_then(|p| p.priv_id)
+            .expect("TTY priv slot populated by init_boot_image");
+        // SAFETY: as above — the sole live reference into `PRIV_TABLE`.
+        let tty_priv = unsafe { priv_slot_mut(tty_priv_id) }.expect("TTY priv slot in range");
+        tty_priv
+            .irqs
+            .try_push(crate::arch::aarch64::uart::PL011_INTID)
+            .expect("TTY IRQ allow-list has room");
     }
 
     // The `memory` driver gets the boot ramdisk mapped into its address space, in

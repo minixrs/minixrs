@@ -12,7 +12,7 @@
 use core::sync::atomic::Ordering;
 
 use minixrs_kernel_shared::ProcNr;
-use minixrs_kernel_shared::com::NR_SYS_PROCS;
+use minixrs_kernel_shared::com::{HARDWARE, NR_SYS_PROCS, boot_endpoint};
 use minixrs_kernel_shared::endpoint::{ANY, Endpoint};
 use minixrs_kernel_shared::error::{EBADSRCDST, ELOCKED, ENOTREADY, OK};
 use minixrs_kernel_shared::ipc_const::RECEIVE;
@@ -73,8 +73,20 @@ pub fn mini_receive(
         // 1. Pending notification?
         if let Some(sender_e) = take_pending_notification(proc_table, priv_table, caller_idx, src_e)
         {
+            // A `HARDWARE` notification carries the caller's pending-interrupt
+            // bitmap, taken so it is zeroed (slice 6.1, spec I7): every line
+            // that fired since the notification was deferred arrives in this
+            // one message. `take_pending_notification` returned `Some`, so the
+            // caller has a priv slot. Every other notification carries `0`.
+            let irq_pending = if sender_e == boot_endpoint(HARDWARE) {
+                proc_table[caller_idx].priv_id.map_or(0, |pid| {
+                    core::mem::take(&mut priv_table[pid.as_usize()].int_pending)
+                })
+            } else {
+                0
+            };
             let caller = &mut proc_table[caller_idx];
-            build_notify_message(caller, sender_e);
+            build_notify_message(caller, sender_e, irq_pending);
             caller.misc_flags |= MF_DELIVERMSG;
             return OK;
         }

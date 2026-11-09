@@ -44,7 +44,7 @@ Kernel-call numbers are contiguous from `KERNEL_CALL = 0x600` (`kernel-shared/sr
 | `0x604` | `SYS_EXIT`     | live   | Full process teardown (address space, endpoint, slot).                  |
 | `0x605` | `SYS_COPY`     | stub   | Inter-space copy — placeholder.                                         |
 | `0x606` | `SYS_SAFECOPY` | stub   | Grant-validated copy — real grants are Phase 5.                         |
-| `0x607` | `SYS_IRQCTL`   | stub   | IRQ handler registration — driver era.                                  |
+| `0x607` | `SYS_IRQCTL`   | live   | Claim/release/mask/unmask a driver's interrupt line (see subcodes).     |
 | `0x608` | `SYS_VMCTL`    | live   | VM's paging-mechanism call (see subcalls below).                        |
 | `0x609` | `SYS_SCHEDULE` | live   | Set a process's priority and quantum.                                   |
 | `0x60A` | `SYS_SETALARM` | live   | Arm/cancel a per-process one-shot alarm.                                |
@@ -139,6 +139,27 @@ address-space-independent, so the frame lands before the AS is ever installed. A
 be built (`E2BIG`) or copied (`ENOMEM`) tears the fresh image back down and leaves the target on its
 old one. The `AT_*` values are the Linux/SysV ones and are deliberately **not** emitted by
 `gen-c-headers`: musl defines them itself.
+
+### `SYS_IRQCTL` subcodes
+
+MINIX 3's four subcodes at MINIX's values. Payload (offsets within `Message::payload`): `0..4`
+subcode, `4..8` vector (raw GIC INTID; `IRQ_SETPOLICY` only), `8..12` policy (must be 0), `12..16`
+`notify_id` for `IRQ_SETPOLICY` and the 1-based hook id for the rest; on `IRQ_SETPOLICY` success the
+hook id comes back at `12..16`.
+
+| Subcode         | Value | Effect                                                                          |
+| --------------- | ----: | ------------------------------------------------------------------------------- |
+| `IRQ_SETPOLICY` |     1 | Claim an SPI (`32 <= vector < nr_intids`), leave it unmasked, return a hook id. |
+| `IRQ_RMPOLICY`  |     2 | Mask the line and free the hook.                                                |
+| `IRQ_ENABLE`    |     3 | Unmask the hook's line — also the acknowledgement of a delivery.                |
+| `IRQ_DISABLE`   |     4 | Mask the hook's line.                                                           |
+
+Results: `OK`; `EINVAL` for a bad subcode, a vector outside the SPI range, a non-zero policy
+(`IRQ_REENABLE`, `0x001`, is defined and refused), a `notify_id` outside `0..=31`, or a hook id out
+of range or naming a free hook; `EPERM` for a shared privilege slot, a vector off the caller's
+allow-list, or a hook the caller does not own; `EBUSY` for a line already claimed by another hook;
+`ENOSPC` when all `NR_IRQ_HOOKS` (16) hooks are in use. The delivery side is in
+[Interrupts reach a driver](../drivers/overview.md#interrupts-reach-a-driver-as-a-hardware-notification).
 
 ### `SYS_VMCTL` subcalls
 

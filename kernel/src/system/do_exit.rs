@@ -16,8 +16,9 @@
 //! - wake every process blocked on the dead endpoint with `EDEADSRCDST`
 //!   (MINIX `clear_ipc_refs`): senders queued on the dead proc's `caller_q`
 //!   and receivers waiting on it specifically both resume with the error in
-//!   `x0`, and a dedicated-priv proc's pending-notification bits and
-//!   grant-table registration are purged;
+//!   `x0`, and a dedicated-priv proc's pending-notification bits,
+//!   grant-table registration and uncollected interrupt bits are purged;
+//! - release its interrupt hooks, masking each line (slice 6.1, spec I8);
 //! - tear down the address space: free every leaf frame ([`walk_leaves`]),
 //!   invalidate the ASID's TLB entries, free the page-table tree
 //!   ([`AddrSpace::destroy`]), and recycle the ASID;
@@ -115,6 +116,15 @@ pub(super) fn do_exit(
 
     unblock_dependents(proc_table, priv_table, target_idx, dead_e, nr, dead_priv_id);
 
+    // Release the dead proc's interrupt lines (slice 6.1, spec I8): mask each
+    // at the distributor and free its hook. A hook naming a stale endpoint
+    // would otherwise be notified — or, once the slot recycles, notify its next
+    // occupant (MINIX panics in `generic_handler` on exactly this). Keyed by
+    // endpoint and unconditional: only a dedicated slot can claim a line (I5),
+    // so a shared-slot proc simply owns none. Its `int_pending` is zeroed with
+    // the rest of the dedicated slot in `unblock_dependents`.
+    crate::irq_hooks::release_owner(dead_e);
+
     let (freed_pages, dev_pages) = teardown_addrspace(ttbr0_pa, dead_asid);
 
     free_slot(&mut proc_table[target_idx]);
@@ -146,7 +156,8 @@ pub(super) fn do_exit(
 /// When the dead proc *owns* a dedicated priv slot (`priv.proc_nr` names it),
 /// its footprint there is purged: its sender bit is cleared from every priv's
 /// `notify_pending`, its own map is zeroed, its grant-table registration is
-/// dropped (slice 5.2), and the slot is detached.
+/// dropped (slice 5.2), its uncollected interrupt bits are zeroed (slice 6.1),
+/// and the slot is detached.
 /// A shared priv slot (the `USER_PRIV_ID` case — every forked child
 /// aliases it) is deliberately left alone: its bitmap state belongs to all
 /// its live procs collectively, and `USR_T` (SENDREC-only) procs can never
@@ -205,6 +216,11 @@ fn unblock_dependents(
             // whatever now lives there.
             priv_table[pidx].grant_table = 0;
             priv_table[pidx].grant_entries = 0;
+            // Drop interrupts fired and never collected (slice 6.1, I8): the
+            // hooks they name were released in `do_exit`, and a recycled
+            // slot's new occupant must not collect them. (A deferred
+            // `HARDWARE` notify bit went with `notify_pending` above.)
+            priv_table[pidx].int_pending = 0;
             priv_table[pidx].proc_nr = None;
         }
     }

@@ -9,6 +9,13 @@ publish = false
 name = "minixrs-init"
 path = "src/main.rs"
 
+[features]
+# `idle-probe` (off by default) ends the fork rotation after one pass over
+# `EXEC_TARGETS`, reaps every child, and parks in a `SENDREC` PM never answers,
+# so the kernel's run queue can empty (slice 6.1, spec I14). Set only by
+# `kernel/build.rs`, from the kernel's own `idle-probe` feature.
+idle-probe = []
+
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minixrs-ipc" }

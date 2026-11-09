@@ -625,7 +625,7 @@ virtio-mmio only; the root backend is chosen by whether a virtio disk is attache
 kept as the second backend for the whole phase; one GPT disk built by a host Rust tool; and a
 framebuffer console plus a keyboard driver inside the milestone bar.
 
-- [ ] **6.1** `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
+- [x] **6.1** `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
 - [ ] **6.2** `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 - [ ] **6.3** `virtio-blk` behind BDEV + root backend selection
 - [ ] **6.4** `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
@@ -646,6 +646,9 @@ framebuffer console plus a keyboard driver inside the milestone bar.
 - `userland/coreutils/`: Multi-call binary -- ls, cat, cp, mv, rm, mkdir, rmdir, echo, wc, head,
   tail, grep, chmod, pwd, env, sleep, date, uname, kill, ps, true, false, test
 - **Milestone:** Login, navigate filesystem, run scripts
+- **Debt carried in from 6.1:** once the default boot idles, which `init`'s rotation prevents today,
+  make `[idle] wake ok` a required marker and delete the `idle-probe` feature
+  ([I14](superpowers/specs/2026-09-29-sys-irqctl-design.md#i14--the-idle-path-is-proved-under-an-opt-in-idle-probe-feature))
 
 ### Phase 8: x86_64 Port
 

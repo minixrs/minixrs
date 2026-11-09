@@ -23,6 +23,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub const PL011_PHYS_BASE: usize = 0x0900_0000;
 
+/// The PL011's GIC INTID on QEMU `virt`: SPI 1, so INTID 33 (spec I3/I9). The
+/// kernel never enables it itself — it is the one line `load_boot_server` puts
+/// on TTY's `SYS_IRQCTL` allow-list (slice 6.1, I4). Duplicated in
+/// `drivers/tty/src/pl011.rs` for the same reason as the offsets below.
+pub const PL011_INTID: u32 = 33;
+
 // These three offsets are deliberately duplicated in `drivers/tty/src/pl011.rs`,
 // the user-space console driver (slice 5.3). They cannot be shared: this crate is
 // bare-metal-only and pinned to `aarch64-unknown-none` by `forced-target`, so it
