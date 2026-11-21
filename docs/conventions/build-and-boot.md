@@ -54,9 +54,10 @@ timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 # (read by the firmware, by nothing in minix.rs), plus `-global virtio-mmio.force-legacy=false` and a
 # blank `target/vblk-blank.img` (2560 sectors, made with `dd` when absent or the wrong size) on a
 # `virtio-blk-device` pinned to `bus=virtio-mmio-bus.0`. The device is attached on every boot,
-# stub-free or not, so the kernel prints a `[virtio] ... skip=no-module for=vblk` line until the
-# driver ELF exists. Extra arguments are appended last, so a later `-global` overrides the default.
-# tests/qemu-boot.expected is the other holder of the sector count (the capacity= marker).
+# stub-free or not, so every boot prints `[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and the
+# virtio-blk driver's `[diag vblk] virtio ok ... capacity=2560 ...` line. Extra arguments are
+# appended last, so a later `-global` overrides the default. tests/qemu-boot.expected is the other
+# holder of the sector count (the capacity= marker).
 
 # Clean, stub-free boot for debugging (servers + init/worker only, no demo
 # stubs A-D): add --no-default-features to disable the `boot-stubs` feature.

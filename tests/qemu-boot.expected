@@ -9,18 +9,22 @@
 minix.rs booting on aarch64
 
 # Address-space bring-up: 10 servers + init (arch/aarch64/userland.rs). The tty
-# line is new in slice 5.3, the memory line in 5.7, and the mfs line in 5.8.
+# line is new in slice 5.3, the memory line in 5.7, the mfs line in 5.8, and the
+# vblk line (the virtio-blk driver, proc slot 11) in 6.2.
 #
 # The order below is `kernel/build.rs`'s `servers` array, and it is load-bearing
 # rather than cosmetic: DS first so every later DS_PUBLISH lands, then each
 # server before its first client's DS_RETRIEVE -- ds < tty < memory < mfs < vfs.
 # MEM precedes MFS (MFS's `bdev.ds` lookup) and MFS precedes VFS (VFS's `fs.ds`
 # lookup). Both lookups fall back to boot_endpoint and say so, so a reordering
-# turns those two markers red rather than hanging the boot.
+# turns those two markers red rather than hanging the boot. vblk sits between
+# memory and mfs because 6.3's DS chain will need `vblk < mfs`; nothing depends
+# on it in 6.2.
 [as] vm nr=7 ttbr0_pa=
 [as] ds nr=5 ttbr0_pa=
 [as] tty nr=4 ttbr0_pa=
 [as] memory nr=3 ttbr0_pa=
+[as] vblk nr=11 ttbr0_pa=
 [as] mfs nr=6 ttbr0_pa=
 [as] vfs nr=1 ttbr0_pa=
 [as] sched nr=9 ttbr0_pa=
@@ -28,7 +32,7 @@ minix.rs booting on aarch64
 [as] pm nr=0 ttbr0_pa=
 [as] init nr=10 ttbr0_pa=
 
-# ...plus the 4 boot stubs (14 [as] lines total)
+# ...plus the 4 boot stubs (15 [as] lines total)
 [as] stub A nr=15 ttbr0_pa=
 [as] stub B nr=16 ttbr0_pa=
 [as] stub C nr=17 ttbr0_pa=
@@ -952,3 +956,26 @@ minix.rs fileio: malloc ok
 # EPERM gate in the kernel's fill_virtio_mmio turns this into `getinfo.deny FAIL
 # case=0 rc=<ENOENT>`.
 [diag tty] getinfo.deny ok n=2
+
+# virtio-blk, the first consumer of driver-rt (spec T4, T5, T7, T12). The kernel's
+# boot probe finds the disk tools/qemu-run.sh pins to bus 0 -- transport slot 0,
+# PA 0xa000000 (measured, spec T14) -- and assigns it to vblk; `ver=2` is the
+# modern transport `-global virtio-mmio.force-legacy=false` selects. It then maps
+# the slot's register page at VIRTIO_MMIO_PAGE_VA (0x40001000; slot 0 sits at the
+# page's start) and the 16-page DMA run at DMA_VA. The run's PA comes from the
+# frame allocator, so it is not asserted.
+[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk
+[devmap] vblk va=0x4000
+[dma] vblk va=0xc0000000
+
+# The driver's verdict on T12's eight steps: the mapping, the DMA cookie (VA and PA
+# name the same memory), the magic/version/DeviceID, the negotiation, the
+# generation-stable capacity read, queue 0 enabled at the run's PA with DRIVER_OK
+# read back, and its interrupt claim plus the INTID+1 refusal. features= is exactly
+# VIRTIO_F_VERSION_1 (bit 32): virtio-blk requests nothing optional, so any other
+# bit means the negotiation accepted something it was not asked for. capacity= is
+# the blank image's sector count, VBLK_IMAGE_SECTORS in tools/qemu-run.sh -- this
+# is the other holder of that number; change the two together. qsize= is driver-
+# rt's QUEUE_SIZE (8) under the device's QueueNumMax. slot= is not asserted. A
+# failing step prints `virtio FAIL step=<step>` instead (forbidden).
+[diag vblk] virtio ok features=0x100000000 capacity=2560 qsize=8

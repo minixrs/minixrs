@@ -211,9 +211,11 @@ dependencies = [
 name = "minixrs-virtio-blk"
 version = "0.1.0"
 dependencies = [
+ "minixrs-abi-note",
  "minixrs-driver-rt",
  "minixrs-ipc",
  "minixrs-kernel-shared",
+ "minixrs-server-rt",
 ]
 
 [[package]]

@@ -206,7 +206,7 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
     // the right proc slot. `worker` is packed with proc_nr -1
     // (`com::EXEC_ONLY_PROC_NR`): it is not a boot server — the loader skips any
     // negative proc_nr — but it is resolvable by name for `SYS_EXEC` (slice 4.7).
-    let servers: [(&str, std::path::PathBuf, i32); 12] = [
+    let servers: [(&str, std::path::PathBuf, i32); 13] = [
         ("minixrs-vm", workspace.join("servers/vm"), 7), // VM_PROC_NR
         ("minixrs-ds", workspace.join("servers/ds"), 5), // DS_PROC_NR
         // **This ordering is load-bearing, and it is a chain, not a preference.**
@@ -225,8 +225,18 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
         // has a `boot_endpoint` fallback and a distinguishable diag line, so a
         // regression here turns CI red on the `bdev.ds ok` / `fs.ds ok` /
         // `vfs.ds ok` markers specifically rather than hanging.
+        //
+        // virtio-blk sits **after memory and before mfs** (slice 6.2, spec T12).
+        // Nothing depends on that in 6.2 — it publishes nothing to DS — but 6.3's
+        // DS chain will (`vblk < mfs`, MFS's root-device lookup), so the row goes
+        // where it will have to be.
         ("minixrs-tty", workspace.join("drivers/tty"), 4), // TTY_PROC_NR
         ("minixrs-memory", workspace.join("drivers/memory"), 3), // MEM_PROC_NR
+        (
+            "minixrs-virtio-blk",
+            workspace.join("drivers/virtio-blk"),
+            11,
+        ), // VBLK_PROC_NR
         ("minixrs-mfs", workspace.join("fs/mfs"), 6),      // MFS_PROC_NR
         ("minixrs-vfs", workspace.join("servers/vfs"), 1), // VFS_PROC_NR
         ("minixrs-sched", workspace.join("servers/sched"), 9), // SCHED_PROC_NR

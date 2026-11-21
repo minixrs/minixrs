@@ -109,3 +109,9 @@ minix.rs fileio: exit-reset FAIL
 # gated selector (GET_VIRTIO_MMIO, GET_DMA) that did not answer EPERM.
 [virtio] refuse
 [diag tty] getinfo.deny FAIL
+
+# Slice 6.2: virtio-blk's bring-up failed at the named step (spec T12), or the
+# device raised an interrupt nothing had asked for (`step=irq-extra`, reported
+# once and left masked). `[diag vblk] no device` is deliberately not forbidden:
+# it becomes meaningful when 6.3 has a second boot without the disk.
+[diag vblk] virtio FAIL
