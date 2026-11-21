@@ -32,8 +32,8 @@ use minixrs_kernel_shared::endpoint::{Endpoint, ProcNr};
 
 /// Table capacity. Slots `0..FORK_POOL_BASE` (= 19), reserved for boot servers
 /// (including the four virtio driver slots 11..=14) plus demo stubs, are seeded
-/// at init — though the stub slots 15..=18 are only
-/// *occupied* when the `boot-stubs` feature is on. The pool above that
+/// at init — though the stub slots 15..=18 are only *occupied* when the
+/// `boot-stubs` feature is on. The pool above that
 /// ([`FORK_POOL_BASE`]`..NR_MPROCS`) is where 4.6's fork allocates children.
 /// Sized from the shared [`NR_SERVED_PROCS`] ceiling so PM's mproc table, VM's
 /// `ClientRegions` table, and SCHED's policy table cannot silently disagree.

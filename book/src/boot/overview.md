@@ -105,10 +105,11 @@ Proc numbers 3 (`MEM`), 4 (`TTY`), 6 (`MFS`), and 8 (`PFS`) are reserved in
 they have no ELF binary.
 
 Alongside the boot modules, `userland_bootstrap` hand-installs four demo stubs (A–D) at proc numbers
-11–14. They are not part of the archive; they are small EL0 programs kept as a live regression
-battery for the IPC primitives, SCHED delegation, and the page-fault / SIGSEGV paths that `init` and
-`worker` do not exercise. So the boot trace shows eleven address-space (`[as]`) lines — six servers,
-`init`, and the four stubs — but not `worker`, which is never loaded until an `exec` names it.
+15–18 (slots 11–14 are reserved for the virtio drivers). They are not part of the archive; they are
+small EL0 programs kept as a live regression battery for the IPC primitives, SCHED delegation, and
+the page-fault / SIGSEGV paths that `init` and `worker` do not exercise. So the boot trace shows
+eleven address-space (`[as]`) lines — six servers, `init`, and the four stubs — but not `worker`,
+which is never loaded until an `exec` names it.
 
 ## Disk image and QEMU
 
