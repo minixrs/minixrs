@@ -17,7 +17,7 @@ use minixrs_kernel_shared::callnr::{
 use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME};
 use minixrs_kernel_shared::error::{EINVAL, ENOENT, EPERM, OK};
 use minixrs_kernel_shared::message::Message;
-use minixrs_kernel_shared::uspace::{DMA_RUN_PAGES, DMA_VA, RAMDISK_VA, VIRTIO_MMIO_PAGE_VA};
+use minixrs_kernel_shared::uspace::{DMA_RUN_BYTES, DMA_VA, RAMDISK_VA, VIRTIO_MMIO_PAGE_VA};
 use minixrs_kernel_shared::virtio::virtio_driver_index;
 
 use crate::arch::aarch64::virtio_mmio::assignment;
@@ -117,9 +117,9 @@ fn fill_virtio_mmio(caller: &Proc, msg: &mut Message) -> i32 {
     let Some(dev) = assignment(caller.nr) else {
         return ENOENT;
     };
-    let Some(va) = VIRTIO_MMIO_PAGE_VA.checked_add(dev.in_page_off) else {
-        return EINVAL;
-    };
+    let va = VIRTIO_MMIO_PAGE_VA
+        .checked_add(dev.in_page_off)
+        .expect("in_page_off is below one page");
     msg.payload[GETINFO_VIRTIO_VA_OFF..GETINFO_VIRTIO_VA_OFF + 8]
         .copy_from_slice(&va.to_ne_bytes());
     msg.payload[GETINFO_VIRTIO_INTID_OFF..GETINFO_VIRTIO_INTID_OFF + 4]
@@ -145,12 +145,10 @@ fn fill_dma(caller: &Proc, msg: &mut Message) -> i32 {
     let Some(dev) = assignment(caller.nr) else {
         return ENOENT;
     };
-    let Some(len) = DMA_RUN_PAGES.checked_mul(4096) else {
-        return EINVAL;
-    };
     msg.payload[GETINFO_DMA_VA_OFF..GETINFO_DMA_VA_OFF + 8].copy_from_slice(&DMA_VA.to_ne_bytes());
     msg.payload[GETINFO_DMA_PA_OFF..GETINFO_DMA_PA_OFF + 8]
         .copy_from_slice(&dev.dma_pa.to_ne_bytes());
-    msg.payload[GETINFO_DMA_LEN_OFF..GETINFO_DMA_LEN_OFF + 8].copy_from_slice(&len.to_ne_bytes());
+    msg.payload[GETINFO_DMA_LEN_OFF..GETINFO_DMA_LEN_OFF + 8]
+        .copy_from_slice(&DMA_RUN_BYTES.to_ne_bytes());
     OK
 }

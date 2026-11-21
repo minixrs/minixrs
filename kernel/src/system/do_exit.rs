@@ -125,6 +125,18 @@ pub(super) fn do_exit(
     // the rest of the dedicated slot in `unblock_dependents`.
     crate::irq_hooks::release_owner(dead_e);
 
+    // Fail-stop (slice 6.2, spec T7): a virtio driver's DMA run is ordinary RAM
+    // that `teardown_addrspace` would hand back to the allocator while the device
+    // may still DMA into it. Halt rather than corrupt memory. Keyed on the proc
+    // number here, not inside `teardown_addrspace`, which has none and is also
+    // run on scratch spaces (`device_teardown_selftest`).
+    assert!(
+        crate::arch::aarch64::virtio_mmio::assignment(nr).is_none(),
+        "proc nr={} owns a virtio device and DMA run: a virtio driver cannot exit until a \
+         device-reset path exists (Status written 0 before the run is freed)",
+        nr.get(),
+    );
+
     let (freed_pages, dev_pages) = teardown_addrspace(ttbr0_pa, dead_asid);
 
     free_slot(&mut proc_table[target_idx]);

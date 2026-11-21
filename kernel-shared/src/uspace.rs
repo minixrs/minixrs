@@ -140,6 +140,9 @@ pub const DMA_VA: u64 = DMA_WINDOW_BASE;
 /// Pages in each driver's contiguous DMA run (64 KiB).
 pub const DMA_RUN_PAGES: u64 = 16;
 
+/// Bytes in each driver's DMA run; const arithmetic, so overflow cannot compile.
+pub const DMA_RUN_BYTES: u64 = DMA_RUN_PAGES * USER_PAGE_SIZE;
+
 /// The kernel writes `pa ^ DMA_COOKIE` into the run's first eight bytes; the
 /// driver checks it against the PA `GET_DMA` reported, then zeroes it.
 pub const DMA_COOKIE: u64 = 0x444D_415F_6D78_7273;

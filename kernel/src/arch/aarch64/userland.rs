@@ -584,8 +584,9 @@ fn elf_errno(e: ElfError) -> i32 {
 /// ASID is allocated — so unlike `do_exit::teardown_addrspace` there is nothing
 /// to flush or recycle.
 ///
-/// The `prot.device` guard is unreachable today — the only device mapping in the
-/// system is installed by [`load_boot_server`] *after* `load_exec_image` has
+/// The `prot.device` guard is unreachable today — every device mapping in the
+/// system (TTY's UART page, a virtio driver's register page) is installed by
+/// [`load_boot_server`] *after* `load_exec_image` has
 /// already returned successfully, so no error path here can see one. It is here
 /// anyway because this is the leaf sweep that gets forgotten, and forgetting it
 /// is a kernel panic (`free_frame` rejects a non-RAM PA), not a leak.
@@ -778,8 +779,10 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
     // page, its interrupt line and its DMA run (slice 6.2, spec T5-T7). The TTY and
     // ramdisk arms above answer the four standing questions -- why not in
     // `load_exec_image`, why no TLB maintenance, why no cache maintenance, why the
-    // RAM frames are not the device-page problem -- and all four apply unchanged
-    // here, so they are not repeated. Every step `.expect()`s for the ramdisk
+    // RAM frames are not the device-page problem. The first three apply unchanged
+    // here. The fourth applies to the mapping invariant (the run is RAM, so
+    // `map_page_in`'s assert passes) but NOT to the run's lifetime: taking the
+    // normal `free_frame` path is exactly the hazard, see the DEBT paragraph below. Every step `.expect()`s for the ramdisk
     // arm's reason: a half-built mapping must panic before `sched::run`, not
     // become a driver that faults later.
     //
@@ -788,11 +791,13 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
     // the assignment's one INTID (T6). The DMA run is the `DMA_RUN_PAGES` frames
     // `probe` reserved, already stamped, mapped `Prot::RW_DATA` at `DMA_VA`.
     //
-    // DEBT (T7), recorded not fixed: `teardown_addrspace` frees every non-device
-    // leaf, so a driver that exits frees its DMA run while the device may still
-    // hold the addresses. Unreachable while boot drivers are `MF_PRIV_PROC` and
-    // nothing kills or restarts them; the slice that makes a driver restartable
-    // must reset the device before teardown or exempt the run.
+    // DEBT (T7): `teardown_addrspace` frees every non-device leaf, so a driver that
+    // exits or execs would free its DMA run while the device may still hold the
+    // addresses. Nothing kills or restarts boot drivers today, and `do_exit` and
+    // `do_exec` carry an `assert!` on `virtio_mmio::assignment` that turns the
+    // hazard into a halt. Removing those guards requires a device-reset path
+    // (Status register written 0) that runs before the run is freed, or exempting
+    // the run from the leaf sweep.
     if let Some(dev) = assignment(nr) {
         map_page_in(
             img.ttbr0_pa,
@@ -838,8 +843,12 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
                 uart,
                 "[devmap] {} va={:#x} pa={:#x} intid={}",
                 name,
-                VIRTIO_MMIO_PAGE_VA + dev.in_page_off,
-                dev.page_pa + dev.in_page_off,
+                VIRTIO_MMIO_PAGE_VA
+                    .checked_add(dev.in_page_off)
+                    .expect("virtio register VA"),
+                dev.page_pa
+                    .checked_add(dev.in_page_off)
+                    .expect("virtio register PA"),
                 dev.intid,
             );
             let _ = writeln!(

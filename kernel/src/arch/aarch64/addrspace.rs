@@ -48,8 +48,9 @@ pub struct Prot {
     /// EL0 may fetch from this page (code).
     pub executable: bool,
     /// This leaf maps MMIO, not RAM: Device memory rather than Normal-WB, and
-    /// **not** a frame the allocator owns. Slice 5.3's TTY UART page is the only
-    /// one today. Every teardown path must skip `free_frame` for such a leaf —
+    /// **not** a frame the allocator owns. The device leaves `load_boot_server`
+    /// pre-maps are TTY's UART page (slice 5.3) and a virtio driver's register
+    /// page (slice 6.2). Every teardown path must skip `free_frame` for such a leaf —
     /// see [`map_page_in`]'s total invariant.
     pub device: bool,
 }
