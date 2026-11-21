@@ -149,6 +149,11 @@ HHDM. The driver reads that word through `DMA_VA`, compares it with the physical
 device, that the address the driver holds and the address it will give the device name the same
 memory.
 
+The window is a convenience for finding memory the driver may use, not a fence around what its
+device may touch. With no IOMMU, a driver writes raw physical addresses into its descriptors, so the
+device can DMA anywhere; see
+[what the boundaries do not stop](../drivers/overview.md#what-the-boundaries-do-not-stop).
+
 Every leaf sweep frees non-device frames, which is exactly wrong for a run a device may still be
 writing to. Nothing can reach one today: a virtio driver halts the kernel if it exits or execs, and
 `VMCTL_PT_UNMAP` answers `EPERM` for an address in an assigned driver's DMA window (see

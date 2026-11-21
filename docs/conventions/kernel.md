@@ -386,10 +386,11 @@ follows is the engine and the policy.
   `free_frame`. It reads `MagicValue`, `Version`, `DeviceID` of QEMU's 32 transports (base
   `0x0A00_0000`, stride `0x200`, INTID `48 + slot`) and the decision is the pure
   `kernel-shared::virtio::assign` — the standing carve-out for predicates the kernel crate cannot
-  host-test. Its rules, in priority order: **a page with more than one *present* device assigns none
-  of them** (even when no driver claims the neighbour — a driver must reach one device's registers
-  and no other's); the lowest slot wins a `DeviceID`; a device with no boot module is reported and
-  left alone
+  host-test. Its rules, in the order the code applies them: **a page with more than one *present*
+  device assigns none of them** (even when no driver claims the neighbour — a driver must reach one
+  device's registers and no other's); a device no driver serves is reported and left alone; so is
+  one whose driver has no boot module; of the rest, the lowest slot wins a `DeviceID` and a later
+  one is a duplicate
 - **The probe prints, and its lines are markers.** One `[virtio] slot=… pa=… id=… ver=… drv=<name>`
   line per assigned device, `skip=no-driver | skip=no-module for=<n> | skip=duplicate for=<n>` for
   the unassigned, and one `[virtio] refuse slot=… id=… page=… shared` line **per refused device**.
@@ -400,7 +401,12 @@ follows is the engine and the policy.
   page `Prot::DEVICE_RW` at `uspace::VIRTIO_MMIO_PAGE_VA`, maps the DMA run `Prot::RW_DATA` at
   `DMA_VA`, and pushes the assignment's one INTID onto `Priv::irqs`: **the allow-list is exactly one
   line long** (I4: it follows the mapping), and a driver with no device has an empty list. It logs
-  `[devmap] <name> va=… pa=… intid=…` and `[dma] <name> va=… pa=… pages=…`
+  `[devmap] <name> va=… pa=… intid=…` and `[dma] <name> va=… pages=… pa=…`
+- **The boundaries are bug containment, not isolation.** There is no IOMMU on QEMU `virt` here, so a
+  driver with a `DRIVER_OK` queue writes raw physical addresses the device will DMA to: it can make
+  its device read or write any guest-physical page. A virtio driver is in the TCB for memory
+  integrity, and every `SRV_T` row (the four driver rows too) holds the full kernel-call mask. Do
+  not cite the one-page mapping, the one-entry allow-list or the DMA window as a security boundary
 - **The DMA window is the third kernel-owned window**: `DMA_WINDOW_BASE = 0xC000_0000` (one L1 slot,
   1 MiB), above the ramdisk window, so VM needs no edit; the same family of geometry asserts as the
   ramdisk window plus `RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE <= DMA_WINDOW_BASE`.

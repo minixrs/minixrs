@@ -59,9 +59,11 @@ address space, so one constant serves all four.
 ## The boot pre-map
 
 TTY has no way to *ask* for its register page. There is no `VMCTL_MAP_PHYS` subcall — a subcall
-letting a user-space server name an arbitrary physical address would hand it the whole machine — so
-decision D1 rejected VM-mediated device mapping and made each device mapping a kernel bring-up step.
-Slice 6.2's virtio pages are installed by the same arm, [described below](#virtio-drivers).
+letting a user-space server name an arbitrary physical address would hand it the whole machine (for
+the CPU's view of memory; a virtio driver's *device* has a wider reach, see
+[the trust model](#what-the-boundaries-do-not-stop)) — so decision D1 rejected VM-mediated device
+mapping and made each device mapping a kernel bring-up step. Slice 6.2's virtio pages are installed
+by the same arm, [described below](#virtio-drivers).
 
 The kernel installs it in `load_boot_server` (`arch/aarch64/userland.rs`), right after the ELF and
 stack are in place and just before the process is enqueued:
@@ -273,8 +275,9 @@ builds that machinery and proves it with one device, `virtio-blk`, answering.
 fork pool starts at 19. Every slot has a `BootEntry` row and a privilege slot, but only `vblk` has
 an ELF; the other three stay blocked on `RTS_NO_PRIV` like `PFS`. A boot process's priv id is its
 `IMAGE` index, so the four rows take priv ids 16–19 and the stubs' dedicated priv ids sit above the
-shared user slot (`USER_PRIV_ID` = 20), at 21–24; two compile-time asserts in
-`kernel/src/arch/aarch64/userland.rs` pin that ordering.
+shared user slot (`USER_PRIV_ID` = 20), at 21–24; two compile-time asserts pin that ordering:
+`USER_PRIV_ID >= N_IMAGE` in `kernel/src/proc/table.rs`, and the stub assert in
+`kernel/src/arch/aarch64/userland.rs` (gated on `boot-stubs`).
 
 ### The kernel finds the device
 
@@ -282,15 +285,16 @@ Nothing in a driver probes for hardware. `userland_bootstrap` runs
 `arch::aarch64::virtio_mmio::probe` before it loads any boot server. QEMU `virt` has 32 virtio-mmio
 transports at `0x0A00_0000`, `0x200` apart, SPI `16 + slot` (INTID `48 + slot`); the probe reads
 `MagicValue`, `Version` and `DeviceID` of each through the HHDM and hands the triples to a pure
-function, `kernel-shared::virtio::assign`, which applies three rules in order:
+function, `kernel-shared::virtio::assign`, which applies four rules in order:
 
 1. A 4 KiB page with more than one *present* device (`MagicValue` right, `DeviceID` non-zero)
    assigns none of them. Eight slots share a page and the kernel maps whole pages, so a driver would
    otherwise be handed a neighbour's registers — and that holds for a neighbour no driver claims,
    such as a stray `virtio-rng-device`.
-2. Of the devices left, the lowest slot wins each `DeviceID`; a later one is reported and left
-   alone.
+2. A device no driver serves (an unknown `DeviceID`) is reported and left alone.
 3. A device whose driver has no module in the boot archive is reported and left alone.
+4. Of the devices left, the lowest slot wins each `DeviceID`; a later one is reported and left
+   alone.
 
 The probe prints one line per present device, and a refusal is one line per refused device:
 
@@ -318,7 +322,7 @@ boot markers:
 
 ```text
 [devmap] vblk va=0x40001000 pa=0xa000000 intid=48
-[dma] vblk va=0xc0000000 pa=0x... pages=16
+[dma] vblk va=0xc0000000 pages=16 pa=0x...
 ```
 
 The driver learns the addresses through two more `SYS_GETINFO` selectors,
@@ -327,6 +331,19 @@ answer `EPERM` to any process that is not one of the four driver slots, and a dr
 device gets `ENOENT` — which is how a driver is told there is no disk, not an error: `virtio-blk`
 prints `no device` and idles. The register base a driver uses is the reply's VA, which already
 includes the device's offset inside its page.
+
+### What the boundaries do not stop
+
+The register mapping (one page), the interrupt allow-list (one line) and the DMA window (one 64 KiB
+run) stop a *buggy* driver from touching another device, another line or another process's memory
+*through the CPU*. They do not stop a hostile one. QEMU `virt` as run here has no IOMMU, and once a
+queue is enabled with `DRIVER_OK` the descriptor addresses the driver writes are raw guest-physical
+addresses that the device will read or write by DMA. A driver can therefore point its device at any
+physical page, the kernel's included. A virtio driver is in the trusted computing base for memory
+integrity, which fits how the image table treats it: every `SRV_T` row, the four driver rows
+included, gets the full kernel-call mask (`kernel/src/proc/table.rs`). The boundaries contain
+mistakes; isolating a driver from the rest of the machine needs an IOMMU, which this platform
+configuration does not offer.
 
 ### `driver-rt`
 
@@ -348,11 +365,12 @@ includes the device's offset inside its page.
   abandoned; `config_read` re-reads until the configuration generation is stable, a bounded number
   of times. Nothing in the crate waits on a register or a ring.
 - **The split virtqueue** (`queue.rs`) is `queue_layout` / `clamp_queue_size` (pure arithmetic over
-  a power-of-two size, at most `QUEUE_SIZE` = 8 entries) and `VirtQueue`, the driver's half of the
-  descriptor table and the available and used rings over a byte buffer it shares with the device.
-  The device is untrusted: a used element naming an out-of-range or not-in-flight chain head is
-  skipped, and the driver's own free list and chain lengths live outside the shared memory, so a
-  device that scribbles on the descriptor table cannot make the walk loop or leave the queue.
+  a power-of-two size up to 32768; `clamp_queue_size` and `VirtQueue::new` cap it at `QUEUE_SIZE` =
+  8 entries) and `VirtQueue`, the driver's half of the descriptor table and the available and used
+  rings over a byte buffer it shares with the device. The device is untrusted: a used element naming
+  an out-of-range or not-in-flight chain head is skipped, and the driver's own free list and chain
+  lengths live outside the shared memory, so a device that scribbles on the descriptor table cannot
+  make the walk loop or leave the queue.
 
 `unsafe` is confined to `mmio.rs` (volatile register accesses) and `queue.rs` (volatile accesses to
 the ring memory the device shares); `irq.rs` is the only piece that traps into the kernel. The rest

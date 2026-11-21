@@ -149,7 +149,9 @@ registers. `qemu-run.sh` therefore attaches every virtio device with an explicit
 page that holds **any second present device**, whether or not a driver claims it (a stray
 `virtio-rng-device` would otherwise be mapped into its page-mate's driver) — a `[virtio] refuse`
 line per device and an absent driver device, not a silently shared page. The per-driver register
-boundary is then real, and it is the command line that makes it so.
+boundary is then real as **bug containment** — a driver cannot be handed a neighbour's registers by
+mistake — and it is the command line that makes it so. It is not isolation: with no IOMMU a driver's
+device can DMA anywhere (debt 10).
 
 A device that is absent is not an error: the driver is told so, publishes nothing to DS, and idles.
 That is what makes H5 work.
@@ -168,7 +170,9 @@ The run is **not** a loop of `alloc_frame`. That call takes the free list first 
 time, so successive calls are contiguous only by accident — not once anything has been freed, and
 not across the end of a Limine region. The kernel instead **reserves one bump run per driver at
 boot, before the first `free_frame`**, from a single usable region, and asserts the run is
-contiguous. A new `mm::frame` entry point does this; nothing frees it.
+contiguous. A new `mm::frame` entry point does this; nothing frees it. The run confines a *buggy*
+driver's buffers, not a hostile one's descriptors: the device DMAs to whatever physical address the
+driver writes (debt 10).
 
 **One request in flight per driver.** A BDEV transfer is at most one 4096-byte block
 (`BDEV_MAX_IO`), so virtio-blk's bounce buffer is one page; the device's 512-byte sectors are the
@@ -449,17 +453,29 @@ mapping granule (none exists below 4 KiB), dropping a device from that boot, or 
    `pop_used` silently skips ids that are out of range or not in flight.
 5. **`VirtQueue<'a>` holds `&mut [u8]` over memory the device writes** (owner: 6.3). Once a queue
    outlives the bring-up this is a `noalias` question; a `NonNull` and a length would state the real
-   contract. 6.2 drops the `VirtQueue` before `queue_enable`; 6.3 must keep it.
+   contract. 6.2 drops the `VirtQueue` before `queue_enable`; 6.3 must keep it. Related:
+   `VirtQueue::add` and `Transport::queue_enable` are safe functions taking raw physical addresses,
+   so safe code can direct the device at any physical page. 6.3, the first caller of `add`, either
+   marks them `unsafe` with a stated contract or takes a typed DMA-buffer handle derived from
+   `DmaRun`.
 6. **`notify` has no barrier of its own** (owner: 6.3). `add`'s fence orders the ring writes; the
    `QueueNotify` MMIO write needs the contract stated or enforced when 6.3 first notifies.
 7. **The local iteration timeout** (owner: 6.3, which adds a second boot). The last required marker
    landed at 73–86% of the 300 s local timeout in two runs (36–43% of CI's 600 s).
-8. **`[dma] vblk` asserts only its prefix** (owner: 6.3). `pa=` depends on the firmware memory map
-   and `pages=16` is not asserted at boot; 6.3's first read proves the run's content instead.
+8. **`[dma] vblk` does not assert `pa=`** (owner: 6.3). The marker is `[dma] vblk va=0xc0000000
+   pages=16`; `pa=` follows it and depends on the firmware memory map, so it stays unasserted. 6.3's
+   first read proves the run's content instead.
 9. **A wrong register page and a missing `VERSION_1` are caught only indirectly** (owner: 6.4, which
    first requests an optional feature). On QEMU an empty slot reads good magic, so the `DeviceID`
    check is what refuses a page one off; and a driver that omits `VERSION_1` is *not* refused by
    QEMU, so only the exact `features=0x100000000` marker text and two host tests catch it.
+10. **No IOMMU: a virtio driver is in the TCB for memory integrity** (owner: Phase 8, or whichever
+    platform gains an IOMMU). A queue enabled with `DRIVER_OK` carries raw physical addresses the
+    device DMAs to, so the one-page register mapping, the one-entry allow-list and the 64 KiB DMA
+    window contain a buggy driver, not a hostile one. Every `SRV_T` image row, the four driver rows
+    included, gets the full kernel-call mask (`kernel/src/proc/table.rs`), the same statement from
+    the other side. Pay with an IOMMU (or an SMMU stage-2 per driver) and descriptor addresses the
+    kernel validates or translates.
 
 ### Slice 6.3: `virtio-blk` behind BDEV + root backend selection
 
