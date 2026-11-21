@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! Driver runtime library (IRQ line, virtio transport and negotiation; BDEV/CDEV protocol to come).
+//! Driver runtime library (IRQ line, virtio transport and negotiation, split virtqueue;
+//! BDEV/CDEV protocol to come).
+//!
+//! Every virtio driver's loop follows the same order (I12): wait for
+//! [`IrqLine::fired`], walk the used ring with [`VirtQueue::pop_used`] until it
+//! returns `None`, call [`Transport::interrupt_ack`], then [`IrqLine::rearm`].
+//! The queue takes no part in interrupt handling and never waits on the ring.
 
 // `no_std` for the real (freestanding) build, but a normal host crate under
 // `cargo test` so the pure logic gets host-runnable unit tests (as `server-rt`).
@@ -8,8 +14,13 @@
 
 pub mod irq;
 pub mod mmio;
+pub mod queue;
 pub mod transport;
 
 pub use irq::IrqLine;
 pub use mmio::{MmioError, MmioTransport};
+pub use queue::{
+    DESC_F_NEXT, DESC_F_WRITE, DmaRun, QUEUE_SIZE, QueueLayout, VirtQueue, clamp_queue_size,
+    queue_layout,
+};
 pub use transport::{QueueAddrs, Transport};
