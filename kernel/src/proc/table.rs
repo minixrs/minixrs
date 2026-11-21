@@ -15,7 +15,8 @@ use minixrs_kernel_shared::callnr::NR_KERN_CALLS;
 use minixrs_kernel_shared::com::{
     ASYNCM, CLOCK, DS_PROC_NR, HARDWARE, IDLE, INIT_PROC_NR, MEM_PROC_NR, MFS_PROC_NR,
     NR_BOOT_PROCS, NR_PROCS, NR_SYS_PROCS, NR_TASKS, PFS_PROC_NR, PM_PROC_NR, RS_PROC_NR,
-    SCHED_PROC_NR, SYSTEM, TTY_PROC_NR, VFS_PROC_NR, VM_PROC_NR, boot_endpoint,
+    SCHED_PROC_NR, SYSTEM, TTY_PROC_NR, VBLK_PROC_NR, VCON_PROC_NR, VFS_PROC_NR, VINPUT_PROC_NR,
+    VM_PROC_NR, VNET_PROC_NR, boot_endpoint,
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, NONE, endpoint_proc};
 use minixrs_kernel_shared::error::{EBADSRCDST, EDEADSRCDST};
@@ -135,7 +136,12 @@ struct BootEntry {
 }
 
 const N_IMAGE: usize = NR_TASKS + NR_BOOT_PROCS;
-const _: () = assert!(N_IMAGE == 16);
+const _: () = assert!(N_IMAGE == 20);
+// The shared user priv slot is never an image slot: a boot-image row's priv id
+// is its `IMAGE` index, so a `USER_PRIV_ID` inside `[0, N_IMAGE)` would collide
+// with a row's dedicated priv. Appending a row without moving `USER_PRIV_ID`
+// (and the stub priv ids above it) fails the build here.
+const _: () = assert!(USER_PRIV_ID.get() as usize >= N_IMAGE);
 
 static IMAGE: [BootEntry; N_IMAGE] = [
     // --- Kernel tasks (always runnable) -----------------------------------
@@ -275,7 +281,8 @@ static IMAGE: [BootEntry; N_IMAGE] = [
         quantum_ms: SRV_QUANTUM_MS,
         runnable: false,
     },
-    // init (PID 1) is an ordinary user process, not a system server (slice 4.8):
+    // init (PID 1) is an ordinary user process, not a system server (slice 4.8).
+    // It is no longer the last row: the four virtio driver rows follow it.
     // `USR_T` traps (SENDREC only), and `init_boot_image` points its proc slot at
     // the shared `USER_PRIV_ID` (ipc_to = {PM, VFS, VM}, empty kernel-call mask)
     // rather populating a dedicated server-grade priv slot. `priv_flags` here is *inert*
@@ -288,6 +295,46 @@ static IMAGE: [BootEntry; N_IMAGE] = [
         priv_flags: SYS_PROC | PREEMPTIBLE,
         trap_mask: USR_T,
         priority: INIT_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    // --- virtio drivers (slice 6.2) ---------------------------------------
+    // Appended after init. No boot module exists for them yet, so they stay
+    // blocked on RTS_NO_PRIV, like `pfs`. Their priv ids are their IMAGE
+    // indices (16..=19), which is why the stub priv ids sit above `USER_PRIV_ID`.
+    BootEntry {
+        nr: VBLK_PROC_NR,
+        name: b"vblk",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: VCON_PROC_NR,
+        name: b"vcon",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: VINPUT_PROC_NR,
+        name: b"vinput",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
+        quantum_ms: SRV_QUANTUM_MS,
+        runnable: false,
+    },
+    BootEntry {
+        nr: VNET_PROC_NR,
+        name: b"vnet",
+        priv_flags: SYS_PROC | PREEMPTIBLE,
+        trap_mask: SRV_T,
+        priority: SRV_Q,
         quantum_ms: SRV_QUANTUM_MS,
         runnable: false,
     },
@@ -368,10 +415,12 @@ pub fn init() {
 
 /// Shared privilege slot for ordinary user processes (slice 4.5) — MINIX 3's
 /// single user priv (`USER_PRIV_ID`), minus the dynamic id allocation. The
-/// boot image populates dedicated priv slots `[0, 15)`; init (PID 1, index 15)
-/// would have taken slot 15 but shares *this* slot instead (slice 4.8), so 15
-/// stays free. The demo stubs are kernel-installed at 16..=19
-/// (`arch::aarch64::userland`); 20 is the next free slot.
+/// boot image populates dedicated priv slots `[0, 20)` (a row's priv id is its
+/// `IMAGE` index, `NR_TASKS + nr`); init (PID 1, index 15) would have taken slot
+/// 15 but shares *this* slot instead (slice 4.8), so 15 stays free. The four
+/// virtio driver rows take 16..=19. This slot is therefore exactly `N_IMAGE`,
+/// and the demo stubs are kernel-installed above it at 21..=24
+/// (`arch::aarch64::userland`).
 /// `SYS_PRIVCTL(PRIVCTL_SET_USER)` points a frozen target here, and the 4.6
 /// fork path hands every forked child this same slot so fork can't exhaust the
 /// 64-slot `PRIV_TABLE`.

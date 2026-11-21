@@ -174,7 +174,7 @@ gates, not `build`.)
   and PM in lockstep. The feature is deliberately **not** on `kernel-shared`: a shared-crate default
   feature gets force-enabled by other dependents (`minixrs-ipc`, `server-rt`) via cargo **feature
   unification**, which would make it impossible to turn off — so `NR_STUB_PROCS` stays a constant
-  `4`, and `FORK_POOL_BASE` (= 15) is therefore stable: disabling stubs leaves slots 11–14
+  `4`, and `FORK_POOL_BASE` (= 19) is therefore stable: disabling stubs leaves slots 15–18
   **unoccupied**, it does **not** renumber the fork pool.
 - When a `--no-default-features` build doesn't actually drop a feature, suspect cargo **feature
   unification** — diagnose with `cargo tree -p <crate> --no-default-features -e features -i

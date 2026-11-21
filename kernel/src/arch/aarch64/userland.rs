@@ -37,8 +37,8 @@ use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
 #[cfg(feature = "boot-stubs")]
 use minixrs_kernel_shared::com::{
-    RS_PROC_NR, SCHED_PROC_NR, STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR, STUB_D_PROC_NR,
-    SYSTEM, VM_PROC_NR, boot_endpoint,
+    NR_SYS_PROCS, RS_PROC_NR, SCHED_PROC_NR, STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR,
+    STUB_D_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint,
 };
 
 use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
@@ -67,9 +67,9 @@ use crate::proc::bitmap::{set_call_bit, set_sys_bit};
 #[cfg(feature = "boot-stubs")]
 use crate::proc::flags::{BILLABLE, PREEMPTIBLE, RTS_NO_PRIV, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
-use crate::proc::table::{priv_slot_mut, proc_slot_mut};
 #[cfg(feature = "boot-stubs")]
-use crate::proc::table::{proc_index, proc_table_ref};
+use crate::proc::table::{USER_PRIV_ID, proc_index, proc_table_ref};
+use crate::proc::table::{priv_slot_mut, proc_slot_mut};
 #[cfg(feature = "boot-stubs")]
 use crate::proc::{HeapWindow, Priv, Proc};
 
@@ -108,22 +108,31 @@ pub const USER_STACK_VA_D: u64 = 0x0083_0000;
 // grow its heap, then touches it. The kernel needs no heap-window constant —
 // faults route to VM, which gates them on its per-proc region table.
 
-// Stub proc numbers (slots 11..=15, just past the boot image) live in
+// Stub proc numbers (slots 15..=18, just past the boot image) live in
 // `kernel-shared::com` since slice 4.5 — PM's mproc table seeds them, so the
 // kernel and PM must agree on one source.
 
-/// Privilege-table slots for the dedicated-priv stubs A–D. Boot image uses
-/// 0..=15; 16, 17, 18, and 19 are the first free entries. The next slot up
-/// (`proc::table::USER_PRIV_ID` = 20) is the shared USER priv that init (PID 1)
-/// and every forked child use — no stub owns it.
+/// Privilege-table slots for the dedicated-priv stubs A–D. A boot-image row's
+/// priv id is its `IMAGE` index, so the image owns `0..=19` (the four virtio
+/// driver rows are 16..=19) and the shared USER priv
+/// (`proc::table::USER_PRIV_ID` = 20, used by init (PID 1) and every forked
+/// child) sits at `N_IMAGE`. The stubs take the four slots above it, 21..=24,
+/// so a future image row can never be overwritten by `install_stub_privs`.
 #[cfg(feature = "boot-stubs")]
-const STUB_A_PRIV_ID: PrivId = PrivId::new(16);
+const STUB_A_PRIV_ID: PrivId = PrivId::new(USER_PRIV_ID.get() + 1);
 #[cfg(feature = "boot-stubs")]
-const STUB_B_PRIV_ID: PrivId = PrivId::new(17);
+const STUB_B_PRIV_ID: PrivId = PrivId::new(USER_PRIV_ID.get() + 2);
 #[cfg(feature = "boot-stubs")]
-const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
+const STUB_C_PRIV_ID: PrivId = PrivId::new(USER_PRIV_ID.get() + 3);
 #[cfg(feature = "boot-stubs")]
-const STUB_D_PRIV_ID: PrivId = PrivId::new(19);
+const STUB_D_PRIV_ID: PrivId = PrivId::new(USER_PRIV_ID.get() + 4);
+
+// The stub priv ids sit strictly above the shared USER priv (which is itself at
+// or above the image), and all four fit in the priv table.
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!(STUB_A_PRIV_ID.get() > USER_PRIV_ID.get());
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!((STUB_D_PRIV_ID.get() as usize) < NR_SYS_PROCS);
 
 // SPSR_EL1 to install on each stub's `eret`. Matches slice 2.4: IRQs
 // unmasked at EL0 (bit 7 = 0), debug + SError + FIQ masked. EL0t. Shared with
@@ -393,7 +402,7 @@ unsafe fn install_boot_stubs() {
 
     // 4. Install priv slots — unchanged from slice 2.6.
     // SAFETY: single-threaded boot; sequential mutable borrows on
-    // priv-table slots 16, 17, 18.
+    // priv-table slots STUB_A..D_PRIV_ID.
     unsafe { install_stub_privs() };
 
     // 5. Enqueue the runnable stubs A–D. (The fork-loop stub E was retired in
@@ -920,8 +929,8 @@ fn populate_stub_slot(
 
 /// Install priv slots for A, B, C. Unchanged from slice 2.6.
 ///
-/// SAFETY: single-threaded boot; touches priv-table slots 16, 17, 18
-/// sequentially.
+/// SAFETY: single-threaded boot; touches priv-table slots `STUB_A_PRIV_ID`,
+/// `STUB_B_PRIV_ID` and `STUB_C_PRIV_ID` sequentially.
 #[cfg(feature = "boot-stubs")]
 unsafe fn install_stub_privs() {
     // SAFETY: sequential mutable borrow.
@@ -985,7 +994,7 @@ unsafe fn install_stub_c_priv() {
 /// check).
 ///
 /// VM's own `ipc_to` was filled by `init_boot_image` only for the active boot
-/// priv slots `[0, n_active)` (≈ 0..15); stub D's slot is 19, so VM cannot
+/// priv slots `[0, n_active)` (0..20); stub D's slot is `STUB_D_PRIV_ID` (24), so VM cannot
 /// reply to D's SENDREC out of the box. This helper also opens that reverse
 /// direction (VM → D) as a separate, sequential priv-slot borrow.
 ///
@@ -1052,7 +1061,7 @@ unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId)
 /// the end of `userland_bootstrap`; proves each stub has a distinct
 /// per-proc address space.
 ///
-/// SAFETY: single-threaded boot; read-only borrows on proc slots 11..=14.
+/// SAFETY: single-threaded boot; read-only borrows on proc slots 15..=18.
 #[cfg(feature = "boot-stubs")]
 unsafe fn print_addrspace_summary() {
     use crate::arch::aarch64::uart::Pl011;

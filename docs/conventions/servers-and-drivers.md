@@ -157,7 +157,7 @@ that keeps the rest of the proof alive while only the `*.ds ok` marker for that 
 ## Privilege wiring
 
 `init_boot_image` fills a boot server's `ipc_to` only for active boot priv slots `[0, n_active)`
-(~0–15). A hand-installed stub in a higher priv slot (16+) that a server must *reply* to needs the
+(0–19). A hand-installed stub in a higher priv slot (21+) that a server must *reply* to needs the
 reverse `ipc_to` bit opened explicitly — see `install_stub_d_priv` opening VM→D after setting D→VM.
 
 The shared user priv slot is the same shape: `populate_user_priv`'s `USER_IPC_TO` widens

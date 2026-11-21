@@ -18,7 +18,7 @@
 //!
 //! `MAX_CLIENTS` is sized from the shared [`NR_SERVED_PROCS`] ceiling so the
 //! table covers the whole proc-number range the user-space servers track: the
-//! boot procs and stubs `0..15` plus PM's fork pool `[15, NR_SERVED_PROCS)`
+//! boot procs and stubs `0..19` plus PM's fork pool `[19, NR_SERVED_PROCS)`
 //! (`VM_FORK` records a child's inherited regions keyed by its proc number). A
 //! full `NR_PROCS`-slot table would burn hundreds of KiB of BSS the ELF loader
 //! must map at boot; the shared ceiling keeps it right-sized and in lockstep

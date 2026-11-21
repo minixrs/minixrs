@@ -256,7 +256,7 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
 ## Demo stubs
 
 - Adding a demo stub is discouraged: `NR_STUB_PROCS` feeds `FORK_POOL_BASE`, so a fifth stub shifts
-  init's forked children 15 → 16 and breaks checked-in markers. Put new probe behavior in an
+  init's forked children 19 → 20 and breaks checked-in markers. Put new probe behavior in an
   existing stub's prologue instead (slice 5.1 — see
   [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
 

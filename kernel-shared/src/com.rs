@@ -57,9 +57,25 @@ pub const PFS_PROC_NR: ProcNr = ProcNr::new(8);
 pub const SCHED_PROC_NR: ProcNr = ProcNr::new(9);
 pub const INIT_PROC_NR: ProcNr = ProcNr::new(10);
 
-/// One past the highest boot-server proc-number (`init` is the last slot
-/// allocated from the boot image).
-pub const NR_BOOT_PROCS: usize = (INIT_PROC_NR.get() as usize) + 1;
+// The four virtio driver slots (slice 6.2), appended after init. Each is a
+// boot-image row with its own proc number so a future driver binary only has to
+// be packed under the matching name; until it is, the slot stays blocked on
+// `RTS_NO_PRIV` like `PFS_PROC_NR`. virtio `DeviceID`s: blk 2, console 3,
+// input 18, net 1.
+
+/// virtio-blk driver (`DeviceID` 2) — `drivers/virtio-blk`, slice 6.2.
+pub const VBLK_PROC_NR: ProcNr = ProcNr::new(11);
+/// virtio-console driver (`DeviceID` 3) — slice 6.6.
+pub const VCON_PROC_NR: ProcNr = ProcNr::new(12);
+/// virtio-input driver (`DeviceID` 18) — slice 6.8.
+pub const VINPUT_PROC_NR: ProcNr = ProcNr::new(13);
+/// virtio-net driver (`DeviceID` 1) — slice 6.9.
+pub const VNET_PROC_NR: ProcNr = ProcNr::new(14);
+
+/// One past the highest boot-image proc-number: the last slot allocated from
+/// the boot image is `VNET_PROC_NR`, the final virtio driver (`init` is no
+/// longer last — the drivers are appended after it).
+pub const NR_BOOT_PROCS: usize = (VNET_PROC_NR.get() as usize) + 1;
 
 // Compile-time guarantees that the proc tables can hold every boot process.
 const _: () = assert!(NR_PROCS >= NR_BOOT_PROCS);
@@ -77,22 +93,22 @@ const _: () = assert!(NR_SYS_PROCS >= NR_BOOT_PROCS);
 // primitives, SCHED delegation, and the VM page-fault / SIGSEGV paths, none of
 // which init + worker exercise.
 //
-// Slots 11..=14 are reserved for the stubs regardless of the kernel/PM
+// Slots 15..=18 are reserved for the stubs regardless of the kernel/PM
 // `boot-stubs` feature: with the feature on (default) they are installed and
 // seeded, off they are simply left empty for a clean boot. `NR_STUB_PROCS` (and
 // hence `FORK_POOL_BASE`) is constant either way, so forked-child proc numbers
-// don't shift — only whether 11..=14 are occupied does.
+// don't shift — only whether 15..=18 are occupied does.
 // ---------------------------------------------------------------------------
 
 /// Stub A — SENDREC ping loop to stub B.
-pub const STUB_A_PROC_NR: ProcNr = ProcNr::new(11);
+pub const STUB_A_PROC_NR: ProcNr = ProcNr::new(15);
 /// Stub B — RECEIVE/SEND echo peer of stub A.
-pub const STUB_B_PROC_NR: ProcNr = ProcNr::new(12);
+pub const STUB_B_PROC_NR: ProcNr = ProcNr::new(16);
 /// Stub C — `SYS_GETINFO(GET_WHOAMI)` kernel-call loop (SCHED-delegated).
-pub const STUB_C_PROC_NR: ProcNr = ProcNr::new(13);
+pub const STUB_C_PROC_NR: ProcNr = ProcNr::new(17);
 /// Stub D — brk/mmap/munmap VM client; deliberately faults out-of-region
 /// after its munmap (slice 4.5) to exercise the SIGSEGV → PM kill path.
-pub const STUB_D_PROC_NR: ProcNr = ProcNr::new(14);
+pub const STUB_D_PROC_NR: ProcNr = ProcNr::new(18);
 
 /// Number of stub slots reserved just past the boot image (A–D; the fork-loop
 /// stub E was retired in slice 4.8). Constant regardless of the `boot-stubs`
@@ -171,6 +187,10 @@ mod tests {
             PFS_PROC_NR,
             SCHED_PROC_NR,
             INIT_PROC_NR,
+            VBLK_PROC_NR,
+            VCON_PROC_NR,
+            VINPUT_PROC_NR,
+            VNET_PROC_NR,
         ];
         for &p in &servers {
             assert!(p.get() >= 0, "server proc {p} should be non-negative");
@@ -209,10 +229,15 @@ mod tests {
     }
 
     #[test]
-    fn nr_boot_procs_covers_init() {
-        // `INIT_PROC_NR.get() as usize` is constant so the comparison is also
-        // checked statically via `const _: () = assert!(...)` below; this
-        // test keeps the invariant visible at test-discovery time.
-        const { assert!(NR_BOOT_PROCS > INIT_PROC_NR.get() as usize) };
+    fn nr_boot_procs_covers_the_last_driver() {
+        // The four virtio driver slots are appended after init, so the last boot
+        // slot is `VNET_PROC_NR`, not `INIT_PROC_NR`. Checked statically too.
+        const { assert!(NR_BOOT_PROCS == VNET_PROC_NR.get() as usize + 1) };
+        const { assert!(NR_BOOT_PROCS == 15) };
+    }
+
+    #[test]
+    fn fork_pool_keeps_thirteen_slots() {
+        const { assert!(NR_SERVED_PROCS - (NR_BOOT_PROCS + NR_STUB_PROCS) == 13) };
     }
 }
