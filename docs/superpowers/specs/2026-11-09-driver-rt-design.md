@@ -296,10 +296,12 @@ cheap proof that the VA the kernel reported is the device the kernel probed — 
 **Bring-up is one free function over the trait**, `negotiate(transport, wanted) -> Result<u64, _>`,
 so the sequence is written once for every device and every future transport: reset, `ACKNOWLEDGE`,
 `DRIVER`, read the device's features, fail unless `VIRTIO_F_VERSION_1` is offered, write `wanted ∩
-offered` plus `VERSION_1`, `FEATURES_OK`, **read status back** and fail if the device cleared it. On
-any failure it sets `FAILED`. `DRIVER_OK` is a separate call the driver makes after its queues are
-enabled. The decision inside — which bits to accept, what counts as failure — is a pure function
-tested on the host against a mock `Transport`.
+offered` plus `VERSION_1`, `FEATURES_OK`, **read status back** and fail if the device cleared it.
+(QEMU does not clear it for a missing `VERSION_1` — §6, mutation 7 — so the read-back is not what
+enforces `VERSION_1`; `accept_features` refusing a device that does not offer it is.) On any failure
+it sets `FAILED`. `DRIVER_OK` is a separate call the driver makes after its queues are enabled. The
+decision inside — which bits to accept, what counts as failure — is a pure function tested on the
+host against a mock `Transport`.
 
 `config_read` loops on `ConfigGeneration` until two reads agree, as the specification requires.
 
@@ -356,7 +358,8 @@ does. It does not reset the device or release anything on the way out.
 1. `GET_VIRTIO_MMIO`. `ENOENT` → print `[diag vblk] no device` and go idle. This is H5's healthy
    no-disk path, not a failure.
 2. `GET_DMA`; verify and clear the cookie (T7).
-3. `MmioTransport::new`; check `DeviceID == 2`.
+3. `MmioTransport::new` (checks the magic and the version); then check `DeviceID == 2`. On QEMU a
+   wrong register page is caught by the `DeviceID` check, not the magic (§6, mutation 3).
 4. `negotiate` with **no optional features** — `VIRTIO_F_VERSION_1` alone. 6.4 adds `FLUSH`.
 5. Read `capacity` (the first eight bytes of device configuration, in 512-byte sectors).
 6. Lay out and enable queue 0; `DRIVER_OK`; read status back.
@@ -421,20 +424,20 @@ depends on it, and each recorded in this document with its date as 6.1's were:
 **Measured (2026-11-21), QEMU 11.0.3, aarch64 `virt,gic-version=3`, stub-free boot, a probe reading
 the three registers of all 32 slots through the HHDM before `device_teardown_selftest`:**
 
-1. **Bus to slot.** `bus=virtio-mmio-bus.N` is slot `N`, address `0x0A00_0000 + N * 0x200`; there is
-   no reversal here. `virtio-blk-device` on bus 0 read at slot 0 (`DeviceID 2`) and
-   `virtio-rng-device` on bus 8 read at slot 8 (`DeviceID 4`), in different pages. So `BUS_VBLK =
-   0`.
+1. **Bus to slot.** `bus=virtio-mmio-bus.N` is slot `N`, address `0x0A00_0000 + N * 0x200`, measured
+   for buses 0 and 8 and inferred for the rest; there is no reversal here. `virtio-blk-device` on
+   bus 0 read at slot 0 (`DeviceID 2`) and `virtio-rng-device` on bus 8 read at slot 8 (`DeviceID
+   4`), in different pages. So `BUS_VBLK = 0`.
 2. **The HHDM reaches the transports.** All 32 reads, `0x0A00_0000` to `0x0A00_3E00`, completed with
    no fault.
 3. **Boot.** Limine booted from the `fat:rw:` drive and the kernel banner printed with the two
    devices attached, with no `bootindex` needed. Wall-clock from `cargo run` start to the banner
    (build already done): 8.1 s and 7.2 s with the two devices, 7.0 s and 7.2 s without; the detour
-   is inside the noise.
+   is well inside the budget (two samples per arm).
 4. **Empty and legacy transports.** With `force-legacy=false`, an empty slot reads magic
    `0x74726976`, `Version 2`, `DeviceID 0`, and the populated slots read `Version 2`. Without it,
    every slot, empty or populated, reads `Version 1`: the version-2-only driver sees the legacy
-   refusal, as T12 expects. Devices arrive at kernel entry already reporting their ids; the probe
+   refusal, as T12 expects. The `DeviceID` register read non-zero for the populated slots; the probe
    did not read `Status`, so firmware-left state is not recorded and `negotiate` resets regardless.
 
 ---
@@ -479,17 +482,17 @@ hang, not a `FAIL` line (the measurement under "Measured during execution" below
 configuration where the marker allows it. Predictions are predictions; what is recorded is what was
 seen.
 
-| Mutation                                                   | Predicted to move                                        |
-| ---------------------------------------------------------- | -------------------------------------------------------- |
-| drop the `Priv::irqs` push in the virtio arm               | step 7's claim answers `EPERM`; `virtio ok` absent       |
-| push `INTID + 1` as well                                   | step 7's refusal probe; a `FAIL` line                    |
-| map the page after the assigned one                        | step 3's magic check; a `FAIL` line                      |
-| map the DMA run one frame off                              | step 2's cookie; a `FAIL` line                           |
-| report a `pa` one frame off in `GET_DMA`                   | step 2's cookie                                          |
-| drop rule 1 of the probe (shared page)                     | the second refusal boot maps the page; `refuse` vanishes |
-| omit `VERSION_1` from the driver's feature write           | the status read-back; observed, not assumed              |
-| widen T8's gate to any caller                              | `getinfo.deny` becomes a `FAIL` line                     |
-| leave the stub priv ids at `16..=19` (T2), asserts removed | observed — which markers a clobbered driver priv moves   |
+| Mutation                                                   | Predicted to move                                                                                                                                          |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| drop the `Priv::irqs` push in the virtio arm               | step 7's claim answers `EPERM`; `virtio ok` absent                                                                                                         |
+| push `INTID + 1` as well                                   | step 7's refusal probe; a `FAIL` line                                                                                                                      |
+| map the page after the assigned one                        | observed: `step=id id=0` — empty slots read the magic ([measured](#6-verification))                                                                        |
+| map the DMA run one frame off                              | step 2's cookie; a `FAIL` line                                                                                                                             |
+| report a `pa` one frame off in `GET_DMA`                   | step 2's cookie                                                                                                                                            |
+| drop rule 1 of the probe (shared page)                     | the second refusal boot maps the page; `refuse` vanishes                                                                                                   |
+| omit `VERSION_1` from the driver's feature write           | observed: QEMU keeps `FEATURES_OK`; `virtio ok features=0x0`, caught by the exact `features=` marker text and two host tests ([measured](#6-verification)) |
+| widen T8's gate to any caller                              | `getinfo.deny` becomes a `FAIL` line                                                                                                                       |
+| leave the stub priv ids at `16..=19` (T2), asserts removed | observed — which markers a clobbered driver priv moves                                                                                                     |
 
 Host tests cover the probe's assignment rules, the negotiation decision, the queue layout and the
 ring discipline; before recording a mutation as uncovered by the boot, run `cargo test` under it.
@@ -542,9 +545,7 @@ No `[devmap] vblk`, no `[dma] vblk`.
 - **3 did not hold as predicted.** The page after the assigned one is the next 8 slots of the same
   transport block. Those slots are empty but their registers still read the virtio magic, with
   `DeviceID` 0, so the magic check passes and the **id check** is what refuses (`step=id id=0`). The
-  mutation is still caught, by a different step than the table named. The magic check is proved by
-  nothing in a QEMU boot that maps a real page. The step-3 claim in T12 should read "magic and id"
-  rather than "magic".
+  mutation is caught, by the id check; no boot that maps a real page exercises the magic check.
 - **4 and 5 differ in what the driver sees.** In 4 the run is mapped one frame off, so the first
   word read through the VA is an unstamped frame (`cookie=0x0`). In 5 the VA is right and the
   reported PA wrong, so the real stamp is read (`0x444d415f2d787273`) and compared against the wrong
@@ -579,11 +580,11 @@ No `[devmap] vblk`, no `[dma] vblk`.
   under the starved-boot rule is the low-throughput signature, but the host was not the cause: the
   control ran minutes before on the same machine, the missing set is the contiguous boot-tail from
   init's first fork (the "stopped early" shape), and a second run matched. The log ends in sampled
-  `[ipc]`/`[ksys]` lines from stub C alone, with nothing downstream moving. So the earlier "no
-  marker moves" finding was an artefact of the stub-free configuration (no stubs, no collision, no
-  driver in the slot to starve); with vblk live, the default boot does prove T2, as the original
-  sentence said, but as a **hang** with 47 missing markers, not a `FAIL` line. What this run does
-  not establish is which step of init's boot waits on vblk's handshake; that was not traced.
+  `[ipc]`/`[ksys]` lines from stub C alone, with nothing downstream moving. At Task 1, before any
+  driver ran in slots 11..=14, the same mutation moved no marker in either configuration; with vblk
+  live it hangs the default boot (47 markers missing, not a `FAIL` line) and still moves nothing
+  stub-free, where the stub priv ids do not exist. What this run does not establish is which step of
+  init's boot waits on vblk's handshake; that was not traced.
 - **9.** vblk sent `PM_EXIT` through `ipc_sendrec` after printing `virtio ok`. Observed, stub-free:
 
   ```text
