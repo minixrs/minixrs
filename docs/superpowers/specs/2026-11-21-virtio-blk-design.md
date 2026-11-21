@@ -1,6 +1,6 @@
 # Slice 6.3 — `virtio-blk` behind BDEV + root backend selection
 
-**Date:** 2026-11-21 **Status:** design, pending review **Branch:** `feature/6.3-virtio-blk`
+**Date:** 2026-11-21 **Status:** approved 2026-11-21 **Branch:** `feature/6.3-virtio-blk`
 **Predecessor:** slice 6.2 (`driver-rt`, PR #71) **Tracker:**
 [`docs/plans/phase-6-virtio.md`](../../plans/phase-6-virtio.md) slice 6.3
 
@@ -217,7 +217,10 @@ then the diff. See B11 for the budget.
 
 ### B11 — measure first
 
-Task 0 of the plan, before any design-dependent code:
+Each measurement is taken at the first point it can be, and before anything is built on its answer.
+Only the control (2) and the merge-base half of the budget (1) can be taken before the driver serves
+a request, and those are Task 0 of the plan; the other items need a disk boot and belong to the task
+that first produces one.
 
 1. **Budget.** The disk boot's last required marker as a fraction of a fixed-timeout log, against
    the merge base ([`ci.md`](../../conventions/ci.md)'s method). This decides the per-boot timeout,
