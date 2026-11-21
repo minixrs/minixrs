@@ -48,7 +48,8 @@ use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
 #[cfg(feature = "boot-stubs")]
 use minixrs_kernel_shared::uspace::USER_REGION_LIMIT;
 use minixrs_kernel_shared::uspace::{
-    RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA, USER_STACK_BASE, USER_STACK_BYTES, USER_STACK_TOP,
+    DMA_RUN_PAGES, DMA_VA, RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA, USER_STACK_BASE,
+    USER_STACK_BYTES, USER_STACK_TOP, VIRTIO_MMIO_PAGE_VA,
 };
 
 use minixrs_kernel_shared::error::{EFAULT, ENOEXEC, ENOMEM};
@@ -58,6 +59,7 @@ use crate::arch::aarch64::asid::alloc_asid;
 #[cfg(feature = "boot-stubs")]
 use crate::arch::aarch64::mmu::flush_icache_range;
 use crate::arch::aarch64::mmu::{self, PAGE_SIZE};
+use crate::arch::aarch64::virtio_mmio::assignment;
 use crate::boot_image::elf::{ElfError, ElfSource};
 #[cfg(feature = "boot-stubs")]
 use crate::mm::phys_to_hhdm;
@@ -770,6 +772,82 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
             blob.len(),
             pages,
         );
+    }
+
+    // A boot driver the virtio probe assigned a device gets that device's register
+    // page, its interrupt line and its DMA run (slice 6.2, spec T5-T7). The TTY and
+    // ramdisk arms above answer the four standing questions -- why not in
+    // `load_exec_image`, why no TLB maintenance, why no cache maintenance, why the
+    // RAM frames are not the device-page problem -- and all four apply unchanged
+    // here, so they are not repeated. Every step `.expect()`s for the ramdisk
+    // arm's reason: a half-built mapping must panic before `sched::run`, not
+    // become a driver that faults later.
+    //
+    // The register page is `Prot::DEVICE_RW` at `VIRTIO_MMIO_PAGE_VA` (the driver
+    // adds `in_page_off`, reported by `GET_VIRTIO_MMIO`). The allow-list is exactly
+    // the assignment's one INTID (T6). The DMA run is the `DMA_RUN_PAGES` frames
+    // `probe` reserved, already stamped, mapped `Prot::RW_DATA` at `DMA_VA`.
+    //
+    // DEBT (T7), recorded not fixed: `teardown_addrspace` frees every non-device
+    // leaf, so a driver that exits frees its DMA run while the device may still
+    // hold the addresses. Unreachable while boot drivers are `MF_PRIV_PROC` and
+    // nothing kills or restarts them; the slice that makes a driver restartable
+    // must reset the device before teardown or exempt the run.
+    if let Some(dev) = assignment(nr) {
+        map_page_in(
+            img.ttbr0_pa,
+            VIRTIO_MMIO_PAGE_VA,
+            dev.page_pa,
+            Prot::DEVICE_RW,
+        )
+        .expect("virtio register page pre-map");
+
+        // SAFETY: single-threaded boot. The proc-slot borrow ends inside this
+        // statement (only the `priv_id` copy escapes), and `PRIV_TABLE` is a
+        // different static, so the `&mut Priv` below overlaps no other borrow.
+        let drv_priv_id = unsafe { proc_slot_mut(nr) }
+            .and_then(|p| p.priv_id)
+            .expect("virtio driver priv slot populated by init_boot_image");
+        // SAFETY: as above -- the sole live reference into `PRIV_TABLE`.
+        let drv_priv = unsafe { priv_slot_mut(drv_priv_id) }.expect("driver priv slot in range");
+        drv_priv
+            .irqs
+            .try_push(dev.intid)
+            .expect("virtio driver IRQ allow-list has room");
+
+        for page in 0..DMA_RUN_PAGES {
+            let off = page.checked_mul(PAGE_SIZE as u64).expect("DMA offset");
+            map_page_in(
+                img.ttbr0_pa,
+                DMA_VA.checked_add(off).expect("DMA VA"),
+                dev.dma_pa.checked_add(off).expect("DMA PA"),
+                Prot::RW_DATA,
+            )
+            .expect("virtio DMA page map");
+        }
+
+        // SAFETY: single-threaded boot; console write only. The name borrow is
+        // read-only and ends with the statement.
+        unsafe {
+            let p = proc_slot_mut(nr).expect("server proc slot in range");
+            let name = core::str::from_utf8(&p.name)
+                .unwrap_or("?")
+                .trim_end_matches('\0');
+            let mut uart = Pl011::new();
+            let _ = writeln!(
+                uart,
+                "[devmap] {} va={:#x} pa={:#x} intid={}",
+                name,
+                VIRTIO_MMIO_PAGE_VA + dev.in_page_off,
+                dev.page_pa + dev.in_page_off,
+                dev.intid,
+            );
+            let _ = writeln!(
+                uart,
+                "[dma] {} va={:#x} pa={:#x} pages={}",
+                name, DMA_VA, dev.dma_pa, DMA_RUN_PAGES,
+            );
+        }
     }
 
     // SAFETY: single-threaded boot; no other PROC_TABLE / RUNQ borrow is live.

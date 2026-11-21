@@ -99,7 +99,6 @@ impl BootImage {
 
     /// The ELF payload for a boot proc number, or `None`. Symmetric with
     /// [`module_by_name`](Self::module_by_name).
-    #[allow(dead_code)] // used by later Phase-4 slices (RS restart, exec)
     pub fn module_by_proc_nr(&self, nr: ProcNr) -> Option<&'static [u8]> {
         (0..self.count).map(|i| self.record(i)).find_map(
             |(p, _, elf)| {

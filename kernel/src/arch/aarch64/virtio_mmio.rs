@@ -38,7 +38,6 @@ pub const VIRTIO_MMIO_SLOT0_INTID: u32 = 48;
 /// Slots sharing one 4 KiB page.
 const SLOTS_PER_PAGE: usize = 4096 / VIRTIO_MMIO_SLOT_STRIDE as usize;
 
-#[allow(dead_code)] // fields consumed by the load_boot_server arms (later 6.2 tasks)
 /// What the probe decided for one driver: where its device is and its DMA run.
 #[derive(Clone, Copy)]
 pub struct VirtioDev {
@@ -175,7 +174,6 @@ pub unsafe fn probe() {
     }
 }
 
-#[allow(dead_code)] // first caller is the load_boot_server arm (later 6.2 task)
 /// The device and DMA run the probe assigned to boot driver `nr`, if any.
 pub fn assignment(nr: ProcNr) -> Option<VirtioDev> {
     let d = virtio_driver_index(nr)?;

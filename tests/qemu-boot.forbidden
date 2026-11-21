@@ -102,3 +102,10 @@ minix.rs fileio: exit-reset FAIL
 # names the first battery row whose result code was wrong, with rc= as returned.
 [diag tty] irq.deny FAIL
 [diag tty] irq FAIL
+
+# Slice 6.2: the virtio boot probe refused a device whose register page is shared
+# with another transport (spec T4 rule 1), and TTY's GETINFO denial battery
+# disagreed with the kernel: `getinfo.deny FAIL case=<i> rc=<rc>` names the first
+# gated selector (GET_VIRTIO_MMIO, GET_DMA) that did not answer EPERM.
+[virtio] refuse
+[diag tty] getinfo.deny FAIL

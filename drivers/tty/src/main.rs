@@ -57,15 +57,39 @@ mod pl011;
 use minixrs_ipc::ipc_send;
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    CDEV_MAX_IO, CDEV_WRITE, NOTIFY_IRQ_PENDING_OFF, SAFECOPY_FROM, SYS_GETINFO_NAME_LEN,
+    CDEV_MAX_IO, CDEV_WRITE, GET_DMA, GET_VIRTIO_MMIO, NOTIFY_IRQ_PENDING_OFF, SAFECOPY_FROM,
+    SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{HARDWARE, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
-use minixrs_kernel_shared::error::{ENOSYS, OK};
+use minixrs_kernel_shared::error::{ENOSYS, EPERM, OK};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minixrs_server_rt::{
-    SefConfig, buf_addr, rd_i32, sef_publish_to_ds, sef_startup, sys_safecopy,
+    SefConfig, buf_addr, diag_fmt, rd_i32, sef_publish_to_ds, sef_startup, sys_getinfo,
+    sys_safecopy,
 };
+
+/// The GETINFO selectors gated to the virtio drivers; TTY is not one, so each
+/// must answer `EPERM` (slice 6.2, spec T8).
+const GETINFO_DENIED: [i32; 2] = [GET_VIRTIO_MMIO, GET_DMA];
+
+/// Ask the kernel for each of [`GETINFO_DENIED`] and print one verdict line.
+#[cfg_attr(test, allow(dead_code))]
+fn getinfo_deny_probe() {
+    let mut m = Message {
+        m_source: 0,
+        m_type: 0,
+        payload: [0u8; 96],
+    };
+    for (i, &sel) in GETINFO_DENIED.iter().enumerate() {
+        let rc = sys_getinfo(sel, &mut m);
+        if rc != EPERM {
+            diag_fmt(format_args!("getinfo.deny FAIL case={i} rc={rc}"));
+            return;
+        }
+    }
+    diag_fmt(format_args!("getinfo.deny ok n={}", GETINFO_DENIED.len()));
+}
 
 /// The banner TTY writes straight to the UART once its device mapping is proven
 /// usable from EL0.
@@ -105,6 +129,8 @@ fn main() -> ! {
             core::hint::spin_loop()
         }
     });
+
+    getinfo_deny_probe();
 
     // Claim the PL011's interrupt line and prove the call's refusals, then make
     // the line fire (slice 6.1). A failure prints its own `[diag tty] irq…FAIL`

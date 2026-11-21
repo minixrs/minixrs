@@ -44,7 +44,8 @@ use crate::payload::{rd_i32, wr_i32, wr_u64};
 ///
 /// Returns `OK`, or a negative errno — `EINVAL` for an unknown selector, `EPERM`
 /// for one the caller is not allowed to ask (`GET_RAMDISK` is gated on the
-/// `memory` driver).
+/// `memory` driver; `GET_VIRTIO_MMIO` and `GET_DMA` are gated on the four virtio
+/// driver procs, and answer `ENOENT` to one the probe gave no device).
 pub fn sys_getinfo(request: i32, m: &mut Message) -> i32 {
     m.m_source = 0;
     m.m_type = SYS_GETINFO;

@@ -942,3 +942,13 @@ minix.rs fileio: malloc ok
 # exactly IRQ_PROOF_ROUNDS notifications, so TTY reports any extra one as
 # `[diag tty] irq FAIL extra bits=` (forbidden in qemu-boot.forbidden) and leaves the line masked.
 [diag tty] irq ok rounds=2
+
+# ---------------------------------------------------------------------------
+# Slice 6.2: the virtio driver contract -- GETINFO selectors gated to the drivers.
+# ---------------------------------------------------------------------------
+
+# TTY is not a virtio driver, so GET_VIRTIO_MMIO and GET_DMA must both answer EPERM.
+# n=2 is GETINFO_DENIED.len(), so it is asserted. Mutation-tested: dropping the
+# EPERM gate in the kernel's fill_virtio_mmio turns this into `getinfo.deny FAIL
+# case=0 rc=<ENOENT>`.
+[diag tty] getinfo.deny ok n=2
