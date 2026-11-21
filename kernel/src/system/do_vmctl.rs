@@ -121,10 +121,10 @@ fn pt_map(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut Me
         // Always Normal-WB: **VM may not mint device mappings.** D1 rejected a
         // VM-mediated `VMCTL_MAP_PHYS` for Phase 5 — a subcall that let a
         // user-space server name an arbitrary physical address would hand it the
-        // whole machine, and the one device mapping Phase 5 needs (TTY's UART) is
-        // installed by the kernel at boot instead. Revisit when Phase 6's
-        // virtio-mmio drivers need to map their own register pages, and gate it on
-        // a per-driver PA whitelist in `Priv` when you do.
+        // whole machine, and every device mapping (TTY's UART page, a virtio
+        // driver's register page) is installed by the kernel at boot instead.
+        // Revisit if a driver is ever started after boot, and gate it on a
+        // per-driver PA whitelist in `Priv` when you do.
         device: false,
     };
 

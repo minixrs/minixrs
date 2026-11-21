@@ -2,8 +2,9 @@
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! The virtio-mmio **version 2** (modern) transport (slice 6.2, spec T10).
 //!
-//! The only `unsafe` in the crate: every access is a volatile, aligned, 32-bit
-//! load or store, because the page is Device memory. 64-bit values travel as
+//! The crate's only register `unsafe` (`queue.rs` has its own, for the shared ring
+//! memory): every access is a volatile, aligned, 32-bit load or store, because the
+//! page is Device memory. 64-bit values travel as
 //! low/high pairs. The legacy (version 1) layout is not supported.
 
 use crate::transport::{QueueAddrs, Transport};

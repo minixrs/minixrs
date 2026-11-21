@@ -284,8 +284,9 @@ pub unsafe fn userland_bootstrap() {
 /// Build a throwaway address space holding exactly one device leaf, tear it down
 /// with the real `do_exit::teardown_addrspace`, and assert the outcome.
 ///
-/// **Why this exists.** TTY is the only process with a device mapping, and TTY
-/// never exits — so without this, `teardown_addrspace`'s `prot.device` arm would
+/// **Why this exists.** The only processes with a device mapping are TTY and the
+/// virtio drivers, and none of them exits (a virtio driver's exit halts in
+/// `do_exit`) — so without this, `teardown_addrspace`'s `prot.device` arm would
 /// be dead code sitting on a live landmine. And the failure mode is not a leak: a
 /// missing guard makes `free_frame` panic on the UART's PA, killing the kernel.
 /// So the arm is exercised deterministically at boot, where a regression shows up

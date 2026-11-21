@@ -155,9 +155,8 @@ pub struct IrqProof {
 
 impl IrqProof {
     /// Start the proof on `line` (the result of [`claim_and_probe`]) by
-    /// setting `TXIM`, which makes the PL011 raise its line. `None` is a failed
-    /// claim, already reported: there is no line to prove, so `TXIM` stays
-    /// clear and `None` comes back.
+    /// setting `TXIM`, which makes the PL011 raise its line. A `None` line is a
+    /// failed claim, already reported: `TXIM` stays clear and there is no proof.
     pub fn start(line: Option<IrqLine>) -> Option<Self> {
         let line = line?;
         pl011::set_txim(true);

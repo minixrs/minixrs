@@ -21,8 +21,9 @@
 //! A failing step prints `virtio FAIL step=<step> …` and abandons the rest without
 //! resetting the device or releasing anything; a failure after `negotiate`
 //! succeeded and before `DRIVER_OK` (config, queue) also sets `FAILED` through
-//! `driver-rt`'s `fail`. The driver still enters its receive loop, degraded. It never exits: the kernel halts if a process holding
-//! a virtio assignment exits or execs (the DMA-run debt, T7).
+//! `driver-rt`'s `fail`. The driver still enters its receive loop, degraded. It
+//! never exits: the kernel halts if a process holding a virtio assignment exits
+//! or execs (the DMA-run debt, T7).
 //!
 //! The loop publishes nothing to DS (6.3 decides who carries a root) and answers
 //! every request `ENOSYS`. Nothing is submitted in 6.2, so a `HARDWARE`

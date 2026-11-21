@@ -99,9 +99,9 @@ const _: () = assert!(REGION_LIMIT < USER_STACK_BASE);
 /// aarch64 4 KiB page.
 const PAGE_SIZE: u64 = 4096;
 
-/// Proc-number range the table can key. Boot procs and stubs occupy `0..15`; PM
+/// Proc-number range the table can key. Boot procs and stubs occupy `0..19`; PM
 /// allocates forked children from the pool above that (kernel proc-nr = PM mproc
-/// slot, `[15, NR_SERVED_PROCS)` — see `servers/pm/src/mproc.rs`), so the table
+/// slot, `[19, NR_SERVED_PROCS)` — see `servers/pm/src/mproc.rs`), so the table
 /// must cover the whole fork pool for `VM_FORK` to record a child's inherited
 /// regions. Derived from the shared ceiling; the guard below rejects any local
 /// under-sizing that would leave a PM-allocatable child unaddressable here.
@@ -476,6 +476,10 @@ pub fn record_stack(nr: i32) -> Result<(), i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use minixrs_kernel_shared::com::{NR_BOOT_PROCS, NR_STUB_PROCS};
+
+    /// First proc number PM's fork pool hands out (VM keeps no copy of PM's constant).
+    const FORK_POOL_BASE: i32 = (NR_BOOT_PROCS + NR_STUB_PROCS) as i32;
 
     #[test]
     fn set_brk_creates_heap_region() {
@@ -617,8 +621,8 @@ mod tests {
 
     #[test]
     fn contains_is_false_for_untracked_client() {
-        // No region set has been created for proc 14 in the global table.
-        assert!(!contains(14, HEAP_BASE));
+        // No region set has been created for the first fork-pool proc in the global table.
+        assert!(!contains(FORK_POOL_BASE, HEAP_BASE));
     }
 
     #[test]

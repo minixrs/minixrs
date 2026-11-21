@@ -76,7 +76,12 @@ VBLK_IMAGE="$ROOT/target/vblk-blank.img"
 # (console), 16 (input) and 24 (net), inferred from that and not yet measured.
 BUS_VBLK=0
 # `dd`, not `truncate` (macOS has none); recreate when absent or the wrong size.
-if [[ ! -f "$VBLK_IMAGE" ]] || [[ "$(wc -c <"$VBLK_IMAGE" | tr -d ' ')" -ne $((VBLK_IMAGE_SECTORS * 512)) ]]; then
+want=$((VBLK_IMAGE_SECTORS * 512))
+have=0
+if [[ -f "$VBLK_IMAGE" ]]; then
+    have=$(wc -c <"$VBLK_IMAGE" | tr -d ' ')
+fi
+if [[ "$have" -ne "$want" ]]; then
     mkdir -p "$ROOT/target"
     dd if=/dev/zero of="$VBLK_IMAGE" bs=512 count="$VBLK_IMAGE_SECTORS" 2>/dev/null
 fi

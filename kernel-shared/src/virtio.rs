@@ -291,9 +291,22 @@ mod tests {
         // Same id twice, no module: both NoModule, neither Duplicate.
         let mut m = ALL;
         m[0] = false;
-        let (v, _) = assign(&bus(&[(0, 2), (8, 2)]), PAGE, m);
+        let (v, a) = assign(&bus(&[(0, 2), (8, 2)]), PAGE, m);
         assert_eq!(v[0], SlotVerdict::NoModule(0));
         assert_eq!(v[8], SlotVerdict::NoModule(0));
+        assert_eq!(a, [None; 4]);
+    }
+
+    #[test]
+    fn a_no_module_device_sharing_a_page_still_refuses_both() {
+        // Rule 1 (shared page) outranks rule 3 (no module): the moduled device and
+        // its module-less page-mate are both SharedPage, and nothing is assigned.
+        let mut m = ALL;
+        m[1] = false; // no module for DeviceID 3's driver
+        let (v, a) = assign(&bus(&[(0, 2), (1, 3)]), PAGE, m);
+        assert_eq!(v[0], SlotVerdict::SharedPage);
+        assert_eq!(v[1], SlotVerdict::SharedPage);
+        assert_eq!(a, [None; 4]);
     }
 
     #[test]

@@ -83,6 +83,7 @@ mod tests {
     fn new_rejects_out_of_range_notify_id_without_a_trap() {
         assert_eq!(IrqLine::new(33, 32), Err(EINVAL));
         assert_eq!(IrqLine::new(33, 255), Err(EINVAL));
+        assert_eq!(IrqLine::new(u32::MAX, 0), Err(EINVAL));
     }
 
     #[test]
