@@ -2,12 +2,14 @@
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! The virtio-mmio **version 2** (modern) transport (slice 6.2, spec T10).
 //!
-//! The crate's only register `unsafe` (`queue.rs` has its own, for the shared ring
-//! memory): every access is a volatile, aligned, 32-bit load or store, because the
-//! page is Device memory. 64-bit values travel as
+//! The crate's only register `unsafe` (`dma.rs` has its own, for the memory shared
+//! with the device): every access is a volatile, aligned, 32-bit load or store,
+//! because the page is Device memory. 64-bit values travel as
 //! low/high pairs. The legacy (version 1) layout is not supported.
 
-use crate::transport::{QueueAddrs, Transport};
+use crate::queue::VirtQueue;
+use crate::transport::Transport;
+use core::sync::atomic::{Ordering, fence};
 
 const MAGIC_VALUE: usize = 0x000;
 const VERSION: usize = 0x004;
@@ -121,15 +123,23 @@ impl Transport for MmioTransport {
         // QueueNumMax is at most 32768, so it fits; saturate on a bad device.
         u16::try_from(self.read(QUEUE_NUM_MAX)).unwrap_or(u16::MAX)
     }
-    fn queue_enable(&mut self, queue: u16, size: u16, addrs: &QueueAddrs) {
+    fn queue_enable(&mut self, queue: u16, q: &VirtQueue) {
+        let addrs = q.addrs();
         self.write(QUEUE_SEL, u32::from(queue));
-        self.write(QUEUE_NUM, u32::from(size));
+        self.write(QUEUE_NUM, u32::from(q.size()));
         self.write64(QUEUE_DESC_LOW, QUEUE_DESC_HIGH, addrs.desc_pa);
         self.write64(QUEUE_DRIVER_LOW, QUEUE_DRIVER_HIGH, addrs.avail_pa);
         self.write64(QUEUE_DEVICE_LOW, QUEUE_DEVICE_HIGH, addrs.used_pa);
         self.write(QUEUE_READY, 1);
     }
     fn notify(&mut self, queue: u16) {
+        // The store that publishes `avail.idx` goes to normal memory; this one goes
+        // to Device memory and tells the device to look. The first must be ordered
+        // before the second, and that ordering must not depend on what the caller
+        // did last (`VirtQueue::add` happens to end in a fence; a caller that
+        // touched anything else in between would have no such guarantee). So the
+        // barrier is issued here, immediately before the register write.
+        fence(Ordering::SeqCst);
         self.write(QUEUE_NOTIFY, u32::from(queue));
     }
     fn interrupt_status(&self) -> u32 {

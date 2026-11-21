@@ -50,7 +50,8 @@ use bringup::{
 };
 use minixrs_driver_rt::transport::{NegotiateError, config_read, driver_ok, fail, negotiate};
 use minixrs_driver_rt::{
-    DmaRun, IrqLine, MmioError, MmioTransport, Transport, VirtQueue, clamp_queue_size, queue_layout,
+    DmaRegion, DmaRun, IrqLine, MmioError, MmioTransport, Transport, VirtQueue, clamp_queue_size,
+    queue_layout,
 };
 use minixrs_ipc::ipc_send;
 use minixrs_kernel_shared::Message;
@@ -63,7 +64,6 @@ use minixrs_kernel_shared::com::{HARDWARE, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{ENOENT, ENOSYS, EPERM, OK};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
-use minixrs_kernel_shared::message::USER_PAGE_SIZE;
 use minixrs_kernel_shared::virtio::VIRTIO_ID_BLOCK;
 use minixrs_server_rt::{SefConfig, diag_fmt, rd_i32, rd_u64, sef_startup, sys_getinfo};
 
@@ -174,28 +174,41 @@ fn bring_up() {
         pa: rd_u64(&m, GETINFO_DMA_PA_OFF),
         len: rd_u64(&m, GETINFO_DMA_LEN_OFF),
     };
-    if run.len < 8 || !run.va.is_multiple_of(8) {
+    // SAFETY: `run` is the kernel's own `GET_DMA` report (`rc == OK` above): it
+    // mapped `run.len` bytes of RAM starting at `run.pa` read-write at `run.va`
+    // in this address space alone, and never unmaps them — a process holding a
+    // virtio assignment may not exit or exec (T7). No Rust reference to that
+    // memory exists or is ever made: this driver reaches it only through the
+    // `DmaRegion` built here and the `DmaBuf`s it hands out.
+    let region = unsafe { DmaRegion::new(run) };
+    // The cookie is the run's first eight bytes; the stamp is 8-aligned (T7).
+    let with_cookie = region
+        .filter(|_| run.va.is_multiple_of(8))
+        .and_then(|region| Some((region.buf(0, 8)?, region)));
+    let Some((cookie, region)) = with_cookie else {
         diag_fmt(format_args!(
             "virtio FAIL step=dma va={:#x} len={}",
             run.va, run.len
         ));
         return;
-    }
-    let cookie = run.va as usize as *mut u64;
-    // SAFETY: the kernel mapped the run read-write at `run.va` in this address
-    // space alone (T7) and reported it through `GET_DMA`; `run.len >= 8` and the
-    // 8-alignment were checked above. Volatile because the memory is shared with
-    // the kernel's stamp and, from step 6 on, with the device.
-    let word = unsafe { cookie.read_volatile() };
-    if !cookie_ok(word, run.pa) {
+    };
+    // Volatile byte copies through the `DmaBuf`: the memory is shared with the
+    // kernel's stamp and, from step 6 on, with the device. The kernel writes the
+    // word in its native order, which on aarch64 is little-endian.
+    let mut word = [0u8; 8];
+    let read = cookie.read_into(0, &mut word);
+    let word = u64::from_le_bytes(word);
+    if !read || !cookie_ok(word, run.pa) {
         diag_fmt(format_args!(
             "virtio FAIL step=dma cookie={word:#x} pa={:#x}",
             run.pa
         ));
         return;
     }
-    // SAFETY: as for the read above — the same mapped, aligned, private word.
-    unsafe { cookie.write_volatile(0) };
+    if !cookie.write_from(0, &[0u8; 8]) {
+        // Unreachable: the same eight bytes were just read.
+        return;
+    }
 
     // Step 3: the transport, and that it is the disk.
     // SAFETY: `regs_va` is `VIRTIO_MMIO_PAGE_VA` plus the slot's 0x200-aligned
@@ -262,7 +275,7 @@ fn bring_up() {
         return;
     };
     let qlayout = queue_layout(qsize);
-    let (Some(qlayout), Some(vlayout)) = (qlayout, qlayout.and_then(|q| vblk_layout(run, q)))
+    let (Some(qlayout), Some(vlayout)) = (qlayout, qlayout.and_then(|q| vblk_layout(&region, q)))
     else {
         fail(&mut t);
         diag_fmt(format_args!(
@@ -271,23 +284,14 @@ fn bring_up() {
         ));
         return;
     };
-    // SAFETY: the kernel mapped the run read-write at `run.va` in this address
-    // space alone (T7), and `vblk_layout` proved the run holds the whole queue page
-    // at `queue_va`, page-aligned. The cookie accesses above (the run's first word,
-    // on this page) are finished, so this is the only live reference to the page,
-    // and the run is never unmapped (T7), so the unbounded lifetime holds.
-    let qmem = unsafe {
-        core::slice::from_raw_parts_mut(
-            vlayout.queue_va as usize as *mut u8,
-            USER_PAGE_SIZE as usize,
-        )
-    };
-    if VirtQueue::new(qmem, qlayout).is_none() {
+    // The queue lives on its own page of the run. Its three device-visible
+    // addresses come out of that `DmaBuf`, which is why enabling it is safe code.
+    let Some(queue) = VirtQueue::new(vlayout.queue, qlayout) else {
         fail(&mut t);
         diag_fmt(format_args!("virtio FAIL step=queue size={qsize}"));
         return;
-    }
-    t.queue_enable(REQUEST_QUEUE, qsize, &vlayout.queue);
+    };
+    t.queue_enable(REQUEST_QUEUE, &queue);
     if let Err(status) = driver_ok(&mut t) {
         fail(&mut t);
         diag_fmt(format_args!("virtio FAIL step=status status={status:#x}"));
