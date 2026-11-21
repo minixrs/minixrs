@@ -1,9 +1,11 @@
 # Drivers
 
 A **driver** in minix.rs is an ordinary user-space process that happens to own a piece of hardware.
-It is not a special kind of kernel module and it holds no kernel privilege beyond a `k_call_mask`
-bit or two — it is a `#![no_std]`/`#![no_main]` ELF, loaded from the MXBI archive into its own
-address space, driving a SEF receive loop exactly like [a server](../servers/overview.md).
+It is not a special kind of kernel module and it runs no code in the kernel — it is a
+`#![no_std]`/`#![no_main]` ELF, loaded from the MXBI archive into its own address space, driving a
+SEF receive loop exactly like [a server](../servers/overview.md). Its privilege is a server's too: a
+boot driver's image row carries the same full kernel-call mask every boot server gets, so what
+confines it is its address space and its interrupt allow-list, not a narrower set of kernel calls.
 
 What separates a driver from a server is one page in its address space that no other process has:
 the device's memory-mapped registers. Everything interesting about this chapter follows from that
