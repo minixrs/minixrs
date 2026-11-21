@@ -103,6 +103,10 @@ needs no fork bump: generated headers are never committed, so the fork picks the
 its next build. The plan re-runs the grep against the pinned submodule commit as its first task and
 records the result; if it finds a hit, the slice stops and becomes a coordinated ABI PR.
 
+**Measured (2026-11-21).** Re-run against the pinned submodule checkout (`4501ccf402fa`), the grep
+for `NR_BOOT_PROCS|STUB_[A-D]|NR_STUB|FORK_POOL` over `*.h`, `*.c` and `*.S` printed nothing. H12
+stands.
+
 ---
 
 ## 3. The kernel side
@@ -410,6 +414,25 @@ depends on it, and each recorded in this document with its date as 6.1's were:
 4. **What an empty transport reads** under `force-legacy=false` — expected `Version == 2`,
    `DeviceID == 0` — and what the device's state is at kernel entry after the firmware has touched
    it. `negotiate` resets first either way.
+
+**Measured (2026-11-21), QEMU 11.0.3, aarch64 `virt,gic-version=3`, stub-free boot, a probe reading
+the three registers of all 32 slots through the HHDM before `device_teardown_selftest`:**
+
+1. **Bus to slot.** `bus=virtio-mmio-bus.N` is slot `N`, address `0x0A00_0000 + N * 0x200`; there is
+   no reversal here. `virtio-blk-device` on bus 0 read at slot 0 (`DeviceID 2`) and
+   `virtio-rng-device` on bus 8 read at slot 8 (`DeviceID 4`), in different pages. So `BUS_VBLK =
+   0`.
+2. **The HHDM reaches the transports.** All 32 reads, `0x0A00_0000` to `0x0A00_3E00`, completed with
+   no fault.
+3. **Boot.** Limine booted from the `fat:rw:` drive and the kernel banner printed with the two
+   devices attached, with no `bootindex` needed. Wall-clock from `cargo run` start to the banner
+   (build already done): 8.1 s and 7.2 s with the two devices, 7.0 s and 7.2 s without; the detour
+   is inside the noise.
+4. **Empty and legacy transports.** With `force-legacy=false`, an empty slot reads magic
+   `0x74726976`, `Version 2`, `DeviceID 0`, and the populated slots read `Version 2`. Without it,
+   every slot, empty or populated, reads `Version 1`: the version-2-only driver sees the legacy
+   refusal, as T12 expects. Devices arrive at kernel entry already reporting their ids; the probe
+   did not read `Status`, so firmware-left state is not recorded and `negotiate` resets regardless.
 
 ---
 
