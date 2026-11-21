@@ -400,16 +400,49 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
     // substitutes the `worker` ELF — the image would then hold whichever one the
     // second call produced. As of slice 5.9 the image is the *only* copy, so this
     // is the one that runs.
+    let rootfs = build_rootfs(&hello_bytes, &fileio_bytes);
+    write_disk_image(out_dir, &rootfs);
     modules.push((
         -1,
         "rootfs".to_string(), // com::ROOTFS_MODULE_NAME
-        build_rootfs(&hello_bytes, &fileio_bytes),
+        rootfs,
     ));
 
     let archive = pack_mxbi(&modules);
     let archive_path = out_dir.join("boot_image.mxbi");
     std::fs::write(&archive_path, &archive).expect("writing boot-image archive");
     println!("cargo:rustc-env=BOOT_IMAGE_PATH={}", archive_path.display());
+}
+
+/// File name of the raw disk image written beside the kernel ELF (slice 6.3,
+/// spec B9). `tools/qemu-run.sh` is the other holder of this name.
+const DISK_IMAGE_NAME: &str = "rootfs.img";
+
+/// Write the root filesystem image to a file `tools/qemu-run.sh` can attach as
+/// the virtio-blk disk (slice 6.3, spec B9).
+///
+/// **The same bytes the archive packs**, from the same `build_rootfs` call, so
+/// the disk root and the ramdisk root cannot differ in content: the two boots'
+/// filesystem proofs compare one image through two drivers.
+///
+/// It lands in the cargo profile directory — the one holding the kernel ELF the
+/// runner is handed as `$1` — so the runner finds it as `$(dirname "$1")/rootfs.img`
+/// and the image always belongs to the kernel being booted. `OUT_DIR` sits under
+/// `<profile>/build/`, at a depth that depends on the cargo version
+/// (`build/<pkg>-<hash>/out` or `build/<pkg>/<hash>/out`), so the profile
+/// directory is found by walking up to `build` rather than by counting levels.
+/// A build script writing outside `OUT_DIR` is unusual; the runner cannot learn
+/// `OUT_DIR`, and the alternative is a second image builder that could drift
+/// from this one.
+fn write_disk_image(out_dir: &std::path::Path, image: &[u8]) {
+    let profile_dir = out_dir
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|name| name == "build"))
+        .and_then(std::path::Path::parent)
+        .expect("OUT_DIR is under <profile>/build/");
+    let path = profile_dir.join(DISK_IMAGE_NAME);
+    std::fs::write(&path, image)
+        .unwrap_or_else(|e| panic!("writing the disk image {}: {e}", path.display()));
 }
 
 /// Build the MinixFS v3 root filesystem image (slice 5.7).

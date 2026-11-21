@@ -62,29 +62,61 @@ cp "$LIMINE_BIN" "$ESP/EFI/BOOT/BOOTAA64.EFI"
 cp "$ROOT/tools/limine.conf" "$ESP/limine.conf"
 cp "$KERNEL" "$ESP/boot/kernel"
 
-# The blank disk the 6.2 virtio-blk driver (`vblk`) binds to. Its size is
-# deliberately NOT the ramdisk's 1 MiB, so a `capacity=` that matches cannot be
-# the ramdisk length leaking through a shared path. tests/qemu-boot.expected
-# is the other holder of this sector count (the capacity= marker); change the
-# two together. 6.3 replaces this blank file with the root image.
-VBLK_IMAGE_SECTORS=2560
-VBLK_IMAGE="$ROOT/target/vblk-blank.img"
 # Bus pinning for the phase: one device per transport page (a page holds 8
 # 0x200-byte slots), eight buses apart, so each driver's registers can be mapped
 # on their own page. `virtio-mmio-bus.N` is transport slot N (measured for buses
-# 0 and 8, Task 0). blk is bus 0; the later devices are planned for buses 8
-# (console), 16 (input) and 24 (net), inferred from that and not yet measured.
+# 0 and 8, slice 6.2 Task 0). blk is bus 0; the later devices are planned for
+# buses 8 (console), 16 (input) and 24 (net), inferred from that and not yet
+# measured.
 BUS_VBLK=0
-# `dd`, not `truncate` (macOS has none); recreate when absent or the wrong size.
-want=$((VBLK_IMAGE_SECTORS * 512))
-have=0
-if [[ -f "$VBLK_IMAGE" ]]; then
-    have=$(wc -c <"$VBLK_IMAGE" | tr -d ' ')
-fi
-if [[ "$have" -ne "$want" ]]; then
-    mkdir -p "$ROOT/target"
-    dd if=/dev/zero of="$VBLK_IMAGE" bs=512 count="$VBLK_IMAGE_SECTORS" 2>/dev/null
-fi
+
+# The root backend (slice 6.3, phase decision H5: what is attached selects it).
+#
+#   MINIXRS_ROOT=disk     (default) attach the root image as a virtio-blk disk;
+#                         MFS mounts its root through the `vblk` driver.
+#   MINIXRS_ROOT=ramdisk  attach no virtio-blk device at all; `vblk` reports
+#                         `no device` and MFS mounts the ramdisk.
+#
+# The image is `rootfs.img` beside the kernel ELF -- kernel/build.rs writes the
+# very bytes it packs into the boot archive there, so the two backends serve one
+# image. It is COPIED on every run: the boot writes to its root, and a reused
+# file would make the second run a different test from the first. Nothing
+# persists across boots; that is slice 6.4's proof.
+#
+# MINIXRS_VBLK_IMAGE=<file> attaches that file as-is instead (no copy), for the
+# refusal boots -- a blank disk, or the root image with extra drive options in
+# MINIXRS_VBLK_DRIVE_OPTS (e.g. `readonly=on`).
+ROOT_BACKEND="${MINIXRS_ROOT:-disk}"
+VBLK_ARGS=()
+case "$ROOT_BACKEND" in
+    disk)
+        if [[ -n "${MINIXRS_VBLK_IMAGE:-}" ]]; then
+            VBLK_IMAGE="$MINIXRS_VBLK_IMAGE"
+            if [[ ! -f "$VBLK_IMAGE" ]]; then
+                echo "error: MINIXRS_VBLK_IMAGE not found: $VBLK_IMAGE" >&2
+                exit 66
+            fi
+        else
+            ROOTFS_IMAGE="$(dirname "$KERNEL")/rootfs.img"
+            if [[ ! -f "$ROOTFS_IMAGE" ]]; then
+                echo "error: no root image at $ROOTFS_IMAGE (kernel/build.rs writes it)" >&2
+                exit 66
+            fi
+            VBLK_IMAGE="$ROOT/target/vblk-root.img"
+            mkdir -p "$ROOT/target"
+            cp "$ROOTFS_IMAGE" "$VBLK_IMAGE"
+        fi
+        VBLK_ARGS=(
+            -drive "file=$VBLK_IMAGE,format=raw,if=none,id=vblk0${MINIXRS_VBLK_DRIVE_OPTS:+,$MINIXRS_VBLK_DRIVE_OPTS}"
+            -device "virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.$BUS_VBLK"
+        )
+        ;;
+    ramdisk) ;;
+    *)
+        echo "error: MINIXRS_ROOT must be 'disk' or 'ramdisk', got '$ROOT_BACKEND'" >&2
+        exit 64
+        ;;
+esac
 
 # `force-legacy=false` makes the mmio transports modern (version 2); the
 # drivers refuse version 1. "$@" stays last so a later -global can override it
@@ -94,8 +126,7 @@ exec qemu-system-aarch64 \
     -bios "$FIRMWARE" \
     -drive "file=fat:rw:fat-type=32:$ESP,format=raw,if=virtio" \
     -global virtio-mmio.force-legacy=false \
-    -drive "file=$VBLK_IMAGE,format=raw,if=none,id=vblk0" \
-    -device "virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.$BUS_VBLK" \
+    ${VBLK_ARGS[@]+"${VBLK_ARGS[@]}"} \
     -display none \
     -serial stdio \
     -no-reboot \

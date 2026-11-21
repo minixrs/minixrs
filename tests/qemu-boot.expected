@@ -986,8 +986,8 @@ minix.rs fileio: malloc ok
 # read back, and its interrupt claim plus the INTID+1 refusal. features= is exactly
 # VIRTIO_F_VERSION_1 (bit 32): virtio-blk requests nothing optional, so any other
 # bit means the negotiation accepted something it was not asked for. capacity= is
-# the blank image's sector count, VBLK_IMAGE_SECTORS in tools/qemu-run.sh -- this
-# is the other holder of that number; change the two together. qsize= is driver-
+# the root image in 512-byte sectors, rootfs::ROOTFS_IMAGE_BYTES / 512 (slice 6.3:
+# the disk is the image kernel/build.rs also packs as the ramdisk). qsize= is driver-
 # rt's QUEUE_SIZE (8) under the device's QueueNumMax. slot= is not asserted. A
 # failing step prints `virtio FAIL step=<step>` instead (forbidden).
-[diag vblk] virtio ok features=0x100000000 capacity=2560 qsize=8
+[diag vblk] virtio ok features=0x100000000 capacity=2048 qsize=8
