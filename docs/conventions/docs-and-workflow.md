@@ -25,16 +25,15 @@ build book`; output `book/book/` is gitignored.
 
 To install mdBook or preview the book locally, use the `mdbook-preview` skill.
 
-**Slices are built with the superpowers skills as of 5.10a** — `brainstorming` for the design,
-`writing-plans` for the task breakdown, `subagent-driven-development` to execute it (a fresh
-subagent per task, a review after each, then a whole-branch review). The per-slice design and plan
-documents land in **`docs/superpowers/specs/`** and **`docs/superpowers/plans/`**, named
-`YYYY-MM-DD-<topic>-{design,plan}.md`. That is the fourth documentation tree and it is deliberately
-narrow: `book/` stays canonical for how the system works, `docs/conventions/` for the rules the work
-follows, `docs/plan.md` + `docs/plans/` for slice *status*, and the superpowers tree holds the
-reasoning behind one slice — the decisions considered and rejected, the per-task steps, the
-verification plan. The phase tracker links to the spec by relative path rather than restating it;
-keep it that way, or the two drift and the tracker is the one people read.
+The per-slice design and plan documents land in **`docs/superpowers/specs/`** and
+**`docs/superpowers/plans/`** (the name is historical — slices 5.10a–6.2 were built with the
+superpowers plugin, which is retired; see [Slice workflow](#slice-workflow) for the rules that
+replaced it). That is the fourth documentation tree and it is deliberately narrow: `book/` stays
+canonical for how the system works, `docs/conventions/` for the rules the work follows,
+`docs/plan.md` + `docs/plans/` for slice *status*, and the specs-and-plans tree holds the reasoning
+behind one slice — the decisions considered and rejected, the per-task steps, the verification plan.
+The phase tracker links to the spec by relative path rather than restating it; keep it that way, or
+the two drift and the tracker is the one people read.
 
 **Amending a merged spec means rewriting its operative paragraphs**, not adding a banner above them:
 an implementer reads the decision text, not the preface. Chunk 4's H2 first reached the IRQCTL spec
@@ -87,6 +86,52 @@ overlapping source will each write the shared rules, and the duplicates drift im
 For the mutation-testing discipline (how a mutation is applied, observed, and reverted; the
 boot-marker gotchas; the cases with no available proof), see
 [`testing-and-markers.md`](./testing-and-markers.md).
+
+## Slice workflow
+
+Every slice or prep chunk beyond a one-line fix runs these six steps in order. No plugin enforces
+them; this section does. The habits in [Documentation](#documentation) above are how steps 4 and 5
+are actually carried out.
+
+1. **Spec, approved before any code.** `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`, dated
+   the day it is written. It states what exists and what the slice changes, the decisions with their
+   rejected alternatives, a **Verification** section naming the host test, boot marker or mutation
+   that proves each behaviour, the documentation owed in the same PR, and a **Rulings to check**
+   table — each decision the phase file did not already make, with an *If wrong* column saying what
+   undoing it costs. The user approves the spec before implementation starts. A bounded change (a
+   prep chunk, a doc fix) may get its design in chat instead, but still gets the approval.
+2. **Plan.** `docs/superpowers/plans/YYYY-MM-DD-<topic>.md`: global constraints, a **Review Focus**
+   list (the edge cases a reviewer should attack, each with the test that pins it), and numbered
+   tasks. Each task lists its files, names the test or marker that proves it, and ends in its own
+   signed, signed-off commit. The last task is always documentation, trackers and the whole-branch
+   sweep. **The plan is not authority:** when a review finding contradicts the plan, the spec wins
+   and the plan is corrected in the same branch.
+3. **Build test-first.** Write or name the failing check before the implementation — a host `cargo
+   test` for logic in a host-testable crate, a QEMU boot marker for kernel and server behaviour (the
+   kernel has no host tests; see [`kernel.md`](./kernel.md)). Debug by finding the root cause before
+   proposing a fix: reproduce, read the trace, then change code. Record every decision made along
+   the way in the plan's ledger. Each task goes to a fresh subagent with the spec, its plan task and
+   the files it touches, on whatever model the coordinating agent judges right for the job; a review
+   against the spec and plan follows each task before the next starts. A subagent may commit its own
+   task but never pushes, opens a PR, or forces anything.
+4. **Definition of done.** A slice is done only when every item has been run and its output read:
+   - each behaviour in the spec's Verification section has a host test or boot marker that was
+     observed to pass, and each new guard has a mutation observed to move its marker, or an honest
+     "nothing moves" row (see [Mutation testing](./testing-and-markers.md#mutation-testing));
+   - every gate [`ci.md`](./ci.md) lists as run-locally passes, and the default boot passes
+     `check-boot-log.sh`;
+   - the stale-claim sweep and the `book/` sweep from [Documentation](#documentation) are done;
+   - the slice's box is checked in `docs/plan.md` and its phase file, as
+     [`git-and-prs.md`](./git-and-prs.md) requires.
+5. **Review before push.** After the last task, a **fresh reviewer** — an agent with no stake in the
+   implementation — gets the branch diff as a file (`git diff origin/main...HEAD`), the spec, and
+   the plan's Review Focus, never the implementer's summary of what it did. It checks the code
+   against the spec, verifies arithmetic by hand, and re-reads every touched `book/` chapter end to
+   end. Fix rounds follow, each owing the grep-the-phrase sweep. The user then reviews the diff in
+   Hunk (below). Nothing is pushed until both reviews are clean.
+6. **Report the rulings.** The final summary lists every decision made on the user's behalf — from
+   the spec's table and from the ledger — with what each costs if it was wrong. A ruling the user
+   never hears about is one they cannot undo.
 
 ## Review tooling: Hunk
 
