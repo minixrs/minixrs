@@ -55,12 +55,19 @@ pub const fn queue_layout(size: u16) -> Option<QueueLayout> {
         return None;
     }
     let n = size as usize;
-    let avail_off = n * DESC_BYTES;
+    // Every product and sum below is under ~1 MiB for size <= 32768, but stay checked.
+    let Some(avail_off) = n.checked_mul(DESC_BYTES) else {
+        return None;
+    };
     // flags + idx + ring[n] + used_event, all u16.
-    let avail_end = avail_off + 6 + 2 * n;
+    let Some(avail_end) = avail_off.checked_add(6 + 2 * n) else {
+        return None;
+    };
     let used_off = (avail_end + 3) & !3;
-    // flags + idx, then ring[n] of { id: u32, len: u32 }.
-    let bytes = used_off + 4 + USED_ELEM_BYTES * n;
+    // flags + idx + ring[n] of { id: u32, len: u32 } + avail_event.
+    let Some(bytes) = used_off.checked_add(6 + USED_ELEM_BYTES * n) else {
+        return None;
+    };
     Some(QueueLayout {
         size,
         desc_off: 0,
@@ -71,8 +78,12 @@ pub const fn queue_layout(size: u16) -> Option<QueueLayout> {
 }
 
 impl QueueLayout {
-    /// The three physical addresses for a queue placed at `base_pa`; `None` on overflow.
+    /// The three physical addresses for a queue placed at `base_pa`; `None` on overflow or when
+    /// `base_pa` is not 16-aligned (the virtio alignment of the descriptor table).
     pub const fn addrs(&self, base_pa: u64) -> Option<QueueAddrs> {
+        if !base_pa.is_multiple_of(16) {
+            return None;
+        }
         let Some(desc_pa) = base_pa.checked_add(self.desc_off as u64) else {
             return None;
         };
@@ -127,44 +138,39 @@ macro_rules! volatile_rw {
         fn $rd(&self, off: usize) -> Option<$t> {
             const N: usize = core::mem::size_of::<$t>();
             let p = self.ptr(off, N)?;
-            if (p as usize).is_multiple_of(N) {
-                // SAFETY: `ptr` proved `off..off+N` lies inside `mem`; `p` is aligned for `$t`.
-                Some(<$t>::from_le(unsafe {
-                    core::ptr::read_volatile(p as *const $t)
-                }))
-            } else {
-                let mut b = [0u8; N];
-                for (i, slot) in b.iter_mut().enumerate() {
-                    // SAFETY: `i < N`, so `p + i` is inside the range `ptr` proved.
-                    *slot = unsafe { core::ptr::read_volatile(p.add(i)) };
-                }
-                Some(<$t>::from_le_bytes(b))
+            if !(p as usize).is_multiple_of(N) {
+                return None;
             }
+            // SAFETY: `ptr` proved `off..off+N` lies inside `mem`; `p` is aligned for `$t`.
+            Some(<$t>::from_le(unsafe {
+                core::ptr::read_volatile(p as *const $t)
+            }))
         }
         fn $wr(&mut self, off: usize, v: $t) -> Option<()> {
             const N: usize = core::mem::size_of::<$t>();
-            let p = self.ptr(off, N)? as *mut u8;
-            if (p as usize).is_multiple_of(N) {
-                // SAFETY: `ptr` proved `off..off+N` lies inside `mem` (exclusively borrowed);
-                // `p` is aligned for `$t`.
-                unsafe { core::ptr::write_volatile(p as *mut $t, v.to_le()) };
-            } else {
-                for (i, byte) in v.to_le_bytes().iter().enumerate() {
-                    // SAFETY: `i < N`, so `p + i` is inside the range `ptr` proved.
-                    unsafe { core::ptr::write_volatile(p.add(i), *byte) };
-                }
+            let p = self.ptr_mut(off, N)?;
+            if !(p as usize).is_multiple_of(N) {
+                return None;
             }
+            // SAFETY: `ptr_mut` derived `p` from `&mut self.mem` (unique access, write
+            // provenance) and proved `off..off+N` lies inside it; `p` is aligned for `$t`.
+            unsafe { core::ptr::write_volatile(p as *mut $t, v.to_le()) };
             Some(())
         }
     };
 }
 
 impl<'a> VirtQueue<'a> {
-    /// `None` when `mem` is shorter than `layout.bytes`, or `layout.size` exceeds
-    /// [`QUEUE_SIZE`] (the driver-private bookkeeping is sized for it). Zeroes the
-    /// queue memory and threads the free list.
+    /// `None` when `layout` is not exactly `queue_layout(layout.size)`, `layout.size`
+    /// exceeds [`QUEUE_SIZE`] (the driver-private bookkeeping is sized for it), `mem` is
+    /// shorter than `layout.bytes`, or `mem` is not 16-aligned (a torn index store must be
+    /// impossible). Zeroes the queue memory and threads the free list.
     pub fn new(mem: &'a mut [u8], layout: QueueLayout) -> Option<Self> {
-        if mem.len() < layout.bytes || layout.size > QUEUE_SIZE || layout.size == 0 {
+        if queue_layout(layout.size) != Some(layout)
+            || layout.size > QUEUE_SIZE
+            || mem.len() < layout.bytes
+            || !(mem.as_ptr() as usize).is_multiple_of(16)
+        {
             return None;
         }
         let mut q = VirtQueue {
@@ -192,15 +198,25 @@ impl<'a> VirtQueue<'a> {
         self.mem.get(off..end).map(|s| s.as_ptr())
     }
 
+    /// Like [`Self::ptr`] but with write provenance, from the exclusive borrow.
+    fn ptr_mut(&mut self, off: usize, n: usize) -> Option<*mut u8> {
+        let end = off.checked_add(n)?;
+        self.mem.get_mut(off..end).map(|s| s.as_mut_ptr())
+    }
+
     fn wr8(&mut self, off: usize, v: u8) -> Option<()> {
-        let p = self.ptr(off, 1)? as *mut u8;
-        // SAFETY: `ptr` proved `off` is inside `mem`, which `&mut self` borrows exclusively.
+        let p = self.ptr_mut(off, 1)?;
+        // SAFETY: `ptr_mut` derived `p` from `&mut self.mem` and proved `off` is inside it.
         unsafe { core::ptr::write_volatile(p, v) };
         Some(())
     }
 
     volatile_rw!(rd16, wr16, u16);
     volatile_rw!(rd32, wr32, u32);
+
+    // Offset arithmetic in `add` and `pop_used` cannot overflow: `new` accepted only a layout
+    // equal to `queue_layout(size)` with `size <= QUEUE_SIZE` (so every offset is below
+    // `layout.bytes`, a few hundred bytes), and every index is reduced modulo `size` first.
 
     /// Chain `out` (device-readable) then `inb` (device-writable) and publish the head.
     /// `None` if there are no buffers or too few free descriptors; nothing changes then.
@@ -248,6 +264,9 @@ impl<'a> VirtQueue<'a> {
     }
 
     /// Next completed `(head, written)`, returning its chain to the free list.
+    ///
+    /// `written` is the device-supplied length, unvalidated: callers must clamp it to the
+    /// size of the buffer they submitted.
     ///
     /// Elements whose id is out of range or not in flight (a faulty device) are
     /// consumed and skipped; at most one queue's worth are examined per call.
@@ -298,6 +317,23 @@ impl<'a> VirtQueue<'a> {
 mod tests {
     use super::*;
 
+    #[repr(align(16))]
+    struct Mem([u8; 4096]);
+
+    fn mem() -> Mem {
+        Mem([0; 4096])
+    }
+
+    /// `(start index, rounds)`: the full 65 540 rounds from 0, or under Miri (too slow for
+    /// that) a start just below 2^16 so the same boundary is still crossed.
+    fn wrap_plan() -> (u32, u32) {
+        if cfg!(miri) {
+            (65_528, 16)
+        } else {
+            (0, 65_540)
+        }
+    }
+
     fn layout8() -> QueueLayout {
         queue_layout(8).unwrap()
     }
@@ -319,9 +355,9 @@ mod tests {
         let l = layout8();
         assert_eq!(
             (l.desc_off, l.avail_off, l.used_off, l.bytes),
-            (0, 128, 152, 220)
+            (0, 128, 152, 222)
         );
-        assert_eq!(l.bytes.min(4096), l.bytes);
+        assert!(l.bytes < 256);
     }
 
     #[test]
@@ -353,44 +389,95 @@ mod tests {
     }
 
     #[test]
-    fn small_queue_never_indexes_past_its_ring() {
-        // A device capped at 4 entries: memory exactly the layout size, many rounds.
+    fn small_queue_runs_past_the_index_wrap() {
+        // A device capped at 4 entries: memory exactly the layout size, add/complete rounds
+        // crossing the u16 index boundary, and exhaustion at the end.
         let l = queue_layout(clamp_queue_size(4).unwrap()).unwrap();
-        let mut mem = vec![0u8; l.bytes];
-        let mut ptrs = Vec::new();
-        {
-            let mut q = VirtQueue::new(&mut mem, l).unwrap();
-            for _ in 0..4 {
-                ptrs.push(q.add(&[(0x1000, 1)], &[]).unwrap());
-            }
-            assert_eq!(q.add(&[(0x1000, 1)], &[]), None);
+        assert_eq!(l.size, 4);
+        let mut buf = mem();
+        let m = &mut buf.0[..l.bytes];
+        let mut q = VirtQueue::new(m, l).unwrap();
+        let (start, rounds) = wrap_plan();
+        q.avail_idx = start as u16;
+        q.last_used = start as u16;
+        for round in 0..rounds {
+            let n = start.wrapping_add(round) as u16;
+            let head = q.add(&[(0x1000, 1)], &[]).unwrap();
+            assert_eq!(rd16(q.mem, l.avail_off + 4 + 2 * usize::from(n % 4)), head);
+            device_complete(q.mem, &l, n, u32::from(head), 1);
+            assert_eq!(q.pop_used(), Some((head, 1)));
         }
-        assert_eq!(rd16(&mem, l.avail_off + 2), 4);
+        for _ in 0..4 {
+            q.add(&[(0x1000, 1)], &[]).unwrap();
+        }
+        assert_eq!(q.add(&[(0x1000, 1)], &[]), None);
     }
 
     #[test]
     fn new_rejects_a_short_buffer() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes - 1];
-        assert!(VirtQueue::new(&mut mem, l).is_none());
-        let mut ok = vec![0u8; l.bytes];
-        assert!(VirtQueue::new(&mut ok, l).is_some());
+        let mut buf = mem();
+        assert!(VirtQueue::new(&mut buf.0[..l.bytes - 1], l).is_none());
+        assert!(VirtQueue::new(&mut buf.0[..l.bytes], l).is_some());
         let big = queue_layout(16).unwrap();
-        let mut m = vec![0u8; big.bytes];
-        assert!(VirtQueue::new(&mut m, big).is_none());
+        assert!(VirtQueue::new(&mut buf.0[..big.bytes], big).is_none());
+    }
+
+    #[test]
+    fn new_rejects_an_unaligned_buffer() {
+        let l = layout8();
+        let mut buf = mem();
+        assert!(VirtQueue::new(&mut buf.0[1..=l.bytes], l).is_none());
+        assert!(VirtQueue::new(&mut buf.0[8..8 + l.bytes], l).is_none());
+        assert!(VirtQueue::new(&mut buf.0[16..16 + l.bytes], l).is_some());
+    }
+
+    #[test]
+    fn new_rejects_an_inconsistent_layout() {
+        let good = layout8();
+        let mut buf = mem();
+        for bad in [
+            QueueLayout {
+                used_off: good.used_off + 4,
+                ..good
+            },
+            QueueLayout {
+                avail_off: 0,
+                ..good
+            },
+            QueueLayout {
+                desc_off: 16,
+                ..good
+            },
+            QueueLayout { bytes: 8, ..good },
+            QueueLayout {
+                bytes: usize::MAX,
+                ..good
+            },
+            QueueLayout { size: 3, ..good },
+        ] {
+            assert!(VirtQueue::new(&mut buf.0[..], bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn addrs_rejects_an_unaligned_base() {
+        let l = layout8();
+        assert_eq!(l.addrs(0x1008), None);
+        assert!(l.addrs(0x1010).is_some());
     }
 
     #[test]
     fn add_builds_an_out_then_in_chain() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes + 3];
-        // Unaligned start exercises the byte-wise fallback.
-        let mut q = VirtQueue::new(&mut mem[3..], l).unwrap();
+        let mut mem_buf = mem();
+        let mem = &mut mem_buf.0[..l.bytes];
+        let mut q = VirtQueue::new(mem, l).unwrap();
         let head = q
             .add(&[(0x1_0000_2000, 16)], &[(0x3000, 4096), (0x4000, 1)])
             .unwrap();
         assert_eq!(q.num_free(), 5);
-        let m = &mem[3..];
+        let m = &mem[..];
         let d = |i: usize| &m[i * 16..i * 16 + 16];
         let flags = |i: usize| rd16(d(i), 12);
         let h = usize::from(head);
@@ -411,8 +498,9 @@ mod tests {
     #[test]
     fn add_without_enough_descriptors_is_none_and_changes_nothing() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes];
-        let mut q = VirtQueue::new(&mut mem, l).unwrap();
+        let mut mem_buf = mem();
+        let mem = &mut mem_buf.0[..l.bytes];
+        let mut q = VirtQueue::new(mem, l).unwrap();
         q.add(&[(1, 1); 3], &[(2, 1); 3]).unwrap();
         assert_eq!(q.num_free(), 2);
         assert_eq!(q.add(&[(1, 1); 3], &[]), None);
@@ -421,14 +509,15 @@ mod tests {
         assert!(q.add(&[(1, 1)], &[(2, 1)]).is_some());
         assert_eq!(q.num_free(), 0);
         assert_eq!(q.add(&[(1, 1)], &[]), None);
-        assert_eq!(rd16(&mem, l.avail_off + 2), 2);
+        assert_eq!(rd16(mem, l.avail_off + 2), 2);
     }
 
     #[test]
     fn add_with_no_buffers_is_none() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes];
-        let mut q = VirtQueue::new(&mut mem, l).unwrap();
+        let mut mem_buf = mem();
+        let mem = &mut mem_buf.0[..l.bytes];
+        let mut q = VirtQueue::new(mem, l).unwrap();
         assert_eq!(q.add(&[], &[]), None);
         assert_eq!(q.num_free(), 8);
     }
@@ -436,8 +525,9 @@ mod tests {
     #[test]
     fn pop_used_returns_the_chain_to_the_free_list() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes];
-        let mut q = VirtQueue::new(&mut mem, l).unwrap();
+        let mut mem_buf = mem();
+        let mem = &mut mem_buf.0[..l.bytes];
+        let mut q = VirtQueue::new(mem, l).unwrap();
         let head = q
             .add(&[(0x1000, 16)], &[(0x2000, 512), (0x3000, 1)])
             .unwrap();
@@ -450,10 +540,14 @@ mod tests {
     #[test]
     fn indices_wrap_modulo_two_to_the_sixteen() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes];
-        let mut q = VirtQueue::new(&mut mem, l).unwrap();
-        for round in 0u32..65_540 {
-            let n = round as u16;
+        let mut mem_buf = mem();
+        let mem = &mut mem_buf.0[..l.bytes];
+        let mut q = VirtQueue::new(mem, l).unwrap();
+        let (start, rounds) = wrap_plan();
+        q.avail_idx = start as u16;
+        q.last_used = start as u16;
+        for round in 0..rounds {
+            let n = start.wrapping_add(round) as u16;
             let head = q.add(&[(0x1000, 1)], &[]).unwrap();
             let slot = usize::from(n % 8);
             let ring = l.avail_off + 4 + 2 * slot;
@@ -463,15 +557,19 @@ mod tests {
             assert_eq!(q.pop_used(), Some((head, 1)), "round {round}");
             assert_eq!(q.num_free(), 8);
         }
-        assert_eq!(rd16(q.mem, l.avail_off + 2), 4);
+        assert_eq!(
+            rd16(q.mem, l.avail_off + 2),
+            start.wrapping_add(rounds) as u16
+        );
         assert_eq!(q.pop_used(), None);
     }
 
     #[test]
     fn out_of_range_or_stale_used_ids_are_skipped() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes];
-        let mut q = VirtQueue::new(&mut mem, l).unwrap();
+        let mut mem_buf = mem();
+        let mem = &mut mem_buf.0[..l.bytes];
+        let mut q = VirtQueue::new(mem, l).unwrap();
         let head = q.add(&[(0x1000, 1)], &[]).unwrap();
         device_complete(q.mem, &l, 0, 8, 0);
         device_complete(q.mem, &l, 1, 0xFFFF_FFFF, 0);
@@ -488,8 +586,9 @@ mod tests {
     #[test]
     fn a_looping_descriptor_chain_cannot_hang_or_corrupt_the_free_list() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes];
-        let mut q = VirtQueue::new(&mut mem, l).unwrap();
+        let mut mem_buf = mem();
+        let mem = &mut mem_buf.0[..l.bytes];
+        let mut q = VirtQueue::new(mem, l).unwrap();
         let head = q.add(&[(1, 1), (2, 1)], &[(3, 1)]).unwrap();
         // The "device" rewrites every descriptor's next to point at itself.
         for i in 0..8usize {
@@ -507,8 +606,9 @@ mod tests {
     #[test]
     fn a_runaway_used_index_is_bounded() {
         let l = layout8();
-        let mut mem = vec![0u8; l.bytes];
-        let mut q = VirtQueue::new(&mut mem, l).unwrap();
+        let mut mem_buf = mem();
+        let mem = &mut mem_buf.0[..l.bytes];
+        let mut q = VirtQueue::new(mem, l).unwrap();
         q.mem[l.used_off + 2..l.used_off + 4].copy_from_slice(&60_000u16.to_le_bytes());
         // Slot contents are all id 0, never in flight: skipped, one queue's worth per call.
         assert_eq!(q.pop_used(), None);

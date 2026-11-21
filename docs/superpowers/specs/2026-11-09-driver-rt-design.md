@@ -329,9 +329,12 @@ Two things are pure and host-tested, which is what the tracker means by "the que
 virtio-blk's use of its run: page 0 the queue, page 1 the request header and status byte, page 2 the
 one 4096-byte bounce buffer (H3). 6.2 computes and reports that layout; 6.3 puts data in it.
 
-The queue takes no part in interrupt handling: a driver calls `IrqLine::fired`, walks the used ring,
-calls `Transport::interrupt_ack`, then `IrqLine::rearm` — I12's order, spelled once in the crate's
-documentation as the pattern every virtio driver's loop follows.
+The queue takes no part in interrupt handling: a driver calls `IrqLine::fired`, reads
+`Transport::interrupt_status` and calls `Transport::interrupt_ack` with those bits, walks the used
+ring until it is empty, then calls `IrqLine::rearm` — I12's order with the ack first, spelled once
+in the crate's documentation as the pattern every virtio driver's loop follows. The ack comes before
+the walk because `InterruptStatus` is level-triggered: acking after the walk would clear a
+completion that landed after the last empty `pop_used`, and the re-arm would find the line low.
 
 ---
 
