@@ -50,6 +50,14 @@ cargo kernel-aarch64
 # as the real clock, and run long enough to observe several periods.
 timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
+# The runner's QEMU command line (slice 6.2, spec T13): the `fat:rw:` ESP as a virtio-blk-pci drive
+# (read by the firmware, by nothing in minix.rs), plus `-global virtio-mmio.force-legacy=false` and a
+# blank `target/vblk-blank.img` (2560 sectors, made with `dd` when absent or the wrong size) on a
+# `virtio-blk-device` pinned to `bus=virtio-mmio-bus.0`. The device is attached on every boot,
+# stub-free or not, so the kernel prints a `[virtio] ... skip=no-module for=vblk` line until the
+# driver ELF exists. Extra arguments are appended last, so a later `-global` overrides the default.
+# tests/qemu-boot.expected is the other holder of the sector count (the capacity= marker).
+
 # Clean, stub-free boot for debugging (servers + init/worker only, no demo
 # stubs A-D): add --no-default-features to disable the `boot-stubs` feature.
 timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
