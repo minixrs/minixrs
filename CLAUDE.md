@@ -8,10 +8,8 @@ Rust, preserving the original ABI. It is a learning OS built around a greenfield
 - **Kernel:** Rust (no_std, no_main), greenfield microkernel
 - **Architecture:** aarch64 primary (Apple Silicon / QEMU virt), x86_64 secondary
 - **Servers:** PM, VFS, VM, RS, DS, SCHED as user-space Rust processes
-- **Drivers:** TTY (PL011 console, TX-only — live as of slice 5.3; owns INTID 33 via `SYS_IRQCTL`
-  since 6.1) and VirtIO (MMIO for aarch64, PCI for x86_64 — Phase 6) as user-space processes;
-  virtio-blk is live at slot 11 as of 6.2 (negotiates and reports capacity, serves nothing until
-  6.3)
+- **Drivers:** TTY and VirtIO (MMIO for aarch64, PCI for x86_64) as user-space processes — current
+  status in [`docs/plan.md`](docs/plan.md)
 - **C library:** musl-libc fork with MINIX IPC syscall wrappers
 - **License:** BSD-3-Clause only (no GPL code)
 - **Platform:** QEMU as primary target
@@ -38,15 +36,7 @@ The MINIX 3 source is available at https://github.com/Stichting-MINIX-Research-F
 ## Architecture
 
 See the [Architecture chapter](book/src/architecture/overview.md) in `book/` for the full system
-design. Key concepts:
-
-- **Microkernel:** Only IPC, scheduling, interrupt dispatch, and memory protection in kernel
-- **Message passing:** MINIX 3's 6 IPC primitives — 5 live (SEND, RECEIVE, SENDREC, NOTIFY, SENDNB);
-  SENDA still an `ENOSYS` stub
-- **User-space servers:** All OS services (file system, process management, memory management) run
-  as separate processes communicating via IPC
-- **Privilege model:** Fine-grained bitmaps control which processes can communicate and what kernel
-  calls they can make
+design.
 
 ## Non-negotiables
 
@@ -72,6 +62,9 @@ These bind every task regardless of area. Everything else lives in
 - **The kernel is bare-metal only and never host-built**; `cargo check`/`clippy`/`test`
   cross-compile it, there is no `#[cfg(test)]` under `kernel/src/`, and **QEMU is the verification
   path** for kernel behaviour.
+- **Slices follow the [slice workflow](docs/conventions/docs-and-workflow.md#slice-workflow):** a
+  dated spec approved before code, a dated plan, test-first tasks, a definition of done, and a fresh
+  review of the diff before any push.
 - **Verify before claiming.** Run the command, read its output, *then* say it passes. A marker that
   was not observed moving has not been proved.
 
@@ -89,7 +82,7 @@ Working rules — read the area file before touching that area:
 | [`abi.md`](docs/conventions/abi.md)                                 | `kernel-shared` — message layouts, request bands, errno bands, generated C headers, the D8 freeze     |
 | [`rust-style.md`](docs/conventions/rust-style.md)                   | SPDX headers, overflow-safe arithmetic, `Display` width, clippy traps in `no_std` crates              |
 | [`testing-and-markers.md`](docs/conventions/testing-and-markers.md) | trace samplers, the boot-marker files, and the mutation-testing discipline                            |
-| [`docs-and-workflow.md`](docs/conventions/docs-and-workflow.md)     | which documentation tree owns what, the superpowers slice workflow, and the review sweeps             |
+| [`docs-and-workflow.md`](docs/conventions/docs-and-workflow.md)     | which documentation tree owns what, the slice workflow, and the review sweeps                         |
 
 Everything else:
 

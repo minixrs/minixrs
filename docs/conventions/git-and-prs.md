@@ -38,6 +38,10 @@ Branching, signing, sign-off, and what a PR owes the plan trackers.
   local-only `checkpoint_remote` left sessions unindexed from 2026-09-18 (per Entire support).
   Checkpoints are `refs/entire/checkpoints/*` refs on `minixrs/development-log`, mirrored on Entire;
   the pre-push hook pushes them on any `git push`, so never hand-push that refspec
+- **Stale Entire hooks** (`entire status` / `entire doctor` say "out of date"): run `entire agent
+  add claude-code`; it rewrites `.claude/settings.json` and `.entire/settings.json`, and both get
+  committed. Pushing checkpoints by hand without a terminal needs `entire checkpoint push
+  <id>@<commit>` (ids and commits from `entire checkpoint list --outgoing --json`)
 - PRs land by **regular merge commit** (never squash; rebase merge only for a solo series where a
   linear history is specifically wanted). A merge preserves every commit object byte-for-byte, so
   both the `Signed-off-by:` trailer **and** the author's GPG signature reach `main` intact — the
