@@ -151,10 +151,29 @@ relays grants on clients' behalf, see [kernel.md](./kernel.md).
 
 ## `uspace`: the address-only ABI
 
-`kernel-shared/src/uspace.rs` is an **address** ABI, not a message one — device/ramdisk window bases
-and sizes. It is deliberately **not** emitted in the generated C headers.
+`kernel-shared/src/uspace.rs` is an **address** ABI, not a message one — the device, ramdisk and DMA
+window bases and sizes, the virtio register page's VA, and the DMA cookie. It is deliberately
+**not** emitted in the generated C headers.
 
 (slice 5.3 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
+
+## `SYS_GETINFO` selectors held back from C
+
+`GET_WHOAMI` (12) describes any process and is emitted. The three driver-gated selectors —
+`GET_RAMDISK` (64, `memory` only), `GET_VIRTIO_MMIO` (65) and `GET_DMA` (66) (the four virtio driver
+slots) — are **deliberately not emitted**: a selector a Rust driver alone can call would freeze its
+value under D8 for no reader, so renumbering stays free for as long as no C ever calls one. Each has
+a "deliberately not emitted" test in `tools/gen-c-headers/src/callnr_h.rs`, and their payload
+offsets (`GETINFO_*_OFF`) are named constants with layout asserts in `callnr.rs`. A new selector
+that C could call is a different matter: it is additive but must be emitted and tested.
+
+The four virtio process names and `NR_BOOT_PROCS` (now 15) **are** emitted into `com.h`, which lists
+every boot process; the array length there is computed from `NR_TASKS + NR_BOOT_PROCS`, so the next
+boot slot fails the build until its name is added. That is additive under D8 (no existing value
+moves) — and the musl fork needs only regenerated headers, since generated headers are never
+committed.
+
+(slice 6.2 — see [the design](../superpowers/specs/2026-11-09-driver-rt-design.md))
 
 ## D8: the ABI freeze
 

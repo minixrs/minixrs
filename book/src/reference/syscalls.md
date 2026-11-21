@@ -37,7 +37,7 @@ Kernel-call numbers are contiguous from `KERNEL_CALL = 0x600` (`kernel-shared/sr
 
 |  Number | Call           | Status | Purpose                                                                 |
 | ------: | -------------- | ------ | ----------------------------------------------------------------------- |
-| `0x600` | `SYS_GETINFO`  | live   | Kernel introspection (e.g. `GET_WHOAMI`).                               |
+| `0x600` | `SYS_GETINFO`  | live   | Kernel introspection (see selectors below).                             |
 | `0x601` | `SYS_PRIVCTL`  | live   | Set up a target's privilege slot (`PRIVCTL_SET_USER`).                  |
 | `0x602` | `SYS_FORK`     | live   | Clone a process slot as a frozen child.                                 |
 | `0x603` | `SYS_EXEC`     | live   | Replace a target's image, from the boot archive or a grant (see below). |
@@ -55,6 +55,24 @@ Kernel-call numbers are contiguous from `KERNEL_CALL = 0x600` (`kernel-shared/sr
 | `0x60F` | `SYS_KILL`     | live   | Raise a signal on a target (queues toward PM).                          |
 | `0x610` | `SYS_GETKSIG`  | live   | PM: fetch the next process with pending signals.                        |
 | `0x611` | `SYS_ENDKSIG`  | live   | PM: acknowledge signal processing for a target.                         |
+
+### `SYS_GETINFO` selectors
+
+The selector is the first four bytes of the payload. Any other value is `EINVAL`.
+
+| Selector          | Value | Caller         | Reply payload                                                                     |
+| ----------------- | ----: | -------------- | --------------------------------------------------------------------------------- |
+| `GET_WHOAMI`      |    12 | any            | `0..4` endpoint, `4..8` priv flags, `8..12` init flags, `12..28` name             |
+| `GET_RAMDISK`     |    64 | `memory`       | `0..8` ramdisk VA (u64), `8..16` length in bytes (u64)                            |
+| `GET_VIRTIO_MMIO` |    65 | virtio drivers | `0..8` register base VA (u64), `8..12` INTID (u32), `12..16` transport slot (u32) |
+| `GET_DMA`         |    66 | virtio drivers | `0..8` run VA (u64), `8..16` run PA (u64), `16..24` run length in bytes (u64)     |
+
+A selector gated to a caller answers `EPERM` to anyone else, because the addresses mean nothing in
+another address space. `GET_RAMDISK`, `GET_VIRTIO_MMIO` and `GET_DMA` answer `ENOENT` to a permitted
+caller that has nothing to report (no ramdisk module; no assigned device). "Virtio drivers" means
+the four proc numbers 11–14. None of `GET_RAMDISK`, `GET_VIRTIO_MMIO` or `GET_DMA` is emitted into
+the generated C headers: a selector that only a Rust driver can call would freeze a value under the
+ABI freeze for no reader.
 
 ### The `SYS_EXEC` initial stack
 

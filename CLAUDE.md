@@ -9,7 +9,9 @@ Rust, preserving the original ABI. It is a learning OS built around a greenfield
 - **Architecture:** aarch64 primary (Apple Silicon / QEMU virt), x86_64 secondary
 - **Servers:** PM, VFS, VM, RS, DS, SCHED as user-space Rust processes
 - **Drivers:** TTY (PL011 console, TX-only — live as of slice 5.3; owns INTID 33 via `SYS_IRQCTL`
-  since 6.1) and VirtIO (MMIO for aarch64, PCI for x86_64 — Phase 6) as user-space processes
+  since 6.1) and VirtIO (MMIO for aarch64, PCI for x86_64 — Phase 6) as user-space processes;
+  virtio-blk is live at slot 11 as of 6.2 (negotiates and reports capacity, serves nothing until
+  6.3)
 - **C library:** musl-libc fork with MINIX IPC syscall wrappers
 - **License:** BSD-3-Clause only (no GPL code)
 - **Platform:** QEMU as primary target

@@ -103,10 +103,10 @@ destinations (see [Roadmap](../roadmap.md)):
 | ---------------------------------------------------- | ---------------------------------------------------- |
 | `include/minix/safecopies.h` — grants                | grant table + `SYS_SAFECOPY` (Phase 5)               |
 | `lib/libc/sys/syscall.c`, `_ipc.S`, `open.c`, …      | the musl fork (`musl/src/minix/*`)                   |
-| `lib/libblockdriver/`, `lib/libchardriver/`          | `drivers/driver-rt` traits                           |
+| `lib/libblockdriver/`, `lib/libchardriver/`          | `drivers/driver-rt` (IRQ, virtio transport, queue)   |
 | `servers/vfs/{open,read,path,mount}.c`               | VFS I/O (VFS is one `main.rs` today)                 |
 | `servers/mfs/`, `servers/pfs/`                       | `fs/mfs`, `fs/pfs` (stubs)                           |
-| `drivers/storage/*`, `drivers/net/*`, `drivers/tty/` | `drivers/virtio-*`, `drivers/memory` (stubs)         |
+| `drivers/storage/*`, `drivers/net/*`, `drivers/tty/` | `drivers/virtio-*` (blk live, rest stubs), `memory`  |
 | disk-image tooling                                   | (no root disk yet — see [Boot](../boot/overview.md)) |
 
 ## Concepts unchanged

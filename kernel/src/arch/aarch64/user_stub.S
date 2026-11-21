@@ -33,8 +33,8 @@
  * we never sub more than 104 so the stack top remains usable). The stack
  * pages are 4 KiB so we have headroom.
  *
- * Endpoint constants below are the boot endpoints of slots 11, 12, and
- * the SYSTEM kernel task (-2). make_endpoint(0, p) = p & 0x7FFF, so
+ * Endpoint constants below are the boot endpoints of slots 15 and 16 (stubs A
+ * and B) and the SYSTEM kernel task (-2). make_endpoint(0, p) = p & 0x7FFF, so
  * SYSTEM at gen 0 = (-2 & 0x7FFF) = 0x7FFE. ANY's encoding is
  * `(1 << 14) - 1 = 0x3FFF` (ENDPOINT_SLOT_TOP at generation 0).
  */
@@ -43,8 +43,8 @@
     .equ RECEIVE,      2
     .equ SENDREC,      3
     .equ ANY,          0x3FFF
-    .equ ENDPOINT_A,   11
-    .equ ENDPOINT_B,   12
+    .equ ENDPOINT_A,   15
+    .equ ENDPOINT_B,   16
     .equ ENDPOINT_PM,  0                   // boot_endpoint(PM_PROC_NR = 0)
     .equ ENDPOINT_VM,  7                   // boot_endpoint(VM_PROC_NR = 7)
     .equ ENDPOINT_SYS, 0x7FFE              // boot_endpoint(SYSTEM)

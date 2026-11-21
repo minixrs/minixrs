@@ -66,6 +66,12 @@ Two invariants keep callers honest:
   state.
 - `free_frame` pushes the frame back through the HHDM.
 
+A second entry point, `reserve_contiguous(pages)`, serves device DMA. It takes `pages` frames in one
+bump from a **single** region's `next_free_pa` — never from the free list and never across a region
+boundary — zeroes them like `alloc_frame`, and returns the first. Contiguity therefore holds by
+construction, not by the order of earlier calls. It returns `None` for zero pages or for exhaustion,
+and nothing ever returns such a run to the allocator.
+
 Frames inside the kernel image, the embedded boot image, and the static EL0 test-stub pages live in
 Limine's `EXECUTABLE_AND_MODULES` region and are never visible to the allocator, so no explicit
 reservation logic is needed.
@@ -117,6 +123,43 @@ sender on VM's caller queue — the lingering `RTS_PAGEFAULT` keeps it blocked e
 running under its own TTBR0 and the message is delivered after the switch, no cross-address-space
 copy machinery is needed at this stage.
 
+## The DMA window
+
+A virtio device reads and writes guest-physical addresses, so a driver needs memory whose physical
+address it knows and whose frames are contiguous. `kernel-shared/src/uspace.rs` declares the third
+kernel-owned window for it, above the ramdisk window like the ramdisk window is above the device
+window, so `USER_REGION_LIMIT` does not move and VM needs no edit:
+
+```rust
+pub const DMA_WINDOW_BASE: u64 = 0xC000_0000;   // 3 GiB — one whole L1 slot
+pub const DMA_WINDOW_SIZE: u64 = 0x0010_0000;   // 1 MiB
+pub const DMA_VA: u64 = DMA_WINDOW_BASE;        // page 0 of the window
+pub const DMA_RUN_PAGES: u64 = 16;              // each driver's run: 64 KiB
+```
+
+The virtio probe reserves one `DMA_RUN_PAGES` run with `reserve_contiguous` for each driver it
+assigns a device, before the first `free_frame`, so the runs do not fragment the region the boot
+servers then bump from. A driver with no device gets no run. The run is mapped `Prot::RW_DATA` at
+`DMA_VA` by the same `load_boot_server` arm that maps the register page; these are ordinary RAM
+frames, so the RAM/device invariant of `map_page_in` holds without any device machinery.
+
+Before mapping, the kernel writes `pa ^ DMA_COOKIE` into the run's first eight bytes through the
+HHDM. The driver reads that word through `DMA_VA`, compares it with the physical address
+`SYS_GETINFO(GET_DMA)` reported, and zeroes it — the one proof, before any request reaches the
+device, that the address the driver holds and the address it will give the device name the same
+memory.
+
+The window is a convenience for finding memory the driver may use, not a fence around what its
+device may touch. With no IOMMU, a driver writes raw physical addresses into its descriptors, so the
+device can DMA anywhere; see
+[what the boundaries do not stop](../drivers/overview.md#what-the-boundaries-do-not-stop).
+
+Every leaf sweep frees non-device frames, which is exactly wrong for a run a device may still be
+writing to. Nothing can reach one today: a virtio driver halts the kernel if it exits or execs, and
+`VMCTL_PT_UNMAP` answers `EPERM` for an address in an assigned driver's DMA window (see
+[the drivers chapter](../drivers/overview.md#a-virtio-driver-cannot-exit)). Removing those guards
+needs a device-reset path that runs before the run is freed.
+
 ## `SYS_VMCTL`: kernel mechanism, VM policy
 
 `SYS_VMCTL` (`kernel/src/system/do_vmctl.rs`) is the one privileged call through which VM drives the
@@ -124,13 +167,13 @@ kernel's paging mechanism. It is gated solely by `Priv::k_call_mask` granting `S
 sole intended holder and is trusted to target only processes it legitimately manages (the MINIX 3
 trust model). Each subcall names a *target* process by endpoint (`SELF` allowed):
 
-| Subcall                          | Effect                                                                                                                                                |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VMCTL_PT_MAP`                   | Allocate a fresh zeroed frame and map it at `vaddr` with the requested protection; reply with the chosen PA.                                          |
-| `VMCTL_PT_UNMAP`                 | Clear the PTE at `vaddr` and free its backing frame. **Returns `EINVAL` if nothing is mapped there** (a harmless no-op for callers sweeping a range). |
-| `VMCTL_CLEAR_PAGEFAULT`          | Clear the target's recorded fault and make it runnable again.                                                                                         |
-| `VMCTL_GET_PAGEFAULT`            | Read the target's recorded fault coordinates.                                                                                                         |
-| `VMCTL_VMINHIBIT_SET` / `_CLEAR` | Gate scheduling of the target while VM mutates its address space.                                                                                     |
+| Subcall                          | Effect                                                                                                                                                                                                               |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VMCTL_PT_MAP`                   | Allocate a fresh zeroed frame and map it at `vaddr` with the requested protection; reply with the chosen PA.                                                                                                         |
+| `VMCTL_PT_UNMAP`                 | Clear the PTE at `vaddr` and free its backing frame. **Returns `EINVAL` if nothing is mapped there** (a harmless no-op for callers sweeping a range) and **`EPERM` for an address in a virtio driver's DMA window**. |
+| `VMCTL_CLEAR_PAGEFAULT`          | Clear the target's recorded fault and make it runnable again.                                                                                                                                                        |
+| `VMCTL_GET_PAGEFAULT`            | Read the target's recorded fault coordinates.                                                                                                                                                                        |
+| `VMCTL_VMINHIBIT_SET` / `_CLEAR` | Gate scheduling of the target while VM mutates its address space.                                                                                                                                                    |
 
 Every PTE change is followed by an ASID-tagged TLB invalidation. The kernel allocates frames (unlike
 MINIX 3, where VM owns physical memory) and VM supplies only the virtual address and protection.

@@ -170,6 +170,19 @@ pub(super) fn do_exec(
         return EINVAL;
     }
 
+    // Fail-stop (slice 6.2, spec T7): exec tears the old address space down, which
+    // would free a virtio driver's DMA run while its device may still DMA into it.
+    // Halt before anything is allocated rather than corrupt memory.
+    assert!(
+        crate::arch::aarch64::virtio_mmio::assignment(target.nr).is_none(),
+        "proc nr={} ({}) owns a virtio device and DMA run: a virtio driver cannot exec until a \
+         device-reset path exists (Status written 0 before the run is freed)",
+        target.nr.get(),
+        core::str::from_utf8(&target.name)
+            .unwrap_or("?")
+            .trim_end_matches('\0'),
+    );
+
     // Build the new address space *before* touching the target — a failure here
     // (OOM, malformed ELF) leaves it untouched on its old image.
     // SAFETY: single-threaded EL1; the sole caller of the frame allocator + ASID

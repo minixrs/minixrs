@@ -50,6 +50,15 @@ cargo kernel-aarch64
 # as the real clock, and run long enough to observe several periods.
 timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
+# The runner's QEMU command line (slice 6.2, spec T13): the `fat:rw:` ESP as a virtio-blk-pci drive
+# (read by the firmware, by nothing in minix.rs), plus `-global virtio-mmio.force-legacy=false` and a
+# blank `target/vblk-blank.img` (2560 sectors, made with `dd` when absent or the wrong size) on a
+# `virtio-blk-device` pinned to `bus=virtio-mmio-bus.0`. The device is attached on every boot,
+# stub-free or not, so every boot prints `[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and the
+# virtio-blk driver's `[diag vblk] virtio ok ... capacity=2560 ...` line. Extra arguments are
+# appended last, so a later `-global` overrides the default. tests/qemu-boot.expected is the other
+# holder of the sector count (the capacity= marker).
+
 # Clean, stub-free boot for debugging (servers + init/worker only, no demo
 # stubs A-D): add --no-default-features to disable the `boot-stubs` feature.
 timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
@@ -174,7 +183,7 @@ gates, not `build`.)
   and PM in lockstep. The feature is deliberately **not** on `kernel-shared`: a shared-crate default
   feature gets force-enabled by other dependents (`minixrs-ipc`, `server-rt`) via cargo **feature
   unification**, which would make it impossible to turn off — so `NR_STUB_PROCS` stays a constant
-  `4`, and `FORK_POOL_BASE` (= 15) is therefore stable: disabling stubs leaves slots 11–14
+  `4`, and `FORK_POOL_BASE` (= 19) is therefore stable: disabling stubs leaves slots 15–18
   **unoccupied**, it does **not** renumber the fork pool.
 - When a `--no-default-features` build doesn't actually drop a feature, suspect cargo **feature
   unification** — diagnose with `cargo tree -p <crate> --no-default-features -e features -i

@@ -31,9 +31,10 @@ whole-project picture.
   nobody has watched fail reads as coverage without being any, so the assertion is that it breaks,
   not that it passes
 - Only `geiger` and `miri` are **advisory** (`continue-on-error`); the other nine block. miri only
-  covers the host-testable crates (`-p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm`) —
-  `minixrs-ipc` has inline asm. `geiger`'s per-package sweep filters out `minixrs-kernel` (it can't
-  host-build)
+  covers the host-testable crates — the `-p` list in the `miri` job of `.github/workflows/ci.yml` is
+  the authority, and `minixrs-driver-rt` joined it in 6.2 because its virtqueue and MMIO code are
+  the `unsafe` Miri is for — while `minixrs-ipc` stays out, having inline asm. `geiger`'s
+  per-package sweep filters out `minixrs-kernel` (it can't host-build)
 - The `clippy` job runs a **second `run:` step**, `cargo clippy -p minixrs-mfs --features server
   --all-targets -- -D warnings`, and it blocks like the first. It exists because `fs/mfs`'s
   `[[bin]]` carries `required-features = ["server"]`, so `main.rs` is **invisible to every other CI

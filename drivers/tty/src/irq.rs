@@ -28,15 +28,17 @@
 // (which drops `_start` and `main`) it would read as dead code.
 #![cfg_attr(test, allow(dead_code))]
 
+use minixrs_driver_rt::IrqLine;
 use minixrs_kernel_shared::callnr::{IRQ_ENABLE, IRQ_REENABLE, IRQ_SETPOLICY};
 use minixrs_kernel_shared::error::{EBUSY, EINVAL, EPERM, OK};
 use minixrs_kernel_shared::irq::NR_IRQ_HOOKS;
+use minixrs_kernel_shared::virtio::NR_VIRTIO_DRIVERS;
 use minixrs_server_rt::{diag_fmt, sys_irqctl};
 
 use crate::pl011::{self, PL011_INTID};
 
 /// The bit TTY's interrupt notifications carry in their pending bitmap.
-pub const TTY_IRQ_NOTIFY_ID: i32 = 0;
+pub const TTY_IRQ_NOTIFY_ID: u8 = 0;
 
 /// How many interrupts [`IrqProof`] takes before it reports: the second one
 /// can only arrive if the first round's `IRQ_ENABLE` really unmasked the line.
@@ -47,7 +49,10 @@ const IRQ_PROOF_ROUNDS: u32 = 2;
 #[derive(Clone, Copy)]
 enum Id {
     Lit(i32),
-    /// `claimed + 1` — a free slot, since TTY is the only claimer.
+    /// `NR_IRQ_HOOKS` — the highest valid hook id (ids are 1-based), so a slot
+    /// in range but unclaimed for as long as the boot has fewer than
+    /// `NR_IRQ_HOOKS` claimers. (`claimed + 1` would name another driver's hook
+    /// — `EPERM`, not `EINVAL` — once virtio-blk claims a line.)
     FreeSlot,
 }
 
@@ -56,36 +61,25 @@ type Case = (i32, i32, i32, Id, i32);
 
 const INTID: i32 = PL011_INTID as i32;
 
+/// TTY plus every virtio driver claim a line; the free-slot row needs one hook
+/// left over.
+const _: () = assert!(NR_IRQ_HOOKS > 1 + NR_VIRTIO_DRIVERS);
+
+/// [`TTY_IRQ_NOTIFY_ID`] as the battery's signed argument word.
+const NOTIFY: i32 = TTY_IRQ_NOTIFY_ID as i32;
+
 /// The denial battery, in order. Each row breaks exactly one rule.
 const CASES: [Case; 11] = [
     // I4: a real SPI, but not on TTY's allow-list.
-    (
-        IRQ_SETPOLICY,
-        INTID + 1,
-        0,
-        Id::Lit(TTY_IRQ_NOTIFY_ID),
-        EPERM,
-    ),
+    (IRQ_SETPOLICY, INTID + 1, 0, Id::Lit(NOTIFY), EPERM),
     // I3: PPI 27 is the kernel's timer; SGIs and PPIs are never claimable.
-    (IRQ_SETPOLICY, 27, 0, Id::Lit(TTY_IRQ_NOTIFY_ID), EINVAL),
+    (IRQ_SETPOLICY, 27, 0, Id::Lit(NOTIFY), EINVAL),
     // I3: INTID 1020 is past every distributor's implemented range.
-    (IRQ_SETPOLICY, 1020, 0, Id::Lit(TTY_IRQ_NOTIFY_ID), EINVAL),
+    (IRQ_SETPOLICY, 1020, 0, Id::Lit(NOTIFY), EINVAL),
     // I10: the policy word must be 0; IRQ_REENABLE is defined and refused.
-    (
-        IRQ_SETPOLICY,
-        INTID,
-        IRQ_REENABLE,
-        Id::Lit(TTY_IRQ_NOTIFY_ID),
-        EINVAL,
-    ),
+    (IRQ_SETPOLICY, INTID, IRQ_REENABLE, Id::Lit(NOTIFY), EINVAL),
     // I6: TTY's own claimed line under a second notify_id.
-    (
-        IRQ_SETPOLICY,
-        INTID,
-        0,
-        Id::Lit(TTY_IRQ_NOTIFY_ID + 1),
-        EBUSY,
-    ),
+    (IRQ_SETPOLICY, INTID, 0, Id::Lit(NOTIFY + 1), EBUSY),
     // I2: notify_id is a bit index into a u32, range-checked as signed.
     (IRQ_SETPOLICY, INTID, 0, Id::Lit(32), EINVAL),
     (IRQ_SETPOLICY, INTID, 0, Id::Lit(-1), EINVAL),
@@ -100,46 +94,59 @@ const CASES: [Case; 11] = [
 ];
 
 /// Claim the PL011 line, run [`CASES`], then the I6 replacement. Returns the
-/// hook id TTY holds, or the claim's negative errno. Every outcome other than
-/// all-pass prints one `[diag tty] irq…FAIL` line.
-pub fn claim_and_probe() -> i32 {
-    let (rc, claimed) = sys_irqctl(IRQ_SETPOLICY, INTID, 0, TTY_IRQ_NOTIFY_ID);
-    if rc != OK {
-        diag_fmt(format_args!("irq FAIL claim rc={rc}"));
-        return rc;
-    }
+/// line TTY holds, or `None` if the claim itself was refused. Every outcome
+/// other than all-pass prints one `[diag tty] irq…FAIL` line.
+pub fn claim_and_probe() -> Option<IrqLine> {
+    let line = match IrqLine::new(PL011_INTID, TTY_IRQ_NOTIFY_ID) {
+        Ok(line) => line,
+        Err(rc) => {
+            diag_fmt(format_args!("irq FAIL claim rc={rc}"));
+            return None;
+        }
+    };
 
     for (i, &(request, vector, policy, id, expected)) in CASES.iter().enumerate() {
         let id = match id {
             Id::Lit(v) => v,
-            Id::FreeSlot => claimed + 1,
+            Id::FreeSlot => NR_IRQ_HOOKS as i32,
         };
         let (rc, _) = sys_irqctl(request, vector, policy, id);
         if rc != expected {
             diag_fmt(format_args!("irq.deny FAIL case={i} rc={rc}"));
-            return claimed;
+            return Some(line);
         }
     }
 
     // I6: a repeat claim by the same owner under the same notify_id replaces
     // its hook in place — same id, no second slot.
-    let (rc, hook) = sys_irqctl(IRQ_SETPOLICY, INTID, 0, TTY_IRQ_NOTIFY_ID);
-    if rc != OK || hook != claimed {
-        diag_fmt(format_args!(
-            "irq.deny FAIL case={} rc={rc} hook={hook}",
-            CASES.len()
-        ));
-        return claimed;
+    match IrqLine::new(PL011_INTID, TTY_IRQ_NOTIFY_ID) {
+        Ok(again) if again.hook_id() == line.hook_id() => {
+            diag_fmt(format_args!("irq.deny ok n={}", CASES.len() + 1));
+            Some(again)
+        }
+        Ok(again) => {
+            diag_fmt(format_args!(
+                "irq.deny FAIL case={} rc={OK} hook={}",
+                CASES.len(),
+                again.hook_id()
+            ));
+            Some(line)
+        }
+        Err(rc) => {
+            diag_fmt(format_args!(
+                "irq.deny FAIL case={} rc={rc} hook=0",
+                CASES.len()
+            ));
+            Some(line)
+        }
     }
-    diag_fmt(format_args!("irq.deny ok n={}", CASES.len() + 1));
-    hook
 }
 
 /// The I13 delivery proof: [`IRQ_PROOF_ROUNDS`] real PL011 TX interrupts, each
 /// acknowledged at the device and re-armed with `IRQ_ENABLE`.
 pub struct IrqProof {
-    /// The hook id `claim_and_probe` adopted — what `IRQ_ENABLE` names.
-    hook: i32,
+    /// The line `claim_and_probe` adopted.
+    line: IrqLine,
     /// Notifications serviced so far.
     rounds: u32,
     /// Whether a notification past the proof has already been reported.
@@ -147,17 +154,14 @@ pub struct IrqProof {
 }
 
 impl IrqProof {
-    /// Start the proof on `hook` (the result of [`claim_and_probe`]) by
-    /// setting `TXIM`, which makes the PL011 raise its line. A negative `hook`
-    /// is a failed claim, already reported: there is no line to prove, so
-    /// `TXIM` stays clear and `None` comes back.
-    pub fn start(hook: i32) -> Option<Self> {
-        if hook <= 0 {
-            return None;
-        }
+    /// Start the proof on `line` (the result of [`claim_and_probe`]) by
+    /// setting `TXIM`, which makes the PL011 raise its line. A `None` line is a
+    /// failed claim, already reported: `TXIM` stays clear and there is no proof.
+    pub fn start(line: Option<IrqLine>) -> Option<Self> {
+        let line = line?;
         pl011::set_txim(true);
         Some(Self {
-            hook,
+            line,
             rounds: 0,
             extra_reported: false,
         })
@@ -184,12 +188,12 @@ impl IrqProof {
             }
             return;
         }
-        if bits & (1u32 << TTY_IRQ_NOTIFY_ID) == 0 {
+        if !self.line.fired(bits) {
             diag_fmt(format_args!("irq FAIL bits={bits:#x}"));
             return;
         }
         pl011::set_txim(false);
-        let (rc, _) = sys_irqctl(IRQ_ENABLE, 0, 0, self.hook);
+        let rc = self.line.rearm();
         if rc != OK {
             diag_fmt(format_args!("irq FAIL enable rc={rc}"));
             return;

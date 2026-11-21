@@ -39,6 +39,10 @@ fn processes() -> [(&'static str, ProcNr); com::NR_TASKS + com::NR_BOOT_PROCS] {
         ("PFS", com::PFS_PROC_NR),
         ("SCHED", com::SCHED_PROC_NR),
         ("INIT", com::INIT_PROC_NR),
+        ("VBLK", com::VBLK_PROC_NR),
+        ("VCON", com::VCON_PROC_NR),
+        ("VINPUT", com::VINPUT_PROC_NR),
+        ("VNET", com::VNET_PROC_NR),
     ]
 }
 

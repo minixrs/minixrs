@@ -17,6 +17,15 @@
 //! free-list trick). This means each frame must be at least 8 bytes — which
 //! is trivially true at 4 KiB.
 //!
+//! A second entry point, [`reserve_contiguous`] (slice 6.2, T7), carves `n`
+//! frames in one bump from a single region for a device's DMA run. It never
+//! touches the free list and never spans two regions, so contiguity holds by
+//! construction rather than by call order. Nothing frees a run: the kernel
+//! hands it to a boot driver for the life of the system, and the one path that
+//! could free it (an exiting driver's address-space teardown) is unreachable
+//! for boot drivers today. The slice that makes a driver restartable owns that
+//! debt.
+//!
 //! Capacity: MAX_REGIONS = 16 is enough for QEMU virt aarch64 (typically
 //! 2–3 USABLE regions) and Apple Silicon QEMU (similar). If a board ever
 //! reports more, `init_from_limine_memmap` panics with a clear message
@@ -218,6 +227,43 @@ pub fn alloc_frame() -> Option<Frame> {
             // require `write_volatile`.
             unsafe {
                 ptr::write_bytes(crate::mm::phys_to_hhdm(pa), 0, FRAME_SIZE);
+            }
+            return Some(Frame::from_addr(pa));
+        }
+    }
+    None
+}
+
+/// Reserve `pages` physically contiguous, zeroed frames and return the first.
+///
+/// Bumps one region's `next_free_pa`: the first region with at least `pages`
+/// frames left. Never draws from the free list and never crosses a region
+/// boundary. `pages == 0` (or a size that overflows) returns `None`, as does
+/// exhaustion. The run is never returned to the allocator; see the module docs.
+pub fn reserve_contiguous(pages: usize) -> Option<Frame> {
+    if pages == 0 {
+        return None;
+    }
+    let bytes = (pages as u64).checked_mul(FRAME_SIZE as u64)?;
+
+    // SAFETY: single-threaded boot invariant; see module-level comment.
+    let a = unsafe { &mut *ALLOC.0.get() };
+
+    for r in &mut a.regions[..a.region_count] {
+        if r.end_pa - r.next_free_pa >= bytes {
+            let pa = r.next_free_pa;
+            let end = pa.checked_add(bytes).expect("reserve_contiguous overflow");
+            // Unconditional (not debug-only): the run must sit inside one region.
+            assert!(
+                r.base_pa <= pa && end <= r.end_pa,
+                "reserve_contiguous: run {pa:#x}..{end:#x} escapes its region"
+            );
+            r.next_free_pa = end;
+            a.allocs += pages as u64; // one per frame, as `frees` counts
+            // SAFETY: HHDM covers this PA, the run is exclusively ours, and HHDM
+            // is cacheable normal memory, as in `alloc_frame`'s bump path.
+            unsafe {
+                ptr::write_bytes(crate::mm::phys_to_hhdm(pa), 0, bytes as usize);
             }
             return Some(Frame::from_addr(pa));
         }

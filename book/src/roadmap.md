@@ -4,9 +4,10 @@
 > Phase 4, but Phase 5 has begun landing and the sections below are no longer uniformly future
 > tense: grants and the fault-safe copy engine are live (slices 5.1–5.2), and so is the first
 > user-space driver — TTY, which owns the PL011 and serves `CDEV_WRITE` (slice 5.3, see
-> [Drivers](drivers/overview.md)). Still absent: the musl fork, the VirtIO drivers, the file-system
-> servers, and any x86_64 port. The rest of this book describes what *does* run; this chapter
-> describes where the project is headed. For live phase status and slice tracking, see the
+> [Drivers](drivers/overview.md)). Still absent: the musl fork, the VirtIO drivers' request paths
+> (virtio-blk boots and reports its disk's capacity from slice 6.2, but serves nothing yet), the
+> file-system servers, and any x86_64 port. The rest of this book describes what *does* run; this
+> chapter describes where the project is headed. For live phase status and slice tracking, see the
 > repository's `docs/plan.md`.
 
 ## Grants and safe copy (Phase 5, first)
@@ -86,9 +87,10 @@ restarts it. They talk to the kernel (interrupts, I/O) and to VFS (device protoc
   `virtio-blk`, `virtio-console`, `virtio-input` (the keyboard) and `virtio-net`. The existing TTY
   driver also grows in Phase 6: PL011 receive, and a text console on the bootloader-provided
   framebuffer.
-- A `driver-rt` crate will provide the reusable `BlockDriver` / `CharDriver` traits and the VirtIO
-  transport types. Only a console story is needed for the Phase-5 `printf` milestone; the rest is
-  Phase 6.
+- The `driver-rt` crate already provides the interrupt-line helper, the VirtIO transport (a trait
+  with the MMIO implementation) and the split virtqueue (slice 6.2); the reusable `BlockDriver` /
+  `CharDriver` request traits are still to come. Only a console story is needed for the Phase-5
+  `printf` milestone; the rest is Phase 6.
 
 ## Copy-on-write fork
 

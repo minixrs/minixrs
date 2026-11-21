@@ -99,7 +99,7 @@ when the kernel is stub-free, passes `--no-default-features` to the nested PM bu
 the two in lockstep. The feature is intentionally **not** placed on `kernel-shared`: a shared-crate
 default feature is force-enabled by other dependents (`minixrs-ipc`, `server-rt`) through cargo
 *feature unification* and could not be turned off. So `NR_STUB_PROCS` (= 4) and `FORK_POOL_BASE`
-(= 15) are constant regardless of the feature — disabling stubs merely leaves proc slots 11–14
+(= 19) are constant regardless of the feature — disabling stubs merely leaves proc slots 15–18
 unoccupied; it does not renumber the fork pool.
 
 ## The kernel is not host-buildable

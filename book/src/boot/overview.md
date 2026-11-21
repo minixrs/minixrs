@@ -38,7 +38,7 @@ kmain()  (kernel/src/main.rs)
   │  3. proc::init() — clear the process/privilege tables; dump them
   │  4. mm::set_hhdm_offset() + mm::init_from_limine_memmap() — seed the frame allocator
   │  5. gic::init() + enable the virtual-timer PPI + timer::init(100 Hz)
-  │  6. arch::userland_bootstrap() — load the boot image, install the demo stubs
+  │  6. arch::userland_bootstrap() — probe virtio-mmio, load the boot image, install the demo stubs
   │  7. proc::sched::run() — first ERET into EL0
   ▼
 User processes run  (scheduler picks the highest-priority runnable proc)
@@ -83,38 +83,58 @@ target binary — the mechanism `worker` rides on.
 
 ### Boot modules
 
-The archive holds eight modules (`kernel/build.rs`'s `servers` array). Seven have non-negative proc
-numbers and are loaded into a process slot at boot; `worker` is tagged with the sentinel
-`EXEC_ONLY_PROC_NR = -1`, so the loader skips it — it has no boot slot and exists only to be
-resolved by name at `exec` time.
+The archive holds thirteen modules (`kernel/build.rs`'s `servers` array). Eleven have non-negative
+proc numbers and are loaded into a process slot at boot; `worker` and `bigprog` (a fixture for the
+user VA map) are tagged with the sentinel `EXEC_ONLY_PROC_NR = -1`, so the loader skips them — they
+have no boot slot and exist only to be resolved by name at `exec` time. The array's order is the
+order the boot log's `[as]` lines appear in, and it is load-bearing: DS first so every later publish
+lands, then each server before its first client's lookup (`ds < tty < memory < mfs < vfs < pm`).
+`vblk` sits between `memory` and `mfs`, where slice 6.3's DS chain will need it.
 
-| Module   | Proc nr | Loaded at boot?       |
-| -------- | ------: | --------------------- |
-| `pm`     |       0 | yes                   |
-| `vfs`    |       1 | yes (skeletal)        |
-| `rs`     |       2 | yes                   |
-| `ds`     |       5 | yes                   |
-| `vm`     |       7 | yes                   |
-| `sched`  |       9 | yes                   |
-| `init`   |      10 | yes — becomes PID 1   |
-| `worker` |      −1 | no — exec-only target |
+| Module    | Proc nr | Loaded at boot?       |
+| --------- | ------: | --------------------- |
+| `vm`      |       7 | yes                   |
+| `ds`      |       5 | yes                   |
+| `tty`     |       4 | yes                   |
+| `memory`  |       3 | yes                   |
+| `vblk`    |      11 | yes — the virtio disk |
+| `mfs`     |       6 | yes                   |
+| `vfs`     |       1 | yes                   |
+| `sched`   |       9 | yes                   |
+| `rs`      |       2 | yes                   |
+| `pm`      |       0 | yes                   |
+| `init`    |      10 | yes — becomes PID 1   |
+| `worker`  |      −1 | no — exec-only target |
+| `bigprog` |      −1 | no — exec-only target |
 
-Proc numbers 3 (`MEM`), 4 (`TTY`), 6 (`MFS`), and 8 (`PFS`) are reserved in
-`kernel-shared/src/com.rs` for servers that do not yet exist. Kernel tasks (`ASYNCM`, `IDLE`,
-`CLOCK`, `SYSTEM`, `HARDWARE`) occupy the negative proc numbers and are internal to the kernel —
-they have no ELF binary.
+Proc number 8 (`PFS`) is reserved in `kernel-shared/src/com.rs` for a server that does not yet
+exist, and so are the three virtio driver slots that have no ELF: 12 (`vcon`), 13 (`vinput`) and 14
+(`vnet`). A reserved slot is fully wired — a `BootEntry` row, a privilege slot, `ipc_to` edges — and
+stays blocked on `RTS_NO_PRIV` until its module arrives. Kernel tasks (`ASYNCM`, `IDLE`, `CLOCK`,
+`SYSTEM`, `HARDWARE`) occupy the negative proc numbers and are internal to the kernel — they have no
+ELF binary. `NR_BOOT_PROCS` is 15: slots `0..=14`.
 
 Alongside the boot modules, `userland_bootstrap` hand-installs four demo stubs (A–D) at proc numbers
-11–14. They are not part of the archive; they are small EL0 programs kept as a live regression
-battery for the IPC primitives, SCHED delegation, and the page-fault / SIGSEGV paths that `init` and
-`worker` do not exercise. So the boot trace shows eleven address-space (`[as]`) lines — six servers,
-`init`, and the four stubs — but not `worker`, which is never loaded until an `exec` names it.
+15–18, just past the boot image; PM's fork pool starts at 19. They are not part of the archive; they
+are small EL0 programs kept as a live regression battery for the IPC primitives, SCHED delegation,
+and the page-fault / SIGSEGV paths that `init` and `worker` do not exercise. So the boot trace shows
+fifteen address-space (`[as]`) lines — ten servers and drivers, `init`, and the four stubs — but
+neither exec-only module, which is never loaded until an `exec` names it.
+
+### The virtio probe
+
+Before `userland_bootstrap` loads the first module it probes QEMU's 32 virtio-mmio transports and
+reserves each assigned driver's DMA run, because the run must be carved out before the first frame
+is ever freed (`device_teardown_selftest`, a few lines later, is the first caller of `free_frame`).
+What the probe reads and decides is described in
+[the drivers chapter](../drivers/overview.md#the-kernel-finds-the-device), and the run in
+[the memory chapter](../memory/overview.md#the-dma-window).
 
 ## Disk image and QEMU
 
-There is no partitioned root disk yet. The cargo runner (`tools/qemu-run.sh`) stages a small ESP
-*directory* and hands it to QEMU's directory-as-FAT helper, which is enough to land the boot banner
-without `parted` / `mtools`:
+There is no partitioned root disk yet — the virtio disk below is blank and nothing reads it until
+slice 6.3. The cargo runner (`tools/qemu-run.sh`) stages a small ESP *directory* and hands it to
+QEMU's directory-as-FAT helper, which is enough to land the boot banner without `parted` / `mtools`:
 
 ```text
 target/esp/
@@ -141,8 +161,18 @@ qemu-system-aarch64 \
     -M virt,gic-version=3 -cpu cortex-a72 -m 256M \
     -bios <edk2-aarch64-code.fd> \
     -drive file=fat:rw:fat-type=32:target/esp,format=raw,if=virtio \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=target/vblk-blank.img,format=raw,if=none,id=vblk0 \
+    -device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0 \
     -display none -serial stdio -no-reboot
 ```
+
+The first drive is a virtio-blk-**pci** device that only the firmware reads. The second is the one
+minix.rs drives: a blank 2560-sector image (`dd`-created by the runner when absent) on a
+virtio-blk-**mmio** device pinned to transport slot 0, which the kernel's
+[boot probe](#the-virtio-probe) finds and hands to `virtio-blk`. `force-legacy=false` makes every
+mmio transport modern (version 2), the only version the drivers accept; a later `-global` on the
+command line overrides it, which is how the version-refusal boot is produced.
 
 Because the kernel runs indefinitely once EL0 starts, always wrap a boot run in `timeout`. See
 [Build & Toolchain](../build.md) for the full run recipe and the trace-forensics rules for reading a

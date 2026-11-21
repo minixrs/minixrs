@@ -62,10 +62,40 @@ cp "$LIMINE_BIN" "$ESP/EFI/BOOT/BOOTAA64.EFI"
 cp "$ROOT/tools/limine.conf" "$ESP/limine.conf"
 cp "$KERNEL" "$ESP/boot/kernel"
 
+# The blank disk the 6.2 virtio-blk driver (`vblk`) binds to. Its size is
+# deliberately NOT the ramdisk's 1 MiB, so a `capacity=` that matches cannot be
+# the ramdisk length leaking through a shared path. tests/qemu-boot.expected
+# is the other holder of this sector count (the capacity= marker); change the
+# two together. 6.3 replaces this blank file with the root image.
+VBLK_IMAGE_SECTORS=2560
+VBLK_IMAGE="$ROOT/target/vblk-blank.img"
+# Bus pinning for the phase: one device per transport page (a page holds 8
+# 0x200-byte slots), eight buses apart, so each driver's registers can be mapped
+# on their own page. `virtio-mmio-bus.N` is transport slot N (measured for buses
+# 0 and 8, Task 0). blk is bus 0; the later devices are planned for buses 8
+# (console), 16 (input) and 24 (net), inferred from that and not yet measured.
+BUS_VBLK=0
+# `dd`, not `truncate` (macOS has none); recreate when absent or the wrong size.
+want=$((VBLK_IMAGE_SECTORS * 512))
+have=0
+if [[ -f "$VBLK_IMAGE" ]]; then
+    have=$(wc -c <"$VBLK_IMAGE" | tr -d ' ')
+fi
+if [[ "$have" -ne "$want" ]]; then
+    mkdir -p "$ROOT/target"
+    dd if=/dev/zero of="$VBLK_IMAGE" bs=512 count="$VBLK_IMAGE_SECTORS" 2>/dev/null
+fi
+
+# `force-legacy=false` makes the mmio transports modern (version 2); the
+# drivers refuse version 1. "$@" stays last so a later -global can override it
+# for the refusal boots.
 exec qemu-system-aarch64 \
     -M "virt,gic-version=3" -cpu cortex-a72 -m 256M \
     -bios "$FIRMWARE" \
     -drive "file=fat:rw:fat-type=32:$ESP,format=raw,if=virtio" \
+    -global virtio-mmio.force-legacy=false \
+    -drive "file=$VBLK_IMAGE,format=raw,if=none,id=vblk0" \
+    -device "virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.$BUS_VBLK" \
     -display none \
     -serial stdio \
     -no-reboot \

@@ -718,6 +718,31 @@ mod tests {
         }
     }
 
+    /// The 6.2 virtio selectors follow `GET_RAMDISK`'s rule: gated to Rust driver
+    /// proc numbers, so no C can call them, and emitting them would freeze their
+    /// values under D8 for no reader. Emit when a C caller exists and delete this
+    /// test in the same commit.
+    #[test]
+    fn no_virtio_selectors_are_emitted_yet() {
+        let text = render();
+        for name in [
+            "GET_VIRTIO_MMIO",
+            "GETINFO_VIRTIO_VA_OFF",
+            "GETINFO_VIRTIO_INTID_OFF",
+            "GETINFO_VIRTIO_SLOT_OFF",
+            "GET_DMA",
+            "GETINFO_DMA_VA_OFF",
+            "GETINFO_DMA_PA_OFF",
+            "GETINFO_DMA_LEN_OFF",
+        ] {
+            assert_eq!(
+                builder::define_value(&text, name),
+                None,
+                "{name} is a kernel-to-Rust-driver selector and must not be frozen into the C ABI"
+            );
+        }
+    }
+
     /// `GrantEntry` is deliberately not emitted as a C struct until a C caller
     /// needs it (slice 5.6). Nothing may quietly add one here — that belongs in
     /// its own `<minixrs/safecopies.h>` with its own CI syntax check.

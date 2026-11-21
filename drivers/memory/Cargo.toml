@@ -9,11 +9,9 @@ publish = false
 name = "minixrs-memory"
 path = "src/main.rs"
 
-# Deliberately NOT `minixrs-driver-rt`, for the reason `drivers/tty` gives: it is
-# a 4-line placeholder today, and depending on it would mean adding
-# `drivers/driver-rt/src` to the shared `rerun-if-changed` list in
-# `kernel/build.rs` for zero benefit. Phase 6, when driver-rt grows a real IRQ/DMA
-# runtime, is when that dependency (and the watch entry) should be added.
+# Deliberately NOT `minixrs-driver-rt`: that crate is the interrupt and device runtime
+# (`IrqLine`, and the virtio transport to come), and this driver has no interrupt and no
+# device — it serves a RAM image.
 #
 # Nor `minixrs-mfs`: a *block* driver must not depend on the *filesystem format*.
 # The device-level checks this driver makes read the image header out of

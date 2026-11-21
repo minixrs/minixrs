@@ -31,6 +31,7 @@
 //! | `0x3FFF_0000` | [the initial stack](USER_STACK_BASE), 16 pages, growing down |
 //! | `0x4000_0000` | **the device window**, and [the stack's top](USER_STACK_TOP) |
 //! | `0x8000_0000` | [the ramdisk window](RAMDISK_WINDOW_BASE) (slice 5.7) |
+//! | `0xC000_0000` | [the DMA window](DMA_WINDOW_BASE) (slice 6.2) |
 //!
 //! Two of those entries *grow* on request — VM's heap (`brk` raises its end) and
 //! VM's mmap arena (a bump cursor that never reuses addresses) — so
@@ -59,6 +60,21 @@
 //! these frames take the normal `free_frame` path in every leaf sweep. RW rather
 //! than RO so that slice 5.10a's write path was a body change in the driver
 //! rather than a re-mapping in the kernel — which is exactly how it landed.
+//!
+//! ## The DMA window
+//!
+//! [`DMA_WINDOW_BASE`] is the third kernel-owned window: one L1 slot above the
+//! ramdisk window, so [`USER_REGION_LIMIT`] does not move. It maps ordinary RAM
+//! (`Prot::RW_DATA`), like the ramdisk window: at boot the kernel reserves one
+//! physically contiguous run of [`DMA_RUN_PAGES`] frames per assigned virtio
+//! driver and maps it at [`DMA_VA`] in that driver's address space, so the VA a
+//! driver holds and the PA it hands the device name the same memory. The kernel
+//! stamps the run's first eight bytes with `pa ^ `[`DMA_COOKIE`] so the driver
+//! can check the mapping. Reported via `SYS_GETINFO(GET_DMA)`.
+//!
+//! [`VIRTIO_MMIO_PAGE_VA`] is page 1 of the device window (page 0 stays TTY's
+//! UART by convention): every virtio driver has its own address space, so one
+//! constant serves all four.
 //!
 //! These constants are deliberately **not** emitted into the generated C headers:
 //! no Phase 5 C touches them (musl's `write()` goes to VFS, not to a driver's
@@ -106,6 +122,30 @@ pub const RAMDISK_WINDOW_SIZE: u64 = 0x0040_0000;
 /// `memory` driver is a boot server with no way to ask for it — and reported to
 /// that driver alone via `SYS_GETINFO(GET_RAMDISK)`.
 pub const RAMDISK_VA: u64 = RAMDISK_WINDOW_BASE;
+
+/// VA of the virtio-mmio register page in a virtio driver's address space: page 1
+/// of the device window (slice 6.2). The driver's register base is this plus the
+/// device's in-page offset.
+pub const VIRTIO_MMIO_PAGE_VA: u64 = USER_DEVICE_WINDOW_BASE + USER_PAGE_SIZE;
+
+/// Base of the DMA window: one whole L1 slot at 3 GiB (slice 6.2).
+pub const DMA_WINDOW_BASE: u64 = 0xC000_0000;
+
+/// Size of the DMA window: 1 MiB, i.e. 256 pages.
+pub const DMA_WINDOW_SIZE: u64 = 0x0010_0000;
+
+/// VA of a driver's DMA run: page 0 of the window.
+pub const DMA_VA: u64 = DMA_WINDOW_BASE;
+
+/// Pages in each driver's contiguous DMA run (64 KiB).
+pub const DMA_RUN_PAGES: u64 = 16;
+
+/// Bytes in each driver's DMA run; const arithmetic, so overflow cannot compile.
+pub const DMA_RUN_BYTES: u64 = DMA_RUN_PAGES * USER_PAGE_SIZE;
+
+/// The kernel writes `pa ^ DMA_COOKIE` into the run's first eight bytes; the
+/// driver checks it against the PA `GET_DMA` reported, then zeroes it.
+pub const DMA_COOKIE: u64 = 0x444D_415F_6D78_7273;
 
 /// Top of the initial user stack: the highest VA a process may name, and the
 /// value the kernel points `SP_EL0` at before `eret`.
@@ -207,6 +247,27 @@ const _: () = assert!(RAMDISK_VA.is_multiple_of(USER_PAGE_SIZE));
 const _: () = assert!(RAMDISK_VA >= RAMDISK_WINDOW_BASE);
 const _: () = assert!(RAMDISK_VA < RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE);
 
+// The DMA window's geometry, mirroring the ramdisk window's.
+const _: () = assert!(DMA_WINDOW_BASE.is_multiple_of(L1_SLOT_SIZE));
+const _: () = assert!(DMA_WINDOW_SIZE <= L1_SLOT_SIZE);
+const _: () = assert!(DMA_WINDOW_SIZE > 0);
+const _: () = assert!(DMA_WINDOW_SIZE.is_multiple_of(USER_PAGE_SIZE));
+const _: () = assert!(DMA_WINDOW_BASE + DMA_WINDOW_SIZE <= USER_VA_TOP);
+const _: () = assert!(DMA_VA.is_multiple_of(USER_PAGE_SIZE));
+const _: () = assert!(DMA_VA >= DMA_WINDOW_BASE);
+const _: () = assert!(DMA_VA < DMA_WINDOW_BASE + DMA_WINDOW_SIZE);
+const _: () = assert!(RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE <= DMA_WINDOW_BASE);
+const _: () = assert!(DMA_RUN_PAGES * USER_PAGE_SIZE <= DMA_WINDOW_SIZE);
+const _: () = assert!(DMA_RUN_PAGES > 0);
+
+// The virtio register page: inside the device window, and not TTY's page.
+const _: () = assert!(VIRTIO_MMIO_PAGE_VA != TTY_UART_VA);
+const _: () = assert!(VIRTIO_MMIO_PAGE_VA.is_multiple_of(USER_PAGE_SIZE));
+const _: () = assert!(VIRTIO_MMIO_PAGE_VA >= USER_DEVICE_WINDOW_BASE);
+const _: () = assert!(
+    VIRTIO_MMIO_PAGE_VA + USER_PAGE_SIZE <= USER_DEVICE_WINDOW_BASE + USER_DEVICE_WINDOW_SIZE
+);
+
 // The load-bearing one. Every kernel-owned window must sit at or above the
 // device window's end, because `USER_REGION_LIMIT` — the cap
 // `servers/vm/src/region.rs` enforces on every *process* region — is derived
@@ -237,6 +298,7 @@ const _: () = assert!(USER_REGION_LIMIT < USER_STACK_BASE);
 // overlapping it is not.
 const _: () = assert!(USER_STACK_TOP <= USER_DEVICE_WINDOW_BASE);
 const _: () = assert!(USER_STACK_TOP <= RAMDISK_WINDOW_BASE);
+const _: () = assert!(USER_STACK_TOP <= DMA_WINDOW_BASE);
 
 #[cfg(test)]
 mod tests {
@@ -249,6 +311,24 @@ mod tests {
         assert_eq!(USER_DEVICE_WINDOW_SIZE, 16 * 1024 * 1024);
         // 4096 pages of headroom for Phase 6's virtio-mmio register pages.
         assert_eq!(USER_DEVICE_WINDOW_SIZE / USER_PAGE_SIZE, 4096);
+    }
+
+    #[test]
+    fn the_dma_window_is_the_third_window() {
+        assert_eq!(DMA_WINDOW_BASE, 0xC000_0000);
+        assert_eq!(DMA_WINDOW_BASE, 3 * L1_SLOT_SIZE);
+        assert_eq!(DMA_WINDOW_SIZE, 1024 * 1024);
+        assert_eq!(DMA_VA, DMA_WINDOW_BASE);
+        assert_eq!(DMA_RUN_PAGES * USER_PAGE_SIZE, 64 * 1024);
+        assert_eq!(DMA_COOKIE, 0x444D_415F_6D78_7273);
+        let ramdisk_end = RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE;
+        assert_eq!(ramdisk_end.min(DMA_WINDOW_BASE), ramdisk_end);
+        assert_eq!(VIRTIO_MMIO_PAGE_VA, USER_DEVICE_WINDOW_BASE + 0x1000);
+        // Every window lies at or above the lowest, so the region limit is unmoved.
+        assert_eq!(
+            DMA_WINDOW_BASE.min(USER_DEVICE_WINDOW_BASE),
+            USER_DEVICE_WINDOW_BASE
+        );
     }
 
     #[test]

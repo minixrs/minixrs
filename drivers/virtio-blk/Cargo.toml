@@ -5,7 +5,19 @@ edition = "2024"
 license = "BSD-3-Clause"
 publish = false
 
+[[bin]]
+name = "minixrs-virtio-blk"
+path = "src/main.rs"
+
+# `minixrs-driver-rt` supplies the virtio-mmio transport, `negotiate`, the split
+# virtqueue and `IrqLine`; its `src` is on the shared `rerun-if-changed` list in
+# `kernel/build.rs`.
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minixrs-ipc" }
+minixrs-server-rt = { path = "../../server-rt" }
 minixrs-driver-rt = { path = "../driver-rt" }
+minixrs-abi-note = { path = "../../minixrs-abi-note" }
+
+[lints]
+workspace = true

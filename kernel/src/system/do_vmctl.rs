@@ -54,8 +54,9 @@ use minixrs_kernel_shared::callnr::{
     VMCTL_PROT_WRITE, VMCTL_PT_MAP, VMCTL_PT_UNMAP, VMCTL_VMINHIBIT_CLEAR, VMCTL_VMINHIBIT_SET,
 };
 use minixrs_kernel_shared::endpoint::Endpoint;
-use minixrs_kernel_shared::error::{EINVAL, ENOMEM, OK};
+use minixrs_kernel_shared::error::{EINVAL, ENOMEM, EPERM, OK};
 use minixrs_kernel_shared::message::Message;
+use minixrs_kernel_shared::uspace::{DMA_WINDOW_BASE, DMA_WINDOW_SIZE};
 
 use crate::arch::aarch64::addrspace::{MapError, Prot, map_page_in, unmap_page_in, walk_pt_in};
 use crate::arch::aarch64::mmu;
@@ -120,10 +121,10 @@ fn pt_map(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut Me
         // Always Normal-WB: **VM may not mint device mappings.** D1 rejected a
         // VM-mediated `VMCTL_MAP_PHYS` for Phase 5 — a subcall that let a
         // user-space server name an arbitrary physical address would hand it the
-        // whole machine, and the one device mapping Phase 5 needs (TTY's UART) is
-        // installed by the kernel at boot instead. Revisit when Phase 6's
-        // virtio-mmio drivers need to map their own register pages, and gate it on
-        // a per-driver PA whitelist in `Priv` when you do.
+        // whole machine, and every device mapping (TTY's UART page, a virtio
+        // driver's register page) is installed by the kernel at boot instead.
+        // Revisit if a driver is ever started after boot, and gate it on a
+        // per-driver PA whitelist in `Priv` when you do.
         device: false,
     };
 
@@ -176,12 +177,19 @@ fn pt_map(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut Me
 ///
 /// Everything `PT_MAP` installs is an anonymous, kernel-allocated frame, so in
 /// practice the free always happens. The device arm is defense-in-depth for the
-/// one leaf kind `PT_MAP` cannot produce: the UART page the kernel pre-maps into
-/// TTY's address space (slice 5.3). Freeing that PA would push MMIO onto the
-/// frame allocator's free list. VM has no reason to unmap a driver's device
-/// window and no `ipc_to` edge that would let it try — but the guard costs one
-/// walk, and `map_page_in`'s RAM/device invariant makes it exact rather than
-/// heuristic.
+/// leaf kinds `PT_MAP` cannot produce: the pages `load_boot_server` pre-maps —
+/// TTY's UART page (slice 5.3) and a virtio driver's register page (slice 6.2).
+/// Freeing such a PA would push MMIO onto the frame allocator's free list. VM has
+/// no reason to unmap a driver's device window and no `ipc_to` edge that would let
+/// it try — but the guard costs one walk, and `map_page_in`'s RAM/device invariant
+/// makes it exact rather than heuristic.
+///
+/// **A virtio driver's DMA window is refused with `EPERM`** (slice 6.2, spec T7):
+/// the run is ordinary RAM (`Prot::RW_DATA`), so the device guard would not stop
+/// the `free_frame` of a frame the device may still DMA into. VM is a caller that
+/// can be told no, so this is a reject, not the halt `do_exit`/`do_exec` use.
+/// `EPERM` because nothing here refuses on policy (`EINVAL` means "nothing mapped
+/// there"), and only procs holding a virtio assignment are affected.
 fn pt_unmap(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut Message) -> i32 {
     let vaddr = read_u64(msg, 8);
     let (ttbr0_pa, asid, name) = {
@@ -190,6 +198,15 @@ fn pt_unmap(proc_table: &mut [Proc; N_PROC_SLOTS], target_idx: usize, msg: &mut 
     };
     if ttbr0_pa == 0 {
         return EINVAL;
+    }
+
+    let in_dma_window = DMA_WINDOW_BASE
+        .checked_add(DMA_WINDOW_SIZE)
+        .is_some_and(|end| (DMA_WINDOW_BASE..end).contains(&vaddr));
+    if in_dma_window
+        && crate::arch::aarch64::virtio_mmio::assignment(proc_table[target_idx].nr).is_some()
+    {
+        return EPERM;
     }
 
     // Resolve the leaf's protection *before* clearing it — `unmap_page_in`

@@ -37,8 +37,8 @@ use minixrs_kernel_shared::ProcNr;
 use minixrs_kernel_shared::callnr::{KERNEL_CALL, SYS_GETINFO};
 #[cfg(feature = "boot-stubs")]
 use minixrs_kernel_shared::com::{
-    RS_PROC_NR, SCHED_PROC_NR, STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR, STUB_D_PROC_NR,
-    SYSTEM, VM_PROC_NR, boot_endpoint,
+    NR_SYS_PROCS, RS_PROC_NR, SCHED_PROC_NR, STUB_A_PROC_NR, STUB_B_PROC_NR, STUB_C_PROC_NR,
+    STUB_D_PROC_NR, SYSTEM, VM_PROC_NR, boot_endpoint,
 };
 
 use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
@@ -48,7 +48,8 @@ use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
 #[cfg(feature = "boot-stubs")]
 use minixrs_kernel_shared::uspace::USER_REGION_LIMIT;
 use minixrs_kernel_shared::uspace::{
-    RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA, USER_STACK_BASE, USER_STACK_BYTES, USER_STACK_TOP,
+    DMA_RUN_PAGES, DMA_VA, RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA, USER_STACK_BASE,
+    USER_STACK_BYTES, USER_STACK_TOP, VIRTIO_MMIO_PAGE_VA,
 };
 
 use minixrs_kernel_shared::error::{EFAULT, ENOEXEC, ENOMEM};
@@ -58,6 +59,7 @@ use crate::arch::aarch64::asid::alloc_asid;
 #[cfg(feature = "boot-stubs")]
 use crate::arch::aarch64::mmu::flush_icache_range;
 use crate::arch::aarch64::mmu::{self, PAGE_SIZE};
+use crate::arch::aarch64::virtio_mmio::assignment;
 use crate::boot_image::elf::{ElfError, ElfSource};
 #[cfg(feature = "boot-stubs")]
 use crate::mm::phys_to_hhdm;
@@ -67,9 +69,9 @@ use crate::proc::bitmap::{set_call_bit, set_sys_bit};
 #[cfg(feature = "boot-stubs")]
 use crate::proc::flags::{BILLABLE, PREEMPTIBLE, RTS_NO_PRIV, SRV_T, SYS_PROC, USR_T};
 use crate::proc::sched;
-use crate::proc::table::{priv_slot_mut, proc_slot_mut};
 #[cfg(feature = "boot-stubs")]
-use crate::proc::table::{proc_index, proc_table_ref};
+use crate::proc::table::{USER_PRIV_ID, proc_index, proc_table_ref};
+use crate::proc::table::{priv_slot_mut, proc_slot_mut};
 #[cfg(feature = "boot-stubs")]
 use crate::proc::{HeapWindow, Priv, Proc};
 
@@ -108,22 +110,31 @@ pub const USER_STACK_VA_D: u64 = 0x0083_0000;
 // grow its heap, then touches it. The kernel needs no heap-window constant —
 // faults route to VM, which gates them on its per-proc region table.
 
-// Stub proc numbers (slots 11..=15, just past the boot image) live in
+// Stub proc numbers (slots 15..=18, just past the boot image) live in
 // `kernel-shared::com` since slice 4.5 — PM's mproc table seeds them, so the
 // kernel and PM must agree on one source.
 
-/// Privilege-table slots for the dedicated-priv stubs A–D. Boot image uses
-/// 0..=15; 16, 17, 18, and 19 are the first free entries. The next slot up
-/// (`proc::table::USER_PRIV_ID` = 20) is the shared USER priv that init (PID 1)
-/// and every forked child use — no stub owns it.
+/// Privilege-table slots for the dedicated-priv stubs A–D. A boot-image row's
+/// priv id is its `IMAGE` index, so the image owns `0..=19` (the four virtio
+/// driver rows are 16..=19) and the shared USER priv
+/// (`proc::table::USER_PRIV_ID` = 20, used by init (PID 1) and every forked
+/// child) sits at `N_IMAGE`. The stubs take the four slots above it, 21..=24,
+/// so a future image row can never be overwritten by `install_stub_privs`.
 #[cfg(feature = "boot-stubs")]
-const STUB_A_PRIV_ID: PrivId = PrivId::new(16);
+const STUB_A_PRIV_ID: PrivId = PrivId::new(USER_PRIV_ID.get() + 1);
 #[cfg(feature = "boot-stubs")]
-const STUB_B_PRIV_ID: PrivId = PrivId::new(17);
+const STUB_B_PRIV_ID: PrivId = PrivId::new(USER_PRIV_ID.get() + 2);
 #[cfg(feature = "boot-stubs")]
-const STUB_C_PRIV_ID: PrivId = PrivId::new(18);
+const STUB_C_PRIV_ID: PrivId = PrivId::new(USER_PRIV_ID.get() + 3);
 #[cfg(feature = "boot-stubs")]
-const STUB_D_PRIV_ID: PrivId = PrivId::new(19);
+const STUB_D_PRIV_ID: PrivId = PrivId::new(USER_PRIV_ID.get() + 4);
+
+// The stub priv ids sit strictly above the shared USER priv (which is itself at
+// or above the image), and all four fit in the priv table.
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!(STUB_A_PRIV_ID.get() > USER_PRIV_ID.get());
+#[cfg(feature = "boot-stubs")]
+const _: () = assert!((STUB_D_PRIV_ID.get() as usize) < NR_SYS_PROCS);
 
 // SPSR_EL1 to install on each stub's `eret`. Matches slice 2.4: IRQs
 // unmasked at EL0 (bit 7 = 0), debug + SError + FIQ masked. EL0t. Shared with
@@ -219,6 +230,15 @@ pub unsafe fn userland_bootstrap() {
     // SAFETY: DAIF still masked from Limine handoff; single-threaded boot.
     unsafe { mmu::enable_ttbr0_walks_once() };
 
+    // 2.2. Probe the virtio-mmio transports and reserve each assigned driver's DMA
+    //      run (slice 6.2, spec T4/T7). Ordering: this must precede
+    //      `device_teardown_selftest` below, the first caller of `free_frame`, so
+    //      the runs are bumped before anything is freed (H3 holds as written) and
+    //      before the boot servers bump from the same region.
+    // SAFETY: single-threaded boot, after `mm::init_from_limine_memmap` and
+    // `mm::set_hhdm_offset` (this function's own precondition).
+    unsafe { crate::arch::aarch64::virtio_mmio::probe() };
+
     // 2.25. Prove the device arm of the address-space teardown path works, before
     //        anything depends on it. Unconditional (so the stub-free boot covers
     //        it too) and cheap: one throwaway address space, four table frames,
@@ -264,8 +284,9 @@ pub unsafe fn userland_bootstrap() {
 /// Build a throwaway address space holding exactly one device leaf, tear it down
 /// with the real `do_exit::teardown_addrspace`, and assert the outcome.
 ///
-/// **Why this exists.** TTY is the only process with a device mapping, and TTY
-/// never exits — so without this, `teardown_addrspace`'s `prot.device` arm would
+/// **Why this exists.** The only processes with a device mapping are TTY and the
+/// virtio drivers, and none of them exits (a virtio driver's exit halts in
+/// `do_exit`) — so without this, `teardown_addrspace`'s `prot.device` arm would
 /// be dead code sitting on a live landmine. And the failure mode is not a leak: a
 /// missing guard makes `free_frame` panic on the UART's PA, killing the kernel.
 /// So the arm is exercised deterministically at boot, where a regression shows up
@@ -393,7 +414,7 @@ unsafe fn install_boot_stubs() {
 
     // 4. Install priv slots — unchanged from slice 2.6.
     // SAFETY: single-threaded boot; sequential mutable borrows on
-    // priv-table slots 16, 17, 18.
+    // priv-table slots STUB_A..D_PRIV_ID.
     unsafe { install_stub_privs() };
 
     // 5. Enqueue the runnable stubs A–D. (The fork-loop stub E was retired in
@@ -564,8 +585,9 @@ fn elf_errno(e: ElfError) -> i32 {
 /// ASID is allocated — so unlike `do_exit::teardown_addrspace` there is nothing
 /// to flush or recycle.
 ///
-/// The `prot.device` guard is unreachable today — the only device mapping in the
-/// system is installed by [`load_boot_server`] *after* `load_exec_image` has
+/// The `prot.device` guard is unreachable today — every device mapping in the
+/// system (TTY's UART page, a virtio driver's register page) is installed by
+/// [`load_boot_server`] *after* `load_exec_image` has
 /// already returned successfully, so no error path here can see one. It is here
 /// anyway because this is the leaf sweep that gets forgotten, and forgetting it
 /// is a kernel panic (`free_frame` rejects a non-RAM PA), not a leak.
@@ -754,6 +776,92 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
         );
     }
 
+    // A boot driver the virtio probe assigned a device gets that device's register
+    // page, its interrupt line and its DMA run (slice 6.2, spec T5-T7). The TTY and
+    // ramdisk arms above answer the four standing questions -- why not in
+    // `load_exec_image`, why no TLB maintenance, why no cache maintenance, why the
+    // RAM frames are not the device-page problem. The first three apply unchanged
+    // here. The fourth applies to the mapping invariant (the run is RAM, so
+    // `map_page_in`'s assert passes) but NOT to the run's lifetime: taking the
+    // normal `free_frame` path is exactly the hazard, see the DEBT paragraph below.
+    // Every step `.expect()`s for the ramdisk arm's reason: a half-built mapping
+    // must panic before `sched::run`, not become a driver that faults later.
+    //
+    // The register page is `Prot::DEVICE_RW` at `VIRTIO_MMIO_PAGE_VA` (the driver
+    // adds `in_page_off`, reported by `GET_VIRTIO_MMIO`). The allow-list is exactly
+    // the assignment's one INTID (T6). The DMA run is the `DMA_RUN_PAGES` frames
+    // `probe` reserved, already stamped, mapped `Prot::RW_DATA` at `DMA_VA`.
+    //
+    // DEBT (T7): `teardown_addrspace` and `VMCTL_PT_UNMAP` free every non-device
+    // leaf, so a driver that exits or execs, or whose DMA page VM unmaps, would
+    // free a DMA frame while the device may still hold the address. Nothing kills
+    // or restarts boot drivers today, and three guards cover the paths anyway, each
+    // keyed on `virtio_mmio::assignment`: `do_exit` and `do_exec` `assert!` (a
+    // halt), and `do_vmctl::pt_unmap` returns `EPERM` for a vaddr in the DMA window
+    // (VM can be told no). Removing them requires a device-reset path (Status
+    // register written 0) that runs before the run is freed, or exempting the run
+    // from the leaf sweeps.
+    if let Some(dev) = assignment(nr) {
+        map_page_in(
+            img.ttbr0_pa,
+            VIRTIO_MMIO_PAGE_VA,
+            dev.page_pa,
+            Prot::DEVICE_RW,
+        )
+        .expect("virtio register page pre-map");
+
+        // SAFETY: single-threaded boot. The proc-slot borrow ends inside this
+        // statement (only the `priv_id` copy escapes), and `PRIV_TABLE` is a
+        // different static, so the `&mut Priv` below overlaps no other borrow.
+        let drv_priv_id = unsafe { proc_slot_mut(nr) }
+            .and_then(|p| p.priv_id)
+            .expect("virtio driver priv slot populated by init_boot_image");
+        // SAFETY: as above -- the sole live reference into `PRIV_TABLE`.
+        let drv_priv = unsafe { priv_slot_mut(drv_priv_id) }.expect("driver priv slot in range");
+        drv_priv
+            .irqs
+            .try_push(dev.intid)
+            .expect("virtio driver IRQ allow-list has room");
+
+        for page in 0..DMA_RUN_PAGES {
+            let off = page.checked_mul(PAGE_SIZE as u64).expect("DMA offset");
+            map_page_in(
+                img.ttbr0_pa,
+                DMA_VA.checked_add(off).expect("DMA VA"),
+                dev.dma_pa.checked_add(off).expect("DMA PA"),
+                Prot::RW_DATA,
+            )
+            .expect("virtio DMA page map");
+        }
+
+        // SAFETY: single-threaded boot; console write only. The name borrow is
+        // read-only and ends with the statement.
+        unsafe {
+            let p = proc_slot_mut(nr).expect("server proc slot in range");
+            let name = core::str::from_utf8(&p.name)
+                .unwrap_or("?")
+                .trim_end_matches('\0');
+            let mut uart = Pl011::new();
+            let _ = writeln!(
+                uart,
+                "[devmap] {} va={:#x} pa={:#x} intid={}",
+                name,
+                VIRTIO_MMIO_PAGE_VA
+                    .checked_add(dev.in_page_off)
+                    .expect("virtio register VA"),
+                dev.page_pa
+                    .checked_add(dev.in_page_off)
+                    .expect("virtio register PA"),
+                dev.intid,
+            );
+            let _ = writeln!(
+                uart,
+                "[dma] {} va={:#x} pages={} pa={:#x}",
+                name, DMA_VA, DMA_RUN_PAGES, dev.dma_pa,
+            );
+        }
+    }
+
     // SAFETY: single-threaded boot; no other PROC_TABLE / RUNQ borrow is live.
     unsafe { sched::enqueue(nr) };
 }
@@ -920,8 +1028,8 @@ fn populate_stub_slot(
 
 /// Install priv slots for A, B, C. Unchanged from slice 2.6.
 ///
-/// SAFETY: single-threaded boot; touches priv-table slots 16, 17, 18
-/// sequentially.
+/// SAFETY: single-threaded boot; touches priv-table slots `STUB_A_PRIV_ID`,
+/// `STUB_B_PRIV_ID` and `STUB_C_PRIV_ID` sequentially.
 #[cfg(feature = "boot-stubs")]
 unsafe fn install_stub_privs() {
     // SAFETY: sequential mutable borrow.
@@ -985,7 +1093,7 @@ unsafe fn install_stub_c_priv() {
 /// check).
 ///
 /// VM's own `ipc_to` was filled by `init_boot_image` only for the active boot
-/// priv slots `[0, n_active)` (≈ 0..15); stub D's slot is 19, so VM cannot
+/// priv slots `[0, n_active)` (0..20); stub D's slot is `STUB_D_PRIV_ID` (24), so VM cannot
 /// reply to D's SENDREC out of the box. This helper also opens that reverse
 /// direction (VM → D) as a separate, sequential priv-slot borrow.
 ///
@@ -1052,7 +1160,7 @@ unsafe fn install_one_stub_priv(id: PrivId, owner: ProcNr, peer_priv_id: PrivId)
 /// the end of `userland_bootstrap`; proves each stub has a distinct
 /// per-proc address space.
 ///
-/// SAFETY: single-threaded boot; read-only borrows on proc slots 11..=14.
+/// SAFETY: single-threaded boot; read-only borrows on proc slots 15..=18.
 #[cfg(feature = "boot-stubs")]
 unsafe fn print_addrspace_summary() {
     use crate::arch::aarch64::uart::Pl011;

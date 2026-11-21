@@ -11,6 +11,7 @@ pub mod mmu;
 pub mod timer;
 pub mod uart;
 pub mod userland;
+pub mod virtio_mmio;
 
 pub use context::ArchRegisterFrame;
 pub use uart::Pl011 as Uart;
