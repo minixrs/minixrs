@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! The pure half of virtio-blk's bring-up (slice 6.2, spec T11/T12): where the
-//! queue, the request header and the bounce buffer sit in the DMA run, how the
-//! capacity is decoded, and the DMA cookie check. Host-tested; `main.rs` does the
+//! queue, the request header, the status byte and the bounce buffer sit in the DMA
+//! run, how the capacity is decoded, and the DMA cookie check. Host-tested; `main.rs` does the
 //! kernel calls and register accesses around it.
 
 // Only `main.rs`'s `not(test)`-gated paths reach most of this, so under
 // `cargo test` (which drops `_start` and `main`) it would read as dead code.
 #![cfg_attr(test, allow(dead_code))]
 
+use crate::blk::REQ_HEADER_LEN;
 use minixrs_driver_rt::{DmaBuf, DmaRegion, QueueLayout};
 use minixrs_kernel_shared::message::USER_PAGE_SIZE;
 use minixrs_kernel_shared::uspace::DMA_COOKIE;
@@ -27,17 +28,27 @@ pub const VBLK_HEADER_PAGE: u64 = 1;
 /// Page of the DMA run holding the one 4096-byte bounce buffer (H3).
 pub const VBLK_DATA_PAGE: u64 = 2;
 
-/// Where virtio-blk's three areas sit in its DMA run: one whole page each.
-// `header` and `data` are read once the driver serves requests (slice 6.3, Task 5);
-// bring-up alone uses only `queue`.
-#[allow(dead_code)]
+/// Offset of the request header in its page.
+pub const VBLK_HEADER_OFF: usize = 0;
+/// Offset of the status byte in the header page: right after the header.
+pub const VBLK_STATUS_OFF: usize = VBLK_HEADER_OFF + REQ_HEADER_LEN;
+/// Bytes of status the device writes back.
+pub const VBLK_STATUS_LEN: usize = 1;
+
+// Header and status share one page and must both fit in it.
+const _: () = assert!((VBLK_STATUS_OFF + VBLK_STATUS_LEN) as u64 <= USER_PAGE_SIZE);
+
+/// Where virtio-blk's four areas sit in its DMA run: the queue and the bounce
+/// buffer on a page each, the request header and the status byte on a third.
 #[derive(Clone, Copy, Debug)]
 pub struct VblkLayout {
     /// The queue page (the `VirtQueue`'s memory).
     pub queue: DmaBuf,
-    /// The request header page.
+    /// The request header: [`REQ_HEADER_LEN`] bytes the device reads.
     pub header: DmaBuf,
-    /// The bounce-buffer page.
+    /// The status byte the device writes, right after the header.
+    pub status: DmaBuf,
+    /// The bounce buffer: one whole page, a BDEV block.
     pub data: DmaBuf,
 }
 
@@ -53,16 +64,15 @@ pub fn vblk_layout(region: &DmaRegion, queue: QueueLayout) -> Option<VblkLayout>
         return None;
     }
     let page_len = usize::try_from(USER_PAGE_SIZE).ok()?;
-    // `DmaRegion::buf` refuses a page the run does not wholly hold, so a run
+    let page_off = |page: u64| usize::try_from(page.checked_mul(USER_PAGE_SIZE)?).ok();
+    let header_page = page_off(VBLK_HEADER_PAGE)?;
+    // `DmaRegion::buf` refuses a range the run does not wholly hold, so a run
     // shorter than the three pages is refused at the data page.
-    let page = |page: u64| {
-        let offset = usize::try_from(page.checked_mul(USER_PAGE_SIZE)?).ok()?;
-        region.buf(offset, page_len)
-    };
     Some(VblkLayout {
-        queue: page(VBLK_QUEUE_PAGE)?,
-        header: page(VBLK_HEADER_PAGE)?,
-        data: page(VBLK_DATA_PAGE)?,
+        queue: region.buf(page_off(VBLK_QUEUE_PAGE)?, page_len)?,
+        header: region.buf(header_page.checked_add(VBLK_HEADER_OFF)?, REQ_HEADER_LEN)?,
+        status: region.buf(header_page.checked_add(VBLK_STATUS_OFF)?, VBLK_STATUS_LEN)?,
+        data: region.buf(page_off(VBLK_DATA_PAGE)?, page_len)?,
     })
 }
 
@@ -119,14 +129,51 @@ mod tests {
         assert_eq!((l.queue.pa(), l.queue.va()), (0x4800_0000, va));
         assert_eq!((l.header.pa(), l.header.va()), (0x4800_1000, va + 0x1000));
         assert_eq!((l.data.pa(), l.data.va()), (0x4800_2000, va + 0x2000));
-        for page in [l.queue, l.header, l.data] {
+        for page in [l.queue, l.data] {
             assert_eq!(u64::from(page.len()), PAGE);
         }
     }
 
     #[test]
+    fn layout_sizes_the_header_and_puts_the_status_byte_right_after_it() {
+        let r = region(0, PA, HOST_PAGES * PAGE);
+        let va = r.run().va;
+        let l = vblk_layout(&r, q8()).expect("a four-page run holds three pages");
+        // Exactly the request header: the device is told to read 16 bytes.
+        assert_eq!(l.header.len(), 16);
+        assert_eq!(l.header.len() as usize, REQ_HEADER_LEN);
+        // Exactly one byte, at offset 16 of the header page.
+        assert_eq!(l.status.len(), 1);
+        assert_eq!((l.status.pa(), l.status.va()), (0x4800_1010, va + 0x1010));
+        // The two do not overlap, and neither reaches the data page.
+        assert_eq!(l.header.pa() + u64::from(l.header.len()), l.status.pa());
+        assert_eq!(l.status.pa() + 1, 0x4800_1011);
+        assert!(l.status.pa() + u64::from(l.status.len()) <= l.data.pa());
+    }
+
+    #[test]
+    fn layout_buffers_refuse_an_access_past_their_end() {
+        let l = vblk_layout(&region(0, PA, HOST_PAGES * PAGE), q8()).unwrap();
+        // A 17th header byte would land on the status byte; a second status
+        // byte on whatever follows it.
+        assert!(l.header.write_from(0, &[0u8; 16]));
+        assert!(!l.header.write_from(0, &[0u8; 17]));
+        assert!(l.status.write_from(0, &[0xFF]));
+        assert!(!l.status.write_from(1, &[0]));
+        let mut b = [0u8; 1];
+        assert!(l.status.read_into(0, &mut b));
+        assert_eq!(b, [0xFF]);
+        // Writing the header leaves the status byte alone, and the reverse.
+        assert!(l.header.write_from(0, &[0xAA; 16]));
+        assert!(l.status.read_into(0, &mut b));
+        assert_eq!(b, [0xFF]);
+    }
+
+    #[test]
     fn layout_rejects_a_two_page_run() {
         assert!(vblk_layout(&region(0, PA, 2 * PAGE), q8()).is_none());
+        // Short of the status byte, though the queue page and the header fit.
+        assert!(vblk_layout(&region(0, PA, PAGE + 16), q8()).is_none());
         // One byte short of the data page's end.
         assert!(vblk_layout(&region(0, PA, 3 * PAGE - 1), q8()).is_none());
         // Exactly three pages is enough.

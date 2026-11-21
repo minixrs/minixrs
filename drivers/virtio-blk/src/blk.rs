@@ -10,9 +10,9 @@
 //! `overflow-checks = false`, where `block * 8` on a large block would wrap and
 //! name a valid sector.
 
-// Nothing in `main.rs` calls this yet: the driver starts serving requests in the
-// next commit of slice 6.3 (Task 5), which narrows this to the test config.
-#![allow(dead_code)]
+// Only `main.rs`'s `not(test)`-gated paths reach most of this, so under
+// `cargo test` (which drops `_start` and `main`) it would read as dead code.
+#![cfg_attr(test, allow(dead_code))]
 
 use minixrs_kernel_shared::callnr::BDEV_BLOCK_SIZE;
 use minixrs_kernel_shared::error::EIO;
@@ -82,6 +82,9 @@ pub const fn encode_header(req_type: u32, sector: u64) -> [u8; REQ_HEADER_LEN] {
 pub const fn status_errno(status: u8) -> Result<(), i32> {
     match status {
         VIRTIO_BLK_S_OK => Ok(()),
+        // The two failures the device can report.
+        VIRTIO_BLK_S_IOERR | VIRTIO_BLK_S_UNSUPP => Err(EIO),
+        // `STATUS_UNWRITTEN`, and any byte the specification does not define.
         _ => Err(EIO),
     }
 }
