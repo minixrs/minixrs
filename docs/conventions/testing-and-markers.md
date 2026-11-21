@@ -78,6 +78,11 @@ A few properties of the script matter when you're reading its output rather than
   moves by more than the expected-marker count alone.
 - **Never copy a count into a marker from a plan** — recompute it from the constant. 5.8's plan said
   `n=30` for what was actually a 31-byte `ROOTFS_MOTD`.
+- **A marker must be able to fail on the thing it proves.** The script matches with `grep -F`, so a
+  prefix is a substring: 6.2's planned `[devmap] vblk va=0x4000` also matched TTY's page at
+  `0x40000000`, the exact off-by-one-page mapping it existed to catch. Assert the whole line when
+  every field is deterministic. When one field varies by run, print the stable fields first — 6.2
+  moved `pages=` ahead of the firmware-dependent `pa=` so that `pages=16` could be asserted.
 
 ## A starved boot is not a regression
 
@@ -157,6 +162,15 @@ This runs against an **uncommitted** working tree, so the restore step has real 
   healthy path** — a healthy path never trips it. Slice 5.8's plan predicted that deleting a
   not-a-directory guard would break the filesystem self-check; resolving a real file only ever walks
   real directories, so what actually moved was the deny-probe's FAIL line instead.
+- **Mutate a guard only once something exercises it.** 6.2's stub/driver priv-id collision moved no
+  marker when its task landed, because no driver ran in the colliding slots yet; with virtio-blk
+  live the same mutation hung the default boot with 47 markers missing. A "nothing moves" row
+  recorded before the consumer exists is not a result — re-run the mutation when the consumer lands.
+- **QEMU is more permissive than the specification, so observe which check fires rather than
+  predicting it.** 6.2 predicted that a wrong register page would fail the virtio magic check; an
+  empty virtio-mmio slot still reads the magic, and the DeviceID check caught it instead. It also
+  predicted that the status read-back would refuse a driver omitting `VIRTIO_F_VERSION_1`; QEMU
+  keeps `FEATURES_OK`, and only the exact `features=` marker text and the host tests catch that.
 
 Two mechanical notes from 5.11: rust-analyzer diagnostics (`dead_code`, unused imports) that appear
 mid-run are usually residue of a mutated or half-edited file — trust `cargo clippy … -D warnings` on

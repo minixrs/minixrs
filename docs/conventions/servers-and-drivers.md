@@ -478,6 +478,13 @@ Beyond the shared contracts above, three driver-specific rules:
   `VIRTIO_F_VERSION_1` requirement and the version-2-only refusal belong to its `Transport` and
   `negotiate`; a driver passes the optional features it wants and decides what a refusal means. Its
   `unsafe` is confined to `mmio.rs` and `queue.rs`
+- **A mock device must model the device's refusals, not accept every write.** 6.2's `negotiate`
+  re-set a status bit the device had just cleared; the mock transport stored whatever it was sent,
+  so the host test passed while QEMU dropped the whole write. A mock that cannot say no proves only
+  that the driver talks
+- **Run `cargo miri test -p minixrs-driver-rt` after touching its `unsafe`** (CI's advisory `miri`
+  job runs it too). 6.2's first virtqueue wrote through a pointer taken from a shared borrow: every
+  host test passed, and Miri rejected it under both aliasing models
 
 ### Block drivers
 

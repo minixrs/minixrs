@@ -265,11 +265,14 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # `minixrs-tty` qualifies despite owning volatile MMIO: its only `unsafe`
       # lives in `pl011.rs`, which no test reaches — the measured logic is
-      # `cdev.rs`'s pure parse/validate.
+      # `cdev.rs`'s pure parse/validate. `minixrs-driver-rt` is here for the
+      # opposite reason: its tests drive the virtqueue's `unsafe` ring accesses,
+      # which is where Miri caught a write through a shared-borrow pointer.
       - run: >
           cargo miri test
           -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm -p minixrs-tty
           -p minixrs-mfs -p minixrs-mkfs-mfs -p minixrs-memory
+          -p minixrs-driver-rt
 
   # Decides whether qemu-smoke has anything to prove. A docs-only PR cannot
   # change the boot, and the boot is the slowest gate by far (it always burns
