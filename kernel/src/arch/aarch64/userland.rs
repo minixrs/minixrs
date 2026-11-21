@@ -782,22 +782,24 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
     // RAM frames are not the device-page problem. The first three apply unchanged
     // here. The fourth applies to the mapping invariant (the run is RAM, so
     // `map_page_in`'s assert passes) but NOT to the run's lifetime: taking the
-    // normal `free_frame` path is exactly the hazard, see the DEBT paragraph below. Every step `.expect()`s for the ramdisk
-    // arm's reason: a half-built mapping must panic before `sched::run`, not
-    // become a driver that faults later.
+    // normal `free_frame` path is exactly the hazard, see the DEBT paragraph below.
+    // Every step `.expect()`s for the ramdisk arm's reason: a half-built mapping
+    // must panic before `sched::run`, not become a driver that faults later.
     //
     // The register page is `Prot::DEVICE_RW` at `VIRTIO_MMIO_PAGE_VA` (the driver
     // adds `in_page_off`, reported by `GET_VIRTIO_MMIO`). The allow-list is exactly
     // the assignment's one INTID (T6). The DMA run is the `DMA_RUN_PAGES` frames
     // `probe` reserved, already stamped, mapped `Prot::RW_DATA` at `DMA_VA`.
     //
-    // DEBT (T7): `teardown_addrspace` frees every non-device leaf, so a driver that
-    // exits or execs would free its DMA run while the device may still hold the
-    // addresses. Nothing kills or restarts boot drivers today, and `do_exit` and
-    // `do_exec` carry an `assert!` on `virtio_mmio::assignment` that turns the
-    // hazard into a halt. Removing those guards requires a device-reset path
-    // (Status register written 0) that runs before the run is freed, or exempting
-    // the run from the leaf sweep.
+    // DEBT (T7): `teardown_addrspace` and `VMCTL_PT_UNMAP` free every non-device
+    // leaf, so a driver that exits or execs, or whose DMA page VM unmaps, would
+    // free a DMA frame while the device may still hold the address. Nothing kills
+    // or restarts boot drivers today, and three guards cover the paths anyway, each
+    // keyed on `virtio_mmio::assignment`: `do_exit` and `do_exec` `assert!` (a
+    // halt), and `do_vmctl::pt_unmap` returns `EPERM` for a vaddr in the DMA window
+    // (VM can be told no). Removing them requires a device-reset path (Status
+    // register written 0) that runs before the run is freed, or exempting the run
+    // from the leaf sweeps.
     if let Some(dev) = assignment(nr) {
         map_page_in(
             img.ttbr0_pa,

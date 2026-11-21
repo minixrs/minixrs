@@ -175,9 +175,12 @@ pub(super) fn do_exec(
     // Halt before anything is allocated rather than corrupt memory.
     assert!(
         crate::arch::aarch64::virtio_mmio::assignment(target.nr).is_none(),
-        "proc nr={} owns a virtio device and DMA run: a virtio driver cannot exec until a \
+        "proc nr={} ({}) owns a virtio device and DMA run: a virtio driver cannot exec until a \
          device-reset path exists (Status written 0 before the run is freed)",
         target.nr.get(),
+        core::str::from_utf8(&target.name)
+            .unwrap_or("?")
+            .trim_end_matches('\0'),
     );
 
     // Build the new address space *before* touching the target — a failure here

@@ -132,9 +132,12 @@ pub(super) fn do_exit(
     // run on scratch spaces (`device_teardown_selftest`).
     assert!(
         crate::arch::aarch64::virtio_mmio::assignment(nr).is_none(),
-        "proc nr={} owns a virtio device and DMA run: a virtio driver cannot exit until a \
+        "proc nr={} ({}) owns a virtio device and DMA run: a virtio driver cannot exit until a \
          device-reset path exists (Status written 0 before the run is freed)",
         nr.get(),
+        core::str::from_utf8(&proc_table[target_idx].name)
+            .unwrap_or("?")
+            .trim_end_matches('\0'),
     );
 
     let (freed_pages, dev_pages) = teardown_addrspace(ttbr0_pa, dead_asid);
@@ -246,8 +249,9 @@ fn unblock_dependents(
 ///
 /// A **device** leaf is counted, not freed: its PA is MMIO, outside every USABLE
 /// region, so `free_frame` would panic on it (and, if that bounds check were ever
-/// relaxed, would hand a UART register page out as ordinary memory). TTY is the
-/// only proc with such a leaf today and it never exits, which is exactly why
+/// relaxed, would hand a UART register page out as ordinary memory). The procs with such
+/// leaves are TTY (UART page) and the virtio drivers (register page); none exits
+/// (a virtio driver's exit halts in `do_exit`), which is exactly why
 /// `userland::device_teardown_selftest` exercises this arm at boot — otherwise it
 /// would be untested code sitting on a live landmine.
 ///
