@@ -463,8 +463,10 @@ asked for.
 **Forbidden** (`tests/qemu-boot.forbidden`): `[virtio] refuse`, `[diag vblk]` followed by `FAIL`.
 `[diag vblk] no device` is **not** forbidden here; it becomes meaningful when 6.3 has two boots.
 
-**Stub-free boot** (`--no-default-features`): the same vblk markers; this is the configuration that
-would have hidden T2's collision, so the default boot is the one that proves T2.
+**Stub-free boot** (`--no-default-features`): the same vblk markers. This configuration cannot see
+T2's collision at all: the stub priv ids are `cfg`-gated out of it, so the mutation that restores
+`16..=19` is inert there. The default boot is where the collision is visible, and it shows it as a
+hang, not a `FAIL` line (the measurement under "Measured during execution" below).
 
 **Two refusal boots, run by hand and recorded** — not CI, in the manner of a mutation:
 
@@ -495,6 +497,111 @@ ring discipline; before recording a mutation as uncovered by the boot, run `carg
 **The usual gates** from [`ci.md`](../../conventions/ci.md) — fmt, clippy, host tests, the
 `c-headers` gate, `dprint`, the link checker, `cargo deny` — and both boots, before anything is
 called done.
+
+**Measured during execution (Task 10, 2026-11-21).** Every row below was run on the working tree
+with one edit (marked `// MUTATION`), the log saved, `grep -a 'error[E'` checked (zero hits in every
+build), the edit restored from a scratchpad snapshot and `diff -q`ed. All runs are stub-free except
+the default-boot controls and mutation 8. Starved-boot check: every stub-free run reached its
+verdict markers (`[diag mfs] sef ready` present); the two default boots are discussed below.
+
+*Refusal boot A* (`-- -global virtio-mmio.force-legacy=true`; a later `-global` does override the
+runner's `=false`, no script change needed):
+
+```text
+[virtio] slot=0 pa=0xa000000 id=2 ver=1 drv=vblk
+[devmap] vblk va=0x40001000 pa=0xa000000 intid=48
+[diag vblk] virtio FAIL step=transport version=1 need -global virtio-mmio.force-legacy=false
+```
+
+`virtio ok` absent. Note the kernel still assigns and maps a version-1 device; the refusal is the
+driver's alone, as T4 intends.
+
+*Refusal boot B* (`-- -device virtio-rng-device,bus=virtio-mmio-bus.1`):
+
+```text
+[virtio] refuse slot=0 id=2 page=0xa000000 shared
+[virtio] refuse slot=1 id=4 page=0xa000000 shared
+[diag vblk] no device
+```
+
+No `[devmap] vblk`, no `[dma] vblk`.
+
+| #  | Mutation                                     | Predicted                             | Observed                                                       | Held?  |
+| -- | -------------------------------------------- | ------------------------------------- | -------------------------------------------------------------- | ------ |
+| 1  | drop the `Priv::irqs` push                   | `step=irq`, `EPERM`                   | `virtio FAIL step=irq intid=48 rc=-1`                          | yes    |
+| 2  | also push `intid + 1`                        | `step=irq-deny`                       | `virtio FAIL step=irq-deny intid=49 rc=0`                      | yes    |
+| 3  | map `page_pa + 0x1000`                       | `step=transport`, bad magic           | `virtio FAIL step=id id=0`                                     | **no** |
+| 4  | map the DMA run from `dma_pa + 0x1000`       | `step=dma`                            | `virtio FAIL step=dma cookie=0x0 pa=0x40000000`                | yes    |
+| 5  | report `dma_pa + 0x1000` in `GET_DMA`        | `step=dma`                            | `virtio FAIL step=dma cookie=0x444d415f2d787273 pa=0x40001000` | yes    |
+| 6  | drop rule 1 in `assign`, under boot B        | `refuse` vanishes; `cargo test` fails | see below                                                      | yes    |
+| 7  | write features without `VERSION_1`           | observed, not assumed                 | see below                                                      | n/a    |
+| 8  | stub priv ids back to `16..=19`, asserts off | observed                              | see below                                                      | n/a    |
+| 9  | virtio-blk `PM_EXIT`s after bring-up         | kernel halts, exit assert             | see below                                                      | yes    |
+| 10 | remove the `EPERM` gate in `fill_dma`        | `getinfo.deny FAIL case=1`            | `getinfo.deny FAIL case=1 rc=-2`                               | yes    |
+
+- **3 did not hold as predicted.** The page after the assigned one is the next 8 slots of the same
+  transport block. Those slots are empty but their registers still read the virtio magic, with
+  `DeviceID` 0, so the magic check passes and the **id check** is what refuses (`step=id id=0`). The
+  mutation is still caught, by a different step than the table named. The magic check is proved by
+  nothing in a QEMU boot that maps a real page. The step-3 claim in T12 should read "magic and id"
+  rather than "magic".
+- **4 and 5 differ in what the driver sees.** In 4 the run is mapped one frame off, so the first
+  word read through the VA is an unstamped frame (`cookie=0x0`). In 5 the VA is right and the
+  reported PA wrong, so the real stamp is read (`0x444d415f2d787273`) and compared against the wrong
+  PA. Both fail at the cookie check; the line distinguishes which half lied.
+- **6.** With `present_in_page > 1` made unreachable, boot B printed no `refuse` line; the rng
+  became `slot=1 pa=0xa000200 id=4 ver=2 skip=no-driver`, vblk was assigned and mapped (`[devmap]
+  vblk …`, `[dma] vblk …`), and **`[diag vblk] virtio ok features=0x100000000 capacity=2560 qsize=8
+  slot=0` was printed**: with a sharing neighbour, the driver still comes up. So `virtio ok` cannot
+  catch this regression; the `refuse` line (absent) and the host tests can. `cargo test -p
+  minixrs-kernel-shared -p minixrs-driver-rt`: driver-rt 34 passed; kernel-shared `207 passed; 3
+  failed`: `a_refused_device_does_not_block_a_later_duplicate`,
+  `a_driverless_neighbour_also_refuses_the_page`, `two_devices_in_one_page_are_both_refused`.
+- **7 did not move the status read-back.** `accept_features` returning `wanted & offered` with no
+  `VERSION_1` bit gave a boot that read back `FEATURES_OK` and went on: `[diag vblk] virtio ok
+  features=0x0 capacity=2560 qsize=8 slot=0`. QEMU's virtio-mmio device does not clear `FEATURES_OK`
+  for a missing `VERSION_1` here, so the "status read-back" prediction was wrong. What catches it:
+  the `features=0x100000000` text of the `tests/qemu-boot.expected` line (that marker would be
+  MISSING; not run through the script, since a stub-free log fails the stub markers by design) and
+  two host tests, `accept_features_is_the_intersection_plus_version_1` and
+  `negotiate_writes_the_spec_sequence` (driver-rt `32 passed; 2 failed`). The exact `features=`
+  value is load-bearing, as §6's prose says.
+- **8 (T2 re-run, default boot with stubs).** Control first: the unmutated default boot passed
+  `tools/check-boot-log.sh` (148 markers; final IPC counter 44.7 M). With stub A..D at priv ids
+  `16..=19` and the two stub asserts commented out (`table.rs`'s `USER_PRIV_ID >= N_IMAGE` assert is
+  about `USER_PRIV_ID` and stays true, so it was not touched), two runs gave the same result: 47
+  markers MISSING, identical sets. `[diag vblk] sef ready` never printed (in the control it follows
+  `[diag memory] sef ready`), so `[diag vblk] virtio ok …` is MISSING; so is every marker from
+  `[ksys SYS_FORK] parent=i nr=10 child_nr=19` on (init's first fork, and all of init's VFS, exec,
+  `hello` and `fileio` steps). Present: `[as] vblk nr=11`, the `[virtio]` and `[devmap] vblk` lines
+  (the kernel-side wiring is intact; only the driver's privileges are overwritten), TTY's markers,
+  `[diag vfs] exec.stage ok`. The final IPC counter was 0.53 M against the control's 44.7 M, which
+  under the starved-boot rule is the low-throughput signature, but the host was not the cause: the
+  control ran minutes before on the same machine, the missing set is the contiguous boot-tail from
+  init's first fork (the "stopped early" shape), and a second run matched. The log ends in sampled
+  `[ipc]`/`[ksys]` lines from stub C alone, with nothing downstream moving. So the earlier "no
+  marker moves" finding was an artefact of the stub-free configuration (no stubs, no collision, no
+  driver in the slot to starve); with vblk live, the default boot does prove T2, as the original
+  sentence said, but as a **hang** with 47 missing markers, not a `FAIL` line. What this run does
+  not establish is which step of init's boot waits on vblk's handshake; that was not traced.
+- **9.** vblk sent `PM_EXIT` through `ipc_sendrec` after printing `virtio ok`. Observed, stub-free:
+
+  ```text
+  !!! KERNEL PANIC: panicked at kernel/src/system/do_exit.rs:133:5:
+  proc nr=11 (vblk) owns a virtio device and DMA run: a virtio driver cannot exit until a
+  device-reset path exists (Status written 0 before the run is freed)
+  ```
+
+  The prediction held: the guard is the `assert!` in `do_exit`, reached through PM's `PM_EXIT`
+  handling of the driver, and the boot stops there, mid-way through the mount sequence.
+- **10.** With `fill_dma`'s `EPERM` gate removed, TTY's `GET_DMA` falls through to the assignment
+  lookup and gets `ENOENT`, so the probe line was `[diag tty] getinfo.deny FAIL case=1 rc=-2` while
+  `case=0` (`GET_VIRTIO_MMIO`, gate intact) passed and `[diag vblk] virtio ok` was still printed.
+  Each selector's gate is separately covered.
+
+After the last restore the tree was rebuilt from clean sources and a stub-free boot printed
+`[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and `[diag vblk] virtio ok features=0x100000000
+capacity=2560 qsize=8 slot=0`.
 
 ---
 
