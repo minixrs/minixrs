@@ -64,6 +64,11 @@ pub trait Transport {
     /// The configuration-space generation counter.
     fn config_generation(&self) -> u32;
     /// One raw (not generation-checked) read of device config at `offset`.
+    ///
+    /// Restriction: the MMIO implementation performs aligned 32-bit accesses, which
+    /// virtio permits only for 32- and 64-bit config fields; 8- and 16-bit fields
+    /// need width-typed reads that do not exist yet (deferred to the first driver
+    /// that needs one).
     fn config_read_raw(&self, offset: usize, buf: &mut [u8]);
 }
 
@@ -88,6 +93,11 @@ pub enum NegotiateError {
         /// The status read back.
         status: u32,
     },
+    /// Status did not read 0 right after the reset write.
+    ResetIncomplete {
+        /// The status read back.
+        status: u32,
+    },
 }
 
 /// Reset, `ACKNOWLEDGE`, `DRIVER`, feature exchange, `FEATURES_OK`, read-back.
@@ -95,6 +105,15 @@ pub enum NegotiateError {
 /// the reason. `DRIVER_OK` is separate ([`driver_ok`]), after the queues exist.
 pub fn negotiate<T: Transport>(t: &mut T, wanted: u64) -> Result<u64, NegotiateError> {
     t.set_status(0);
+    // No wait-for-zero loop: the spec's wait is needed for the PCI transport, not
+    // for MMIO, where reset completes inside the Status write; and this module may
+    // not poll. One non-looping read-back catches a device that did not reset.
+    let after_reset = t.status();
+    if after_reset != 0 {
+        return Err(NegotiateError::ResetIncomplete {
+            status: after_reset,
+        });
+    }
     t.set_status(STATUS_ACKNOWLEDGE);
     t.set_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER);
     let offered = t.device_features();
@@ -107,17 +126,24 @@ pub fn negotiate<T: Transport>(t: &mut T, wanted: u64) -> Result<u64, NegotiateE
     t.set_status(with_ok);
     let status = t.status();
     if status & STATUS_FEATURES_OK == 0 {
-        t.set_status(with_ok | STATUS_FAILED);
+        // FAILED goes without FEATURES_OK: a device re-validates features on any write
+        // that sets it and drops the whole write when validation fails.
+        t.set_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FAILED);
         return Err(NegotiateError::FeaturesRejected { status });
     }
     Ok(accepted)
 }
 
-/// Set `DRIVER_OK`; `Err(status)` if the read-back shows `FAILED` or
+/// Set `DRIVER_OK`; `Err(status)` without writing if the device already shows
+/// `FAILED` or `NEEDS_RESET`, and if the read-back shows `FAILED` or
 /// `NEEDS_RESET`, or lacks `DRIVER_OK`.
 pub fn driver_ok<T: Transport>(t: &mut T) -> Result<(), u32> {
-    let next = t.status() | STATUS_DRIVER_OK;
-    t.set_status(next);
+    let before = t.status();
+    if before & (STATUS_FAILED | STATUS_NEEDS_RESET) != 0 {
+        // Never echo a device-owned bit back in a write.
+        return Err(before);
+    }
+    t.set_status(before | STATUS_DRIVER_OK);
     let status = t.status();
     if status & (STATUS_FAILED | STATUS_NEEDS_RESET) != 0 || status & STATUS_DRIVER_OK == 0 {
         return Err(status);
@@ -126,16 +152,18 @@ pub fn driver_ok<T: Transport>(t: &mut T) -> Result<(), u32> {
 }
 
 /// Generation-stable read of device config: re-read while `ConfigGeneration`
-/// changed across the read, at most [`CONFIG_READ_RETRIES`] attempts. A config
-/// space that never settles yields the last read rather than a hang.
-pub fn config_read<T: Transport>(t: &T, offset: usize, buf: &mut [u8]) {
+/// changed across the read, at most [`CONFIG_READ_RETRIES`] attempts. `true`
+/// when a generation-stable read was obtained; `false` when it gave up, with the
+/// last read left in `buf` (a config space that never settles must not hang).
+pub fn config_read<T: Transport>(t: &T, offset: usize, buf: &mut [u8]) -> bool {
     for _ in 0..CONFIG_READ_RETRIES {
         let before = t.config_generation();
         t.config_read_raw(offset, buf);
         if t.config_generation() == before {
-            return;
+            return true;
         }
     }
+    false
 }
 
 #[cfg(test)]
@@ -146,6 +174,9 @@ mod tests {
     struct MockTransport {
         offered: u64,
         reject_features: bool,
+        rejected: bool,
+        reset_sticks: bool,
+        drop_driver_ok: bool,
         status: u32,
         status_writes: Vec<u32>,
         feature_writes: Vec<u64>,
@@ -159,6 +190,9 @@ mod tests {
             Self {
                 offered,
                 reject_features: false,
+                rejected: false,
+                reset_sticks: false,
+                drop_driver_ok: false,
                 status: 0,
                 status_writes: Vec::new(),
                 feature_writes: Vec::new(),
@@ -178,10 +212,22 @@ mod tests {
         }
         fn set_status(&mut self, status: u32) {
             self.status_writes.push(status);
-            self.status = status;
-            if self.reject_features {
-                self.status &= !STATUS_FEATURES_OK;
+            if status == 0 && self.reset_sticks {
+                return;
             }
+            if self.reject_features && status & STATUS_FEATURES_OK != 0 {
+                // Like QEMU: the first FEATURES_OK write fails validation and the bit
+                // reads back clear; any later write carrying FEATURES_OK is dropped whole.
+                if !self.rejected {
+                    self.rejected = true;
+                    self.status = status & !STATUS_FEATURES_OK;
+                }
+                return;
+            }
+            if self.drop_driver_ok && status & STATUS_DRIVER_OK != 0 {
+                return;
+            }
+            self.status = status;
         }
         fn device_features(&mut self) -> u64 {
             self.offered
@@ -201,7 +247,7 @@ mod tests {
         fn config_generation(&self) -> u32 {
             let mut g = self.generations.borrow_mut();
             if g.is_empty() {
-                // Ever-changing once the script runs out only if asked to.
+                // Script exhausted: keep answering the last value served.
                 return self.last_gen.get();
             }
             let v = g.remove(0);
@@ -253,7 +299,9 @@ mod tests {
         t.reject_features = true;
         let got = negotiate(&mut t, 0);
         assert!(matches!(got, Err(NegotiateError::FeaturesRejected { .. })));
-        assert_ne!(t.status_writes.last().unwrap() & STATUS_FAILED, 0);
+        // The device state, not just the write log: FAILED must have landed.
+        assert_ne!(t.status & STATUS_FAILED, 0);
+        assert_eq!(t.status & STATUS_FEATURES_OK, 0);
     }
 
     #[test]
@@ -274,11 +322,50 @@ mod tests {
     }
 
     #[test]
+    fn negotiate_fails_cleanly_when_reset_does_not_clear_status() {
+        let mut t = MockTransport::new(VIRTIO_F_VERSION_1);
+        t.status = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
+        t.reset_sticks = true;
+        let got = negotiate(&mut t, 0);
+        assert_eq!(got, Err(NegotiateError::ResetIncomplete { status: 3 }));
+        assert_eq!(t.status_writes, [0]);
+    }
+
+    #[test]
+    fn driver_ok_refuses_a_failed_device_without_writing() {
+        let mut t = MockTransport::new(VIRTIO_F_VERSION_1);
+        t.status = STATUS_ACKNOWLEDGE | STATUS_FAILED;
+        assert_eq!(driver_ok(&mut t), Err(STATUS_ACKNOWLEDGE | STATUS_FAILED));
+        assert!(t.status_writes.is_empty());
+    }
+
+    #[test]
+    fn driver_ok_refuses_needs_reset_without_echoing_it() {
+        let mut t = MockTransport::new(VIRTIO_F_VERSION_1);
+        t.status = STATUS_NEEDS_RESET;
+        assert_eq!(driver_ok(&mut t), Err(STATUS_NEEDS_RESET));
+        assert!(t.status_writes.is_empty());
+    }
+
+    #[test]
+    fn driver_ok_fails_when_the_bit_is_missing_on_read_back() {
+        // A device that ignores the DRIVER_OK write.
+        let mut t = MockTransport::new(VIRTIO_F_VERSION_1);
+        t.status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK;
+        t.drop_driver_ok = true;
+        let got = driver_ok(&mut t);
+        assert_eq!(
+            got,
+            Err(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK)
+        );
+    }
+
+    #[test]
     fn config_read_retries_until_the_generation_is_stable() {
         let t = MockTransport::new(0);
         *t.generations.borrow_mut() = vec![1, 2, 2, 2];
         let mut buf = [0u8; 4];
-        config_read(&t, 0, &mut buf);
+        assert!(config_read(&t, 0, &mut buf));
         assert_eq!(t.raw_reads.get(), 2);
         assert_eq!(buf, [0xAB; 4]);
     }
@@ -288,7 +375,8 @@ mod tests {
         let t = MockTransport::new(0);
         *t.generations.borrow_mut() = (1..=100).collect();
         let mut buf = [0u8; 4];
-        config_read(&t, 0, &mut buf);
+        assert!(!config_read(&t, 0, &mut buf));
         assert_eq!(t.raw_reads.get(), CONFIG_READ_RETRIES);
+        assert_eq!(buf, [0xAB; 4]);
     }
 }

@@ -140,20 +140,19 @@ impl Transport for MmioTransport {
     fn config_generation(&self) -> u32 {
         self.read(CONFIG_GENERATION)
     }
+    /// Aligned 32-bit accesses only, bytes taken little-endian from each word. Virtio
+    /// permits that only for 32- and 64-bit config fields; 8- and 16-bit fields need
+    /// width-typed reads that do not exist yet. Bytes outside the slot (or past an
+    /// offset overflow) read as 0.
     fn config_read_raw(&self, offset: usize, buf: &mut [u8]) {
-        // Aligned 32-bit reads only; bytes are taken little-endian from each word.
         for (i, byte) in buf.iter_mut().enumerate() {
-            let Some(pos) = offset.checked_add(i) else {
-                return;
+            let reg = offset
+                .checked_add(i)
+                .and_then(|pos| CONFIG.checked_add(pos & !3).map(|reg| (pos, reg)));
+            *byte = match reg {
+                Some((pos, reg)) if reg < SLOT_SIZE => self.read(reg).to_le_bytes()[pos & 3],
+                _ => 0,
             };
-            let Some(reg) = CONFIG.checked_add(pos & !3) else {
-                return;
-            };
-            if reg >= SLOT_SIZE {
-                *byte = 0;
-                continue;
-            }
-            *byte = self.read(reg).to_le_bytes()[pos & 3];
         }
     }
 }
