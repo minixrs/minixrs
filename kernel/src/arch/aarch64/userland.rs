@@ -228,6 +228,15 @@ pub unsafe fn userland_bootstrap() {
     // SAFETY: DAIF still masked from Limine handoff; single-threaded boot.
     unsafe { mmu::enable_ttbr0_walks_once() };
 
+    // 2.2. Probe the virtio-mmio transports and reserve each assigned driver's DMA
+    //      run (slice 6.2, spec T4/T7). Ordering: this must precede
+    //      `device_teardown_selftest` below, the first caller of `free_frame`, so
+    //      the runs are bumped before anything is freed (H3 holds as written) and
+    //      before the boot servers bump from the same region.
+    // SAFETY: single-threaded boot, after `mm::init_from_limine_memmap` and
+    // `mm::set_hhdm_offset` (this function's own precondition).
+    unsafe { crate::arch::aarch64::virtio_mmio::probe() };
+
     // 2.25. Prove the device arm of the address-space teardown path works, before
     //        anything depends on it. Unconditional (so the stub-free boot covers
     //        it too) and cheap: one throwaway address space, four table frames,
