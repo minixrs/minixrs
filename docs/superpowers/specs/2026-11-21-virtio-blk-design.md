@@ -161,16 +161,17 @@ unlike the ramdisk's length. Content, not size, is now what tells the two apart.
 
 ### B8 — `driver-rt` pays 6.2's debts 4, 5 and 6
 
-- **Queue memory (debt 5).** `VirtQueue` holds a `NonNull<u8>` and a length, not `&mut [u8]`: the
-  device writes that memory, so a unique reference was the wrong contract once the queue outlives
-  bring-up — and 6.3 keeps it for the life of the process. `VirtQueue::new` becomes `unsafe` with
-  the contract stated (mapped, exclusive to this queue, never unmapped).
 - **Typed DMA handles (debt 5).** A new `dma.rs`: `DmaRegion` is built by one `unsafe` constructor
-  from the kernel-reported run; `DmaRegion::buf(offset, len)` hands out bounds-checked `DmaBuf`s;
-  `VirtQueue::add` takes `DmaBuf`s, so safe code can no longer aim the device at an arbitrary
-  physical address. `DmaBuf` carries volatile `read_into` / `write_from`, which is how the driver
-  touches header, status and bounce bytes without its own `unsafe`. `Transport::queue_enable`
-  becomes an `unsafe fn` (one call per driver, contract stated).
+  from the kernel-reported run, whose contract is that the memory is mapped for the life of the
+  process and that no Rust reference to it ever exists; `DmaRegion::buf(offset, len)` hands out
+  bounds-checked `DmaBuf`s. `DmaBuf` carries volatile `read_into` / `write_from`, which is how the
+  driver touches header, status and bounce bytes without its own `unsafe`.
+- **Queue memory (debt 5).** `VirtQueue` holds a `DmaBuf`, not `&mut [u8]`: the device writes that
+  memory, so a unique reference was the wrong contract once the queue outlives bring-up — and 6.3
+  keeps it for the life of the process. `VirtQueue::add` takes `DmaBuf`s and
+  `Transport::queue_enable` takes the `VirtQueue`, so safe code can no longer aim the device at an
+  arbitrary physical address and neither function needs to be `unsafe`: every address the device is
+  given derives from the one `unsafe` constructor.
 - **Notify barrier (debt 6).** `MmioTransport::notify` issues the fence itself before the
   `QueueNotify` store, so the ordering does not depend on what the caller did last.
 - **Queue fault (debt 4).** As B7.
@@ -306,17 +307,17 @@ Rows 7–9 are recorded honestly whichever way they come out.
 
 ## 5. Rulings to check
 
-| # | Ruling                                                                          | If wrong                                                                                                    |
-| - | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| 1 | **B1 amends H5:** publish on device, `ENXIO` on no root, MFS probes             | H5 as written needs a blocking DS lookup — a DS change and a new request; MFS's prologue is rewritten again |
-| 2 | B5: BDEV validation shared in `server-rt`                                       | move two functions back; the two drivers' refusals must then be kept identical by hand                      |
-| 3 | B3: source-filtered receive, no queue, no timeout                               | a second BDEV client that must not wait needs a pending-request slot in the driver                          |
-| 4 | B4: partial writes are read-modify-write rather than `EINVAL`                   | refusing them changes `memory` too, and the BDEV contract in `abi.md`                                       |
-| 5 | B8: `add` takes typed buffers; `queue_enable` and `VirtQueue::new` are `unsafe` | API churn in `driver-rt` before 6.6 adds the second consumer                                                |
-| 6 | B9: the image is written beside the kernel ELF by `kernel/build.rs`             | a build script writing outside `OUT_DIR`; the alternative is a host tool the runner invokes                 |
-| 7 | B10: CI runs the boots in sequence in one job, not as a matrix                  | roughly 10 more minutes per run; a matrix renames the required check and needs a branch-protection edit     |
-| 8 | B10: `check-boot-log.sh`'s backend argument is required                         | every documented invocation changes; an optional argument would let the common set pass alone               |
-| 9 | `BDEV_MINOR_ROOT` lands now, not in 6.4                                         | one additive constant earlier than H6 scheduled it                                                          |
+| # | Ruling                                                                                          | If wrong                                                                                                    |
+| - | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 1 | **B1 amends H5:** publish on device, `ENXIO` on no root, MFS probes                             | H5 as written needs a blocking DS lookup — a DS change and a new request; MFS's prologue is rewritten again |
+| 2 | B5: BDEV validation shared in `server-rt`                                                       | move two functions back; the two drivers' refusals must then be kept identical by hand                      |
+| 3 | B3: source-filtered receive, no queue, no timeout                                               | a second BDEV client that must not wait needs a pending-request slot in the driver                          |
+| 4 | B4: partial writes are read-modify-write rather than `EINVAL`                                   | refusing them changes `memory` too, and the BDEV contract in `abi.md`                                       |
+| 5 | B8: `add`, `VirtQueue::new` and `queue_enable` take typed DMA handles; one `unsafe` constructor | API churn in `driver-rt` before 6.6 adds the second consumer                                                |
+| 6 | B9: the image is written beside the kernel ELF by `kernel/build.rs`                             | a build script writing outside `OUT_DIR`; the alternative is a host tool the runner invokes                 |
+| 7 | B10: CI runs the boots in sequence in one job, not as a matrix                                  | roughly 10 more minutes per run; a matrix renames the required check and needs a branch-protection edit     |
+| 8 | B10: `check-boot-log.sh`'s backend argument is required                                         | every documented invocation changes; an optional argument would let the common set pass alone               |
+| 9 | `BDEV_MINOR_ROOT` lands now, not in 6.4                                                         | one additive constant earlier than H6 scheduled it                                                          |
 
 ---
 
