@@ -80,7 +80,9 @@ pub const fn accept_features(offered: u64, wanted: u64) -> Option<u64> {
     Some((wanted & offered) | VIRTIO_F_VERSION_1)
 }
 
-/// Why [`negotiate`] failed; the device has been left with `FAILED` set.
+/// Why [`negotiate`] failed. After `NoVersion1` or `FeaturesRejected` the device
+/// has been left with `FAILED` set; after `ResetIncomplete` nothing was written
+/// past the reset.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NegotiateError {
     /// The device does not offer `VIRTIO_F_VERSION_1`.
@@ -101,8 +103,10 @@ pub enum NegotiateError {
 }
 
 /// Reset, `ACKNOWLEDGE`, `DRIVER`, feature exchange, `FEATURES_OK`, read-back.
-/// Returns the accepted feature word. On any failure sets `FAILED` and returns
-/// the reason. `DRIVER_OK` is separate ([`driver_ok`]), after the queues exist.
+/// Returns the accepted feature word. A feature failure sets `FAILED` and returns
+/// the reason; a device whose status does not read 0 after the reset write is
+/// left as it is (`ResetIncomplete`, nothing written after the reset).
+/// `DRIVER_OK` is separate ([`driver_ok`]), after the queues exist.
 pub fn negotiate<T: Transport>(t: &mut T, wanted: u64) -> Result<u64, NegotiateError> {
     t.set_status(0);
     // No wait-for-zero loop: the spec's wait is needed for the PCI transport, not
@@ -149,6 +153,16 @@ pub fn driver_ok<T: Transport>(t: &mut T) -> Result<(), u32> {
         return Err(status);
     }
     Ok(())
+}
+
+/// Give up on a device after a successful [`negotiate`]: write `FAILED` on top of
+/// the status read back, without echoing the device-owned `NEEDS_RESET` and
+/// without resetting. Re-writing bits the device still shows re-asserts nothing
+/// it cleared, and `FEATURES_OK` already holds, so the write triggers no
+/// re-validation.
+pub fn fail<T: Transport>(t: &mut T) {
+    let status = t.status();
+    t.set_status((status & !STATUS_NEEDS_RESET) | STATUS_FAILED);
 }
 
 /// Generation-stable read of device config: re-read while `ConfigGeneration`
@@ -358,6 +372,28 @@ mod tests {
             got,
             Err(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK)
         );
+    }
+
+    #[test]
+    fn fail_sets_failed_on_top_of_the_status_read_back() {
+        let mut t = MockTransport::new(VIRTIO_F_VERSION_1);
+        negotiate(&mut t, 0).unwrap();
+        let before = t.status;
+        fail(&mut t);
+        assert_eq!(t.status_writes.last(), Some(&(before | STATUS_FAILED)));
+        // The device state: FAILED landed and FEATURES_OK was not dropped.
+        assert_ne!(t.status & STATUS_FAILED, 0);
+        assert_ne!(t.status & STATUS_FEATURES_OK, 0);
+    }
+
+    #[test]
+    fn fail_never_echoes_needs_reset() {
+        let mut t = MockTransport::new(VIRTIO_F_VERSION_1);
+        negotiate(&mut t, 0).unwrap();
+        let before = t.status;
+        t.status |= STATUS_NEEDS_RESET;
+        fail(&mut t);
+        assert_eq!(t.status_writes.last(), Some(&(before | STATUS_FAILED)));
     }
 
     #[test]

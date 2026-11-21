@@ -960,12 +960,24 @@ minix.rs fileio: malloc ok
 # virtio-blk, the first consumer of driver-rt (spec T4, T5, T7, T12). The kernel's
 # boot probe finds the disk tools/qemu-run.sh pins to bus 0 -- transport slot 0,
 # PA 0xa000000 (measured, spec T14) -- and assigns it to vblk; `ver=2` is the
-# modern transport `-global virtio-mmio.force-legacy=false` selects. It then maps
-# the slot's register page at VIRTIO_MMIO_PAGE_VA (0x40001000; slot 0 sits at the
-# page's start) and the 16-page DMA run at DMA_VA. The run's PA comes from the
-# frame allocator, so it is not asserted.
+# modern transport `-global virtio-mmio.force-legacy=false` selects.
 [virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk
-[devmap] vblk va=0x4000
+
+# The register page, asserted whole: every value follows from the bus pinning in
+# tools/qemu-run.sh (BUS_VBLK=0 -> slot 0 -> PA 0xa000000, in-page offset 0, INTID
+# 48 + 0 = 48), mapped at VIRTIO_MMIO_PAGE_VA (0x40001000). A prefix would also
+# match va=0x40000000 -- TTY's UART page, the off-by-one-page mapping this line
+# exists to catch.
+[devmap] vblk va=0x40001000 pa=0xa000000 intid=48
+
+# The 16-page DMA run at DMA_VA. Only the prefix is asserted: the run-variable pa=
+# sits between va= and pages=. pa= read 0x40000000 in every local boot, stub-free
+# and default -- the probe's reservation is the first bump from the first usable
+# region -- but that region's base comes from the firmware's memory map, which
+# CI's edk2 build may draw differently (the reason ttbr0_pa is never asserted
+# either). A wrong run size is caught by the driver instead: `vblk_layout` refuses
+# a run without its three pages, and the driver prints `virtio FAIL step=queue`
+# (forbidden).
 [dma] vblk va=0xc0000000
 
 # The driver's verdict on T12's eight steps: the mapping, the DMA cookie (VA and PA

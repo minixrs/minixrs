@@ -19,8 +19,9 @@
 //! 8. `virtio ok features=… capacity=… qsize=… slot=…`.
 //!
 //! A failing step prints `virtio FAIL step=<step> …` and abandons the rest without
-//! resetting the device or releasing anything; the driver still enters its
-//! receive loop, degraded. It never exits: the kernel halts if a process holding
+//! resetting the device or releasing anything; a failure after `negotiate`
+//! succeeded and before `DRIVER_OK` (config, queue) also sets `FAILED` through
+//! `driver-rt`'s `fail`. The driver still enters its receive loop, degraded. It never exits: the kernel halts if a process holding
 //! a virtio assignment exits or execs (the DMA-run debt, T7).
 //!
 //! The loop publishes nothing to DS (6.3 decides who carries a root) and answers
@@ -46,7 +47,7 @@ use bringup::{
     VBLK_CONFIG_CAPACITY_OFF, VBLK_IRQ_NOTIFY_ID, VBLK_WANTED_FEATURES, capacity_from_config,
     cookie_ok, vblk_layout,
 };
-use minixrs_driver_rt::transport::{NegotiateError, config_read, driver_ok, negotiate};
+use minixrs_driver_rt::transport::{NegotiateError, config_read, driver_ok, fail, negotiate};
 use minixrs_driver_rt::{
     DmaRun, IrqLine, MmioError, MmioTransport, Transport, VirtQueue, clamp_queue_size, queue_layout,
 };
@@ -123,6 +124,10 @@ fn main() -> ! {
                 let bits = rd_i32(&msg, NOTIFY_IRQ_PENDING_OFF) as u32;
                 diag_fmt(format_args!("virtio FAIL step=irq-extra bits={bits:#x}"));
             }
+            continue;
+        }
+        // Any other notification has no sender waiting in a SENDREC: drop it.
+        if msg.m_type == NOTIFY_MESSAGE {
             continue;
         }
         // Capture the caller first: the reply overwrites `msg.m_source`.
@@ -242,6 +247,7 @@ fn bring_up() {
     // Step 5: capacity. An unstable read is not reported as a capacity.
     let mut cap = [0u8; 8];
     if !config_read(&t, VBLK_CONFIG_CAPACITY_OFF, &mut cap) {
+        fail(&mut t);
         diag_fmt(format_args!("virtio FAIL step=config"));
         return;
     }
@@ -250,12 +256,14 @@ fn bring_up() {
     // Step 6: lay out and enable the request queue, then DRIVER_OK.
     let device_max = t.queue_max(REQUEST_QUEUE);
     let Some(qsize) = clamp_queue_size(device_max) else {
+        fail(&mut t);
         diag_fmt(format_args!("virtio FAIL step=queue max={device_max}"));
         return;
     };
     let qlayout = queue_layout(qsize);
     let (Some(qlayout), Some(vlayout)) = (qlayout, qlayout.and_then(|q| vblk_layout(run, q)))
     else {
+        fail(&mut t);
         diag_fmt(format_args!(
             "virtio FAIL step=queue size={qsize} len={}",
             run.len
@@ -274,6 +282,7 @@ fn bring_up() {
         )
     };
     if VirtQueue::new(qmem, qlayout).is_none() {
+        fail(&mut t);
         diag_fmt(format_args!("virtio FAIL step=queue size={qsize}"));
         return;
     }
