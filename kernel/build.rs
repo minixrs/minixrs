@@ -193,6 +193,7 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
     for path in [
         workspace.join("minixrs-ipc/src"),
         workspace.join("server-rt/src"),
+        workspace.join("drivers/driver-rt/src"),
         workspace.join("kernel-shared/src"),
         workspace.join("minixrs-abi-note/src"),
         workspace.join("tools/targets/aarch64-unknown-minixrs.json"),

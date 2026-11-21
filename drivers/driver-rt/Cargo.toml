@@ -13,3 +13,7 @@ categories = ["no-std", "os"]
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared", version = "0.1.0" }
 minixrs-ipc = { path = "../../minixrs-ipc", version = "0.1.0" }
+minixrs-server-rt = { path = "../../server-rt", version = "0.1.0" }
+
+[lints]
+workspace = true

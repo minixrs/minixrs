@@ -9,15 +9,13 @@ publish = false
 name = "minixrs-tty"
 path = "src/main.rs"
 
-# Deliberately NOT `minixrs-driver-rt`: it is a 4-line placeholder today, and
-# depending on it would mean adding `drivers/driver-rt/src` to the shared
-# `rerun-if-changed` list in `kernel/build.rs` for zero benefit. Phase 6, when
-# driver-rt grows a real IRQ/DMA runtime, is when that dependency (and the watch
-# entry) should be added.
+# `minixrs-driver-rt` supplies `IrqLine`, the claim / re-arm helper shared with the virtio
+# drivers; its `src` is on the shared `rerun-if-changed` list in `kernel/build.rs`.
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minixrs-ipc" }
 minixrs-server-rt = { path = "../../server-rt" }
+minixrs-driver-rt = { path = "../driver-rt" }
 minixrs-abi-note = { path = "../../minixrs-abi-note" }
 
 [lints]

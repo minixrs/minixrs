@@ -439,9 +439,10 @@ Beyond the shared contracts above, three driver-specific rules:
   `UARTICR` write. Acking with `UARTICR` instead of clearing `TXIM` re-fires on every byte printed
   (83,741 interrupts in 60 s) while `irq ok` still prints; TTY's post-proof `irq FAIL extra` guard
   is what catches it. Disarm it by clearing `TXIM`.
-- `drivers/tty` deliberately does **not** depend on `minixrs-driver-rt` (a 4-line placeholder) —
-  Phase 6 makes that move, plus the `kernel/build.rs` watch entry (slice 5.3 — see
-  [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+- **A driver that owns an interrupt line claims and re-arms it through `minixrs-driver-rt`'s
+  `IrqLine`** (`drivers/tty` does since slice 6.2). The crate's `src` is on the shared
+  `rerun-if-changed` list in `kernel/build.rs`, so an edit re-embeds every driver ELF.
+  `drivers/memory` deliberately does not depend on it: it has no interrupt and no device.
 
 - **A driver identifies an interrupt by `m_source == boot_endpoint(HARDWARE)`, never by payload,**
   and re-arms with `IRQ_ENABLE` only after draining and acknowledging at the device — the kernel
