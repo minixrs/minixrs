@@ -1,0 +1,7 @@
+# tests/qemu-boot.ramdisk.forbidden -- substrings forbidden IN ADDITION to
+# tests/qemu-boot.forbidden when no virtio-blk device is attached.
+
+# No disk is attached, so nothing may claim to have used one.
+[diag mfs] bdev.ds ok name=vblk
+[diag vblk] virtio ok
+[virtio] slot=0 pa=0xa000000 id=2

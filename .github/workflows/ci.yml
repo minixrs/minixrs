@@ -337,7 +337,11 @@ jobs:
     # still builds the kernel and nine user crates with -Zbuild-std before the
     # first byte. 40 → 50 leaves that headroom: whoever raises the boot timeout
     # again should raise this in the same edit.
-    timeout-minutes: 50
+    #
+    # Slice 6.3 (50 → 65): the job boots TWICE, once per root backend, and each
+    # boot burns its full timeout. A second 600 s boot is 10 more minutes; 65
+    # keeps the build headroom the 50 was sized for, plus five.
+    timeout-minutes: 65
     steps:
       # submodules: external/musl is the musl fork (slice 5.6). Without it
       # kernel/build.rs falls back to packing `worker` as `hello` and the C
@@ -382,7 +386,16 @@ jobs:
         run: tools/build-musl.sh
       - name: Build kernel
         run: cargo kernel-aarch64
-      - name: Boot in QEMU (600 s wall clock)
+      # Slice 6.3: two boots, one per root backend (phase decision H5 -- what is
+      # attached selects the root). `disk` attaches the root image as a virtio-blk
+      # disk and MFS mounts through the vblk driver; `ramdisk` attaches no disk
+      # and MFS mounts the ramdisk, which stays green for the whole phase (H7).
+      # Sequential in ONE job, not a matrix: a matrix would rename the required
+      # "QEMU boot smoke" check and two QEMUs on one runner would starve each
+      # other. Each boot is checked against the common marker lists plus its own
+      # backend's (tools/check-boot-log.sh), then tools/diff-backends.sh proves
+      # the filesystem's output is the same on both.
+      - name: Boot in QEMU, once per root backend (600 s wall clock each)
         env:
           QEMU_EFI_AARCH64: /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
         run: |
@@ -422,24 +435,49 @@ jobs:
           # safety factor of only 1.62x at 240 s (below the 1.78x that forced the
           # previous raise), so 600 s restores it to ~4.1x.
           #
+          # 6.3 (600 kept, now twice): the disk boot completes every block request
+          # by a real interrupt instead of a memcpy. Measured the same way at a
+          # fixed 300 s: the last required marker sits at 66.8% of the disk
+          # boot's log, against 48.1% for the ramdisk boot of the same build and
+          # 48.1% / 55.7% for two boots of the merge base. That is ~200 s local
+          # for the slower backend, a 3.0x factor under 600 s -- well above the
+          # 1.6-1.8x that forced the earlier raises -- so the per-boot budget
+          # stays and only the job's `timeout-minutes` grew.
+          #
           # If you change this, re-measure the fraction rather than reasoning
           # from the wall-clock number above: it is a ratio against a local run,
           # not a CI timing.
-          timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
-            > qemu.log 2>&1 || status=$?
-          echo "qemu run finished with status $status (124 = timeout, expected)"
-          if [ "$status" -ne 124 ]; then
-            echo "::error::expected exit 124 (timeout); got $status — see the qemu-boot-log artifact"
-            exit 1
-          fi
-      - name: Check boot log
-        run: tools/check-boot-log.sh qemu.log
+          for backend in disk ramdisk; do
+            status=0
+            MINIXRS_ROOT="$backend" timeout 600 cargo run -p minixrs-kernel \
+              --target aarch64-unknown-none --release \
+              > "qemu-$backend.log" 2>&1 || status=$?
+            echo "$backend boot finished with status $status (124 = timeout, expected)"
+            if [ "$status" -ne 124 ]; then
+              echo "::error::$backend boot: expected exit 124 (timeout); got $status — see the qemu-boot-log artifact"
+              exit 1
+            fi
+          done
+      # Both logs are checked even if the first fails, so one run shows the
+      # whole story; the step fails if either does.
+      - name: Check boot logs
+        run: |
+          rc=0
+          tools/check-boot-log.sh disk qemu-disk.log || rc=1
+          tools/check-boot-log.sh ramdisk qemu-ramdisk.log || rc=1
+          exit "$rc"
+      - name: Compare the two backends
+        run: |
+          tools/diff-backends.sh --self-test
+          tools/diff-backends.sh qemu-disk.log qemu-ramdisk.log
       - name: Upload boot log
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: qemu-boot-log
-          path: qemu.log
+          path: |
+            qemu-disk.log
+            qemu-ramdisk.log
           if-no-files-found: error
 
   coverage:

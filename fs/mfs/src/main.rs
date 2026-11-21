@@ -1641,7 +1641,12 @@ fn root_device<'a>(
             if let Some(rc) = refused {
                 diag_fmt(format_args!("bdev.root vblk rc={rc} fallback=memory"));
             }
-            device(grants, mem_endpoint(), blocks.buf)
+            // The declined driver must not keep a read/write grant over the
+            // block buffer for the rest of the boot. A failed revoke changes
+            // nothing the fallback depends on, so it is not reported.
+            let Blocks { buf, gid, .. } = blocks;
+            let _ = grants.revoke(gid);
+            device(grants, mem_endpoint(), buf)
         }
     }
 }

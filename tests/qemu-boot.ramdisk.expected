@@ -1,0 +1,12 @@
+# tests/qemu-boot.ramdisk.expected -- substrings required IN ADDITION to
+# tests/qemu-boot.expected when no virtio-blk device is attached
+# (MINIXRS_ROOT=ramdisk). tools/check-boot-log.sh ramdisk <log> checks both.
+
+# The kernel's probe found no block device, so GET_VIRTIO_MMIO answered ENOENT:
+# healthy, not a failure (phase decision H2). The driver publishes nothing to DS
+# and idles.
+[diag vblk] no device
+
+# MFS found no `vblk` in DS and resolved the `memory` driver -- the ramdisk root,
+# kept green for the whole phase (H7).
+[diag mfs] bdev.ds ok name=memory ep=

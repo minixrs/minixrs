@@ -1,0 +1,12 @@
+# tests/qemu-boot.disk.forbidden -- substrings forbidden IN ADDITION to
+# tests/qemu-boot.forbidden when the root image is attached as a virtio-blk disk.
+
+# The silent fallback H5 warns of: the disk is attached and the root came from
+# the ramdisk anyway.
+[diag mfs] bdev.ds ok name=memory
+# MFS found vblk in DS and the driver said it serves no root.
+[diag mfs] bdev.root vblk
+# The driver was given no device although one is attached.
+[diag vblk] no device
+# The device did not carry the image this build made.
+[diag vblk] root FAIL

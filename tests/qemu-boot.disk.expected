@@ -1,0 +1,62 @@
+# tests/qemu-boot.disk.expected -- substrings required IN ADDITION to
+# tests/qemu-boot.expected when the boot has the root image attached as a
+# virtio-blk disk (MINIXRS_ROOT=disk, the default). Same format as that file.
+# tools/check-boot-log.sh disk <log> checks both.
+#
+# Everything the filesystem proves -- mount, read, write, create/truncate, the
+# hole probe, exec from the root -- is in the COMMON file and is therefore
+# required of both backends. This file holds only what exists because the disk
+# does.
+
+# virtio-blk, the first consumer of driver-rt (spec T4, T5, T7, T12). The kernel's
+# boot probe finds the disk tools/qemu-run.sh pins to bus 0 -- transport slot 0,
+# PA 0xa000000 (measured, spec T14) -- and assigns it to vblk; `ver=2` is the
+# modern transport `-global virtio-mmio.force-legacy=false` selects.
+[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk
+
+# The register page, asserted whole: every value follows from the bus pinning in
+# tools/qemu-run.sh (BUS_VBLK=0 -> slot 0 -> PA 0xa000000, in-page offset 0, INTID
+# 48 + 0 = 48), mapped at VIRTIO_MMIO_PAGE_VA (0x40001000). A prefix would also
+# match va=0x40000000 -- TTY's UART page, the off-by-one-page mapping this line
+# exists to catch.
+[devmap] vblk va=0x40001000 pa=0xa000000 intid=48
+
+# The 16-page DMA run at DMA_VA. va= and pages= are asserted; pa= follows them and
+# is not. pa= read 0x40000000 in every local boot, stub-free and default -- the
+# probe's reservation is the first bump from the first usable region -- but that
+# region's base comes from the firmware's memory map, which CI's edk2 build may
+# draw differently (the reason ttbr0_pa is never asserted either). pages= is
+# printed before pa= precisely so the run size is pinned: a wrong size also
+# trips the driver, whose `vblk_layout` refuses a run without its three pages
+# (`virtio FAIL step=queue`, forbidden).
+[dma] vblk va=0xc0000000 pages=16
+
+# The driver's verdict on T12's eight steps: the mapping, the DMA cookie (VA and PA
+# name the same memory), the magic/version/DeviceID, the negotiation, the
+# generation-stable capacity read, queue 0 enabled at the run's PA with DRIVER_OK
+# read back, and its interrupt claim plus the INTID+1 refusal. features= is exactly
+# VIRTIO_F_VERSION_1 (bit 32): virtio-blk requests nothing optional, so any other
+# bit means the negotiation accepted something it was not asked for. capacity= is
+# the root image in 512-byte sectors, rootfs::ROOTFS_IMAGE_BYTES / 512 (slice 6.3:
+# the disk is the image kernel/build.rs also packs as the ramdisk). qsize= is driver-
+# rt's QUEUE_SIZE (8) under the device's QueueNumMax. slot= is not asserted. A
+# failing step prints `virtio FAIL step=<step>` instead (forbidden).
+[diag vblk] virtio ok features=0x100000000 capacity=2048 qsize=8
+
+# Slice 6.3: the root check (spec B6). After bring-up the driver reads block 0 and
+# the last block THROUGH THE QUEUE, each completed by a real interrupt it blocked
+# in receive for, and applies the memory driver's device-level checks: the image
+# label, the header's block count against the device's (capacity / 8), and the
+# tail label. blocks= is printed from the device (ROOTFS_IMAGE_BLOCKS = 256).
+# These two reads are also the first proof that the DMA run's data page is the
+# memory the device writes (the 6.2 cookie proved only the run's first page).
+# Mutation-tested: dropping the IRQ re-arm hangs the boot before this line, and
+# addressing sector = block (not 8 * block) turns it into `root FAIL tail label`.
+[diag vblk] root ok blocks=256 tail=1
+
+# Slice 6.3: MFS chose the disk (spec B1/B2, phase decision H5). It found `vblk`
+# in DS, probed it with one zero-length read, and mounted its root through it.
+# This line, with tests/qemu-boot.disk.forbidden's `name=memory`, is what closes
+# H5's silent fallback: a broken virtio path that fell back to the ramdisk would
+# otherwise pass every filesystem marker.
+[diag mfs] bdev.ds ok name=vblk ep=

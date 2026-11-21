@@ -115,3 +115,7 @@ minix.rs fileio: exit-reset FAIL
 # once and left masked). `[diag vblk] no device` is deliberately not forbidden:
 # it becomes meaningful when 6.3 has a second boot without the disk.
 [diag vblk] virtio FAIL
+# Slice 6.3: vblk had a device and could not publish itself to DS, so MFS cannot
+# find it and the disk boot falls back (tests/qemu-boot.disk.forbidden catches
+# that too; this names the cause).
+[diag vblk] ds FAIL

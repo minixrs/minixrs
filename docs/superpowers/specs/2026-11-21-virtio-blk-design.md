@@ -82,8 +82,9 @@ bdev.ds ok name=vblk ep=…` or `name=memory ep=…`. That is the single line th
 differs by. Every later request uses `BDEV_MINOR_ROOT`.
 
 The change is in `main.rs`'s prologue and `Blocks`' endpoint field name. No FS-band handler, no
-library module and no VFS line moves. On fallback the grant issued to `vblk` is left in its pool
-slot unused; `GRANT_SLOTS` is 8 and the plan confirms the denial battery still fits.
+library module and no VFS line moves. On fallback MFS revokes the grant it issued to `vblk`, so a
+driver that declined holds nothing over the block buffer; the fallback boot peaks at five of the
+eight `GRANT_SLOTS`.
 
 ### B3 — one request in flight, waited for with a source-filtered receive
 
