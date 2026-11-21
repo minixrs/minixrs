@@ -168,7 +168,9 @@ stale-claim grep; every touched `book/` chapter read end to end; all local gates
 
 ## Ledger
 
-| When | Decision                                                                                                                        | If wrong                                      |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| plan | Spec B11 said every measurement precedes the code; three of the four need a serving driver. The spec's paragraph was rewritten. | none — an ordering claim, not a design choice |
-| plan | Task 2 (image, runner) precedes the driver tasks so each has a disk to boot against.                                            | none                                          |
+| When   | Decision                                                                                                                                         | If wrong                                                                                                                              |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| plan   | Spec B11 said every measurement precedes the code; three of the four need a serving driver. The spec's paragraph was rewritten.                  | none — an ordering claim, not a design choice                                                                                         |
+| plan   | Task 2 (image, runner) precedes the driver tasks so each has a disk to boot against.                                                             | none                                                                                                                                  |
+| Task 0 | Baseline (merge base, 300 s, two boots): PASS 148 both; last required marker at 48.1% and 55.7% of the log; final IPC counter 32.3 M and 31.9 M. | —                                                                                                                                     |
+| Task 0 | Determinism control failed on the raw stream and passed per server by first occurrence; spec B10 and B11.2 rewritten to that scope.              | a backend-dependent *ordering* or *repeat count* inside one server's stream would go unseen; the marker sets still require every line |

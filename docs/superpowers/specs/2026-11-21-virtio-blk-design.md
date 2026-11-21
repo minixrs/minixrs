@@ -208,9 +208,13 @@ The blank image and `VBLK_IMAGE_SECTORS` go.
 The forbidden halves are what close H5's silent fallback. `check-boot-log.sh` takes the backend as a
 **required** argument, so no caller can check the common set alone and call it a pass.
 
-"Byte-identical" is checked mechanically by a new `tools/diff-backends.sh <disk-log> <ramdisk-log>`:
-it extracts the `[diag mfs]` and `[diag vfs]` lines from each log, in order, and fails unless they
-differ in exactly the `bdev.ds ok name=` line.
+"Byte-identical" is checked mechanically by a new `tools/diff-backends.sh <disk-log> <ramdisk-log>`.
+It takes the `[diag mfs]` lines and the `[diag vfs]` lines of each log as two separate streams,
+keeps the first occurrence of each line in order, and fails unless the VFS streams are identical and
+the MFS streams differ in exactly the `bdev.ds ok name=` line. The two streams are compared
+separately because the servers interleave differently from boot to boot, and by first occurrence
+because VFS prints one `pm-exit reset` line per exit for as long as the boot runs (both measured,
+B11.2). A line is matched wherever it starts, since a tick character can precede it.
 
 CI's `qemu-smoke` keeps its name (branch protection requires it) and runs the two boots in sequence,
 then the diff. See B11 for the budget.
@@ -226,8 +230,9 @@ that first produces one.
    the merge base ([`ci.md`](../../conventions/ci.md)'s method). This decides the per-boot timeout,
    the job's `timeout-minutes`, and the local iteration timeout (6.2 debt 7).
 2. **Determinism control.** Two boots of the *same* backend through `diff-backends.sh` must come out
-   identical. If they do not, the diff's scope is narrowed to MFS's prologue and the spec is
-   amended.
+   identical. **Measured 2026-11-21 at the merge base:** the raw interleaved stream is not (VFS and
+   MFS lines change order, and the count of VFS's per-exit lines follows the run length); each
+   server's first-occurrence stream is, which is the scope B10 states.
 3. **Which `deliver_irq` arm completions take.** 6.1 left the immediate-delivery arm unexercised. A
    temporary trace counts both arms during a disk boot.
 4. **Two assumptions about QEMU and the kernel:** `SYS_SAFECOPY` into the DMA window works as it
