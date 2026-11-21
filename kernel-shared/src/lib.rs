@@ -28,6 +28,7 @@ pub mod rootfs;
 pub mod signal;
 pub mod sys_limits;
 pub mod uspace;
+pub mod virtio;
 
 pub use endpoint::{Endpoint, GenNr, PrivId, ProcNr, SysId};
 pub use message::Message;

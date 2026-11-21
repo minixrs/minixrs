@@ -282,6 +282,60 @@ const _: () = assert!(GETINFO_RAMDISK_LEN_OFF + 8 <= 96);
 const _: () = assert!((8 + GETINFO_RAMDISK_VA_OFF).is_multiple_of(8));
 const _: () = assert!((8 + GETINFO_RAMDISK_LEN_OFF).is_multiple_of(8));
 
+/// `SYS_GETINFO` request: report the caller's virtio-mmio register page (slice
+/// 6.2). Reply payload: register base VA (u64) at [`GETINFO_VIRTIO_VA_OFF`],
+/// INTID (u32) at [`GETINFO_VIRTIO_INTID_OFF`], transport slot (u32) at
+/// [`GETINFO_VIRTIO_SLOT_OFF`], with `m_type == OK`.
+///
+/// Gated on the caller being one of the four virtio driver proc numbers (else
+/// `EPERM`); a driver with no assigned device gets `ENOENT`. Like
+/// [`GET_RAMDISK`] it is deliberately not emitted into the C headers.
+pub const GET_VIRTIO_MMIO: i32 = 65;
+/// Offset of the register base VA in a [`GET_VIRTIO_MMIO`] reply (u64).
+pub const GETINFO_VIRTIO_VA_OFF: usize = 0;
+/// Offset of the INTID in a [`GET_VIRTIO_MMIO`] reply (u32).
+pub const GETINFO_VIRTIO_INTID_OFF: usize = 8;
+/// Offset of the transport slot in a [`GET_VIRTIO_MMIO`] reply (u32).
+pub const GETINFO_VIRTIO_SLOT_OFF: usize = 12;
+
+/// `SYS_GETINFO` request: report the caller's DMA run (slice 6.2). Reply
+/// payload: VA (u64) at [`GETINFO_DMA_VA_OFF`], PA (u64) at
+/// [`GETINFO_DMA_PA_OFF`], length in bytes (u64) at [`GETINFO_DMA_LEN_OFF`].
+///
+/// Same gate and absent answer as [`GET_VIRTIO_MMIO`]; also not emitted into the
+/// C headers.
+pub const GET_DMA: i32 = 66;
+/// Offset of the DMA run VA in a [`GET_DMA`] reply (u64).
+pub const GETINFO_DMA_VA_OFF: usize = 0;
+/// Offset of the DMA run PA in a [`GET_DMA`] reply (u64).
+pub const GETINFO_DMA_PA_OFF: usize = 8;
+/// Offset of the DMA run length in a [`GET_DMA`] reply (u64).
+pub const GETINFO_DMA_LEN_OFF: usize = 16;
+
+const _: () = assert!(GET_VIRTIO_MMIO > 31);
+const _: () = assert!(GET_DMA > 31);
+const _: () = assert!(GET_VIRTIO_MMIO != GET_RAMDISK);
+const _: () = assert!(GET_DMA != GET_VIRTIO_MMIO);
+const _: () = assert!(GET_DMA != GET_RAMDISK);
+const _: () = assert!(GET_VIRTIO_MMIO != GET_WHOAMI);
+const _: () = assert!(GET_DMA != GET_WHOAMI);
+
+// `GET_VIRTIO_MMIO`: u64 then two u32, ordered, disjoint, naturally aligned
+// within the message (payload starts at byte 8).
+const _: () = assert!(GETINFO_VIRTIO_VA_OFF + 8 <= GETINFO_VIRTIO_INTID_OFF);
+const _: () = assert!(GETINFO_VIRTIO_INTID_OFF + 4 <= GETINFO_VIRTIO_SLOT_OFF);
+const _: () = assert!(GETINFO_VIRTIO_SLOT_OFF + 4 <= 96);
+const _: () = assert!((8 + GETINFO_VIRTIO_VA_OFF).is_multiple_of(8));
+const _: () = assert!((8 + GETINFO_VIRTIO_INTID_OFF).is_multiple_of(4));
+const _: () = assert!((8 + GETINFO_VIRTIO_SLOT_OFF).is_multiple_of(4));
+// `GET_DMA`: three u64.
+const _: () = assert!(GETINFO_DMA_VA_OFF + 8 <= GETINFO_DMA_PA_OFF);
+const _: () = assert!(GETINFO_DMA_PA_OFF + 8 <= GETINFO_DMA_LEN_OFF);
+const _: () = assert!(GETINFO_DMA_LEN_OFF + 8 <= 96);
+const _: () = assert!((8 + GETINFO_DMA_VA_OFF).is_multiple_of(8));
+const _: () = assert!((8 + GETINFO_DMA_PA_OFF).is_multiple_of(8));
+const _: () = assert!((8 + GETINFO_DMA_LEN_OFF).is_multiple_of(8));
+
 // ---------------------------------------------------------------------------
 // `SYS_PRIVCTL` subcodes.
 //
@@ -1650,6 +1704,33 @@ mod tests {
         assert_eq!(end.min(96), end);
         assert_eq!((8 + GETINFO_RAMDISK_VA_OFF) % 8, 0);
         assert_eq!((8 + GETINFO_RAMDISK_LEN_OFF) % 8, 0);
+    }
+
+    #[test]
+    fn virtio_getinfo_selectors_are_distinct_and_laid_out() {
+        assert_eq!(GET_VIRTIO_MMIO, 65);
+        assert_eq!(GET_DMA, 66);
+        assert_ne!(GET_VIRTIO_MMIO, GET_RAMDISK);
+        assert_ne!(GET_DMA, GET_VIRTIO_MMIO);
+        assert_ne!(GET_DMA, GET_RAMDISK);
+        assert_ne!(GET_VIRTIO_MMIO, GET_WHOAMI);
+        assert_ne!(GET_DMA, GET_WHOAMI);
+        assert_eq!(GET_VIRTIO_MMIO.min(32), 32);
+        assert_eq!(GET_DMA.min(32), 32);
+        assert_eq!(
+            [
+                GETINFO_VIRTIO_VA_OFF,
+                GETINFO_VIRTIO_INTID_OFF,
+                GETINFO_VIRTIO_SLOT_OFF
+            ],
+            [0, 8, 12]
+        );
+        assert_eq!(
+            [GETINFO_DMA_VA_OFF, GETINFO_DMA_PA_OFF, GETINFO_DMA_LEN_OFF],
+            [0, 8, 16]
+        );
+        assert_eq!((8 + GETINFO_VIRTIO_VA_OFF) % 8, 0);
+        assert_eq!((8 + GETINFO_DMA_LEN_OFF) % 8, 0);
     }
 
     #[test]
