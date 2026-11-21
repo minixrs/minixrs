@@ -20,7 +20,7 @@
 //!
 //! A failing step prints `virtio FAIL step=<step> …` and abandons the rest without
 //! resetting the device or releasing anything; a failure after `negotiate`
-//! succeeded and before `DRIVER_OK` (config, queue) also sets `FAILED` through
+//! succeeded (config, queue, or a refused `DRIVER_OK`) also sets `FAILED` through
 //! `driver-rt`'s `fail`. The driver still enters its receive loop, degraded. It
 //! never exits: the kernel halts if a process holding a virtio assignment exits
 //! or execs (the DMA-run debt, T7).
@@ -289,6 +289,7 @@ fn bring_up() {
     }
     t.queue_enable(REQUEST_QUEUE, qsize, &vlayout.queue);
     if let Err(status) = driver_ok(&mut t) {
+        fail(&mut t);
         diag_fmt(format_args!("virtio FAIL step=status status={status:#x}"));
         return;
     }

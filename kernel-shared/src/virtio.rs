@@ -8,16 +8,16 @@
 //! the register reads and the platform facts (base, stride, INTID) stay in the
 //! kernel's arch module.
 //!
-//! The rules, in priority order:
+//! The rules, in the order [`assign`] applies them to each present device:
 //!
 //! 1. A 4 KiB page holding more than one *present* device assigns none of them
 //!    ([`SlotVerdict::SharedPage`]), whether or not a driver exists for them: a
 //!    driver must reach one device's registers and no neighbour's.
-//! 2. Among devices not refused, the lowest slot wins a `DeviceID`; later ones are
-//!    [`SlotVerdict::Duplicate`].
+//! 2. A lone device with an unknown id is [`SlotVerdict::NoDriver`].
 //! 3. A device whose driver has no boot module is [`SlotVerdict::NoModule`] and
-//!    does not consume the driver; a lone device with an unknown id is
-//!    [`SlotVerdict::NoDriver`].
+//!    does not consume the driver.
+//! 4. Among the rest, the lowest slot wins a `DeviceID`; later ones are
+//!    [`SlotVerdict::Duplicate`]. The winner is [`SlotVerdict::Assigned`].
 //!
 //! `Version` is never judged here: refusing a legacy transport is the driver's
 //! job.

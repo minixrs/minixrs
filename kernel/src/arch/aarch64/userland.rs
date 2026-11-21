@@ -856,8 +856,8 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
             );
             let _ = writeln!(
                 uart,
-                "[dma] {} va={:#x} pa={:#x} pages={}",
-                name, DMA_VA, dev.dma_pa, DMA_RUN_PAGES,
+                "[dma] {} va={:#x} pages={} pa={:#x}",
+                name, DMA_VA, DMA_RUN_PAGES, dev.dma_pa,
             );
         }
     }
