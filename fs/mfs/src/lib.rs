@@ -39,6 +39,8 @@
 //!   * [`walk`] — path traversal and read policy: which block to fetch next, how
 //!     much of it to move, and every bound that stops a corrupt image spinning
 //!     the server forever.
+//!   * [`root`] — which block driver the root is mounted from: the disk when it
+//!     carries a root, the ramdisk otherwise (slice 6.3).
 //!
 //! The modules below it ([`superblock`], [`inode`], [`layout`], [`dirent`],
 //! [`read`]) are slice 5.7's and are untouched — the server drives exactly the
@@ -59,6 +61,7 @@ pub mod inode;
 pub mod layout;
 pub mod proto;
 pub mod read;
+pub mod root;
 pub mod superblock;
 pub mod walk;
 pub mod write;
