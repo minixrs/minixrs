@@ -259,7 +259,7 @@ pub fn reserve_contiguous(pages: usize) -> Option<Frame> {
                 "reserve_contiguous: run {pa:#x}..{end:#x} escapes its region"
             );
             r.next_free_pa = end;
-            a.allocs += 1;
+            a.allocs += pages as u64; // one per frame, as `frees` counts
             // SAFETY: HHDM covers this PA, the run is exclusively ours, and HHDM
             // is cacheable normal memory, as in `alloc_frame`'s bump path.
             unsafe {

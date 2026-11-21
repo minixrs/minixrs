@@ -127,11 +127,11 @@ page_pa, in_page_offset, intid)` per driver, plus the refusals.
 Rules, in order:
 
 1. **A page with more than one present device assigns nothing**, and each device in it gets a
-   `[virtio] refuse` line naming the page and both slots. This is **stricter than H2's wording**
-   ("the slot of more than one *driver's* device"): a device no driver claims — a stray
-   `virtio-rng-device`, say — would otherwise have its registers mapped into its page-mate's driver.
-   The boundary H2 wants is "a driver reaches one device's registers", and only the stricter rule
-   gives it. **(finding)**
+   `[virtio] refuse` line naming the page and its own slot (so the lines together name every slot in
+   the page). This is **stricter than H2's wording** ("the slot of more than one *driver's*
+   device"): a device no driver claims — a stray `virtio-rng-device`, say — would otherwise have its
+   registers mapped into its page-mate's driver. The boundary H2 wants is "a driver reaches one
+   device's registers", and only the stricter rule gives it. **(finding)**
 2. **The lowest slot wins a `DeviceID`.** A second device of the same type in another page is
    reported and left unassigned; multiple disks are out of scope.
 3. **A device whose driver has no module in the boot archive is reported and left alone** — no

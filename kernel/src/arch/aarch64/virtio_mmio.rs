@@ -25,6 +25,7 @@ use minixrs_kernel_shared::virtio::{
 };
 
 use crate::arch::aarch64::uart::Pl011;
+use crate::mm::FRAME_SIZE;
 
 /// Physical base of virtio-mmio slot 0 on QEMU `virt`.
 pub const VIRTIO_MMIO_PHYS_BASE: u64 = 0x0A00_0000;
@@ -35,8 +36,15 @@ pub const NR_VIRTIO_MMIO_SLOTS: usize = 32;
 /// INTID of slot 0 (SPI 16); slot `n` is `48 + n`.
 pub const VIRTIO_MMIO_SLOT0_INTID: u32 = 48;
 
+/// Page size as a `u64`, for physical-address arithmetic.
+const PAGE: u64 = FRAME_SIZE as u64;
+/// Mask of the in-page offset bits.
+const PAGE_OFF_MASK: u64 = PAGE - 1;
 /// Slots sharing one 4 KiB page.
-const SLOTS_PER_PAGE: usize = 4096 / VIRTIO_MMIO_SLOT_STRIDE as usize;
+const SLOTS_PER_PAGE: usize = (PAGE / VIRTIO_MMIO_SLOT_STRIDE) as usize;
+
+const _: () = assert!(VIRTIO_MMIO_PHYS_BASE & PAGE_OFF_MASK == 0);
+const _: () = assert!(VIRTIO_MMIO_SLOT_STRIDE > 0 && PAGE.is_multiple_of(VIRTIO_MMIO_SLOT_STRIDE));
 
 /// What the probe decided for one driver: where its device is and its DMA run.
 #[derive(Clone, Copy)]
@@ -58,8 +66,11 @@ unsafe impl Sync for Assignments {}
 
 static ASSIGNMENTS: Assignments = Assignments(UnsafeCell::new([None; NR_VIRTIO_DRIVERS]));
 
-const fn slot_pa(slot: usize) -> u64 {
-    VIRTIO_MMIO_PHYS_BASE + slot as u64 * VIRTIO_MMIO_SLOT_STRIDE
+fn slot_pa(slot: usize) -> u64 {
+    (slot as u64)
+        .checked_mul(VIRTIO_MMIO_SLOT_STRIDE)
+        .and_then(|o| VIRTIO_MMIO_PHYS_BASE.checked_add(o))
+        .expect("virtio-mmio slot PA overflows")
 }
 
 /// Read one 32-bit register of `slot` through the HHDM.
@@ -67,7 +78,10 @@ const fn slot_pa(slot: usize) -> u64 {
 /// SAFETY: the HHDM must be up; every virtio-mmio slot is inside the blanket
 /// `[0, 4 GiB)` HHDM mapping (measured readable without a fault on QEMU `virt`).
 unsafe fn read_reg(slot: usize, off: usize) -> u32 {
-    let p = crate::mm::phys_to_hhdm(slot_pa(slot) + off as u64) as *const u32;
+    let pa = slot_pa(slot)
+        .checked_add(off as u64)
+        .expect("virtio-mmio register PA overflows");
+    let p = crate::mm::phys_to_hhdm(pa) as *const u32;
     // SAFETY: caller's contract; volatile because this is MMIO.
     unsafe { read_volatile(p) }
 }
@@ -113,7 +127,7 @@ pub unsafe fn probe() {
                     "[virtio] refuse slot={} id={} page={:#x} shared",
                     i,
                     s.device_id,
-                    pa & !0xFFF,
+                    pa & !PAGE_OFF_MASK,
                 );
             }
             SlotVerdict::Assigned(d) => {
@@ -130,18 +144,18 @@ pub unsafe fn probe() {
                     i, pa, s.device_id, s.version,
                 );
             }
-            SlotVerdict::NoModule(_) => {
+            SlotVerdict::NoModule(d) => {
                 let _ = writeln!(
                     uart,
-                    "[virtio] slot={} pa={:#x} id={} ver={} skip=no-module",
-                    i, pa, s.device_id, s.version,
+                    "[virtio] slot={} pa={:#x} id={} ver={} skip=no-module for={}",
+                    i, pa, s.device_id, s.version, VIRTIO_DRIVERS[d].name,
                 );
             }
-            SlotVerdict::Duplicate(_) => {
+            SlotVerdict::Duplicate(d) => {
                 let _ = writeln!(
                     uart,
-                    "[virtio] slot={} pa={:#x} id={} ver={} skip=duplicate",
-                    i, pa, s.device_id, s.version,
+                    "[virtio] slot={} pa={:#x} id={} ver={} skip=duplicate for={}",
+                    i, pa, s.device_id, s.version, VIRTIO_DRIVERS[d].name,
                 );
             }
         }
@@ -166,9 +180,11 @@ pub unsafe fn probe() {
         let pa = slot_pa(slot);
         table[d] = Some(VirtioDev {
             slot: slot as u32,
-            page_pa: pa & !0xFFF,
-            in_page_off: pa & 0xFFF,
-            intid: VIRTIO_MMIO_SLOT0_INTID + slot as u32,
+            page_pa: pa & !PAGE_OFF_MASK,
+            in_page_off: pa & PAGE_OFF_MASK,
+            intid: VIRTIO_MMIO_SLOT0_INTID
+                .checked_add(slot as u32)
+                .expect("virtio-mmio INTID overflows"),
             dma_pa,
         });
     }
