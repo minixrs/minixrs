@@ -42,6 +42,7 @@
 
 minixrs_abi_note::brand!();
 
+mod blk;
 mod bringup;
 
 use bringup::{
