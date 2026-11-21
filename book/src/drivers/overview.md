@@ -9,11 +9,14 @@ What separates a driver from a server is one page in its address space that no o
 the device's memory-mapped registers. Everything interesting about this chapter follows from that
 page.
 
-As of Phase 5 there are two drivers: **TTY** (`drivers/tty/`), the console, and **`memory`**
+There are three drivers with an ELF today: **TTY** (`drivers/tty/`), the console; **`memory`**
 (`drivers/memory/`), the boot ramdisk plus, since slice 5.11, the
-[`/dev/null` and `/dev/zero` character minors](#the-character-minors). The VirtIO block, network,
-and console drivers under `drivers/` are still empty placeholders (Phase 6), and so is
-`drivers/driver-rt` — the shared driver runtime they will eventually use.
+[`/dev/null` and `/dev/zero` character minors](#the-character-minors); and, since slice 6.2,
+**`virtio-blk`** (`drivers/virtio-blk/`), which [brings a virtio disk up](#virtio-drivers) and
+serves nothing yet. Three more slots (`vcon`, `vinput`, `vnet`) are wired in the kernel but hold no
+ELF, and `drivers/virtio-console` and `drivers/virtio-net` are still empty placeholders.
+`drivers/driver-rt` is the runtime the virtio drivers share: the interrupt-line helper, the virtio
+transport and the virtqueue.
 
 The two are worth contrasting up front, because `memory` is the counter-example to the paragraph
 above: **its window is ordinary RAM, not MMIO**. It owns no hardware at all. What makes it a driver
@@ -48,15 +51,17 @@ start. The heap's end is whatever `brk` last asked for, and the mmap arena is a 
 never reuses addresses — so `servers/vm/src/region.rs` bounds both with a runtime `REGION_LIMIT`
 check (`ENOMEM` past it) rather than trusting the 992 MiB of slack. That matters even though nothing
 is exploitable today: the window's whole purpose is to be kernel-owned in *every* address space, so
-Phase 6 can pre-map a device page into any driver without first asking whether VM already promised
-that VA to the process's heap.
+the kernel can pre-map a device page into any driver without first asking whether VM already
+promised that VA to the process's heap. Page 0 is TTY's UART by convention; page 1,
+`VIRTIO_MMIO_PAGE_VA`, is where every virtio driver finds its register page — each has its own
+address space, so one constant serves all four.
 
 ## The boot pre-map
 
 TTY has no way to *ask* for its register page. There is no `VMCTL_MAP_PHYS` subcall — a subcall
 letting a user-space server name an arbitrary physical address would hand it the whole machine — so
-decision D1 deferred VM-mediated device mapping to Phase 6 and made the one mapping Phase 5 needs a
-kernel bring-up step.
+decision D1 rejected VM-mediated device mapping and made each device mapping a kernel bring-up step.
+Slice 6.2's virtio pages are installed by the same arm, [described below](#virtio-drivers).
 
 The kernel installs it in `load_boot_server` (`arch/aarch64/userland.rs`), right after the ELF and
 stack are in place and just before the process is enqueued:
@@ -209,13 +214,15 @@ one pattern in the driver.
 <= vector < nr_intids`) and a `notify_id` in `0..=31`; the reply carries a 1-based hook id. Two
 gates apply: the caller's kernel-call mask must admit `SYS_IRQCTL`, and the vector must be on the
 caller's per-line allow-list (`Priv::irqs`), which the kernel fills at boot and which has no opt-out
-— an empty list denies every line. Today TTY holds exactly one entry, INTID 33 (the PL011). The hook
-table (`NR_IRQ_HOOKS` = 16) allows one owner per line, and a claim under the same `(owner,
-notify_id)` replaces that hook in place (answering with the same hook id). The claim unmasks the
-line at the GIC with priority `0x80`. A process sharing a privilege slot is refused (`EPERM`),
-because `int_pending` lives in the slot. `IRQ_RMPOLICY` masks the line and frees the hook;
-`IRQ_ENABLE` / `IRQ_DISABLE` unmask and mask it. `IRQ_REENABLE` (`0x001`) is defined but refused. A
-hook is also released, with its line masked, when its owner exits or `exec`s.
+— an empty list denies every line. TTY holds exactly one entry, INTID 33 (the PL011); each virtio
+driver holds exactly one, its transport's INTID (`48 + slot`). The hook table (`NR_IRQ_HOOKS` = 16)
+allows one owner per line, and a claim under the same `(owner, notify_id)` replaces that hook in
+place (answering with the same hook id). The claim unmasks the line at the GIC with priority `0x80`.
+A process sharing a privilege slot is refused (`EPERM`), because `int_pending` lives in the slot.
+`IRQ_RMPOLICY` masks the line and frees the hook; `IRQ_ENABLE` / `IRQ_DISABLE` unmask and mask it.
+`IRQ_REENABLE` (`0x001`) is defined but refused. A hook is also released, with its line masked, when
+its owner exits or `exec`s — except that a virtio driver cannot do either,
+[see below](#a-virtio-driver-cannot-exit).
 
 **Delivery.** When a hooked SPI fires, `irq_dispatch` **masks the line at the distributor before the
 EOI**, sets the hook's `notify_id` bit in the owner's `int_pending`, and `deliver_irq` sends a
@@ -241,12 +248,162 @@ A driver identifies the interrupt by the kernel-stamped `m_source`, never by pay
 cannot forge `HARDWARE`, but it could set a payload bit. Re-enabling before the device is quiet
 would re-enter at once.
 
+That order fits a device whose acknowledgement *is* the drain, as the PL011's is. A virtio-mmio
+device's line is level-triggered on its `InterruptStatus` register, so a virtio driver acknowledges
+first and walks afterwards (see [the virtio loop](#the-driver-loop)).
+
 **The kernel idles.** With the run queue empty, `schedule_next` no longer returns towards `eret`: it
 sets an idling flag, executes `wfi`, polls the GIC through `irq_dispatch` on the kernel stack with
 `PSTATE.I` still set, and tries again until a process is picked. The timer tick does only
 timekeeping while idling, and a due alarm is what wakes the system. The default boot never reaches
 this (init's rotation always leaves something runnable); the opt-in `idle-probe` kernel feature (a
 stub-free boot whose `init` parks) proves it with a one-shot `[idle] wake ok`.
+
+## VirtIO drivers
+
+A virtio driver is the same kind of process as TTY, with three things delivered by the kernel
+instead of discovered: a register page, an interrupt line and a block of DMA memory. Slice 6.2
+builds that machinery and proves it with one device, `virtio-blk`, answering.
+
+### Four slots, one device each
+
+`kernel-shared/src/com.rs` names four driver slots, appended after `init`: `VBLK_PROC_NR` 11
+(`vblk`, virtio `DeviceID` 2), `VCON_PROC_NR` 12 (`vcon`, 3), `VINPUT_PROC_NR` 13 (`vinput`, 18) and
+`VNET_PROC_NR` 14 (`vnet`, 1). `NR_BOOT_PROCS` is therefore 15, the demo stubs sit at 15–18 and PM's
+fork pool starts at 19. Every slot has a `BootEntry` row and a privilege slot, but only `vblk` has
+an ELF; the other three stay blocked on `RTS_NO_PRIV` like `PFS`. A boot process's priv id is its
+`IMAGE` index, so the four rows take priv ids 16–19 and the stubs' dedicated priv ids sit above the
+shared user slot (`USER_PRIV_ID` = 20), at 21–24; two compile-time asserts in
+`kernel/src/arch/aarch64/userland.rs` pin that ordering.
+
+### The kernel finds the device
+
+Nothing in a driver probes for hardware. `userland_bootstrap` runs
+`arch::aarch64::virtio_mmio::probe` before it loads any boot server. QEMU `virt` has 32 virtio-mmio
+transports at `0x0A00_0000`, `0x200` apart, SPI `16 + slot` (INTID `48 + slot`); the probe reads
+`MagicValue`, `Version` and `DeviceID` of each through the HHDM and hands the triples to a pure
+function, `kernel-shared::virtio::assign`, which applies three rules in order:
+
+1. A 4 KiB page with more than one *present* device (`MagicValue` right, `DeviceID` non-zero)
+   assigns none of them. Eight slots share a page and the kernel maps whole pages, so a driver would
+   otherwise be handed a neighbour's registers — and that holds for a neighbour no driver claims,
+   such as a stray `virtio-rng-device`.
+2. Of the devices left, the lowest slot wins each `DeviceID`; a later one is reported and left
+   alone.
+3. A device whose driver has no module in the boot archive is reported and left alone.
+
+The probe prints one line per present device, and a refusal is one line per refused device:
+
+```text
+[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk
+[virtio] slot=1 pa=0xa000200 id=4 ver=2 skip=no-driver
+[virtio] refuse slot=0 id=2 page=0xa000000 shared
+```
+
+(`skip=no-module for=<name>` and `skip=duplicate for=<name>` are the other two skips.) The kernel
+does not judge `Version`: it prints it and leaves a legacy transport's refusal to the driver, which
+is the one place that knows what the version means and can name the QEMU flag that fixes it. For
+that reason `tools/qemu-run.sh` passes `-global virtio-mmio.force-legacy=false` and pins every
+device with `bus=virtio-mmio-bus.N`; `N` is the transport slot, and the buses are eight apart so
+each device owns its page. All four pages are taken by the four planned devices, so a fifth device
+would have no page of its own.
+
+### What the kernel hands over
+
+For a driver the probe assigned, `load_boot_server` adds one arm beside TTY's and the ramdisk's. It
+maps the register page `Prot::DEVICE_RW` at `VIRTIO_MMIO_PAGE_VA`, pushes the device's INTID onto
+the driver's `Priv::irqs` — so the allow-list is exactly one line long — and maps the driver's
+[DMA run](../memory/overview.md#the-dma-window) at `DMA_VA`. It logs two lines, which are required
+boot markers:
+
+```text
+[devmap] vblk va=0x40001000 pa=0xa000000 intid=48
+[dma] vblk va=0xc0000000 pa=0x... pages=16
+```
+
+The driver learns the addresses through two more `SYS_GETINFO` selectors,
+[`GET_VIRTIO_MMIO` (65) and `GET_DMA` (66)](../reference/syscalls.md#sys_getinfo-selectors). Both
+answer `EPERM` to any process that is not one of the four driver slots, and a driver slot with no
+device gets `ENOENT` — which is how a driver is told there is no disk, not an error: `virtio-blk`
+prints `no device` and idles. The register base a driver uses is the reply's VA, which already
+includes the device's offset inside its page.
+
+### `driver-rt`
+
+`drivers/driver-rt/` has three pieces and no `std`:
+
+- **`IrqLine`** (`irq.rs`) is a claim on one interrupt line: `new(intid, notify_id)` issues
+  `IRQ_SETPOLICY`, `rearm()` issues `IRQ_ENABLE`, `fired(pending)` tests the line's bit in a
+  `HARDWARE` notification. It owns nothing else; the order of draining, acknowledging and re-arming
+  stays the caller's, because only the caller knows what acknowledging its device means. TTY uses it
+  too.
+- **The transport** (`transport.rs`, `mmio.rs`) is the `Transport` trait — status, features, queue
+  setup, notify, interrupt status and acknowledge, configuration — with `MmioTransport` as its only
+  implementation (a PCI transport for x86_64 is a second one, later). `MmioTransport::new` checks
+  the magic and refuses any version but 2. `negotiate` writes the virtio 1.x sequence once for every
+  device: reset (and one read-back that the reset took), `ACKNOWLEDGE`, `DRIVER`, the feature
+  exchange, `FEATURES_OK` and a read-back. `VIRTIO_F_VERSION_1` is always requested and required; a
+  device that clears `FEATURES_OK` is left `FAILED`. `driver_ok` refuses to write if the device
+  already shows `FAILED` or `NEEDS_RESET`; `fail` marks a device that was negotiated and then
+  abandoned; `config_read` re-reads until the configuration generation is stable, a bounded number
+  of times. Nothing in the crate waits on a register or a ring.
+- **The split virtqueue** (`queue.rs`) is `queue_layout` / `clamp_queue_size` (pure arithmetic over
+  a power-of-two size, at most `QUEUE_SIZE` = 8 entries) and `VirtQueue`, the driver's half of the
+  descriptor table and the available and used rings over a byte buffer it shares with the device.
+  The device is untrusted: a used element naming an out-of-range or not-in-flight chain head is
+  skipped, and the driver's own free list and chain lengths live outside the shared memory, so a
+  device that scribbles on the descriptor table cannot make the walk loop or leave the queue.
+
+`unsafe` is confined to `mmio.rs` (volatile register accesses) and `queue.rs` (volatile accesses to
+the ring memory the device shares); `irq.rs` is the only piece that traps into the kernel. The rest
+is host-tested against a mock transport and hand-written rings.
+
+### The driver loop
+
+Every virtio driver's receive loop follows one order, written once in `driver-rt`'s crate
+documentation: when a `HARDWARE` notification names the line (`IrqLine::fired`), read
+`Transport::interrupt_status`, `interrupt_ack` exactly those bits, **then** walk the used ring with
+`VirtQueue::pop_used` until it returns `None`, and only then `IrqLine::rearm`. The acknowledgement
+comes before the walk because a virtio-mmio line is level-triggered on `InterruptStatus`: a
+completion landing after the last empty `pop_used` but before an acknowledgement placed after the
+walk would be cleared by that acknowledgement, and the re-arm would find the line low and lose the
+interrupt. Acknowledged first, any later completion re-raises the line, and the walk, which runs
+afterwards, still sees everything already published.
+
+### `virtio-blk` in 6.2
+
+`drivers/virtio-blk/` does its bring-up once, after `sef_startup` (not inside the `init_fresh`
+callback, where a failure would leave the driver spinning), in eight steps, and prints exactly one
+verdict line:
+
+1. `GET_VIRTIO_MMIO`; `ENOENT` prints `no device` and idles.
+2. `GET_DMA`, then check the kernel's stamp. The kernel wrote `pa ^ DMA_COOKIE` into the run's first
+   eight bytes through the HHDM; the driver reads it through `DMA_VA`, compares it with the PA it
+   was told, and zeroes it. That proves the VA the driver holds and the PA it will hand the device
+   are the same memory.
+3. `MmioTransport::new`, then `DeviceID` must be 2.
+4. `negotiate` with no optional feature, so the accepted word is exactly `VIRTIO_F_VERSION_1`.
+5. Read the capacity from configuration space, generation-stable.
+6. Lay out queue 0 in the first page of the run, enable it, set `DRIVER_OK`, read it back.
+7. Claim the INTID, then claim `INTID + 1`, which must be refused with `EPERM`: that is the proof
+   the allow-list is one line long.
+8. `[diag vblk] virtio ok features=0x100000000 capacity=2560 qsize=8 slot=0`.
+
+A failing step prints `virtio FAIL step=<step> …` and abandons the rest; the driver still enters its
+receive loop, answers every request `ENOSYS` and publishes nothing to DS. The queue memory is the
+run's page 0, the request header the run's page 1, and the bounce buffer page 2; nothing is
+submitted yet, so a `HARDWARE` notification is unexpected and is reported once as `step=irq-extra`,
+with the line left masked. Serving BDEV requests is slice 6.3.
+
+### A virtio driver cannot exit
+
+The DMA run is ordinary RAM, so every address-space teardown would free it while the device may
+still be writing to it. No device-reset path exists yet, so the kernel guards the three ways the run
+could be freed. `do_exit` and `do_exec` `assert!` that the process holds no virtio assignment, so
+the kernel halts with a message naming the missing reset path; and `VMCTL_PT_UNMAP` answers `EPERM`
+for an address inside the DMA window of a process that holds one. Boot drivers never exit, so none
+of the guards fires on a healthy boot; a mutation that made `vblk` send `PM_EXIT` showed the exit
+guard firing.
 
 ## TTY
 

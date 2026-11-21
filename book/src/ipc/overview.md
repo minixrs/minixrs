@@ -137,22 +137,27 @@ generation 0 so they can never collide with a real `(gen, proc)` endpoint:
 |      -1 | `HARDWARE` | source endpoint for IRQ notifications |
 
 **Well-known servers** are numbered contiguously from 0. minix.rs renumbers these compared to MINIX
-3 (which scatters the slots). Note that some numbers are *reserved* for servers that do not yet
-boot:
+3 (which scatters the slots). Some numbers are *reserved* for servers that do not yet boot:
 
-| Proc nr | Server                | Boots today?        |
-| ------: | --------------------- | ------------------- |
-|       0 | PM                    | yes                 |
-|       1 | VFS                   | yes (skeletal)      |
-|       2 | RS                    | yes                 |
-|       3 | `MEM` (memory driver) | reserved, not built |
-|       4 | `TTY`                 | reserved, not built |
-|       5 | DS                    | yes                 |
-|       6 | `MFS`                 | reserved, not built |
-|       7 | VM                    | yes                 |
-|       8 | `PFS`                 | reserved, not built |
-|       9 | SCHED                 | yes                 |
-|      10 | `init` (PID 1)        | yes                 |
+| Proc nr | Server                  | Boots today?                             |
+| ------: | ----------------------- | ---------------------------------------- |
+|       0 | PM                      | yes                                      |
+|       1 | VFS                     | yes                                      |
+|       2 | RS                      | yes                                      |
+|       3 | `MEM` (memory driver)   | yes                                      |
+|       4 | `TTY`                   | yes                                      |
+|       5 | DS                      | yes                                      |
+|       6 | `MFS`                   | yes                                      |
+|       7 | VM                      | yes                                      |
+|       8 | `PFS`                   | reserved, not built                      |
+|       9 | SCHED                   | yes                                      |
+|      10 | `init` (PID 1)          | yes                                      |
+|      11 | `VBLK` (virtio-blk)     | yes — brings its disk up, serves nothing |
+|      12 | `VCON` (virtio-console) | reserved, not built                      |
+|      13 | `VINPUT` (virtio-input) | reserved, not built                      |
+|      14 | `VNET` (virtio-net)     | reserved, not built                      |
+
+Slots 15–18 hold the demo stubs and PM's fork pool starts at 19.
 
 Endpoints at generation 0 are *boot* endpoints; construct one from a task/server `ProcNr` with
 `boot_endpoint(p)`.

@@ -15,8 +15,8 @@ privilege model — while dropping 32-bit legacy and targeting modern 64-bit pla
 - **Message passing** — MINIX 3's six IPC primitives; five are live (SEND, RECEIVE, SENDREC, NOTIFY,
   SENDNB), SENDA is still a stub.
 - **User-space servers** — PM, VFS, VM, RS, DS, SCHED run as separate processes.
-- **User-space drivers** — VirtIO drivers as separate processes (planned; see the
-  [Roadmap](roadmap.md)).
+- **User-space drivers** — TTY, the ramdisk and virtio-blk run as separate processes; the other
+  VirtIO drivers are planned (see the [Roadmap](roadmap.md)).
 - **aarch64 first** (Apple Silicon / QEMU virt); x86_64 planned.
 - **ABI-preserving** — message layout, endpoints, and call numbers track MINIX 3.
 

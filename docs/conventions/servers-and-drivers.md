@@ -160,6 +160,15 @@ that keeps the rest of the proof alive while only the `*.ds ok` marker for that 
 (0–19). A hand-installed stub in a higher priv slot (21+) that a server must *reply* to needs the
 reverse `ipc_to` bit opened explicitly — see `install_stub_d_priv` opening VM→D after setting D→VM.
 
+A boot process's priv id is its `IMAGE` index in `kernel/src/proc/table.rs`, so adding image rows
+moves what is "above the image". The four virtio driver rows take priv ids 16–19, `USER_PRIV_ID` is
+`N_IMAGE` (20), and the four demo stubs' dedicated priv ids are `USER_PRIV_ID + 1..=4` (21–24) —
+above the user slot, so `install_stub_privs` can never overwrite an image row's privileges. Two
+compile-time asserts pin it (`USER_PRIV_ID >= N_IMAGE`; the lowest stub priv id above
+`USER_PRIV_ID`); the next row added to the image fails the build instead of colliding. With the
+stubs on, a collision does not show as a `FAIL` line: it hangs the boot, and `--no-default-features`
+cannot see it at all.
+
 The shared user priv slot is the same shape: `populate_user_priv`'s `USER_IPC_TO` widens
 `USER_PRIV_ID` (slot 20), and **every entry costs a pair of bits**, because the slot is above
 `n_active`. Drop the forward bit and a client's SENDREC is refused and every downstream marker
@@ -448,7 +457,27 @@ Beyond the shared contracts above, three driver-specific rules:
   and re-arms with `IRQ_ENABLE` only after draining and acknowledging at the device — the kernel
   leaves the line masked until then, and a re-enable before the device is quiet re-enters at once
   (slice 6.1 — see
-  [I12](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i12--one-pattern-for-tty-rx-virtio-console-and-virtio-blk))
+  [I12](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i12--one-pattern-for-tty-rx-virtio-console-and-virtio-blk)).
+  For a **virtio** device the acknowledgement comes *before* the drain: `InterruptStatus` is a
+  level, so acknowledge exactly the bits read, walk the used ring until `pop_used` returns `None`,
+  then `rearm` — an acknowledgement placed after the walk would clear a completion that landed
+  between the last pop and the ack, and the re-arm would find the line low. The order is written
+  once, in `driver-rt`'s crate documentation
+- **A virtio driver brings its device up after `sef_startup`, in straight-line code, never inside an
+  `init_fresh` callback**: a callback that returns non-`OK` fails startup and leaves the driver
+  spinning with no way to say why, where bring-up after the handshake can print one `[diag]` verdict
+  line. No bring-up step waits on a register or a ring; and a failed step prints its name (`virtio
+  FAIL step=<step>`), abandons the rest, and leaves the driver in its receive loop answering
+  `ENOSYS`. A driver whose `SYS_GETINFO(GET_VIRTIO_MMIO)` answers `ENOENT` has no device: it prints
+  `no device` and idles — healthy, not a failure
+- **A virtio driver never exits and never execs.** Its DMA run is ordinary RAM that every
+  address-space teardown frees while the device may still be writing to it; `do_exit` and `do_exec`
+  halt the kernel for a process holding a virtio assignment until a device-reset path exists
+  ([`kernel.md`](./kernel.md#virtio-devices-and-the-dma-window))
+- **`driver-rt` is the one place virtio register knowledge lives.** The negotiation sequence, the
+  `VIRTIO_F_VERSION_1` requirement and the version-2-only refusal belong to its `Transport` and
+  `negotiate`; a driver passes the optional features it wants and decides what a refusal means. Its
+  `unsafe` is confined to `mmio.rs` and `queue.rs`
 
 ### Block drivers
 

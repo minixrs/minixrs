@@ -318,8 +318,9 @@ follows is the engine and the policy.
   (firmware-dependent)
 - `Prot` has a third field, `device` (+ `Prot::DEVICE_RW`), which is a compile error at every struct
   literal — the point. `do_vmctl`'s `pt_map` answers `device: false` **permanently**, because D1
-  rejected a VM-mediated `VMCTL_MAP_PHYS` for Phase 5 (revisit for Phase-6 virtio-mmio, gated on a
-  per-driver PA whitelist)
+  rejected a VM-mediated `VMCTL_MAP_PHYS`, and slice 6.2 did not reopen it: the virtio drivers'
+  register pages are also pre-mapped by the kernel (see
+  [Virtio devices and the DMA window](#virtio-devices-and-the-dma-window))
 - `pte_prot` decodes `device` **statelessly** (`pte_attr_idx_of(pte) != ATTR_IDX_NORMAL`), sound
   because the kernel emits only two indices and byte 0 is pinned Normal-WB (`const _: () =
   assert!(ATTR_IDX_NORMAL == 0)`)
@@ -342,7 +343,7 @@ follows is the engine and the policy.
 - The device VA map lives in `kernel-shared/src/uspace.rs`: `USER_DEVICE_WINDOW_BASE = 0x4000_0000`
   (one whole L1 slot), `USER_DEVICE_WINDOW_SIZE = 16 MiB`, `TTY_UART_VA` = page 0. For what kind of
   ABI that module is, see [`abi.md`](./abi.md)
-- The pre-map lives in `load_boot_server` gated on `nr == TTY_PROC_NR`, **deliberately not in
+- TTY's pre-map lives in `load_boot_server` gated on `nr == TTY_PROC_NR`, **deliberately not in
   `load_exec_image`** (shared with `do_exec`, so every exec'd binary would inherit a device window —
   and conversely a proc that exec'd would *lose* its window, which is why `do_exec` drops the device
   count). **No TLB maintenance**, because the AS was built moments ago and never installed in TTBR0
@@ -374,6 +375,56 @@ follows is the engine and the policy.
 - The selector **`GET_RAMDISK = 64`** returns `(va, len)` and is **gated on `caller.nr ==
   MEM_PROC_NR` → `EPERM`** (the VA is meaningless in any other address space). It adds no kernel
   call and no kernel statics — the VA is a const and the length is `module_by_name("rootfs")`'s
+
+## Virtio devices and the DMA window
+
+(slice 6.2 — design in
+[`2026-11-09-driver-rt-design.md`](../superpowers/specs/2026-11-09-driver-rt-design.md))
+
+- **The kernel probes; a driver never does.** `virtio_mmio::probe` runs in `userland_bootstrap`
+  before the first boot module loads and before `device_teardown_selftest`, the first caller of
+  `free_frame`. It reads `MagicValue`, `Version`, `DeviceID` of QEMU's 32 transports (base
+  `0x0A00_0000`, stride `0x200`, INTID `48 + slot`) and the decision is the pure
+  `kernel-shared::virtio::assign` — the standing carve-out for predicates the kernel crate cannot
+  host-test. Its rules, in priority order: **a page with more than one *present* device assigns none
+  of them** (even when no driver claims the neighbour — a driver must reach one device's registers
+  and no other's); the lowest slot wins a `DeviceID`; a device with no boot module is reported and
+  left alone
+- **The probe prints, and its lines are markers.** One `[virtio] slot=… pa=… id=… ver=… drv=<name>`
+  line per assigned device, `skip=no-driver | skip=no-module for=<n> | skip=duplicate for=<n>` for
+  the unassigned, and one `[virtio] refuse slot=… id=… page=… shared` line **per refused device**.
+  `[virtio] refuse` is in `tests/qemu-boot.forbidden`. The kernel does **not** judge `Version`: the
+  transport refuses a legacy device, so the refusal line can name the QEMU flag
+- **The arm in `load_boot_server`** (beside TTY's and the ramdisk's, with the same four answers —
+  not in `load_exec_image`, no TLB or cache maintenance, every step `.expect()`s) maps the register
+  page `Prot::DEVICE_RW` at `uspace::VIRTIO_MMIO_PAGE_VA`, maps the DMA run `Prot::RW_DATA` at
+  `DMA_VA`, and pushes the assignment's one INTID onto `Priv::irqs`: **the allow-list is exactly one
+  line long** (I4: it follows the mapping), and a driver with no device has an empty list. It logs
+  `[devmap] <name> va=… pa=… intid=…` and `[dma] <name> va=… pa=… pages=…`
+- **The DMA window is the third kernel-owned window**: `DMA_WINDOW_BASE = 0xC000_0000` (one L1 slot,
+  1 MiB), above the ramdisk window, so VM needs no edit; the same family of geometry asserts as the
+  ramdisk window plus `RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE <= DMA_WINDOW_BASE`.
+  `mm::frame::reserve_contiguous(pages)` bumps one region's `next_free_pa` — never the free list,
+  never across a region — and zeroes the frames; contiguity is true by construction. The run is
+  `DMA_RUN_PAGES` (16) for every assigned driver, reserved in the probe step so H3's "before the
+  first `free_frame`" holds. The kernel stamps its first eight bytes with `pa ^ DMA_COOKIE`; the
+  driver checks and zeroes it
+- **The run is never freed, and three guards make that true.** `teardown_addrspace` and
+  `VMCTL_PT_UNMAP` free every non-device leaf, so a driver that exits, execs, or has a DMA page
+  unmapped would hand a frame back while the device may still write to it. `do_exit` and `do_exec`
+  `assert!` that the process has no `virtio_mmio::assignment` (a halt, with a message naming the
+  missing device-reset path); `do_vmctl::pt_unmap` answers **`EPERM`** for a vaddr inside the DMA
+  window of an assigned process (VM can be told no). Keyed on the proc number, not inside
+  `teardown_addrspace`, which has none and also runs on scratch spaces. **Debt, to pay together:** a
+  device-reset path (`Status` written 0 before the run is freed) so a virtio driver can exit or
+  exec, which removes the three guards; and `do_fork` of an assigned driver, which would share the
+  register page with a child holding no assignment (unreachable today)
+- **Two `SYS_GETINFO` selectors** report the assignment: `GET_VIRTIO_MMIO = 65` (register base VA,
+  INTID, transport slot) and `GET_DMA = 66` (VA, PA, length). Both are **gated on the caller being
+  one of the four virtio driver slots → `EPERM`** (`virtio_driver_index`), and answer `ENOENT` to a
+  driver slot with no assignment — the driver's "no device", not an error. Each gate is probed
+  separately by TTY's `getinfo.deny` battery (TTY is not a virtio driver). Neither is emitted into
+  the generated C headers ([`abi.md`](./abi.md))
 
 ## `exec` — the kernel call
 

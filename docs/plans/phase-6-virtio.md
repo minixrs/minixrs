@@ -24,7 +24,7 @@ milestone bar rather than after it.
 ## Status
 
 - [x] **6.1** — `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
-- [ ] **6.2** — `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
+- [x] **6.2** — `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 - [ ] **6.3** — `virtio-blk` behind BDEV + root backend selection
 - [ ] **6.4** — `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
 - [ ] **6.5** — TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
@@ -44,13 +44,14 @@ Facts the design rests on, each verified against `main` at session time.
   reviewed in
   [`2026-09-29-sys-irqctl-design.md`](../superpowers/specs/2026-09-29-sys-irqctl-design.md). The
   kernel has no idle path and takes IRQs only from EL0 (I11).
-- **The four virtio crates are placeholders.** `drivers/driver-rt/src/lib.rs` is 4 lines;
-  `drivers/virtio-{blk,console,net}/src/main.rs` are 5 lines each. All four are workspace members.
-  There is no `virtio-input` or `virtio-gpu` crate.
-- **No proc slot exists for a new driver.** Boot slots `0..=10` are all assigned (`PM` … `INIT`),
-  the demo stubs hold `11..=14`, and PM's `FORK_POOL_BASE` is `NR_BOOT_PROCS + NR_STUB_PROCS` = 15.
-  `PFS_PROC_NR` (8) has a slot and no ELF. RS is a heartbeat monitor: it cannot fork, exec, or grant
-  a privilege, so it cannot start a driver.
+- **The four virtio crates were placeholders** (6.2 filled `driver-rt` and `virtio-blk`).
+  `drivers/driver-rt/src/lib.rs` was 4 lines; `drivers/virtio-{blk,console,net}/src/main.rs` were 5
+  lines each. All four were workspace members. There is no `virtio-input` or `virtio-gpu` crate.
+- **No proc slot existed for a new driver.** Boot slots `0..=10` were all assigned (`PM` … `INIT`),
+  the demo stubs held `11..=14`, and PM's `FORK_POOL_BASE` was `NR_BOOT_PROCS + NR_STUB_PROCS` = 15
+  (6.2 moved them: [H1](#h1-four-driver-boot-slots-reserved-together-in-62)). `PFS_PROC_NR` (8) has
+  a slot and no ELF. RS is a heartbeat monitor: it cannot fork, exec, or grant a privilege, so it
+  cannot start a driver.
 - **Nothing gives a process a physical address.** `mm::frame` exposes `alloc_frame` / `free_frame` —
   one frame at a time, no contiguous allocation — and no kernel call reports the PA behind a user
   VA. A virtqueue needs both.
@@ -106,14 +107,20 @@ wired slots before they had ELFs.
 
 Reserving all four at once means the stub markers (`[as] stub A nr=11` …) and every
 fork-pool-derived number in `tests/qemu-boot.expected` change **once**. The constant names above are
-the working names; 6.2's plan fixes them.
+final; 6.2 adopted them.
 
-**This overturns a written contract, and 6.2 amends it where it is written.** `com.rs` reserves
-`11..=14` for the stubs "regardless of the `boot-stubs` feature" and keeps `FORK_POOL_BASE` at 15 so
-that feature never renumbers a forked child; PM's `mproc.rs` documents the base as 15; and
-`proc/table.rs` asserts `N_IMAGE == 16`, which becomes 20. The property the contract protects
-survives — with the stubs on or off, the pool stays at 19 — but the numbers in all three places
-change, and each is rewritten rather than left describing the old layout.
+**This overturned a written contract, and 6.2 amended it where it was written.** `com.rs` had
+reserved `11..=14` for the stubs "regardless of the `boot-stubs` feature" and kept `FORK_POOL_BASE`
+at 15 so that feature never renumbers a forked child; PM's `mproc.rs` documented the base as 15; and
+`proc/table.rs` asserted `N_IMAGE == 16`, now 20. The property the contract protects survives — with
+the stubs on or off, the pool stays at 19 — and the numbers in all three places were rewritten.
+
+**A boot process's priv id is its `IMAGE` index, which H1 did not count.** The four new rows take
+priv ids `16..=19`, which had been the stubs' dedicated ids, so `install_stub_privs` would have
+overwritten the driver slots' privileges at boot. 6.2 moved the stub priv ids above `USER_PRIV_ID`
+(now `N_IMAGE`, 20) to `USER_PRIV_ID + 1..=4`, and two compile-time asserts pin the order. The
+collision is invisible stub-free and shows as a hang, not a `FAIL`, on the default boot. Any later
+image row moves `USER_PRIV_ID` and is caught by the asserts.
 
 *Rejected:* a slot per slice (four rounds of marker churn); RS-started drivers (MINIX-authentic, but
 needs RS fork/exec, dynamic `SYS_PRIVCTL` allow-lists and VM-mediated device mapping before the
@@ -139,9 +146,10 @@ negotiation and everything else stay in `driver-rt`.
 4 KiB page and H2 maps whole pages: two devices in one page would each be mapped the other's
 registers. `qemu-run.sh` therefore attaches every virtio device with an explicit
 `bus=virtio-mmio-bus.N`, choosing buses eight slots apart, and the kernel probe **refuses** to map a
-page that holds the slot of more than one driver's device — a `[diag]` line and an absent device,
-not a silently shared page. The per-driver register boundary is then real, and it is the command
-line that makes it so.
+page that holds **any second present device**, whether or not a driver claims it (a stray
+`virtio-rng-device` would otherwise be mapped into its page-mate's driver) — a `[virtio] refuse`
+line per device and an absent driver device, not a silently shared page. The per-driver register
+boundary is then real, and it is the command line that makes it so.
 
 A device that is absent is not an error: the driver is told so, publishes nothing to DS, and idles.
 That is what makes H5 work.
@@ -315,7 +323,12 @@ for both before relying on it.
 
 - **No polling driver** (I12). Every driver blocks in `receive` between requests; a driver that
   spins on a used ring passes under TCG and proves nothing.
-- **Mask before EOI; acknowledge at the device, then `IRQ_ENABLE`** (I7, I12).
+- **Mask before EOI; quiesce the device, then `IRQ_ENABLE`** (I7, I12). I12's order — drain,
+  acknowledge at the device, `IRQ_ENABLE` — fits a device whose acknowledgement *is* the drain, as
+  the PL011's is. A virtio-mmio line is level-triggered on `InterruptStatus`, so for virtio the
+  acknowledgement precedes the used-ring walk: a completion landing between the last pop and a late
+  acknowledgement would be acked away and the re-arm would find the line low. `driver-rt`'s crate
+  documentation is the one place the virtio order is written.
 - **A block driver does not depend on the filesystem format**
   ([`servers-and-drivers.md`](../conventions/servers-and-drivers.md#block-drivers)). virtio-blk's
   "is this a minix.rs root" check in H5 is the device-level image header `memory` already verifies,
@@ -373,8 +386,6 @@ does not build. Correct it when the default boot first idles, at the latest Phas
   mapping"). Unreachable today: only `USER_PRIV_ID` is assigned at runtime and no device owner
   execs. The slice that reuses dedicated slots must clear `irqs` on exit and at exec's point of no
   return.
-- 6.2: the TTY battery's "free slot" row uses `claimed + 1`, which assumes TTY is the sole claimer;
-  revisit when virtio drivers claim lines.
 
 ### Slice 6.2: `driver-rt` — transport, virtqueues, DMA, driver slots
 
@@ -397,6 +408,58 @@ of the fork.
 configuration space, matching the image's size; a version-1 transport produces the refusal line; two
 devices pinned into one page produce the probe's refusal line; the stub and fork-pool markers carry
 their new numbers.
+
+**Design:** [`2026-11-09-driver-rt-design.md`](../superpowers/specs/2026-11-09-driver-rt-design.md),
+decisions `T1…T14`; the findings beyond H1…H12 (the stub priv ids, the any-second-device sharing
+rule) are listed in its §8. **Plan:**
+[`2026-11-09-driver-rt.md`](../superpowers/plans/2026-11-09-driver-rt.md). **Status: done** (checked
+in the Status list above).
+
+**Measured (2026-11-21, QEMU 11.0.3):** `bus=virtio-mmio-bus.N` is transport slot `N` at
+`0x0A00_0000 + N * 0x200` (buses 0 and 8 observed, in different pages, with no reversal; the rest
+inferred), so `BUS_VBLK = 0`. The HHDM reaches all 32 transports with no fault. edk2 boots Limine
+from the `fat:rw:` drive with the blank disk attached and no `bootindex`; the kernel banner arrives
+in about 7–8 s either way. An empty transport reads magic `0x74726976`, `Version 2` and `DeviceID 0`
+under `force-legacy=false`; without that flag every slot reads `Version 1`. The musl fork reads none
+of `NR_BOOT_PROCS`, `STUB_*`, `NR_STUB` or `FORK_POOL` (H12 stands). The default boot passes 148
+marker checks. Full figures: the design's §5 T14 and §6.
+
+**Amendments to phase text.** H1 gains the priv-id consequence, H2's shared-page rule is "any second
+present device" (not "more than one driver's device"), and the acknowledge-before-walk order for
+virtio is in the standing rules — each rewritten where it is stated above. One finding touches a
+later slice: all four transport pages are taken by the four pinned devices (buses 0, 8, 16, 24), so
+**6.10's `virtio-gpu` has no page of its own**. Its options are a page shared under a narrower
+mapping granule (none exists below 4 KiB), dropping a device from that boot, or the PCI transport.
+
+**Debts carried: the DMA run's lifetime, and what 6.2 left for its consumers.**
+
+1. **A virtio driver cannot exit or exec** (owner: whichever slice first lets one exit or restart —
+   no Phase 6 slice does). `do_exit` and `do_exec` halt the kernel, and `VMCTL_PT_UNMAP` answers
+   `EPERM` inside an assigned driver's DMA window, because the run is ordinary RAM and teardown
+   would free it while the device may still write to it. Pay with a device-reset path (`Status`
+   written 0 before the run is freed), which removes the three guards. The same slice owns `do_fork`
+   of an assigned driver, which would share the register page with a child that holds no assignment
+   (unreachable today), and the 6.1 item that `Priv::irqs` is never cleared.
+2. **Sub-word config access** (owner: 6.6 or 6.8, the first driver with 8- or 16-bit config fields).
+   `config_read_raw` performs aligned 32-bit reads, valid only for 32- and 64-bit fields; virtio
+   requires matching widths for narrower ones, so typed reads are needed.
+3. **Queue depth** (owner: 6.9). `VirtQueue`'s bookkeeping arrays are fixed at `QUEUE_SIZE` (8); a
+   deeper receive queue needs a const generic.
+4. **No "device broken" signal** (owner: 6.3). A used index that runs away is not reported, and
+   `pop_used` silently skips ids that are out of range or not in flight.
+5. **`VirtQueue<'a>` holds `&mut [u8]` over memory the device writes** (owner: 6.3). Once a queue
+   outlives the bring-up this is a `noalias` question; a `NonNull` and a length would state the real
+   contract. 6.2 drops the `VirtQueue` before `queue_enable`; 6.3 must keep it.
+6. **`notify` has no barrier of its own** (owner: 6.3). `add`'s fence orders the ring writes; the
+   `QueueNotify` MMIO write needs the contract stated or enforced when 6.3 first notifies.
+7. **The local iteration timeout** (owner: 6.3, which adds a second boot). The last required marker
+   landed at 73–86% of the 300 s local timeout in two runs (36–43% of CI's 600 s).
+8. **`[dma] vblk` asserts only its prefix** (owner: 6.3). `pa=` depends on the firmware memory map
+   and `pages=16` is not asserted at boot; 6.3's first read proves the run's content instead.
+9. **A wrong register page and a missing `VERSION_1` are caught only indirectly** (owner: 6.4, which
+   first requests an optional feature). On QEMU an empty slot reads good magic, so the `DeviceID`
+   check is what refuses a page one off; and a driver that omits `VERSION_1` is *not* refused by
+   QEMU, so only the exact `features=0x100000000` marker text and two host tests catch it.
 
 ### Slice 6.3: `virtio-blk` behind BDEV + root backend selection
 
