@@ -78,6 +78,7 @@ musl submodule pointer|true|external/musl
 toolchain pin|true|rust-toolchain.toml
 lockfile|true|Cargo.lock
 lookalike outside docs/|true|tools/docs-gen.sh
+disk-image host tool|true|tools/mkimage/src/fat32.rs
 empty change set|true|
 EOF
     echo "boot-relevant: self-test $((total - failed))/$total cases passed" >&2

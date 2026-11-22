@@ -268,6 +268,10 @@ jobs:
       # `cdev.rs`'s pure parse/validate. `minixrs-driver-rt` is here for the
       # opposite reason: its tests drive the virtqueue's `unsafe` ring accesses,
       # which is where Miri caught a write through a shared-borrow pointer.
+      # `minixrs-mkimage` is pure and still NOT here: it has no `unsafe` for
+      # Miri to check, and its integration tests build whole 37 MiB disk images,
+      # which under an interpreter would take a very long time. Its tests run
+      # in the `coverage` job, which is workspace-wide.
       - run: >
           cargo miri test
           -p minixrs-kernel-shared -p minixrs-vm -p minixrs-pm -p minixrs-tty
@@ -275,9 +279,10 @@ jobs:
           -p minixrs-driver-rt
 
   # Decides whether qemu-smoke has anything to prove. A docs-only PR cannot
-  # change the boot, and the boot is the slowest gate by far (it always burns
-  # its full 600 s timeout), so it skips there -- see tools/boot-relevant.sh
-  # for what counts as docs-only. Pushes to main always boot.
+  # change the boot, and the boot is the slowest gate by far (every one of its
+  # three boots always burns its full timeout -- 33 minutes in all as of slice
+  # 6.4), so it skips there -- see tools/boot-relevant.sh for what counts as
+  # docs-only. Pushes to main always boot.
   #
   # This cannot be a workflow-level `paths-ignore`: "QEMU boot smoke" is a
   # required check, and a workflow that never starts never reports it, so a
@@ -341,7 +346,17 @@ jobs:
     # Slice 6.3 (50 → 65): the job boots TWICE, once per root backend, and each
     # boot burns its full timeout. A second 600 s boot is 10 more minutes; 65
     # keeps the build headroom the 50 was sized for, plus five.
-    timeout-minutes: 65
+    #
+    # Slice 6.4 (65 → 80): the job boots THREE times -- the disk boot, a short
+    # reboot of the image that boot wrote, the rootless-disk fallback boot --
+    # and the two full boots went from 600 s to 900 s each (the budget comment
+    # on the boot step has the measurement). The 65 was 20 minutes of boots
+    # plus 45 of build headroom; the boots are now 900 + 180 + 900 = 1980 s =
+    # 33 minutes, and 45 + 33 = 78, rounded up to 80. The new host-tool build
+    # (tools/mkimage and its one dependency, no build-std) is seconds and lives
+    # inside the headroom. Whoever changes any of the three timeouts changes
+    # this in the same edit, by the sum of the differences.
+    timeout-minutes: 80
     steps:
       # submodules: external/musl is the musl fork (slice 5.6). Without it
       # kernel/build.rs falls back to packing `worker` as `hello` and the C
@@ -356,8 +371,15 @@ jobs:
       - name: Install QEMU + aarch64 UEFI firmware
         run: |
           sudo apt-get update
-          # ipxe-qemu ships efi-virtio.rom, which QEMU needs for the virtio ESP
-          # drive; it is a Recommends skipped by --no-install-recommends.
+          # ipxe-qemu ships efi-virtio.rom, a Recommends that
+          # --no-install-recommends skips. Until slice 6.4 QEMU needed it for
+          # the ESP drive, which was virtio-blk-PCI. Since 6.4 neither CI boot
+          # attaches a PCI virtio-blk device (the one disk is virtio-blk-device
+          # on virtio-mmio; only the hand-run MINIXRS_ROOT=nodisk uses PCI), so
+          # that reason is gone -- but whether QEMU on this runner still wants
+          # the ROM for a device `-M virt` creates by default has NOT been
+          # tested: that takes a CI run without the package. Kept until one is
+          # made on purpose.
           sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-efi-aarch64 ipxe-qemu
           qemu-system-aarch64 --version
       - name: Fetch Limine bootloader (pinned commit)
@@ -386,16 +408,59 @@ jobs:
         run: tools/build-musl.sh
       - name: Build kernel
         run: cargo kernel-aarch64
-      # Slice 6.3: two boots, one per root backend (phase decision H5 -- what is
-      # attached selects the root). `disk` attaches the root image as a virtio-blk
-      # disk and MFS mounts through the vblk driver; `ramdisk` attaches no disk
-      # and MFS mounts the ramdisk, which stays green for the whole phase (H7).
+      # tools/mkimage is the HOST tool that writes the boot disk. The cargo
+      # runner (tools/qemu-run.sh) builds it through a nested `cargo run
+      # --release -p minixrs-mkimage`, which happens INSIDE the boot's
+      # `timeout`: on a cold cache that compile would be charged to the first
+      # boot's budget and skew the very fraction the budget is derived from.
+      # Built here, the nested cargo finds it fresh and only runs it.
+      - name: Build the disk-image tool (host)
+        run: cargo build --release -p minixrs-mkimage
+      # Three boots (slice 6.4; two since 6.3). The machine always boots from ONE
+      # disk now: a GPT image written by tools/mkimage, attached as a modern
+      # virtio-blk device on virtio-mmio, which the firmware reads the kernel
+      # from and the vblk driver then brings up. What is ON the image selects
+      # the root (phase decision H5):
+      #
+      #   disk     the image carries the ESP and the root partition; vblk finds
+      #            the root by its GPT type and MFS mounts through it.
+      #   reboot   the image the disk boot just WROTE TO, attached as-is with no
+      #            rebuild (MINIXRS_VBLK_IMAGE=target/disk.img). It must print
+      #            `persist gen=1` -- a write that survived into a second boot,
+      #            which the ramdisk could never show. Short: it runs only until
+      #            that line and is checked against its own marker pair.
+      #   ramdisk  the same image WITHOUT the root partition. A disk is still
+      #            attached (the firmware needs somewhere to read the kernel
+      #            from); vblk brings it up, finds no root partition, and MFS
+      #            falls back to the ramdisk. This is the no-root fallback boot,
+      #            and it keeps the ramdisk root green for the whole phase (H7).
+      #
+      # No boot here attaches no disk at all, and none uses virtio-blk-PCI: that
+      # is MINIXRS_ROOT=nodisk, hand-run only.
+      #
+      # The reboot comes IMMEDIATELY after the disk boot, before anything else
+      # runs. Every disk boot REBUILDS target/disk.img, so the image the reboot
+      # needs exists only between that boot and the next one of its kind. The
+      # ramdisk boot writes a different file (target/disk-rootless.img) and
+      # would not destroy it today, but the order should not depend on that
+      # staying true.
+      #
       # Sequential in ONE job, not a matrix: a matrix would rename the required
       # "QEMU boot smoke" check and two QEMUs on one runner would starve each
-      # other. Each boot is checked against the common marker lists plus its own
-      # backend's (tools/check-boot-log.sh), then tools/diff-backends.sh proves
-      # the filesystem's output is the same on both.
-      - name: Boot in QEMU, once per root backend (600 s wall clock each)
+      # other. Each full boot is checked against the common marker lists plus
+      # its own backend's (tools/check-boot-log.sh), then tools/diff-backends.sh
+      # proves the filesystem's output is the same on both.
+      #
+      # NOT YET MEASURED ON THIS RUNNER (slice 6.4): that Debian's QEMU_EFI.fd
+      # boots from a modern (version 2) virtio-mmio disk and reads the FAT32
+      # that tools/mkimage writes. Both were measured only against Homebrew's
+      # edk2 under QEMU 11.0.3. The first CI run of the 6.4 branch IS the
+      # measurement: if this firmware cannot, the disk boot's log holds no
+      # kernel banner at all (only the firmware's boot-failure output) and the
+      # checker reports every marker missing. The fallback recorded in
+      # docs/plans/phase-6-virtio.md is a second, firmware-only attachment of
+      # the same image.
+      - name: Boot in QEMU — disk, a reboot of that image, the rootless-disk fallback
         env:
           QEMU_EFI_AARCH64: /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
         run: |
@@ -404,7 +469,7 @@ jobs:
           # the build, the runner, or QEMU itself failed — fail here rather
           # than letting the log checker report a confusing missing-marker
           # error. The checker step below is the verdict on log content.
-          status=0
+          #
           # 45 s until slice 5.9, 120 s until slice 5.10a, 240 s until slice
           # 5.10b. Every raise was the same story: a slice made the boot
           # genuinely longer, and the budget was raised with real headroom
@@ -444,26 +509,78 @@ jobs:
           # 1.6-1.8x that forced the earlier raises -- so the per-boot budget
           # stays and only the job's `timeout-minutes` grew.
           #
-          # If you change this, re-measure the fraction rather than reasoning
-          # from the wall-clock number above: it is a ratio against a local run,
-          # not a CI timing.
-          for backend in disk ramdisk; do
-            status=0
-            MINIXRS_ROOT="$backend" timeout 600 cargo run -p minixrs-kernel \
-              --target aarch64-unknown-none --release \
-              > "qemu-$backend.log" 2>&1 || status=$?
-            echo "$backend boot finished with status $status (124 = timeout, expected)"
-            if [ "$status" -ne 124 ]; then
-              echo "::error::$backend boot: expected exit 124 (timeout); got $status — see the qemu-boot-log artifact"
+          # 6.4 (600 -> 900 for the two full boots, plus a 180 s reboot): the
+          # machine boots from one GPT disk, and two things got slower. Every
+          # write to the disk is now followed by a FLUSH, a second interrupt
+          # round trip per write; and the ramdisk boot is no longer device-free
+          # -- it brings the rootless disk up and falls back -- while both boots
+          # gained the persistence probe and MFS's whole-disk probe. Measured
+          # the same way at a fixed 300 s (dev machine, QEMU 11.0.3): the last
+          # required marker (`[diag vfs] pm-exit reset closed=1`) sits at
+          # 82.71% of the disk boot's log and 59.30% of the ramdisk boot's,
+          # against 66.8% / 48.1% on the merge base. That is ~248 s local for
+          # the disk boot, which under 600 s is a 2.42x factor -- no longer the
+          # 3.0x that let 6.3 keep the budget, and heading for the 1.6-1.8x
+          # that forced the earlier raises. 900 s restores 3.63x for the disk
+          # boot (5.06x for the ramdisk boot's ~178 s). One number for both
+          # full boots, budgeted for the slower. The readings are noisy and the
+          # budget takes the worst: four disk boots across this slice's tasks
+          # measured 74.89%, 68.43%, 82.00% and 82.71%, the last two being the
+          # final code.
+          #
+          # The reboot needs one line, `minix.rs init: persist gen=1`, and is
+          # checked for nothing after it. In a 120 s local reboot that line is
+          # at 24.36% of the log (~29 s of guest run), and ~34 s of wall clock
+          # from the start of `cargo run`; 45 s passed locally twice. 180 s is
+          # 5.3x the 34 s -- rounded up past the full boots' factor on purpose,
+          # because a short boot's fixed costs (cargo's start-up, the firmware,
+          # Limine) are a larger share of it and do not scale the way guest
+          # work does.
+          #
+          # If you change any of these, re-measure the fraction rather than
+          # reasoning from the wall-clock numbers above: they are ratios
+          # against a local run, not CI timings. And change the job's
+          # `timeout-minutes` in the same edit.
+          #
+          # $1 names the boot, $2 is its exit status.
+          expect_timeout() {
+            echo "$1 boot finished with status $2 (124 = timeout, expected)"
+            if [ "$2" -ne 124 ]; then
+              echo "::error::$1 boot: expected exit 124 (timeout); got $2 — see the qemu-boot-log artifact"
               exit 1
             fi
-          done
-      # Both logs are checked even if the first fails, so one run shows the
-      # whole story; the step fails if either does.
+          }
+
+          status=0
+          MINIXRS_ROOT=disk timeout 900 cargo run -p minixrs-kernel \
+            --target aarch64-unknown-none --release \
+            > qemu-disk.log 2>&1 || status=$?
+          expect_timeout disk "$status"
+
+          # The image the disk boot left behind, attached as-is: the runner
+          # builds nothing and the boot's writes land in the same file. Nothing
+          # may run between the boot above and this one that rebuilds
+          # target/disk.img.
+          status=0
+          MINIXRS_ROOT=disk MINIXRS_VBLK_IMAGE=target/disk.img \
+            timeout 180 cargo run -p minixrs-kernel \
+            --target aarch64-unknown-none --release \
+            > qemu-reboot.log 2>&1 || status=$?
+          expect_timeout reboot "$status"
+
+          status=0
+          MINIXRS_ROOT=ramdisk timeout 900 cargo run -p minixrs-kernel \
+            --target aarch64-unknown-none --release \
+            > qemu-ramdisk.log 2>&1 || status=$?
+          expect_timeout ramdisk "$status"
+      # All three logs are checked even if an earlier one fails, so one run
+      # shows the whole story; the step fails if any does. `reboot` is checked
+      # against its own marker pair only (tools/check-boot-log.sh says why).
       - name: Check boot logs
         run: |
           rc=0
           tools/check-boot-log.sh disk qemu-disk.log || rc=1
+          tools/check-boot-log.sh reboot qemu-reboot.log || rc=1
           tools/check-boot-log.sh ramdisk qemu-ramdisk.log || rc=1
           exit "$rc"
       - name: Compare the two backends
@@ -477,6 +594,7 @@ jobs:
           name: qemu-boot-log
           path: |
             qemu-disk.log
+            qemu-reboot.log
             qemu-ramdisk.log
           if-no-files-found: error
 
