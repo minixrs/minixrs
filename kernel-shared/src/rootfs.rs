@@ -33,6 +33,13 @@
 //!
 //! Both labels are 16 bytes and differ from each other, so a 32-byte read of
 //! either end is self-identifying.
+//!
+//! ## The root partition's type GUID
+//!
+//! From slice 6.4 the same image is also the contents of a GPT partition on the
+//! virtio disk. [`ROOT_PARTITION_TYPE_GUID`] is how that partition is found:
+//! `tools/mkimage` writes it and `virtio-blk` selects the root by it, and it
+//! lives here for the reason the labels do.
 
 use crate::callnr::BDEV_BLOCK_SIZE;
 use crate::uspace::RAMDISK_WINDOW_SIZE;
@@ -431,6 +438,42 @@ const _: () = assert!(ROOTFS_IMAGE_BYTES as u64 <= RAMDISK_WINDOW_SIZE);
 const _: () = assert!(ROOTFS_IMAGE_BYTES.is_multiple_of(BDEV_BLOCK_SIZE));
 const _: () = assert!(ROOTFS_IMAGE_BLOCKS > 0);
 
+// ---------------------------------------------------------------------------
+// The root partition on the GPT disk (slice 6.4).
+// ---------------------------------------------------------------------------
+
+/// The GPT partition **type** GUID of the minix.rs root partition,
+/// `10FDAC43-2E55-4E0E-8D18-2D46479E1B44`, as the 16 bytes a partition entry
+/// holds **on disk** (phase decision H6, slice 6.4).
+///
+/// `tools/mkimage` writes these bytes into the root partition's entry, and
+/// `virtio-blk` selects the root — minor [`BDEV_MINOR_ROOT`] — as the one
+/// partition whose type field equals them. Neither crate may depend on the
+/// other, so the bytes live here: one literal, shared, cannot drift. The GUID was
+/// generated for slice 6.4 and names nothing else; it is a *type*, the same on
+/// every minix.rs disk, and is not the partition's unique GUID.
+///
+/// **The byte order is not the text order.** GPT stores a GUID mixed-endian: the
+/// first three fields (a `u32` and two `u16`s) little-endian, the last two (two
+/// bytes, then six) in the order written. So `10FDAC43` is stored `43 AC FD 10`,
+/// `2E55` as `55 2E`, `4E0E` as `0E 4E`, and `8D18-2D46479E1B44` byte for byte.
+/// Compare an entry's 16 type bytes with this array directly — no decoding — and
+/// expect `sgdisk -i` to print the text form above for it. A test pins the two
+/// forms to each other.
+///
+/// Additive under D8: no existing value moved. It is not emitted into the
+/// generated C headers, like the rest of this module — no C reads a partition
+/// table.
+///
+/// [`BDEV_MINOR_ROOT`]: crate::callnr::BDEV_MINOR_ROOT
+pub const ROOT_PARTITION_TYPE_GUID: [u8; 16] = [
+    0x43, 0xAC, 0xFD, 0x10, // 10FDAC43, little-endian
+    0x55, 0x2E, // 2E55, little-endian
+    0x0E, 0x4E, // 4E0E, little-endian
+    0x8D, 0x18, // 8D18, as written
+    0x2D, 0x46, 0x47, 0x9E, 0x1B, 0x44, // 2D46479E1B44, as written
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +649,84 @@ mod tests {
         assert_eq!(ROOTFS_SEEKHOLE_ZONES, 1);
         assert_eq!(ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_GROWTH_ZONES + 6);
         assert_ne!(ROOTFS_SEEKHOLE_PATH, ROOTFS_HOLEY_PATH);
+    }
+
+    /// The canonical text of the root partition's type GUID, as `gdisk`, `sgdisk
+    /// -i` and the UEFI specification print one. The tests below derive the
+    /// on-disk bytes from *this*, so the constant is checked against the form a
+    /// person reads rather than against a second copy of itself.
+    const ROOT_GUID_TEXT: &str = "10FDAC43-2E55-4E0E-8D18-2D46479E1B44";
+
+    /// The hex digits of `text`, in the order written, with the dashes dropped.
+    fn guid_text_bytes(text: &str) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        let mut nibbles = 0usize;
+        for c in text.chars() {
+            if c == '-' {
+                continue;
+            }
+            let digit = c.to_digit(16).expect("a GUID is hex digits and dashes") as u8;
+            out[nibbles / 2] = (out[nibbles / 2] << 4) | digit;
+            nibbles += 1;
+        }
+        assert_eq!(nibbles, 32, "a GUID is 32 hex digits");
+        out
+    }
+
+    #[test]
+    fn the_root_type_guid_is_the_mixed_endian_encoding_of_its_text() {
+        // The text groups are 8-4-4-4-12 digits, and the dashes are where the
+        // five fields end.
+        let groups: [usize; 5] = [8, 4, 4, 4, 12];
+        let mut split = ROOT_GUID_TEXT.split('-');
+        for want in groups {
+            assert_eq!(split.next().map(str::len), Some(want));
+        }
+        assert_eq!(split.next(), None);
+
+        // As written: big-endian, field by field.
+        let text = guid_text_bytes(ROOT_GUID_TEXT);
+        // GPT stores the first three fields little-endian...
+        let g = ROOT_PARTITION_TYPE_GUID;
+        assert_eq!(
+            u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
+            u32::from_be_bytes([text[0], text[1], text[2], text[3]])
+        );
+        assert_eq!(
+            u16::from_le_bytes([g[4], g[5]]),
+            u16::from_be_bytes([text[4], text[5]])
+        );
+        assert_eq!(
+            u16::from_le_bytes([g[6], g[7]]),
+            u16::from_be_bytes([text[6], text[7]])
+        );
+        // ...and the last two as written.
+        assert_eq!(g[8..], text[8..]);
+
+        // The same numbers as literals, so a typo in the text above and a
+        // matching one in the constant cannot agree with each other unnoticed.
+        assert_eq!(u32::from_le_bytes([g[0], g[1], g[2], g[3]]), 0x10FD_AC43);
+        assert_eq!(u16::from_le_bytes([g[4], g[5]]), 0x2E55);
+        assert_eq!(u16::from_le_bytes([g[6], g[7]]), 0x4E0E);
+        assert_eq!(g[8..10], [0x8D, 0x18]);
+        assert_eq!(g[10..], [0x2D, 0x46, 0x47, 0x9E, 0x1B, 0x44]);
+    }
+
+    #[test]
+    fn the_root_type_guid_is_not_the_text_order_and_not_a_well_known_type() {
+        // The byte order is the whole point of the constant: written out in text
+        // order it would be a *different* GUID that no tool prints this way, and
+        // the driver would never find the partition `mkimage` made.
+        assert_ne!(ROOT_PARTITION_TYPE_GUID, guid_text_bytes(ROOT_GUID_TEXT));
+        // Not the unused-entry type (all zero), which a parser skips...
+        assert_ne!(ROOT_PARTITION_TYPE_GUID, [0u8; 16]);
+        // ...and not the EFI System Partition's, which is the image's other
+        // partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B.
+        let esp: [u8; 16] = [
+            0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E,
+            0xC9, 0x3B,
+        ];
+        assert_ne!(ROOT_PARTITION_TYPE_GUID, esp);
     }
 
     #[test]
