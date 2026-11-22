@@ -32,12 +32,9 @@
 //! All arithmetic is `checked_*`: drivers ship `--release` with
 //! `overflow-checks = false`.
 
-// Task 5 (main.rs) is the caller; remove this allow there — that is, narrow it
-// to `#![cfg_attr(test, allow(dead_code))]`, the gate `blk.rs` and `bringup.rs`
-// carry: only `main.rs`'s `not(test)`-gated paths will reach most of this, so
-// under `cargo test` (which drops `_start` and `main`) it reads as dead code.
-// Until `main.rs` calls it, it is dead in the real build too.
-#![allow(dead_code)]
+// Only `main.rs`'s `not(test)`-gated paths reach most of this, so under
+// `cargo test` (which drops `_start` and `main`) it would read as dead code.
+#![cfg_attr(test, allow(dead_code))]
 
 use crate::blk::{RootFail, SECTORS_PER_BLOCK, block_to_sector, device_blocks};
 use minixrs_driver_rt::gpt::{self, Lookup, Partition};

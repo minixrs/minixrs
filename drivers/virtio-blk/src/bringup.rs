@@ -102,16 +102,12 @@ pub fn vblk_layout(region: DmaRegion, queue: QueueLayout) -> Option<VblkLayout> 
 
 /// Whether writes are followed by a flush: the **accepted** feature word (what
 /// `negotiate` returned, not what the device offered) has `VIRTIO_BLK_F_FLUSH`.
-// Task 5 (main.rs) is the caller; remove this allow there
-#[allow(dead_code)]
 pub const fn flush_enabled(accepted: u64) -> bool {
     accepted & VIRTIO_BLK_F_FLUSH != 0
 }
 
 /// Whether the device is read-only: the **accepted** feature word has
 /// `VIRTIO_BLK_F_RO`. Such a disk is declined as a root (`root FAIL readonly`).
-// Task 5 (main.rs) is the caller; remove this allow there
-#[allow(dead_code)]
 pub const fn read_only(accepted: u64) -> bool {
     accepted & VIRTIO_BLK_F_RO != 0
 }

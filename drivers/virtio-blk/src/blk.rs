@@ -42,8 +42,6 @@ pub const VIRTIO_BLK_T_IN: u32 = 0;
 /// Request type: write (the device reads the data buffer).
 pub const VIRTIO_BLK_T_OUT: u32 = 1;
 /// Request type: flush (no data buffer; slice 6.4, spec P8).
-// Task 5 (main.rs) is the caller; remove this allow there
-#[allow(dead_code)]
 pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
 
 /// Status byte: the request succeeded.
@@ -93,8 +91,6 @@ pub const fn encode_header(req_type: u32, sector: u64) -> [u8; REQ_HEADER_LEN] {
 /// (device-readable) and the status byte (device-writable) — where a read's is
 /// header / data / status. The status byte is preset to [`STATUS_UNWRITTEN`] and
 /// read through [`status_errno`] exactly as a read's or a write's is.
-// Task 5 (main.rs) is the caller; remove this allow there
-#[allow(dead_code)]
 pub const FLUSH_HEADER: [u8; REQ_HEADER_LEN] = encode_header(VIRTIO_BLK_T_FLUSH, 0);
 
 /// What a completed request's status byte means. Only [`VIRTIO_BLK_S_OK`] is
@@ -124,8 +120,8 @@ pub enum WritePlan {
 }
 
 /// The plan for a write of `len` bytes. `len` has already been validated to be at
-/// most `BDEV_MAX_IO` (one block) by `server-rt`'s `bdev::validate_read` before
-/// this is called, so everything that is neither empty nor whole is a partial
+/// most `BDEV_MAX_IO` (one block) by `server-rt`'s `bdev::validate_range` (through
+/// `part::MinorTable::locate`) before this is called, so everything that is neither empty nor whole is a partial
 /// block.
 pub const fn write_plan(len: usize) -> WritePlan {
     if len == 0 {
@@ -149,8 +145,6 @@ pub const fn write_plan(len: usize) -> WritePlan {
 ///
 /// `plan` is consulted as well as `device_write`, so an empty write is never
 /// flushed whatever the caller passes for the other.
-// Task 5 (main.rs) is the caller; remove this allow there
-#[allow(dead_code)]
 pub const fn flush_after(
     flush_enabled: bool,
     plan: WritePlan,
@@ -166,8 +160,6 @@ pub const fn flush_after(
 ///
 /// Not for a write that failed earlier: that reply is the failing step's errno,
 /// and no flush follows it.
-// Task 5 (main.rs) is the caller; remove this allow there
-#[allow(dead_code)]
 pub const fn write_reply(len: usize, flush: Option<Result<(), i32>>) -> i32 {
     match flush {
         Some(Err(_)) => EIO,
@@ -184,20 +176,25 @@ pub const fn write_reply(len: usize, flush: Option<Result<(), i32>>) -> i32 {
 }
 
 /// Why a device is not a minix.rs root, in the order the checks run (spec P7):
-/// the disk's geometry, its partition table, the root partition's alignment, a
-/// read-only device, and then `drivers/memory`'s `selfcheck` refusals (spec B6)
-/// applied to the root partition — each of its two reads can also fail outright.
+/// the disk's geometry, the read of its partition table, the table itself, the
+/// root partition's alignment, a read-only device, and then `drivers/memory`'s
+/// `selfcheck` refusals (spec B6) applied to the root partition — each of its two
+/// reads can also fail outright.
 ///
 /// The `Display` impl renders the whole boot-marker line, `root FAIL …`. It is the
 /// only place that text is written: the marker files match it literally.
-// Task 5 (main.rs) is the caller of the 6.4 arms; remove this allow there
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RootFail {
     /// The device is empty or not a whole number of 4096-byte blocks.
     Geometry {
         /// The device's capacity in 512-byte sectors.
         capacity: u64,
+    },
+    /// The read of one of the disk's first blocks — the ones that hold the
+    /// partition table — failed.
+    TableIo {
+        /// The errno the read returned.
+        rc: i32,
     },
     /// The primary GPT header or its entry array was refused.
     Gpt(GptError),
@@ -236,6 +233,7 @@ impl core::fmt::Display for RootFail {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
             Self::Geometry { capacity } => write!(f, "root FAIL geometry capacity={capacity}"),
+            Self::TableIo { rc } => write!(f, "root FAIL gpt rc={rc}"),
             Self::Gpt(e) => write!(f, "root FAIL gpt {}", e.why()),
             Self::GptAmbiguous => f.write_str("root FAIL gpt ambiguous"),
             Self::NoRootPartition => f.write_str("root FAIL no root partition"),
@@ -545,7 +543,7 @@ mod tests {
 
     #[test]
     fn every_verdict_renders_its_marker_line() {
-        let cases: [(RootFail, &str); 13] = [
+        let cases: [(RootFail, &str); 14] = [
             (
                 RootFail::Geometry { capacity: 75_777 },
                 "root FAIL geometry capacity=75777",
@@ -554,6 +552,7 @@ mod tests {
                 RootFail::Geometry { capacity: 0 },
                 "root FAIL geometry capacity=0",
             ),
+            (RootFail::TableIo { rc: -5 }, "root FAIL gpt rc=-5"),
             (
                 RootFail::Gpt(GptError::Signature),
                 "root FAIL gpt signature",
