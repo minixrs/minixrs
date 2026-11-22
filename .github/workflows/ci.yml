@@ -421,7 +421,7 @@ jobs:
       # boot's budget and skew the very fraction the budget is derived from.
       # Built here, the nested cargo finds it fresh and only runs it.
       - name: Build the disk-image tool (host)
-        run: cargo build --release -p minixrs-mkimage
+        run: cargo build --locked --release -p minixrs-mkimage
       # Three boots (slice 6.4; two since 6.3). The machine always boots from ONE
       # disk now: a GPT image written by tools/mkimage, attached as a modern
       # virtio-blk device on virtio-mmio, which the firmware reads the kernel
