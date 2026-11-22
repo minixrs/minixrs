@@ -23,7 +23,7 @@
 #     exactly `[diag mfs] bdev.minor absent minor=1 rc=-6` on the RAMDISK side,
 #     at the same place in the two streams.
 #
-# That last line is how the ramdisk boot reaches its root since slice 6.4: the
+# The fallback line is how the ramdisk boot reaches its root since slice 6.4: the
 # boot disk is attached but carries no root partition, so MFS finds `vblk`,
 # is told ENXIO (-6), and falls back. It is allowed on the ramdisk side only (on
 # the disk side it is the silent fallback), as that exact line only (another rc
@@ -160,7 +160,7 @@ self_test() {
     expect pass "a clean pair passes"
     cp "$ram" "$dir/ram.keep"
     cp "$disk" "$dir/disk.keep"
-    # The one allowance (slice 6.4): the fallback line, on the ramdisk side.
+    # The first allowance (slice 6.4): the fallback line, on the ramdisk side.
     printf '[diag mfs] bdev.root vblk rc=-6 fallback=memory\r\n' >>"$ram"
     expect pass "the fallback line once on the ramdisk side"
     # A literal repeat is invisible to the first-occurrence stream, so this case

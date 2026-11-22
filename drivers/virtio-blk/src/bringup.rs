@@ -313,7 +313,8 @@ mod tests {
 
     #[test]
     fn the_accepted_word_decides_flush_and_read_only() {
-        // What QEMU's raw drive is expected to accept: VERSION_1 and FLUSH.
+        // What QEMU's writable raw drive accepts (measured, spec P11.4):
+        // VERSION_1 and FLUSH.
         assert!(flush_enabled(0x1_0000_0200));
         assert!(!read_only(0x1_0000_0200));
         // The same drive with `readonly=on`.

@@ -102,8 +102,9 @@
 # the root image's label at offset 0 (minixrs_mfs::minor::classify, host-
 # tested). The root partition's block 0 has zeroes at both offsets, and the
 # ESP's has the signature but no 0xEE record, so a driver that answered minor 1
-# from either extent prints `bdev.minor FAIL mbr` instead (forbidden; spec
-# mutation 11 is the root case, and was run). minor= is
+# from either extent prints `bdev.minor FAIL mbr` instead (forbidden; both were
+# run -- spec mutation 11 is the root case, and the ESP case showed that
+# without the 0xEE check the probe reports a false `ok`). minor= is
 # BDEV_MINOR_WHOLE_DISK, the constant the driver's table is built from. The
 # ramdisk boot FORBIDS this line and requires `absent`.
 [diag mfs] bdev.minor ok minor=1 mbr=1

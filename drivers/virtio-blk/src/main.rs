@@ -18,8 +18,9 @@
 //!
 //! - **Whether there is a device** is one kernel call. `vblk_init`, the
 //!   `init_fresh` callback, asks `GET_VIRTIO_MMIO` and publishes this driver to DS
-//!   if the kernel assigned it a transport; with no disk attached (`ENOENT`) it
-//!   publishes nothing. Nothing in that callback can block on the device.
+//!   if the kernel assigned it a transport; with no virtio-mmio disk attached
+//!   (`ENOENT`) it publishes nothing. Nothing in that callback can block on the
+//!   device.
 //! - **Whether the device carries a root** takes several reads, each a completion
 //!   interrupt the driver blocks for. [`bring_up`] and [`root_check`] run after
 //!   `sef_startup`, before the receive loop.
@@ -34,7 +35,10 @@
 //!
 //! [`bring_up`] runs once and prints exactly one verdict line:
 //!
-//! 1. `GET_VIRTIO_MMIO` — `ENOENT` means no disk is attached: `no device`.
+//! 1. `GET_VIRTIO_MMIO` — `ENOENT` means the kernel's probe assigned this
+//!    driver no virtio-mmio device: `no device`. (Since slice 6.4 the machine
+//!    boots from its virtio-mmio disk, so only the hand-run
+//!    `MINIXRS_ROOT=nodisk` boot, whose disk is on PCI, prints it.)
 //! 2. `GET_DMA`; check the kernel's cookie (step 6's queue zeroes over it).
 //! 3. `MmioTransport::new` (magic, version 2); `DeviceID` must be 2.
 //! 4. `negotiate`, requesting `VIRTIO_BLK_F_RO | VIRTIO_BLK_F_FLUSH`: the
@@ -139,8 +143,8 @@
 //!
 //! When the device accepted `VIRTIO_BLK_F_FLUSH`, every `BDEV_WRITE` whose
 //! device write succeeded is followed by a `VIRTIO_BLK_T_FLUSH` **before the
-//! client is answered** (spec P8), so a write a client was told succeeded is on
-//! the medium. A flush is a two-descriptor chain — header and status byte, no
+//! client is answered** (spec P8), so a client is told a write succeeded only
+//! after the device reported its cache committed. A flush is a two-descriptor chain — header and status byte, no
 //! data — completed by interrupt like any other request. There is none after a
 //! zero-length write, a refused grant, or a device write that failed. A flush
 //! that fails turns the write's reply into `EIO`.
@@ -383,8 +387,8 @@ fn main() -> ! {
 ///
 /// One kernel call decides it, and nothing here touches the device: the publish
 /// has to precede every step that can block, or a client that looks `vblk` up
-/// while bring-up waits for a completion finds nothing. With no disk attached
-/// (`ENOENT`) — or any other refusal — nothing is published, and [`bring_up`]
+/// while bring-up waits for a completion finds nothing. With no virtio-mmio disk
+/// attached (`ENOENT`) — or any other refusal — nothing is published, and [`bring_up`]
 /// asks again and reports it.
 ///
 /// Always `OK`: a non-`OK` return fails `sef_startup` and leaves the driver
@@ -802,7 +806,8 @@ fn bring_up() -> Option<Disk> {
         payload: [0u8; 96],
     };
 
-    // Step 1: where the registers are. ENOENT is the healthy no-disk path.
+    // Step 1: where the registers are. ENOENT is the healthy no-device path
+    // (no virtio-mmio disk: the hand-run MINIXRS_ROOT=nodisk boot).
     let rc = sys_getinfo(GET_VIRTIO_MMIO, &mut m);
     if rc == ENOENT {
         diag_fmt(format_args!("no device"));

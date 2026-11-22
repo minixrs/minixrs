@@ -27,10 +27,11 @@
 # What it shows: a write made during one boot is on the device in the next --
 # writes REACH THE DEVICE and survive the machine. What it does not show:
 # anything about the flush. QEMU serves a raw image through the host's page
-# cache, so the first boot's writes are expected to be in the file whether or
-# not the driver flushed them (spec P9; spec mutation 6 -- drop the flush -- is
-# the check of that, predicted to move `flush ok n=1` on the disk boot and
-# nothing here). The flush has its own marker, in tests/qemu-boot.disk.expected.
+# cache, so the first boot's writes are in the file whether or not the driver
+# flushed them (spec P9). Spec mutation 6 -- drop the flush -- was run and is
+# the check of that: `flush ok n=1` went missing on the disk boot and nothing
+# moved here, the reboot still printing gen=1 and passing this pair. The flush
+# has its own marker, in tests/qemu-boot.disk.expected.
 
 # The proof. init read /etc/boots before writing anything, and it held `1`: the
 # image ships `0` (ROOTFS_BOOTS_INITIAL), and the only thing that stores `1` is

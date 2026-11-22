@@ -415,12 +415,14 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
     println!("cargo:rustc-env=BOOT_IMAGE_PATH={}", archive_path.display());
 }
 
-/// File name of the raw disk image written beside the kernel ELF (slice 6.3,
-/// spec B9). `tools/qemu-run.sh` is the other holder of this name.
+/// File name of the raw root filesystem image written beside the kernel ELF
+/// (slice 6.3, spec B9). `tools/qemu-run.sh` is the other holder of this name.
 const DISK_IMAGE_NAME: &str = "rootfs.img";
 
-/// Write the root filesystem image to a file `tools/qemu-run.sh` can attach as
-/// the virtio-blk disk (slice 6.3, spec B9).
+/// Write the root filesystem image to a file beside the kernel ELF (slice 6.3,
+/// spec B9). Since slice 6.4 the file is not attached itself: `tools/qemu-run.sh`
+/// hands it to `tools/mkimage` as `--root`, which copies it byte for byte into
+/// the root partition of the GPT boot disk.
 ///
 /// **The same bytes the archive packs**, from the same `build_rootfs` call, so
 /// the disk root and the ramdisk root cannot differ in content: the two boots'

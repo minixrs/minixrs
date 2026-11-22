@@ -1404,8 +1404,8 @@ fn create_demo(vfs: Endpoint) {
 ///
 /// `/full` ships 62 empty files, so with `.` and `..` its block holds 64 used
 /// slots and this create *must* allocate a second directory zone. That arm is
-/// otherwise unreachable in both boot configurations — `/` holds 5 entries and
-/// `/etc` 7, against 64 slots — and an arm no QEMU boot executes is what the
+/// otherwise unreachable in both boot configurations — `/` and `/etc` each hold
+/// a handful of entries against 64 slots — and an arm no QEMU boot executes is what the
 /// `/etc/pattern` mandate and the device-teardown selftest exist to prevent.
 ///
 /// The proof that growth *worked* is the read-back: the entry lands in the new

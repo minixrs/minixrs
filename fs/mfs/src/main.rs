@@ -1605,7 +1605,10 @@ fn ds_key(name: &[u8]) -> [u8; SYS_GETINFO_NAME_LEN] {
 /// Select the block device the root is mounted from, grant it the block buffer,
 /// and hand back the fetch capability (slice 6.3, B2).
 ///
-/// `vblk` first. A DS miss is the healthy no-disk boot and prints nothing. On a
+/// `vblk` first. A DS miss means the driver was assigned no virtio-mmio device;
+/// it is healthy and prints nothing (since slice 6.4 only the hand-run
+/// `MINIXRS_ROOT=nodisk` boot takes it — the ramdisk boot CI runs attaches a
+/// rootless disk and takes the `ENXIO` fallback below). On a
 /// hit the buffer is granted to that endpoint and **one** request is sent: a
 /// zero-length `BDEV_READ` of the root minor, which a driver serving a root
 /// answers `0` with no grant use and no device I/O, and a driver with a device
@@ -1668,9 +1671,9 @@ fn root_device<'a>(
 /// the FS path, while the required `bdev.ds ok` marker disappears and CI goes red
 /// on the ordering regression specifically.
 ///
-/// `vblk` has no such fallback, deliberately: its absence from DS is the normal
-/// ramdisk boot, so there is no boot endpoint worth guessing at and no line to
-/// print.
+/// `vblk` has no such fallback, deliberately: its absence from DS is how a boot
+/// with no virtio-mmio disk looks (`MINIXRS_ROOT=nodisk`), so there is no boot
+/// endpoint worth guessing at and no line to print.
 #[cfg_attr(test, allow(dead_code))]
 fn mem_endpoint() -> Endpoint {
     match sef_retrieve_from_ds(&ds_key(root::MEMORY_NAME)) {

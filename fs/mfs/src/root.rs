@@ -36,7 +36,11 @@ pub const MEMORY_NAME: &[u8] = b"memory";
 /// What the server learned about `vblk` before choosing.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum VblkProbe {
-    /// DS has no `vblk` entry: no disk is attached. The healthy ramdisk boot.
+    /// DS has no `vblk` entry: the kernel assigned the driver no virtio-mmio
+    /// device, so it published nothing. Healthy, and since slice 6.4 seen only
+    /// on the hand-run `MINIXRS_ROOT=nodisk` boot — the ramdisk boot CI runs
+    /// attaches a disk with no root partition and arrives as [`Self::Answered`]
+    /// with `ENXIO`.
     Absent,
     /// DS resolved `vblk` to `ep`, and the driver answered the zero-length
     /// root read with `rc` (the reply `m_type`, or the trap's own errno if the

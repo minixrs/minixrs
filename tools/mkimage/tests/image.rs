@@ -8,8 +8,8 @@
 //!
 //! - the FAT32 reader below ([`Volume`]) parses the boot sector's BPB, walks the
 //!   FAT chains and the directory entries, and reassembles long names — the way
-//!   edk2's FAT driver and Limine will;
-//! - `minixrs_driver_rt::gpt` is the parser `virtio-blk` will use, a
+//!   edk2's FAT driver and Limine do;
+//! - `minixrs_driver_rt::gpt` is the parser `virtio-blk` uses, a
 //!   dev-dependency that shares no code with the writer;
 //! - a few fields are read straight from the bytes at the offsets the UEFI
 //!   specification gives.
