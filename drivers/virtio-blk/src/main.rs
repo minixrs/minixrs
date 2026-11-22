@@ -66,8 +66,9 @@
 //! same code. It makes no write, so it never flushes. The refusals, in the order
 //! they are decided (spec P7) — each one's text is `blk::RootFail`'s `Display`:
 //!
-//! 1. `geometry capacity=<c>` — the device is empty or not a whole number of
-//!    4096-byte blocks.
+//! 1. `geometry capacity=<c>` — the device is empty, not a whole number of
+//!    4096-byte blocks, or shorter than the five blocks the next step reads.
+//!    Decided before any read.
 //! 2. `gpt rc=<rc>` — a read of whole-disk blocks 0–4 failed. Those five blocks
 //!    (LBA 0–39) hold the protective MBR, the primary GPT header and all 128
 //!    partition entries; they are read into [`TABLE_BUF`].
@@ -107,7 +108,8 @@
 //! extent's first block is added by `checked_add` after the range check.
 //!
 //! **With no root there are no minors at all**: every request answers `ENXIO`,
-//! the whole disk (minor 1) included.
+//! the whole disk (minor 1) included, and a zero-length request too. That gate
+//! is the first thing `part::locate` decides, so it is host-tested there.
 //!
 //! ## One request in flight
 //!
@@ -144,10 +146,11 @@
 //! When the device accepted `VIRTIO_BLK_F_FLUSH`, every `BDEV_WRITE` whose
 //! device write succeeded is followed by a `VIRTIO_BLK_T_FLUSH` **before the
 //! client is answered** (spec P8), so a client is told a write succeeded only
-//! after the device reported its cache committed. A flush is a two-descriptor chain — header and status byte, no
-//! data — completed by interrupt like any other request. There is none after a
-//! zero-length write, a refused grant, or a device write that failed. A flush
-//! that fails turns the write's reply into `EIO`.
+//! after the device reported its cache committed. A flush is a two-descriptor
+//! chain — header and status byte, no data — completed by interrupt like any
+//! other request. There is none after a zero-length write, a refused grant, or
+//! a device write that failed. A flush that fails turns the write's reply into
+//! `EIO`.
 //!
 //! The first successful flush of a boot prints `flush ok n=1`, and no later one
 //! prints anything. Every flush the device completed with a status other than
@@ -364,16 +367,32 @@ fn main() -> ! {
         // (never a payload field), and the reply overwrites `msg.m_source`.
         let caller_e = msg.m_source;
         let rc = match msg.m_type {
-            BDEV_READ | BDEV_WRITE => match (disk.as_mut(), minors.as_ref()) {
-                (Some(disk), Some(table)) if msg.m_type == BDEV_READ => {
-                    do_read(disk, table, caller_e, &msg)
+            BDEV_READ | BDEV_WRITE => {
+                let req = parse_read(&msg);
+                // `part::locate` decides everything about the request before
+                // the device is touched, and it decides the no-root case first:
+                // with no table every request is `ENXIO`, on every minor, a
+                // zero-length one included (spec B1, P6). That gate is there,
+                // not here, so that a host test holds it.
+                match (part::locate(minors.as_ref(), req), disk.as_mut()) {
+                    (Err(e), _) => e,
+                    // A legal zero-length request: no grant use, no device
+                    // I/O, no flush. This is the request a client probes the
+                    // device with.
+                    (Ok(Located::Empty), _) => 0,
+                    (Ok(Located::Io { sector, len }), Some(disk)) => {
+                        if msg.m_type == BDEV_READ {
+                            do_read(disk, sector, len, caller_e, req.gid)
+                        } else {
+                            do_write(disk, sector, len, caller_e, req.gid)
+                        }
+                    }
+                    // Unreachable: `minors` is `Some` only if `disk` is — it
+                    // was built from it above — and `locate` answers `ENXIO`
+                    // without one.
+                    (Ok(Located::Io { .. }), None) => ENXIO,
                 }
-                (Some(disk), Some(table)) => do_write(disk, table, caller_e, &msg),
-                // No root: no minor exists on this driver — the whole disk
-                // (minor 1) included — whatever else the request says (spec B1,
-                // P6).
-                _ => ENXIO,
-            },
+            }
             // Unlike DS, reply rather than drop — the caller is inside a SENDREC
             // and would otherwise block forever.
             _ => ENOSYS,
@@ -623,7 +642,8 @@ fn root_check(disk: &mut Disk) -> Option<MinorTable> {
 
 /// Find the root partition and check it, in spec P7's order:
 ///
-/// 1. the device's geometry — before any read, so an empty or ragged device is
+/// 1. the device's geometry ([`part::geometry`]) — before any read, so an
+///    empty or ragged device, or one shorter than the table's five blocks, is
 ///    refused for that and not for whichever read fails on it;
 /// 2. whole-disk blocks `0..part::TABLE_BLOCKS` into [`TABLE_BUF`], one block
 ///    per request;
@@ -643,10 +663,10 @@ fn root_check(disk: &mut Disk) -> Option<MinorTable> {
 fn find_root(disk: &mut Disk) -> Result<MinorTable, blk::RootFail> {
     use blk::RootFail;
 
+    // Before any read: an empty or ragged device, and one too short to hold
+    // the blocks the loop below asks for.
     let capacity = disk.capacity;
-    if blk::device_blocks(capacity).is_none() {
-        return Err(RootFail::Geometry { capacity });
-    }
+    part::geometry(capacity)?;
 
     // SAFETY: `TABLE_BUF` is named only here, and this function runs once, from
     // `main` through `root_check`, on the driver's single thread: no other
@@ -655,7 +675,8 @@ fn find_root(disk: &mut Disk) -> Result<MinorTable, blk::RootFail> {
     // the `MinorTable` it returns — and nothing below re-enters this function.
     let table_buf: &mut [u8; part::TABLE_BUF_BYTES] = unsafe { &mut *TABLE_BUF.0.get() };
     for (block, chunk) in (0u64..).zip(table_buf.as_chunks_mut::<BDEV_BLOCK_SIZE>().0) {
-        // The `EINVAL` is unreachable: `block` is below `TABLE_BLOCKS`.
+        // The `EINVAL` is unreachable: `block` is below `TABLE_BLOCKS`, and
+        // `geometry` above refused a device with fewer blocks than that.
         let sector = blk::block_to_sector(block).ok_or(RootFail::TableIo { rc: EINVAL })?;
         serve(disk, blk::VIRTIO_BLK_T_IN, sector)
             .and_then(|()| read_bounce(disk, chunk))
@@ -704,31 +725,26 @@ fn read_bounce(disk: &Disk, dst: &mut [u8]) -> Result<(), i32> {
     }
 }
 
-/// Serve one `BDEV_READ`. Returns the reply `m_type`: the byte count read
-/// (`>= 0`), or a negative errno.
+/// Serve one `BDEV_READ` that [`part::locate`] placed: `n` bytes
+/// (`1..=BDEV_MAX_IO`) of the block starting at device `sector`. Returns the
+/// reply `m_type`: the byte count read (`>= 0`), or a negative errno.
 ///
-/// The device fills the bounce page with the whole block; the client's `len`
+/// The device fills the bounce page with the whole block; the client's `n`
 /// bytes are then pushed into its granted buffer. `caller_e` is the
-/// kernel-stamped source of this very message — the granter can be nothing else —
-/// and the grant offset is `0`, as on `drivers/memory`.
+/// kernel-stamped source of the request — the granter can be nothing else —
+/// `gid` is the request's grant, and the grant offset is `0`, as on
+/// `drivers/memory`.
 ///
-/// `table` decides everything about the request before the device is touched:
-/// whether its minor exists (`ENXIO`), whether its range is good (`EINVAL`), and
-/// which device sector its block — relative to that minor's extent — starts at.
+/// Everything about the request was decided before this is called, in the main
+/// loop: whether its minor exists (`ENXIO`), whether its range is good
+/// (`EINVAL`), a zero-length read (`0`, never reaching here), and which device
+/// sector its block — relative to that minor's extent — starts at.
 #[cfg_attr(test, allow(dead_code))]
-fn do_read(disk: &mut Disk, table: &MinorTable, caller_e: Endpoint, msg: &Message) -> i32 {
-    let req = parse_read(msg);
-    let (sector, n) = match table.locate(req) {
-        Err(e) => return e,
-        // A legal zero-length read: no grant use, no device I/O. This is the
-        // request a client probes the device with.
-        Ok(Located::Empty) => return 0,
-        Ok(Located::Io { sector, len }) => (sector, len),
-    };
+fn do_read(disk: &mut Disk, sector: u64, n: usize, caller_e: Endpoint, gid: i32) -> i32 {
     if let Err(rc) = serve(disk, blk::VIRTIO_BLK_T_IN, sector) {
         return rc;
     }
-    let rc = sys_safecopy(SAFECOPY_TO, caller_e, req.gid, 0, disk.data.va(), n as u64);
+    let rc = sys_safecopy(SAFECOPY_TO, caller_e, gid, 0, disk.data.va(), n as u64);
     if rc != OK {
         // Verbatim: EPERM ("your grant does not authorize this") and EFAULT ("your
         // buffer is not mapped") are different bugs on the client's side.
@@ -737,7 +753,9 @@ fn do_read(disk: &mut Disk, table: &MinorTable, caller_e: Endpoint, msg: &Messag
     n as i32
 }
 
-/// Serve one `BDEV_WRITE`. Returns the reply `m_type`: the byte count stored
+/// Serve one `BDEV_WRITE` that [`part::locate`] placed: `n` bytes
+/// (`1..=BDEV_MAX_IO`) of the block starting at device `sector`, taken from the
+/// grant `gid` of `caller_e`. Returns the reply `m_type`: the byte count stored
 /// (`>= 0`), or a negative errno.
 ///
 /// A whole block is copied from the client into the bounce page and written. A
@@ -748,33 +766,20 @@ fn do_read(disk: &mut Disk, table: &MinorTable, caller_e: Endpoint, msg: &Messag
 ///
 /// A device write that succeeded is then flushed, if the device takes flushes,
 /// before the reply (spec P8): `blk::flush_after` decides, and a failed flush
-/// makes the reply `EIO` (`blk::write_reply`). Every earlier exit — a refused
-/// request, a zero-length one, a failed read-before-write, a refused grant, a
-/// failed device write — returns without one.
+/// makes the reply `EIO` (`blk::write_reply`). Every earlier exit returns
+/// without one: a refused request and a zero-length one never reach this
+/// function (the main loop answers them), and a failed read-before-write, a
+/// refused grant and a failed device write return from it below.
 #[cfg_attr(test, allow(dead_code))]
-fn do_write(disk: &mut Disk, table: &MinorTable, caller_e: Endpoint, msg: &Message) -> i32 {
-    let req = parse_read(msg);
-    let (sector, n) = match table.locate(req) {
-        Err(e) => return e,
-        // A legal zero-length write: no grant use, no device I/O, no flush.
-        Ok(Located::Empty) => return 0,
-        Ok(Located::Io { sector, len }) => (sector, len),
-    };
-    // Never `Empty` here: `locate` answered that above.
+fn do_write(disk: &mut Disk, sector: u64, n: usize, caller_e: Endpoint, gid: i32) -> i32 {
+    // Never `Empty` here: the main loop answered a zero-length write itself.
     let plan = blk::write_plan(n);
     if plan == blk::WritePlan::Partial
         && let Err(rc) = serve(disk, blk::VIRTIO_BLK_T_IN, sector)
     {
         return rc;
     }
-    let rc = sys_safecopy(
-        SAFECOPY_FROM,
-        caller_e,
-        req.gid,
-        0,
-        disk.data.va(),
-        n as u64,
-    );
+    let rc = sys_safecopy(SAFECOPY_FROM, caller_e, gid, 0, disk.data.va(), n as u64);
     if rc != OK {
         // Verbatim, as in `do_read`. Nothing has been written to the device.
         return rc;

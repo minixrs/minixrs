@@ -483,9 +483,12 @@ minix.rs hello: iov ok match=1
 # 6.3's mutation 8 found. n=16 is IMAGE_LABEL_LEN.
 [diag mfs] bdev.partial ok n=16
 
-# Ten refusals, each well-formed but for one field: minor 7 (-> ENXIO, the
-# driver's own minor check), one block past the end (-> EINVAL, not EIO: a block
-# device's size is known to its client), BDEV_MAX_IO + 1 bytes (-> EINVAL, the
+# Ten refusals, each well-formed but for one field: the minor no block driver
+# serves, BDEV_MINOR_NONE (-> ENXIO, the driver's own minor check; it was the
+# literal 7 until slice 6.4, where `vblk` made 7 a GPT partition's minor and
+# refused it only because the boot disk has two), one block past the end (->
+# EINVAL, not EIO: a block device's size is known to its client), BDEV_MAX_IO + 1
+# bytes (-> EINVAL, the
 # deliberate departure from CDEV's clamp -- a short block read is useless to a
 # filesystem), a negative length (-> EINVAL, which unchecked would widen into a
 # ~16 EiB u64), a grant issued to PM (-> EPERM, the kernel's `who_to` check), a
@@ -494,9 +497,9 @@ minix.rs hello: iov ok match=1
 # carries only CPF_WRITE (-> EPERM from the KERNEL's grant-direction check, not
 # from the driver: every geometry check passes and what refuses it is
 # `verify_grant`, the guard that stops a client reading a device buffer back out
-# through a write-shaped request), a BDEV_WRITE to minor 7 (-> ENXIO: the driver
-# validates the device before it touches the grant, so a bad minor is reported as
-# one rather than as a grant failure), a request one past the band (-> ENOSYS, and
+# through a write-shaped request), a BDEV_WRITE to that same absent minor (->
+# ENXIO: the driver validates the device before it touches the grant, so a bad
+# minor is reported as one rather than as a grant failure), a request one past the band (-> ENOSYS, and
 # the reply itself is the assertion: a dropped unknown would block MFS in its
 # SENDREC forever and take every later marker with it), and a
 # SYS_GETINFO(GET_RAMDISK) issued by MFS (-> EPERM, the gate that keeps a VA

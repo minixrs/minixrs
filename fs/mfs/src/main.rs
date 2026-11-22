@@ -93,9 +93,10 @@ minixrs_abi_note::brand!();
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF, BDEV_MINOR_ROOT,
-    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_CREATE, FS_LOOKUP, FS_READ, FS_READSUPER, FS_TRUNC,
-    FS_WRITE, GET_RAMDISK, NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_NONE, BDEV_MINOR_OFF,
+    BDEV_MINOR_ROOT, BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_CREATE, FS_LOOKUP, FS_READ,
+    FS_READSUPER, FS_TRUNC, FS_WRITE, GET_RAMDISK, NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO,
+    SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{MEM_PROC_NR, PM_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -1951,8 +1952,14 @@ struct Probe {
 /// None of the ten is reachable from the live path, which is the whole reason they
 /// exist: a check no marker exercises is a check that can regress silently.
 ///
-///   - `bad-minor` — a good grant aimed at minor 7. `ENXIO`, from the driver's own
-///     minor check: the *device* does not exist; nothing is wrong with the grant.
+///   - `bad-minor` — a good grant aimed at [`BDEV_MINOR_NONE`], the minor no
+///     block driver serves. `ENXIO`, from the driver's own minor check: the
+///     *device* does not exist; nothing is wrong with the grant. The minor is
+///     that constant and not a small literal because a literal stops being
+///     "no such device" when a driver's table reaches it: this probe named
+///     minor 7 until slice 6.4, where `vblk` made 7 the sixth GPT partition
+///     and refused it only because the boot disk has two. Each driver holds
+///     the constant outside its own minors at compile time.
 ///   - `bad-block` — one block past the end. `EINVAL` rather than `EIO`: a block
 ///     device's size is known to its client, so this is a caller bug.
 ///   - `too-long` — one byte more than `BDEV_MAX_IO`. The deliberate departure
@@ -1975,7 +1982,8 @@ struct Probe {
 ///     rather than quietly retiring. It also aims at block 1, the one block
 ///     `START_BLOCK = 2` leaves spare, so a regression in the guard is a wasted
 ///     write rather than a destroyed superblock.
-///   - `wr-minor` — a write to a device that does not exist. `ENXIO`, and the
+///   - `wr-minor` — a write to a device that does not exist: [`BDEV_MINOR_NONE`]
+///     again, for the reason `bad-minor` gives. `ENXIO`, and the
 ///     point is the *order*: the driver validates the minor before it touches the
 ///     grant, so a bad device is reported as one rather than as a grant failure.
 ///     It rides `write_only` and block 1 for the same reason `wr-dir` does — the
@@ -2017,7 +2025,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "bad-minor",
             m_type: BDEV_READ,
-            minor: 7,
+            minor: BDEV_MINOR_NONE,
             gid: good,
             len: n,
             block: 0,
@@ -2080,7 +2088,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "wr-minor",
             m_type: BDEV_WRITE,
-            minor: 7,
+            minor: BDEV_MINOR_NONE,
             gid: write_only,
             len: n,
             block: 1,

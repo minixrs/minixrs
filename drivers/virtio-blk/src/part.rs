@@ -26,8 +26,12 @@
 //!    [`TABLE_BUF_BYTES`]-byte buffer.
 //! 2. [`scan`] turns that buffer and the device's capacity into a
 //!    [`MinorTable`], or the [`RootFail`] to print.
-//! 3. Per request, [`MinorTable::locate`] answers with the first sector to
-//!    transfer or the errno to reply.
+//! 3. Per request, [`locate`] answers with the first sector to transfer or the
+//!    errno to reply: `ENXIO` for everything when there is no table, and
+//!    [`MinorTable::locate`]'s answer when there is one.
+//!
+//! Before step 1, `main.rs` asks [`geometry`] whether the device can hold a
+//! table at all.
 //!
 //! All arithmetic is `checked_*`: drivers ship `--release` with
 //! `overflow-checks = false`.
@@ -38,7 +42,9 @@
 
 use crate::blk::{RootFail, SECTORS_PER_BLOCK, block_to_sector, device_blocks};
 use minixrs_driver_rt::gpt::{self, Lookup, Partition};
-use minixrs_kernel_shared::callnr::{BDEV_BLOCK_SIZE, BDEV_MINOR_ROOT, BDEV_MINOR_WHOLE_DISK};
+use minixrs_kernel_shared::callnr::{
+    BDEV_BLOCK_SIZE, BDEV_MINOR_NONE, BDEV_MINOR_ROOT, BDEV_MINOR_WHOLE_DISK,
+};
 use minixrs_kernel_shared::error::{EINVAL, ENXIO};
 use minixrs_kernel_shared::rootfs::ROOT_PARTITION_TYPE_GUID;
 use minixrs_server_rt::bdev::{ReadRequest, validate_range};
@@ -65,6 +71,11 @@ pub const MINORS: usize = 2 + gpt::MAX_ENTRIES as usize;
 const _: () = assert!(BDEV_MINOR_ROOT == 0);
 const _: () = assert!(MINOR_WHOLE_DISK == 1);
 const _: () = assert!(MINORS == 130);
+// `BDEV_MINOR_NONE` — the minor a client's denial probe names for "no such
+// device" — has no slot here, whatever the disk's partition table holds. A
+// table grown to reach it fails the build instead of quietly turning that
+// probe into a request for a real partition.
+const _: () = assert!(BDEV_MINOR_NONE as usize >= MINORS);
 
 /// A run of whole BDEV blocks on the disk: what one minor serves.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -194,13 +205,61 @@ impl MinorTable {
     }
 }
 
+/// The device's size in BDEV blocks, if it is one a partition table can be read
+/// from; [`RootFail::Geometry`] otherwise. **Decided before any read** — it is
+/// what [`scan`] refuses first, and `main.rs` calls it before it reads the
+/// table's blocks, so the two cannot disagree.
+///
+/// A device is refused for its geometry when its `capacity` (in 512-byte
+/// sectors) is
+///
+/// - zero, or not a whole number of 4096-byte blocks ([`device_blocks`]); or
+/// - fewer than [`TABLE_BLOCKS`] blocks. The table read names whole-disk blocks
+///   `0..TABLE_BLOCKS`, so on a shorter device it would ask for sectors past
+///   the end and leave the refusal to whatever the device makes of that. No
+///   GPT disk is that small anyway: 40 sectors do not hold a primary table, a
+///   backup table and a partition.
+pub fn geometry(capacity: u64) -> Result<u64, RootFail> {
+    let refused = RootFail::Geometry { capacity };
+    let blocks = device_blocks(capacity).ok_or(refused)?;
+    // Widening: `TABLE_BLOCKS` is 5.
+    if blocks < TABLE_BLOCKS as u64 {
+        return Err(refused);
+    }
+    Ok(blocks)
+}
+
+/// The first decision about every `BDEV_READ` and `BDEV_WRITE`: **with no root
+/// there are no minors** (spec B1, P6, phase decision H5).
+///
+/// `table` is what the driver serves — `None` when it has no device, its
+/// bring-up failed, or the root check refused the disk. Then every request
+/// answers `ENXIO` before anything else about it is looked at: on every minor,
+/// the whole disk (minor 1) included; well-formed or not; and **a zero-length
+/// request too**, which is the request MFS probes the driver with and reads the
+/// `ENXIO` of as "no root here" (`fs/mfs/src/root.rs`).
+///
+/// With a table the answer is [`MinorTable::locate`]'s, unchanged.
+///
+/// It is a function here, and not a `match` arm in `main.rs`, so that it is
+/// host-tested: `main.rs` has no tests, and on the rootless boot MFS's
+/// `bdev.minor` probe goes to `memory`, so no boot marker sees this driver's
+/// answer for any minor but the root.
+pub fn locate(table: Option<&MinorTable>, req: ReadRequest) -> Result<Located, i32> {
+    match table {
+        None => Err(ENXIO),
+        Some(table) => table.locate(req),
+    }
+}
+
 /// Read the partition table out of `buf` — the disk from LBA 0, at least
 /// [`gpt::TABLE_BYTES`] long; `main.rs` passes the [`TABLE_BUF_BYTES`] of blocks
 /// `0..TABLE_BLOCKS` — for a device of `capacity` 512-byte sectors.
 ///
 /// Refuses for the first of these that holds (spec P7):
 ///
-/// 1. `capacity` is 0 or not a multiple of eight — [`RootFail::Geometry`];
+/// 1. `capacity` is 0, not a multiple of eight, or fewer than [`TABLE_BLOCKS`]
+///    blocks — [`RootFail::Geometry`], by [`geometry`];
 /// 2. the header, the entry array's CRC or any entry was refused by
 ///    `driver-rt::gpt` — [`RootFail::Gpt`] (a short `buf` reads as `header
 ///    short` or `entries short`);
@@ -211,7 +270,7 @@ impl MinorTable {
 /// Any *other* partition that is not block-aligned is not a refusal: it simply
 /// has no minor.
 pub fn scan(buf: &[u8], capacity: u64) -> Result<MinorTable, RootFail> {
-    let disk_blocks = device_blocks(capacity).ok_or(RootFail::Geometry { capacity })?;
+    let disk_blocks = geometry(capacity)?;
 
     // A buffer too short to hold either part reads as an empty slice, which
     // the parser refuses as short.
@@ -728,6 +787,52 @@ mod tests {
     }
 
     #[test]
+    fn a_device_shorter_than_the_table_is_refused_for_its_geometry() {
+        // One to four whole blocks: the geometry is whole, and blocks 0..=4
+        // are not all there to read. Refused before any read, as geometry —
+        // not left to the device to fail a read past its end.
+        for capacity in [8u64, 16, 24, 32] {
+            assert_eq!(
+                geometry(capacity),
+                Err(RootFail::Geometry { capacity }),
+                "{capacity}"
+            );
+            // Whatever the buffer holds: a blank one, a good table.
+            let blank = vec![0u8; TABLE_BUF_BYTES];
+            assert_eq!(
+                scan(&blank, capacity),
+                Err(RootFail::Geometry { capacity }),
+                "{capacity}"
+            );
+            assert_eq!(
+                scan(&disk_image(), capacity),
+                Err(RootFail::Geometry { capacity }),
+                "{capacity}"
+            );
+        }
+        assert_eq!(
+            RootFail::Geometry { capacity: 32 }.to_string(),
+            "root FAIL geometry capacity=32"
+        );
+        // The empty and the ragged device are still the same refusal.
+        assert_eq!(geometry(0), Err(RootFail::Geometry { capacity: 0 }));
+        assert_eq!(geometry(41), Err(RootFail::Geometry { capacity: 41 }));
+        assert_eq!(geometry(39), Err(RootFail::Geometry { capacity: 39 }));
+    }
+
+    #[test]
+    fn a_five_block_device_reaches_the_gpt_checks() {
+        // 40 sectors is exactly `TABLE_BLOCKS` blocks: every block the table
+        // read names exists, so the verdict is the table's, not the geometry's.
+        assert_eq!(40 / SECTORS_PER_BLOCK, TABLE_BLOCKS as u64);
+        assert_eq!(geometry(40), Ok(5));
+        let blank = vec![0u8; TABLE_BUF_BYTES];
+        assert_eq!(scan(&blank, 40), Err(RootFail::Gpt(GptError::Signature)));
+        // And the plan's disk is its 9472 blocks.
+        assert_eq!(geometry(DISK), Ok(9472));
+    }
+
+    #[test]
     fn a_short_buffer_is_a_refusal_not_a_panic() {
         let b = disk_image();
         for len in [0, 1, 511, 512, 1023] {
@@ -849,6 +954,93 @@ mod tests {
         assert_eq!(t.locate(req(1, 0, 0)), Ok(Located::Empty));
         // As on `drivers/memory`: the block of an empty request is not checked.
         assert_eq!(t.locate(req(0, 0, u64::MAX)), Ok(Located::Empty));
+    }
+
+    // ---- the no-root gate ----------------------------------------------------
+
+    #[test]
+    fn with_no_root_every_request_is_enxio_on_every_minor() {
+        // No table: no device, a failed bring-up, or any `root FAIL`. The root
+        // (0), the whole disk (1), the partitions (2, 3), a negative minor and
+        // the minor nobody has all answer alike.
+        for minor in [0, 1, 2, 3, -1, 129, 130, BDEV_MINOR_NONE] {
+            // A well-formed whole-block request.
+            assert_eq!(locate(None, req(minor, 4096, 0)), Err(ENXIO), "{minor}");
+            // A partial one, and one at a block only a large extent has.
+            assert_eq!(locate(None, req(minor, 32, 0)), Err(ENXIO), "{minor}");
+            assert_eq!(locate(None, req(minor, 4096, 8960)), Err(ENXIO), "{minor}");
+        }
+    }
+
+    #[test]
+    fn with_no_root_a_zero_length_request_is_enxio_not_empty() {
+        // MFS's root probe is exactly this request on minor 0, and reads the
+        // `ENXIO` as "no root here": a `0` would mount a disk with no root.
+        for minor in [0, 1, 2, 3, -1] {
+            assert_eq!(locate(None, req(minor, 0, 0)), Err(ENXIO), "{minor}");
+            assert_ne!(
+                locate(None, req(minor, 0, 0)),
+                Ok(Located::Empty),
+                "{minor}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_root_enxio_comes_before_every_other_refusal() {
+        // ENXIO, not EINVAL, for a request that is malformed as well.
+        for minor in [0, 1, 2, 3, -1] {
+            assert_eq!(locate(None, req(minor, -1, 0)), Err(ENXIO), "{minor}");
+            let over = i32::try_from(BDEV_MAX_IO).unwrap() + 1;
+            assert_eq!(locate(None, req(minor, over, 0)), Err(ENXIO), "{minor}");
+            assert_eq!(
+                locate(None, req(minor, 4096, u64::MAX)),
+                Err(ENXIO),
+                "{minor}"
+            );
+            let bad_grant = ReadRequest {
+                gid: -1,
+                ..req(minor, 0, 0)
+            };
+            assert_eq!(locate(None, bad_grant), Err(ENXIO), "{minor}");
+        }
+    }
+
+    #[test]
+    fn with_a_root_the_gate_answers_as_the_table_does() {
+        let t = minors(&disk_image());
+        for minor in [0, 1, 2, 3, 4, -1, 130, BDEV_MINOR_NONE] {
+            for len in [-1, 0, 32, 4096, 4097] {
+                for block in [0, 255, 256, u64::MAX] {
+                    let r = req(minor, len, block);
+                    assert_eq!(locate(Some(&t), r), t.locate(r), "{r:?}");
+                }
+            }
+        }
+        // The two answers MFS's prologue leans on, spelled out.
+        assert_eq!(locate(Some(&t), req(0, 0, 0)), Ok(Located::Empty));
+        assert_eq!(
+            locate(Some(&t), req(1, 4096, 0)),
+            Ok(Located::Io {
+                sector: 0,
+                len: 4096
+            })
+        );
+    }
+
+    #[test]
+    fn the_minor_nobody_has_is_outside_this_table() {
+        // `BDEV_MINOR_NONE` is what MFS's `bad-minor` and `wr-minor` denial
+        // probes name. A const assert above holds it past the table; this is
+        // the same fact as an answer, on a table with every slot used.
+        let full: Vec<Part> = (1..=128)
+            .map(|n| (n, if n == 1 { ROOT } else { OTHER }, 2048 + 8 * n as u64, 8))
+            .collect();
+        let t = minors(&table(&full));
+        assert_eq!(t.extent(129), Some(ext(256 + 128, 1)));
+        assert_eq!(t.extent(BDEV_MINOR_NONE), None);
+        assert_eq!(t.locate(req(BDEV_MINOR_NONE, 32, 0)), Err(ENXIO));
+        assert_eq!(t.locate(req(BDEV_MINOR_NONE, 32, 1)), Err(ENXIO));
     }
 
     #[test]

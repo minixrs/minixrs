@@ -60,7 +60,10 @@ pub const REQ_HEADER_LEN: usize = 16;
 
 /// The device's size in BDEV blocks, from its `capacity` in sectors. `None` for an
 /// empty device or one that is not a whole number of blocks: its last sectors
-/// would be unreachable through BDEV, and the root image is never such a size.
+/// would be unreachable through BDEV, and the disk `tools/mkimage` writes is
+/// never such a size (it is a whole number of mebibytes). `part::geometry`
+/// adds the other half of the geometry verdict: a device too short to hold a
+/// partition table.
 pub const fn device_blocks(capacity_sectors: u64) -> Option<u64> {
     if capacity_sectors == 0 || !capacity_sectors.is_multiple_of(SECTORS_PER_BLOCK) {
         return None;
@@ -120,9 +123,9 @@ pub enum WritePlan {
 }
 
 /// The plan for a write of `len` bytes. `len` has already been validated to be at
-/// most `BDEV_MAX_IO` (one block) by `server-rt`'s `bdev::validate_range` (through
-/// `part::MinorTable::locate`) before this is called, so everything that is neither empty nor whole is a partial
-/// block.
+/// most `BDEV_MAX_IO` (one block) by `server-rt`'s `bdev::validate_range`
+/// (through `part::locate`) before this is called, so everything that is
+/// neither empty nor whole is a partial block.
 pub const fn write_plan(len: usize) -> WritePlan {
     if len == 0 {
         WritePlan::Empty
@@ -305,7 +308,9 @@ mod tests {
     use minixrs_kernel_shared::callnr::BDEV_MAX_IO;
     use minixrs_kernel_shared::rootfs::{ROOTFS_IMAGE_BLOCKS, ROOTFS_IMAGE_BYTES};
 
-    /// The root image's size in sectors: what the disk boot's device reports.
+    /// The root image's size in sectors (2048): the size of the root
+    /// *partition*, and of 6.3's raw disk. The disk boot's device is the whole
+    /// GPT image and reports 75 776.
     const ROOT_SECTORS: u64 = (ROOTFS_IMAGE_BYTES / SECTOR_SIZE) as u64;
 
     /// A well-formed block-0 header for a device of `blocks` blocks.

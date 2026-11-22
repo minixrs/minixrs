@@ -32,6 +32,11 @@
 # (not just the first) before the non-zero exit, so one run shows the whole
 # story.
 #
+# A boot kind whose expected files hold NO marker at all fails (exit 1), before
+# the log is looked at: with nothing required, every log would pass. The
+# `reboot` kind is why -- it leans on one three-line file and nothing else, so
+# that file emptied, or reduced to comments, would otherwise read as PASS.
+#
 # grep needs -a (the log interleaves raw single-char tick bytes, so it reads
 # as binary) and -F (the marker files hold literal substrings, not regexes).
 
@@ -79,6 +84,18 @@ done
 
 fail=0
 checked=0
+required=0
+
+# How many markers this boot kind requires. Zero is a broken marker file, not a
+# boot that passed: refuse it here rather than report `PASS` on nothing.
+while IFS= read -r line; do
+    if [[ -z "$line" || "$line" == \#* ]]; then continue; fi
+    required=$((required + 1))
+done < <(cat "${EXPECTED[@]}")
+if [[ "$required" -eq 0 ]]; then
+    echo "FAIL: no required marker for a $BACKEND boot -- ${EXPECTED[*]} hold(s) none, so any log would pass" >&2
+    exit 1
+fi
 
 # Required markers: report every one that is missing.
 while IFS= read -r line; do

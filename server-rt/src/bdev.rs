@@ -63,13 +63,18 @@
 
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    BDEV_BLOCK_OFF, BDEV_BLOCK_SIZE, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF,
-    BDEV_MINOR_ROOT,
+    BDEV_BLOCK_OFF, BDEV_BLOCK_SIZE, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_NONE,
+    BDEV_MINOR_OFF, BDEV_MINOR_ROOT,
 };
 use minixrs_kernel_shared::error::{EINVAL, ENXIO};
 use minixrs_kernel_shared::grant::grant_valid;
 
 use crate::payload::{rd_i32, rd_u64};
+
+// `BDEV_MINOR_NONE` is the minor a denial probe names for "no such device". A
+// driver that calls `validate_read` has the root minor and no other, so the
+// probe's premise holds on it for as long as the two differ.
+const _: () = assert!(BDEV_MINOR_NONE != BDEV_MINOR_ROOT);
 
 /// A parsed `BDEV_READ` (or `BDEV_WRITE`) request. Field-for-field the payload,
 /// with no interpretation applied — [`validate_read`] and [`validate_range`] do
@@ -293,6 +298,16 @@ mod tests {
         for minor in [1i32, 7, -1, i32::MAX] {
             let req = parse_read(&request(minor, GOOD_GID, 32, 0));
             assert_eq!(validate_read(req, BLOCKS), Err(ENXIO), "minor {minor}");
+        }
+    }
+
+    #[test]
+    fn the_minor_nobody_has_is_enxio_whatever_else_the_request_says() {
+        // What MFS's `bad-minor` (a read) and `wr-minor` (a write, block 1)
+        // denial probes send a driver with one minor.
+        for (len, block) in [(32, 0), (32, 1), (0, 0), (-1, 0), (32, u64::MAX)] {
+            let req = parse_read(&request(BDEV_MINOR_NONE, GOOD_GID, len, block));
+            assert_eq!(validate_read(req, BLOCKS), Err(ENXIO), "{len} {block}");
         }
     }
 
