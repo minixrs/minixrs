@@ -110,10 +110,11 @@ minix.rs fileio: exit-reset FAIL
 [virtio] refuse
 [diag tty] getinfo.deny FAIL
 
-# Slice 6.2: virtio-blk's bring-up failed at the named step (spec T12), or the
-# device raised an interrupt nothing had asked for (`step=irq-extra`, reported
-# once and left masked). `[diag vblk] no device` is deliberately not forbidden:
-# it becomes meaningful when 6.3 has a second boot without the disk.
+# virtio-blk's bring-up failed at the named step (slice 6.2, spec T12), or the
+# device misbehaved while serving (`step=io`, slice 6.3: a queue fault, a failed
+# re-arm; the driver answers EIO from then on). `[diag vblk] no device` is not
+# forbidden HERE because the ramdisk boot requires it; the disk boot forbids it
+# in tests/qemu-boot.disk.forbidden.
 [diag vblk] virtio FAIL
 # Slice 6.3: vblk had a device and could not publish itself to DS, so MFS cannot
 # find it and the disk boot falls back (tests/qemu-boot.disk.forbidden catches

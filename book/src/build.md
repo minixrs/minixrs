@@ -37,7 +37,10 @@ timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release -
 `cargo run` invokes the cargo runner (`tools/qemu-run.sh`), which stages an ESP directory at
 `target/esp/`, drops Limine and the freshly built kernel in, and boots QEMU with the
 directory-as-FAT helper — no disk-image scripting needed (see [Boot](boot/overview.md) for the ESP
-layout and the exact QEMU command). Early serial output looks like:
+layout and the exact QEMU command). By default it also attaches the root filesystem image as a
+virtio disk, and MFS mounts its root through `virtio-blk`; `MINIXRS_ROOT=ramdisk` in the environment
+attaches no disk, and MFS mounts the ramdisk instead (see
+[The root backend](boot/overview.md#the-root-backend)). Early serial output looks like:
 
 ```text
 minix.rs booting on aarch64
@@ -83,6 +86,10 @@ The kernel's `build.rs` does two build-time jobs:
   crate), checks each ELF carries the minixrs identity note, packs them into the MXBI archive
   (`pack_mxbi`), and emits `BOOT_IMAGE_PATH` for the kernel to `include_bytes!`. There is no
   separate `mkbootimage` tool. See [Boot](boot/overview.md) for the archive format and module set.
+  The root filesystem image it packs as the `rootfs` module is also written, byte for byte, to
+  `rootfs.img` in the cargo profile directory that holds the kernel ELF — outside `OUT_DIR`, which
+  is unusual for a build script, because that is the one place the runner can find it from the
+  kernel path it is handed.
 
 ### Boot stubs (`boot-stubs` feature)
 
@@ -186,7 +193,7 @@ verification for kernel code, and CI smoke-boots it (below).
 | `deny`          | yes       | `cargo-deny` (licenses / bans, config in `deny.toml`)                                                                                      |
 | `geiger`        | advisory  | `unsafe` surface report (per package, kernel filtered out)                                                                                 |
 | `miri`          | advisory  | UB check on the host-testable crates                                                                                                       |
-| `qemu-smoke`    | yes       | boots the kernel and greps the serial log                                                                                                  |
+| `qemu-smoke`    | yes       | boots the kernel once per root backend and greps both serial logs                                                                          |
 | `coverage`      | yes       | `cargo-llvm-cov` → `lcov.info` (kernel excluded)                                                                                           |
 | `sonar`         | —         | feeds LCOV to SonarQube Cloud                                                                                                              |
 
@@ -196,11 +203,14 @@ files and run 8 nested server builds on a blocking gate. So **`clippy-kernel` is
 that compiles kernel code** (a local `cargo clippy --workspace` does lint it) — which is why it
 blocks and runs on a native `ubuntu-24.04-arm` runner. It passes no `--all-targets`: the kernel is
 `no_std`/`no_main`, so there is no test harness to build. `qemu-smoke` (also `ubuntu-24.04-arm`)
-boots for 45 s wall clock, requires exit status 124 — the `timeout(1)` status a healthy,
-never-exiting kernel must produce — and then runs `tools/check-boot-log.sh` against
-`tests/qemu-boot.expected` / `.forbidden`; keep those expectations timing-robust (first occurrences,
-never counts), because CI's TCG is slower than a local run. `Cargo.lock` is committed so `audit` /
-`deny` are reproducible, and third-party actions are pinned to commit SHAs.
+boots twice, `MINIXRS_ROOT=disk` and then `MINIXRS_ROOT=ramdisk`, each for 600 s wall clock, and
+requires exit status 124 of both — the `timeout(1)` status a healthy, never-exiting kernel must
+produce. It then runs `tools/check-boot-log.sh <backend> <log>` on each log, which checks the common
+marker files `tests/qemu-boot.expected` / `.forbidden` plus that backend's own pair
+(`tests/qemu-boot.disk.*` or `tests/qemu-boot.ramdisk.*`), and `tools/diff-backends.sh`, which
+requires the filesystem's own output to be the same on both. Keep the expectations timing-robust
+(first occurrences, never counts), because CI's TCG is slower than a local run. `Cargo.lock` is
+committed so `audit` / `deny` are reproducible, and third-party actions are pinned to commit SHAs.
 
 ## Generated C headers
 
@@ -252,10 +262,17 @@ some sharp edges worth knowing:
   downstream head-carved `[ksys …]` traces (`SYS_FORK` / `SYS_EXIT` are head-carved), or add a
   temporary `[DBG]` trace in `ipc::do_ipc` keyed on the caller's proc number — and remove it before
   committing.
-- **The acceptance harness.** `tools/check-boot-log.sh <log>` greps a captured log against
-  `tests/qemu-boot.expected` and `tests/qemu-boot.forbidden` — the same check the `qemu-smoke` CI
-  job runs. Update those marker files in the same change when trace formats or the boot roster
-  shift.
+- **The acceptance harness.** `tools/check-boot-log.sh <disk|ramdisk> <log>` greps a captured log
+  against `tests/qemu-boot.expected` and `tests/qemu-boot.forbidden`, which hold for every boot, and
+  against the named backend's own `tests/qemu-boot.<backend>.expected` / `.forbidden` — the same
+  check the `qemu-smoke` CI job runs on each of its two boots. The backend is the `MINIXRS_ROOT` the
+  boot ran with (`disk` when unset) and the argument is required: the common files alone cannot tell
+  a disk boot that silently fell back to the ramdisk from a healthy one. Given one log of each,
+  `tools/diff-backends.sh <disk-log> <ramdisk-log>` checks that nothing else differs: it takes each
+  log's `[diag vfs]` lines and `[diag mfs]` lines as two separate streams, keeps the first
+  occurrence of each line, and fails unless the VFS streams are identical and the MFS streams differ
+  only in the `bdev.ds ok name=` line that names the driver. Update the marker files in the same
+  change when trace formats or the boot roster shift.
 - **Quiet the stubs.** Stub C's `SYS_GETINFO` loop dominates the `[ipc]`/`[ksys]` sample stream.
   When you're chasing a server or init/musl issue, boot `--no-default-features` to drop the demo
   stubs A–D entirely (see [Boot stubs](#boot-stubs-boot-stubs-feature)) — the trace then shows only

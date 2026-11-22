@@ -43,8 +43,8 @@
 //! 8. `virtio ok features=… capacity=… qsize=… slot=…`.
 //!
 //! A failing step prints `virtio FAIL step=<step> …` and abandons the rest without
-//! resetting the device or releasing anything; a failure after `negotiate`
-//! succeeded also sets `FAILED` through `driver-rt`'s `fail`. No bring-up step
+//! resetting the device or releasing anything; a failure in step 5 or 6 (after
+//! `negotiate` succeeded) also sets `FAILED` through `driver-rt`'s `fail`. No bring-up step
 //! waits on a register or a ring. On success the transport, the queue, the
 //! interrupt line and the request buffers are kept in a [`Disk`] in `main`'s
 //! frame for the life of the process.

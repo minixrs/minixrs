@@ -226,10 +226,11 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
         // regression here turns CI red on the `bdev.ds ok` / `fs.ds ok` /
         // `vfs.ds ok` markers specifically rather than hanging.
         //
-        // virtio-blk sits **after memory and before mfs** (slice 6.2, spec T12).
-        // Nothing depends on that in 6.2 — it publishes nothing to DS — but 6.3's
-        // DS chain will (`vblk < mfs`, MFS's root-device lookup), so the row goes
-        // where it will have to be.
+        // virtio-blk sits **after memory and before mfs**, and since slice 6.3
+        // that is load-bearing: `vblk` publishes its name in `init_fresh` and
+        // MFS's root-device lookup must find it (`vblk < mfs`). Unlike the two
+        // links above, a miss here prints no FAIL line of its own — MFS takes
+        // `memory` — so it is the disk boot's marker set that catches it.
         ("minixrs-tty", workspace.join("drivers/tty"), 4), // TTY_PROC_NR
         ("minixrs-memory", workspace.join("drivers/memory"), 3), // MEM_PROC_NR
         (

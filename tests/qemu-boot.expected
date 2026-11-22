@@ -18,8 +18,8 @@ minix.rs booting on aarch64
 # MEM precedes MFS (MFS's `bdev.ds` lookup) and MFS precedes VFS (VFS's `fs.ds`
 # lookup). Both lookups fall back to boot_endpoint and say so, so a reordering
 # turns those two markers red rather than hanging the boot. vblk sits between
-# memory and mfs because 6.3's DS chain will need `vblk < mfs`; nothing depends
-# on it in 6.2.
+# memory and mfs because MFS looks `vblk` up first (slice 6.3); a miss there has
+# no FAIL line and is caught by tests/qemu-boot.disk.expected instead.
 [as] vm nr=7 ttbr0_pa=
 [as] ds nr=5 ttbr0_pa=
 [as] tty nr=4 ttbr0_pa=

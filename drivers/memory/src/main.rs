@@ -30,8 +30,8 @@
 //! `server-rt`'s `bdev` module has no way to express one.
 //!
 //! **An over-long or out-of-range request is `EINVAL`.** Not a short read (a
-//! filesystem cannot interpret half a block) and not `EIO` (which stays reserved
-//! for Phase 6's real media errors). See `server-rt`'s `bdev` module, which
+//! filesystem cannot interpret half a block) and not `EIO` (which means the device
+//! failed a well-formed request — something only `virtio-blk` can report). See `server-rt`'s `bdev` module, which
 //! `virtio-blk` shares so both drivers refuse identically.
 //!
 //! **`BDEV_WRITE` stores, as of slice 5.10a.** It was defined and answering

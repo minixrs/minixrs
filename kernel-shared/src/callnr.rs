@@ -1138,8 +1138,8 @@ pub const BDEV_RQ_BASE: i32 = 0xA00;
 /// push a retry loop into every FS caller for no gain. An out-of-range `block` is
 /// `EINVAL` for the same reason: a block device's size is known to its client
 /// (MFS reads it from the superblock's `s_zones`), so asking past the end is a
-/// caller bug rather than a media condition. `EIO` stays reserved for Phase 6's
-/// real media errors, where the request was well-formed and the *device* failed.
+/// caller bug rather than a media condition. `EIO` is the answer when the request
+/// was well-formed and the *device* failed (`virtio-blk`, since slice 6.3).
 pub const BDEV_READ: i32 = BDEV_RQ_BASE;
 
 /// Client → block driver: write one block. Payload is [`BDEV_READ`]'s, with the

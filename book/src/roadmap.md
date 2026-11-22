@@ -4,8 +4,8 @@
 > Phase 4, but Phase 5 has begun landing and the sections below are no longer uniformly future
 > tense: grants and the fault-safe copy engine are live (slices 5.1–5.2), and so is the first
 > user-space driver — TTY, which owns the PL011 and serves `CDEV_WRITE` (slice 5.3, see
-> [Drivers](drivers/overview.md)). Still absent: the musl fork, the VirtIO drivers' request paths
-> (virtio-blk boots and reports its disk's capacity from slice 6.2, but serves nothing yet), the
+> [Drivers](drivers/overview.md)). Still absent: the musl fork, the VirtIO drivers other than
+> virtio-blk (which serves the root filesystem's blocks from a disk since slice 6.3), the
 > file-system servers, and any x86_64 port. The rest of this book describes what *does* run; this
 > chapter describes where the project is headed. For live phase status and slice tracking, see the
 > repository's `docs/plan.md`.

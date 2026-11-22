@@ -177,9 +177,9 @@ unlike the ramdisk's length. Content, not size, is now what tells the two apart.
   `QueueNotify` store, so the ordering does not depend on what the caller did last.
 - **Queue fault (debt 4).** As B7.
 
-`driver-rt`'s `unsafe` stays confined to `mmio.rs`, `queue.rs` and now `dma.rs`; Miri runs over all
-three. The mock transport is extended to model a device that completes, fails and misbehaves — it
-must be able to say no.
+`driver-rt`'s `unsafe` is confined to `mmio.rs` and `dma.rs` (as built, `queue.rs` holds none once
+it takes handles); Miri runs over the crate. The mock transport is extended to model a device that
+completes, fails and misbehaves — it must be able to say no.
 
 ### B9 — the disk image
 
@@ -269,6 +269,13 @@ in the common set and therefore required of both.
 | a blank disk (`MINIXRS_VBLK_IMAGE`)   | `root FAIL label`; `bdev.root vblk rc=-6 fallback=memory`; ramdisk root        |
 | the root image attached `readonly=on` | mount and reads pass; the first write surfaces `EIO` in the `fs.write` markers |
 
+*Observed (2026-11-21).* Blank disk: as predicted, and the common marker set passes on the ramdisk
+root. `readonly=on`: QEMU lets the driver reach `DRIVER_OK` without `VIRTIO_BLK_F_RO` negotiated;
+mount and every read pass; each write fails per request with no `step=io` line (the device is not
+broken). The prediction's wording was loose: `fs.write` prints `FAIL short` with no errno. The lines
+that show the errno are `[diag mfs] bdev.partial FAIL write rc=-5` and `fileio: seek-hole FAIL open
+rc=-1 errno=5`. The image is byte-identical afterwards.
+
 **Mutations**, each applied, observed and reverted:
 
 | # | Mutation                                          | Predicted                                                          |
@@ -283,7 +290,22 @@ in the common set and therefore required of both.
 | 8 | skip the read in a partial write                  | host test; a marker only if MFS issues partial writes (to observe) |
 | 9 | drop `notify`'s fence; acknowledge after the walk | expected to move nothing under TCG — recorded as such              |
 
-Rows 7–9 are recorded honestly whichever way they come out.
+*Observed (2026-11-21), every boot with a healthy IPC counter:*
+
+| # | Observed                                                                                                                                                                                                                                         |
+| - | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1 | As predicted. `virtio ok`, then no `root` line; MFS prints only `sef ready`; 56 markers missing, none forbidden.                                                                                                                                 |
+| 2 | As predicted: `root FAIL tail label`, then the fallback. Three `blk.rs` host tests fail too.                                                                                                                                                     |
+| 3 | As predicted: exactly that pair, everything else passing.                                                                                                                                                                                        |
+| 4 | As predicted: the same pair.                                                                                                                                                                                                                     |
+| 5 | As predicted: `bdev.ds ok name=vblk`, `mount FAIL rc=-22`, no fallback line.                                                                                                                                                                     |
+| 6 | No `errno=5` anywhere; the write probes fail on read-back instead (`fs.write FAIL read off=0`, …). **`fs.trunc ok n=0` still passes** — a dropped truncate is invisible to its marker. Three `blk.rs` host tests fail too.                       |
+| 7 | A hang: completions take the immediate arm (B11.3). Disk boot identical to row 1's; ramdisk boot and TTY's `irq ok rounds=2` unmoved. **Rows 1 and 7 are indistinguishable by markers** — the driver prints nothing between its two reads.       |
+| 8 | **First run: nothing moved, anywhere** — no host test reaches `do_write`, and MFS issues no partial write that stores. The `bdev.partial` probe was added for it; second run: `bdev.partial FAIL clobbered` on the disk boot, ramdisk boot `ok`. |
+| 9 | Nothing moved, either half, as expected. Both orderings rest on reading alone.                                                                                                                                                                   |
+
+Rows 7–9 were to be recorded honestly whichever way they came out; row 8's prediction was the wrong
+one.
 
 ---
 

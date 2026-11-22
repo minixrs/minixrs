@@ -37,8 +37,8 @@
 //!
 //! **An out-of-range block is `EINVAL`, not `EIO`.** A block device's size is
 //! known to its client (MFS reads it from the superblock's `s_zones`), so asking
-//! past the end is a caller bug. `EIO` stays reserved for Phase 6's real media
-//! errors, where the request was well-formed and the device failed.
+//! past the end is a caller bug. `EIO` is for a device that failed a
+//! well-formed request, which `virtio-blk` reports and `memory` never can.
 
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
@@ -322,7 +322,7 @@ mod tests {
     fn an_over_long_write_is_refused_not_clamped() {
         // Same rule as the read, and for the same reason: a client that cannot
         // interpret a fraction of a block gains nothing from a short transfer, and
-        // EIO stays reserved for Phase 6's real media errors.
+        // EIO means the device failed, which is not what happened here.
         let m = request(BDEV_MINOR_ROOT, 5, BDEV_BLOCK_SIZE as i32 + 1, 0);
         assert_eq!(validate_read(parse_read(&m), 256), Err(EINVAL));
     }

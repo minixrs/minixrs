@@ -1619,10 +1619,11 @@ fn ds_key(name: &[u8]) -> [u8; SYS_GETINFO_NAME_LEN] {
 /// by. For `vblk` it is printed after the probe, so it never names a device this
 /// server then declined.
 ///
-/// **On fallback the grant issued to `vblk` stays in its pool slot**, unused and
-/// unrevoked: [`GRANT_SLOTS`] counts it. The [`Blocks`] returned is rebuilt over
-/// the same buffer — moved out of the declined token, so there is never a second
-/// path to it — with a fresh grant whose grantee is `memory`.
+/// **On fallback the grant issued to `vblk` is revoked**, so a driver this server
+/// declined keeps no access to the block buffer; its pool slot stays spent, and
+/// [`GRANT_SLOTS`] counts it. The [`Blocks`] returned is rebuilt over the same
+/// buffer — moved out of the declined token, so there is never a second path to
+/// it — with a fresh grant whose grantee is `memory`.
 #[cfg_attr(test, allow(dead_code))]
 fn root_device<'a>(
     grants: &mut GrantPool<GRANT_SLOTS>,

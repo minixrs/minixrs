@@ -25,7 +25,7 @@ milestone bar rather than after it.
 
 - [x] **6.1** — `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
 - [x] **6.2** — `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
-- [ ] **6.3** — `virtio-blk` behind BDEV + root backend selection
+- [x] **6.3** — `virtio-blk` behind BDEV + root backend selection
 - [ ] **6.4** — `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
 - [ ] **6.5** — TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
 - [ ] **6.6** — `virtio-console` as a second CDEV backend
@@ -201,10 +201,21 @@ setup path for a transport no current device needs.
 
 ### H5. The root backend is chosen by what is attached
 
-virtio-blk publishes itself to DS only when H2 found it a device and the device carries a minix.rs
-root. MFS asks DS for the virtio name first and the `memory` name second. So the QEMU command line
-is the selector: with a virtio disk attached the root is on it, without one the root is the ramdisk.
-No kernel command line, no compile-time feature, no ABI change.
+virtio-blk publishes itself to DS **whenever H2 found it a device**, in `init_fresh` and before
+anything that can block; whether the device carries a minix.rs root is decided afterwards. A driver
+with a device but no root answers `ENXIO` to every BDEV request. MFS asks DS for the virtio name
+first, **probes it with one zero-length `BDEV_READ`**, and takes the `memory` name when the lookup
+misses or the probe is refused. So the QEMU command line is the selector: with a virtio disk
+carrying a root attached the root is on it, otherwise the root is the ramdisk. No kernel command
+line, no compile-time feature, no ABI change.
+
+*Amended by 6.3 (its decision B1).* This paragraph first read "publishes itself to DS only when …
+the device carries a minix.rs root". That cannot be built: the root check is two device reads, each
+of which blocks in `RECEIVE` for a completion interrupt, and `init_fresh` — the only place a publish
+can precede MFS's lookup in the DS chain — must not block. Publishing after the check lets MFS look
+the name up before it exists and fall back on a healthy disk, depending on scheduling. The publish
+therefore says "a device is here" and the probe asks "is it a root"; the answer to the second is
+synchronous, because a `SENDREC` to a driver still in its root check simply waits.
 
 **The selection lives in MFS alone.** VFS also looks up `memory` in DS, but as the **character**
 peer behind `/dev/null` and `/dev/zero` (5.11), not as a block device. Pointing that lookup at
@@ -381,9 +392,10 @@ does not build. Correct it when the default boot first idles, at the latest Phas
 
 **Debt carried: three items from 6.1's execution.**
 
-- `deliver_irq`'s immediate-delivery path (owner `RECEIVE`-blocked when the line fires) is verified
-  by reading only. Its first real exercise is a device interrupt arriving while its driver is
-  blocked — 6.3 (virtio-blk) or 6.5 (TTY RX). That slice should name a mutation that moves on it.
+- ~~`deliver_irq`'s immediate-delivery path (owner `RECEIVE`-blocked when the line fires) is
+  verified by reading only.~~ **Paid by 6.3:** every virtio-blk completion takes it (the driver is
+  blocked in a source-filtered `RECEIVE` when the line fires), and 6.3's mutation 7 disables it and
+  hangs the disk boot at the root check while the ramdisk boot and TTY's `irq ok` are unmoved.
 - 6.5 must retire or rescope TTY's post-proof `irq FAIL extra` guard, since RX interrupts will
   legitimately arrive after the TX proof.
 - `Priv::irqs` is never cleared on exit or exec, contradicting I4 ("the allow-list follows the
@@ -449,22 +461,23 @@ mapping granule (none exists below 4 KiB), dropping a device from that boot, or 
    requires matching widths for narrower ones, so typed reads are needed.
 3. **Queue depth** (owner: 6.9). `VirtQueue`'s bookkeeping arrays are fixed at `QUEUE_SIZE` (8); a
    deeper receive queue needs a const generic.
-4. **No "device broken" signal** (owner: 6.3). A used index that runs away is not reported, and
-   `pop_used` silently skips ids that are out of range or not in flight.
-5. **`VirtQueue<'a>` holds `&mut [u8]` over memory the device writes** (owner: 6.3). Once a queue
-   outlives the bring-up this is a `noalias` question; a `NonNull` and a length would state the real
-   contract. 6.2 drops the `VirtQueue` before `queue_enable`; 6.3 must keep it. Related:
-   `VirtQueue::add` and `Transport::queue_enable` are safe functions taking raw physical addresses,
-   so safe code can direct the device at any physical page. 6.3, the first caller of `add`, either
-   marks them `unsafe` with a stated contract or takes a typed DMA-buffer handle derived from
-   `DmaRun`.
-6. **`notify` has no barrier of its own** (owner: 6.3). `add`'s fence orders the ring writes; the
-   `QueueNotify` MMIO write needs the contract stated or enforced when 6.3 first notifies.
-7. **The local iteration timeout** (owner: 6.3, which adds a second boot). The last required marker
-   landed at 73–86% of the 300 s local timeout in two runs (36–43% of CI's 600 s).
-8. **`[dma] vblk` does not assert `pa=`** (owner: 6.3). The marker is `[dma] vblk va=0xc0000000
-   pages=16`; `pa=` follows it and depends on the firmware memory map, so it stays unasserted. 6.3's
-   first read proves the run's content instead.
+4. ~~**No "device broken" signal** (owner: 6.3).~~ **Paid by 6.3:** `pop_used` returns `Result<_,
+   QueueFault>` (`BadId`, `NotInFlight`, `Runaway`), a fault is sticky, and the driver answers one
+   with `virtio FAIL step=io` and `EIO` from then on.
+5. ~~**`VirtQueue<'a>` holds `&mut [u8]` over memory the device writes** (owner: 6.3), and
+   `VirtQueue::add` / `Transport::queue_enable` are safe functions taking raw physical addresses.~~
+   **Paid by 6.3** with the typed handle: `driver-rt`'s `dma.rs` has one `unsafe` constructor
+   (`DmaRegion::new`, over the kernel's `GET_DMA` report), every `DmaBuf` is carved from it with
+   bounds checked, and the queue and transport take handles — no reference into device-written
+   memory exists and no physical address is typed by a driver.
+6. ~~**`notify` has no barrier of its own** (owner: 6.3).~~ **Paid by 6.3:** `notify` issues its own
+   `SeqCst` fence before the `QueueNotify` write. Verified by reading only — removing it moves
+   nothing under TCG (6.3's mutation 9).
+7. ~~**The local iteration timeout** (owner: 6.3, which adds a second boot).~~ **Paid by 6.3** by
+   measurement: 300 s stays. See 6.3's figures below.
+8. ~~**`[dma] vblk` does not assert `pa=`** (owner: 6.3).~~ **Paid by 6.3:** `root ok blocks=256
+   tail=1` is two blocks the device wrote through the run's physical address and the driver read
+   through its virtual one, so a `pa` that named other memory fails the root check.
 9. **A wrong register page and a missing `VERSION_1` are caught only indirectly** (owner: 6.4, which
    first requests an optional feature). On QEMU an empty slot reads good magic, so the `DeviceID`
    check is what refuses a page one off; and a driver that omits `VERSION_1` is *not* refused by
@@ -493,6 +506,58 @@ already produces — written to a file under `target/`. No partitions yet: minor
 — is **byte-identical** on the two backends apart from the one line naming the backend. Two boots,
 with and without the disk, each with a marker file that requires its own backend. A mutation that
 drops the `IRQ_ENABLE` hangs the disk boot at its second request.
+
+**Design:**
+[`2026-11-21-virtio-blk-design.md`](../superpowers/specs/2026-11-21-virtio-blk-design.md), decisions
+`B1…B11`. **Plan:** [`2026-11-21-virtio-blk.md`](../superpowers/plans/2026-11-21-virtio-blk.md),
+whose ledger records every ruling made during the run. **Status: done** (checked in the Status list
+above).
+
+**Measured (2026-11-21, QEMU 11.0.3, 300 s local boots).** At the merge base both of two boots pass
+148 checks, the last required marker at 48.1% and 55.7% of the log, the IPC counter at 32.3 M and
+31.9 M. On the branch the disk boot passes 157 checks and the ramdisk boot 152; the last required
+marker lands at 66.8% of the disk log and 48.1% of the ramdisk log (measured before the
+`bdev.partial` probe, which adds two device requests). The local 300 s and CI's 600 s per boot both
+stay; CI's job `timeout-minutes` goes 50 → 65 for the second boot. `[diag mfs]` and `[diag vfs]`,
+compared as each server's first-occurrence stream, are identical on the two backends apart from the
+`bdev.ds ok name=` line (`tools/diff-backends.sh`). Every completion interrupt of the driver's (proc
+11) is delivered immediately, none deferred.
+
+**Refusal boots.** A blank disk: `root FAIL label`, then MFS's `bdev.root vblk rc=-6
+fallback=memory` and a fully working ramdisk root; that log fails both backends' marker sets, as it
+should. The root image attached `readonly=on`: bring-up, the root check, the mount and every read
+pass, and each write fails with `EIO` (`bdev.partial FAIL write rc=-5`) without the device being
+marked broken; the image is unchanged afterwards.
+
+**Mutations.** Nine, each applied, booted and reverted; the full table is in the design's §3. Seven
+moved as predicted. Dropping `notify`'s fence and acknowledging after the walk each moved nothing
+under TCG, as expected. **Skipping the read in a partial write moved nothing at first** — no host
+test and no marker reached it — so the slice added the `bdev.partial` boot probe, and the mutation
+now gives `bdev.partial FAIL clobbered` on the disk boot.
+
+**Amendments to phase text.** H5's first paragraph is rewritten above (publish on a device, probe
+for a root). 6.1's `deliver_irq` debt and 6.2's debts 4–8 are marked paid where they are listed.
+
+**Debts carried.**
+
+1. **`VIRTIO_BLK_F_RO` is not negotiated** (owner: 6.4, the first slice to request an optional
+   feature — 6.2's debt 9 already sends it there). A read-only disk mounts as a root and fails at
+   the first write instead of being declined or mounted read-only.
+2. **The interrupt orderings are proved by reading only** (owner: whichever slice first boots under
+   a non-TCG accelerator or a multi-queue device). Acknowledge-before-walk and the fence before
+   `QueueNotify` cannot be made to fail under TCG.
+3. **`fs.trunc ok n=0` cannot see a dropped truncate** (owner: the next slice that touches `init`'s
+   write battery). With every device status read as success on a read-only disk it still passes; it
+   should read the file back.
+4. **A hang in the root check has one signature** (owner: none — recorded so the next reader does
+   not hunt for a difference). A lost re-arm and a lost immediate delivery both show `virtio ok`
+   followed by silence from `vblk` and MFS.
+5. **One request in flight, completed synchronously** (owner: the slice that first needs throughput
+   — none in Phase 6). The driver does not return to its main loop while a request is outstanding,
+   so a second client waits in `SENDREC`.
+6. **`vblk` is a DS name any server could publish** (owner: Phase 8, with the rest of the DS trust
+   model). MFS trusts whoever answers the name and the zero-length probe. Not reachable from user
+   processes, whose IPC mask excludes DS.
 
 The two write-back orderings [`phase-6-prep.md`](phase-6-prep.md) carries from Phase 5 are **not**
 discharged by this slice or by 6.4's persistence proof. `lseek` itself landed in pre-Phase-6 chunk 5
@@ -604,7 +669,8 @@ of a fixed-timeout log, against the same number at the merge base. Two pressures
 phase. H5 means **two boots** per CI run from 6.3 on, and the smoke job's wall clock is per boot.
 And real completion interrupts under TCG are slower than the ramdisk's `memcpy`. If two full boots
 do not fit, the answer to reach for first is a shorter marker set for the second backend, not a
-larger timeout.
+larger timeout. *6.3's outcome:* they fit — the per-boot timeout did not move, and the disk boot's
+last marker lands at about two thirds of the local log.
 
 ## Non-goals for Phase 6
 
