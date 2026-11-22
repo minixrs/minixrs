@@ -59,8 +59,11 @@ pub trait Transport {
     /// three addresses of its areas ([`VirtQueue::addrs`]).
     ///
     /// Taking the queue rather than a size and three numbers is what keeps this
-    /// safe to call: the addresses derive from the `DmaBuf` the queue was built
-    /// over, so the device cannot be aimed at memory outside the driver's DMA run.
+    /// safe to call: the addresses derive from the `QueueMem` the queue was built
+    /// over, which lies inside the driver's DMA run, so the rings themselves cannot
+    /// be placed outside it. Where the device goes from there is decided by the
+    /// descriptor table, which only the queue can write: `QueueMem` is disjoint
+    /// from every buffer handle a driver can hold (see `dma.rs`).
     fn queue_enable(&mut self, queue: u16, q: &VirtQueue);
     /// Tell the device `queue` has new available buffers.
     ///
@@ -419,7 +422,7 @@ mod tests {
 
         let host = HostDma::new(0x4800_0000);
         let layout = queue_layout(4).unwrap();
-        let q = VirtQueue::new(host.region.buf(4096, 4096).unwrap(), layout).unwrap();
+        let q = VirtQueue::new(host.queue_mem(4096, 4096), layout).unwrap();
         let mut t = MockTransport::new(VIRTIO_F_VERSION_1);
         t.queue_enable(0, &q);
         assert_eq!(

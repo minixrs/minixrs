@@ -21,10 +21,12 @@
 //!
 //! The crate's `unsafe` lives in two modules. `mmio.rs` holds the register
 //! accesses. `dma.rs` holds every access to memory shared with the device: one
-//! `unsafe` constructor ([`DmaRegion::new`]) adopts the kernel-reported run, and
-//! the bounds-checked [`DmaBuf`]s it hands out carry the volatile accessors.
-//! `queue.rs` contains no `unsafe` of its own — its ring accesses go through the
-//! `DmaBuf` it holds — and its tests are what drive `dma.rs` under Miri.
+//! `unsafe` constructor ([`DmaRegion::new`]) adopts the kernel-reported run, a
+//! queue's memory is split off it first as a [`QueueMem`] that no buffer handle
+//! can reach, and the bounds-checked [`DmaBuf`]s handed out of the remainder
+//! carry the volatile accessors. `queue.rs` contains no `unsafe` of its own — its
+//! ring accesses go through the handle it took out of its `QueueMem` — and its
+//! tests are what drive `dma.rs` under Miri.
 
 // `no_std` for the real (freestanding) build, but a normal host crate under
 // `cargo test` so the pure logic gets host-runnable unit tests (as `server-rt`).
@@ -36,7 +38,7 @@ pub mod mmio;
 pub mod queue;
 pub mod transport;
 
-pub use dma::{DmaBuf, DmaRegion, DmaRun};
+pub use dma::{DmaBuf, DmaRegion, DmaRun, QueueMem};
 pub use irq::IrqLine;
 pub use mmio::{MmioError, MmioTransport};
 pub use queue::{

@@ -34,7 +34,7 @@
 //! [`bring_up`] runs once and prints exactly one verdict line:
 //!
 //! 1. `GET_VIRTIO_MMIO` — `ENOENT` means no disk is attached: `no device`.
-//! 2. `GET_DMA`; check and clear the kernel's cookie.
+//! 2. `GET_DMA`; check the kernel's cookie (step 6's queue zeroes over it).
 //! 3. `MmioTransport::new` (magic, version 2); `DeviceID` must be 2.
 //! 4. `negotiate` with no optional feature — `VIRTIO_F_VERSION_1` alone.
 //! 5. Read `capacity`, generation-stable.
@@ -629,24 +629,23 @@ fn bring_up() -> Option<Disk> {
     // in this address space alone, and never unmaps them — a process holding a
     // virtio assignment may not exit or exec (T7). No Rust reference to that
     // memory exists or is ever made: this driver reaches it only through the
-    // `DmaRegion` built here and the `DmaBuf`s it hands out.
+    // `DmaRegion` built here and the `QueueMem` and `DmaBuf`s that come out of
+    // it. This is the only place the run is adopted.
     let region = unsafe { DmaRegion::new(run) };
     // The cookie is the run's first eight bytes; the stamp is 8-aligned (T7).
-    let with_cookie = region
-        .filter(|_| run.va.is_multiple_of(8))
-        .and_then(|region| Some((region.buf(0, 8)?, region)));
-    let Some((cookie, region)) = with_cookie else {
+    let Some(region) = region.filter(|_| run.va.is_multiple_of(8) && run.len >= 8) else {
         diag_fmt(format_args!(
             "virtio FAIL step=dma va={:#x} len={}",
             run.va, run.len
         ));
         return None;
     };
-    // Volatile byte copies through the `DmaBuf`: the memory is shared with the
-    // kernel's stamp and, from step 6 on, with the device. The kernel writes the
-    // word in its native order, which on aarch64 is little-endian.
+    // A volatile byte copy that makes no buffer handle: these eight bytes are in
+    // the page step 6 splits off for the queue, which no `DmaBuf` may ever cover.
+    // The kernel writes the word in its native order, which on aarch64 is
+    // little-endian.
     let mut word = [0u8; 8];
-    let read = cookie.read_into(0, &mut word);
+    let read = region.peek(0, &mut word);
     let word = u64::from_le_bytes(word);
     if !read || !cookie_ok(word, run.pa) {
         diag_fmt(format_args!(
@@ -655,10 +654,8 @@ fn bring_up() -> Option<Disk> {
         ));
         return None;
     }
-    if !cookie.write_from(0, &[0u8; 8]) {
-        // Unreachable: the same eight bytes were just read.
-        return None;
-    }
+    // The stamp is not cleared here: that would take a writable handle on the
+    // queue page. `VirtQueue::new` zeroes the queue's bytes, these among them.
 
     // Step 3: the transport, and that it is the disk.
     // SAFETY: `regs_va` is `VIRTIO_MMIO_PAGE_VA` plus the slot's 0x200-aligned
@@ -725,7 +722,7 @@ fn bring_up() -> Option<Disk> {
         return None;
     };
     let qlayout = queue_layout(qsize);
-    let (Some(qlayout), Some(vlayout)) = (qlayout, qlayout.and_then(|q| vblk_layout(&region, q)))
+    let (Some(qlayout), Some(vlayout)) = (qlayout, qlayout.and_then(|q| vblk_layout(region, q)))
     else {
         fail(&mut t);
         diag_fmt(format_args!(
@@ -734,8 +731,10 @@ fn bring_up() -> Option<Disk> {
         ));
         return None;
     };
-    // The queue lives on its own page of the run. Its three device-visible
-    // addresses come out of that `DmaBuf`, which is why enabling it is safe code.
+    // The queue lives on its own page of the run, split off before any buffer
+    // existed and moved into the queue here, so nothing else in this driver can
+    // write a descriptor. Its three device-visible addresses come out of that
+    // `QueueMem`, which is why enabling it is safe code.
     let Some(queue) = VirtQueue::new(vlayout.queue, qlayout) else {
         fail(&mut t);
         diag_fmt(format_args!("virtio FAIL step=queue size={qsize}"));

@@ -2,24 +2,32 @@
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! The split virtqueue: layout arithmetic and ring discipline (slice 6.2, spec T11).
 //!
-//! Everything here is pure logic over a [`DmaBuf`] the driver shares with the
+//! Everything here is pure logic over the [`QueueMem`] the driver shares with the
 //! device, so the tests play the device's half by writing the rings by hand
-//! through a second handle on the same memory. The queue holds a handle, not a
-//! `&mut [u8]`: the device writes that memory, so a unique reference was never a
-//! contract the driver could keep (slice 6.3, spec B8). Every ring access is an
-//! aligned volatile load or store made by `dma.rs`, bounds-checked there, so this
-//! module contains no `unsafe`.
+//! through a second handle on the same memory (which only this crate's tests can
+//! make). The queue holds a handle, not a `&mut [u8]`: the device writes that
+//! memory, so a unique reference was never a contract the driver could keep
+//! (slice 6.3, spec B8). Every ring access is an aligned volatile load or store
+//! made by `dma.rs`, bounds-checked there, so this module contains no `unsafe`.
 //!
 //! The device is untrusted, and a faulty one is *reported*, never skipped: a used
 //! element naming an out-of-range or not-in-flight head, or a used index further
 //! ahead than the chains in flight, makes [`VirtQueue::pop_used`] return a
 //! [`QueueFault`] (spec B7). The driver's own chain bookkeeping lives outside the
 //! shared memory, so a device that scribbles on the descriptor table cannot make a
-//! walk loop or leave the queue. Descriptors are filled from `DmaBuf`s, so safe
-//! code cannot aim the device at an address outside the driver's DMA run. Nothing
-//! here waits on the used ring.
+//! walk loop or leave the queue.
+//!
+//! Safe code cannot aim the device at an address outside the driver's DMA run,
+//! and that rests on two things together. Descriptors are filled only by
+//! [`VirtQueue::add`], from [`DmaBuf`]s, each a range inside the run. And nothing
+//! else in the driver can write the descriptor table: the queue's memory arrives
+//! as a `QueueMem`, which `DmaRegion::split_queue` guarantees is disjoint from
+//! every `DmaBuf` that can ever exist, which is neither `Copy` nor `Clone`, and
+//! which [`VirtQueue::new`] consumes. (Built over a plain `DmaBuf`, as 6.3 first
+//! had it, the caller could keep a copy and overwrite a descriptor's address
+//! through it.) Nothing here waits on the used ring.
 
-use crate::dma::DmaBuf;
+use crate::dma::{DmaBuf, QueueMem};
 use crate::transport::QueueAddrs;
 use core::sync::atomic::{Ordering, fence};
 
@@ -145,6 +153,8 @@ pub enum QueueFault {
 
 /// One split virtqueue over shared memory.
 pub struct VirtQueue {
+    /// The queue's memory, taken out of the [`QueueMem`] `new` consumed and never
+    /// handed on: no other handle on these bytes exists in the driver.
     mem: DmaBuf,
     layout: QueueLayout,
     /// Device-visible addresses of the three areas, validated by `new`.
@@ -167,7 +177,11 @@ impl VirtQueue {
     /// shorter than `layout.bytes`, or `mem` is not 16-aligned at both its virtual and
     /// its physical address (a torn index store must be impossible, and the device
     /// requires the alignment). Zeroes the queue memory and threads the free list.
-    pub fn new(mem: DmaBuf, layout: QueueLayout) -> Option<Self> {
+    ///
+    /// `mem` is consumed either way: queue memory is never handed back as something
+    /// a driver could write through.
+    pub fn new(mem: QueueMem, layout: QueueLayout) -> Option<Self> {
+        let QueueMem(mem) = mem;
         if queue_layout(layout.size) != Some(layout)
             || layout.size > QUEUE_SIZE
             || u64::from(mem.len()) < u64::try_from(layout.bytes).ok()?
@@ -241,7 +255,8 @@ impl VirtQueue {
     /// `None` if there are no buffers or too few free descriptors; nothing changes then.
     ///
     /// Each descriptor names its buffer's physical address and length, both taken from
-    /// the [`DmaBuf`]: the device is only ever pointed inside the driver's DMA run.
+    /// the [`DmaBuf`]: the device is only ever pointed inside the driver's DMA run,
+    /// and never at this queue's own memory, which no `DmaBuf` covers.
     pub fn add(&mut self, out: &[DmaBuf], inb: &[DmaBuf]) -> Option<u16> {
         let total = u16::try_from(out.len().checked_add(inb.len())?).ok()?;
         if total == 0 {
@@ -370,7 +385,7 @@ mod tests {
 
     /// The queue lives in page 0 of the host run; page 1 supplies request buffers.
     fn queue(host: &HostDma, l: QueueLayout) -> VirtQueue {
-        VirtQueue::new(host.region.buf(0, PAGE).unwrap(), l).unwrap()
+        VirtQueue::new(host.queue_mem(0, PAGE), l).unwrap()
     }
 
     /// A request buffer: `len` bytes at `off` in page 1.
@@ -426,6 +441,28 @@ mod tests {
     }
 
     #[test]
+    fn a_queue_over_split_off_memory_is_out_of_reach_of_every_buffer() {
+        // The production path: no test-only handle on the queue's bytes.
+        let l = layout8();
+        let host = HostDma::new(PA);
+        let dev = host.all();
+        let (mem, rest) = host.fresh_region().split_queue(PAGE).unwrap();
+        let mut q = VirtQueue::new(mem, l).unwrap();
+        assert_eq!(Some(q.addrs()), l.addrs(PA));
+        // The driver's largest possible buffer starts after the queue, so filling
+        // it cannot touch a descriptor...
+        let all = rest.buf(0, PAGE).unwrap();
+        assert_eq!(all.pa(), PA + PAGE as u64);
+        assert!(all.write_from(0, &[0xFF; PAGE]));
+        let head = q.add(&[rest.buf(0, 16).unwrap()], &[]).unwrap();
+        // ...and the address the device reads is the one `add` took from the buffer.
+        assert_eq!(rd64(&dev, usize::from(head) * 16), PA + PAGE as u64);
+        assert_eq!(rd32(&dev, usize::from(head) * 16 + 8), 16);
+        device_complete(&dev, &l, 0, u32::from(head), 0);
+        assert_eq!(q.pop_used(), Ok(Some((head, 0))));
+    }
+
+    #[test]
     fn layout_for_eight_entries_fits_one_page() {
         let l = layout8();
         assert_eq!(
@@ -471,7 +508,7 @@ mod tests {
         assert_eq!(l.size, 4);
         let host = HostDma::new(PA);
         let dev = host.all();
-        let mut q = VirtQueue::new(host.region.buf(0, l.bytes).unwrap(), l).unwrap();
+        let mut q = VirtQueue::new(host.queue_mem(0, l.bytes), l).unwrap();
         assert_eq!(q.size(), 4);
         let one = data(&host, 0, 1);
         let (start, rounds) = wrap_plan();
@@ -494,7 +531,7 @@ mod tests {
     fn new_rejects_a_short_buffer() {
         let l = layout8();
         let host = HostDma::new(PA);
-        let buf = |len| host.region.buf(0, len).unwrap();
+        let buf = |len| host.queue_mem(0, len);
         assert!(VirtQueue::new(buf(l.bytes - 1), l).is_none());
         assert!(VirtQueue::new(buf(l.bytes), l).is_some());
         let big = queue_layout(16).unwrap();
@@ -505,7 +542,7 @@ mod tests {
     fn new_rejects_an_unaligned_buffer() {
         let l = layout8();
         let host = HostDma::new(PA);
-        let at = |off| host.region.buf(off, l.bytes).unwrap();
+        let at = |off| host.queue_mem(off, l.bytes);
         assert!(VirtQueue::new(at(1), l).is_none());
         assert!(VirtQueue::new(at(8), l).is_none());
         assert!(VirtQueue::new(at(16), l).is_some());
@@ -517,7 +554,7 @@ mod tests {
         // are never 16-aligned together.
         let l = layout8();
         let host = HostDma::new(PA + 8);
-        let at = |off| host.region.buf(off, l.bytes).unwrap();
+        let at = |off| host.queue_mem(off, l.bytes);
         let (va_only, pa_only) = (at(0), at(8));
         assert!(va_only.va().is_multiple_of(16) && !va_only.pa().is_multiple_of(16));
         assert!(!pa_only.va().is_multiple_of(16) && pa_only.pa().is_multiple_of(16));
@@ -549,7 +586,8 @@ mod tests {
             },
             QueueLayout { size: 3, ..good },
         ] {
-            assert!(VirtQueue::new(host.all(), bad).is_none(), "{bad:?}");
+            let all = host.queue_mem(0, crate::dma::testmem::HOST_DMA_BYTES);
+            assert!(VirtQueue::new(all, bad).is_none(), "{bad:?}");
         }
     }
 
@@ -577,7 +615,7 @@ mod tests {
     fn the_queue_reports_its_size_and_device_addresses() {
         let l = layout8();
         let host = HostDma::new(PA);
-        let q = VirtQueue::new(host.region.buf(PAGE, PAGE).unwrap(), l).unwrap();
+        let q = VirtQueue::new(host.queue_mem(PAGE, PAGE), l).unwrap();
         assert_eq!(q.size(), 8);
         let base = PA + PAGE as u64;
         assert_eq!(
