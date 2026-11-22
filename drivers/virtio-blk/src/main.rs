@@ -116,6 +116,7 @@ minixrs_abi_note::brand!();
 
 mod blk;
 mod bringup;
+mod part;
 
 use bringup::{
     VBLK_CONFIG_CAPACITY_OFF, VBLK_IRQ_NOTIFY_ID, VBLK_WANTED_FEATURES, capacity_from_config,
@@ -501,13 +502,8 @@ fn read_hdr(disk: &Disk, hdr: &mut [u8; IMAGE_HDR_LEN]) -> Result<(), i32> {
 /// Print the `root FAIL` line for a failed label or block-count check.
 #[cfg_attr(test, allow(dead_code))]
 fn report_root_fail(why: blk::RootFail) {
-    match why {
-        blk::RootFail::Label => diag_fmt(format_args!("root FAIL label")),
-        blk::RootFail::Blocks { hdr, dev } => {
-            diag_fmt(format_args!("root FAIL blocks hdr={hdr} dev={dev}"))
-        }
-        blk::RootFail::TailLabel => diag_fmt(format_args!("root FAIL tail label")),
-    }
+    // The text is `RootFail`'s `Display`, the one place it is written.
+    diag_fmt(format_args!("{why}"));
 }
 
 /// Serve one `BDEV_READ`. Returns the reply `m_type`: the byte count read
