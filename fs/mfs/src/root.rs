@@ -5,7 +5,8 @@
 //! Two drivers can serve the root: `vblk` (virtio-blk, a disk) and `memory`
 //! (the ramdisk the kernel copies out of the boot archive). The server prefers
 //! the disk and falls back to the ramdisk, and this module is the whole of that
-//! preference — in the library because `main.rs` is compiled by no CI job.
+//! preference — in the library because no host test, Miri or coverage job sees
+//! `main.rs` (CI only lints it, with the `server` feature, and boots it).
 //!
 //! **A DS entry for `vblk` is not a root.** The driver publishes as soon as the
 //! kernel assigns it a device, before it has read a single sector, because

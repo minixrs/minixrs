@@ -23,8 +23,9 @@
 //! glue: SEF startup, the FS-band receive loop, two block-sized buffers, and
 //! the grants at either end of them. **Every line with a decision in it is in the
 //! library** (`proto.rs`, `walk.rs`, `root.rs`), because this file is behind
-//! `required-features = ["server"]` and therefore compiled by no CI job except the
-//! QEMU boot smoke test — see the note in `Cargo.toml`.
+//! `required-features = ["server"]` and therefore seen by no host test, Miri or
+//! coverage job — CI only lints it (a clippy step that passes the feature) and
+//! boots it in the QEMU smoke test. See the note in `Cargo.toml`.
 //!
 //! ## Five things worth knowing
 //!
@@ -124,12 +125,12 @@ use minixrs_server_rt::{
     sys_getinfo, sys_safecopy, wr_i32, wr_u64,
 };
 
-/// Simultaneously outstanding grants. Four are used on a healthy boot — the
-/// block buffer's, and the three malformed ones the denial battery needs — and
-/// five at the peak of the fallback boot, where the block-buffer grant issued to
-/// a `vblk` that then refused the root stays in its slot, unused, beside the one
-/// issued to `memory` (see [`root_device`]). The pool costs `N * 32` bytes of
-/// `main`'s frame, so 8 is headroom enough at 256 bytes.
+/// Simultaneously outstanding grants. Four at the peak of every boot — the
+/// block buffer's, and the three malformed ones the denial battery needs. The
+/// fallback boot peaks no higher: the block-buffer grant issued to a `vblk`
+/// that then refused the root is revoked, which frees its slot, before the one
+/// to `memory` is issued (see [`root_device`]). The pool costs `N * 32` bytes
+/// of `main`'s frame, so 8 is headroom enough at 256 bytes.
 const GRANT_SLOTS: usize = 8;
 
 /// Mode a newly created file gets: a regular file, `rw-r--r--`.
@@ -1514,8 +1515,8 @@ fn lookup(blocks: &mut Blocks<'_>, mount: &Mount, path: &str) -> Result<(u32, In
 /// there is no allocator here and no second buffer, so this asks about each block
 /// in turn and keeps nothing but a `u32`. [`walk::dir_size`] is what bounds the
 /// loop — a corrupt inode claiming `size = i32::MAX` would otherwise spin — and
-/// [`walk::next_dir_chunk`] is the round itself, in the library because this file
-/// is compiled by no CI job.
+/// [`walk::next_dir_chunk`] is the round itself, in the library because no host
+/// test, Miri or coverage job sees this file.
 #[cfg_attr(test, allow(dead_code))]
 fn find_component(
     blocks: &mut Blocks<'_>,
@@ -1620,8 +1621,9 @@ fn ds_key(name: &[u8]) -> [u8; SYS_GETINFO_NAME_LEN] {
 /// server then declined.
 ///
 /// **On fallback the grant issued to `vblk` is revoked**, so a driver this server
-/// declined keeps no access to the block buffer; its pool slot stays spent, and
-/// [`GRANT_SLOTS`] counts it. The [`Blocks`] returned is rebuilt over the same
+/// declined keeps no access to the block buffer, and the revoke frees its pool
+/// slot, so [`GRANT_SLOTS`] sees no more grants outstanding on this boot than on
+/// a healthy one. The [`Blocks`] returned is rebuilt over the same
 /// buffer — moved out of the declined token, so there is never a second path to
 /// it — with a fresh grant whose grantee is `memory`.
 #[cfg_attr(test, allow(dead_code))]

@@ -393,9 +393,12 @@ does not build. Correct it when the default boot first idles, at the latest Phas
 **Debt carried: three items from 6.1's execution.**
 
 - ~~`deliver_irq`'s immediate-delivery path (owner `RECEIVE`-blocked when the line fires) is
-  verified by reading only.~~ **Paid by 6.3:** every virtio-blk completion takes it (the driver is
-  blocked in a source-filtered `RECEIVE` when the line fires), and 6.3's mutation 7 disables it and
-  hangs the disk boot at the root check while the ramdisk boot and TTY's `irq ok` are unmoved.
+  verified by reading only.~~ **Paid by 6.3:** virtio-blk's completions take it whenever the driver
+  is already blocked in its source-filtered `RECEIVE` when the line fires — measured for the two
+  root-check completions (2 immediate, 0 deferred) — and 6.3's mutation 7 disables it and hangs the
+  disk boot at the root check while the ramdisk boot and TTY's `irq ok` are unmoved. A completion
+  landing between `notify` and the driver's receive takes the deferred arm instead, which is equally
+  correct.
 - 6.5 must retire or rescope TTY's post-proof `irq FAIL extra` guard, since RX interrupts will
   legitimately arrive after the TX proof.
 - `Priv::irqs` is never cleared on exit or exec, contradicting I4 ("the allow-list follows the
@@ -467,9 +470,10 @@ mapping granule (none exists below 4 KiB), dropping a device from that boot, or 
 5. ~~**`VirtQueue<'a>` holds `&mut [u8]` over memory the device writes** (owner: 6.3), and
    `VirtQueue::add` / `Transport::queue_enable` are safe functions taking raw physical addresses.~~
    **Paid by 6.3** with the typed handle: `driver-rt`'s `dma.rs` has one `unsafe` constructor
-   (`DmaRegion::new`, over the kernel's `GET_DMA` report), every `DmaBuf` is carved from it with
-   bounds checked, and the queue and transport take handles — no reference into device-written
-   memory exists and no physical address is typed by a driver.
+   (`DmaRegion::new`, over the kernel's `GET_DMA` report), the queue's memory is split off it as a
+   `QueueMem` no buffer handle can overlap, every `DmaBuf` is carved from the remainder with bounds
+   checked, and the queue and transport take handles — no reference into device-written memory
+   exists and no physical address is typed by a driver.
 6. ~~**`notify` has no barrier of its own** (owner: 6.3).~~ **Paid by 6.3:** `notify` issues its own
    `SeqCst` fence before the `QueueNotify` write. Verified by reading only — removing it moves
    nothing under TCG (6.3's mutation 9).
@@ -497,15 +501,18 @@ mapping granule (none exists below 4 KiB), dropping a device from that boot, or 
 **Scope:** `BDEV_READ` / `BDEV_WRITE` served from the request queue, completion by interrupt; the
 bounce path of H3; `EIO` for a device-reported failure, the errno
 [`servers-and-drivers.md`](../conventions/servers-and-drivers.md#block-drivers) reserved for it;
-H5's DS-name selection, **in MFS only** — VFS's `memory` lookup is the `/dev/null` / `/dev/zero`
-peer and does not move. The disk is a **raw, whole-disk** MinixFS image — the bytes `build_rootfs`
-already produces — written to a file under `target/`. No partitions yet: minor 0 is the whole image
-(H6), so H5's root check reads LBA 0.
+H5's DS-name selection (as built: the name plus a zero-length probe the driver answers — B1), **in
+MFS only** — VFS's `memory` lookup is the `/dev/null` / `/dev/zero` peer and does not move. The disk
+is a **raw, whole-disk** MinixFS image — the bytes `build_rootfs` already produces — written to a
+file under `target/`. No partitions yet: minor 0 is the whole image (H6), so H5's root check reads
+LBA 0.
 
 **Proof:** the full MFS battery — read, `fs.write ok`, create/truncate, the `/etc/holey` hole probe
-— is **byte-identical** on the two backends apart from the one line naming the backend. Two boots,
-with and without the disk, each with a marker file that requires its own backend. A mutation that
-drops the `IRQ_ENABLE` hangs the disk boot at its second request.
+— is **byte-identical** on the two backends apart from the one line naming the backend (as built and
+measured: `[diag mfs]` and `[diag vfs]`, each compared as that server's first-occurrence stream, are
+identical apart from the `bdev.ds ok name=` line; the raw interleaved logs are not byte-comparable).
+Two boots, with and without the disk, each with a marker file that requires its own backend. A
+mutation that drops the `IRQ_ENABLE` hangs the disk boot at its second request.
 
 **Design:**
 [`2026-11-21-virtio-blk-design.md`](../superpowers/specs/2026-11-21-virtio-blk-design.md), decisions
@@ -517,11 +524,14 @@ above).
 148 checks, the last required marker at 48.1% and 55.7% of the log, the IPC counter at 32.3 M and
 31.9 M. On the branch the disk boot passes 157 checks and the ramdisk boot 152; the last required
 marker lands at 66.8% of the disk log and 48.1% of the ramdisk log (measured before the
-`bdev.partial` probe, which adds two device requests). The local 300 s and CI's 600 s per boot both
-stay; CI's job `timeout-minutes` goes 50 → 65 for the second boot. `[diag mfs]` and `[diag vfs]`,
-compared as each server's first-occurrence stream, are identical on the two backends apart from the
-`bdev.ds ok name=` line (`tools/diff-backends.sh`). Every completion interrupt of the driver's (proc
-11) is delivered immediately, none deferred.
+`bdev.partial` probe, which adds three BDEV requests — read block 0, the partial write, read the
+tail back — and so four device transfers on `vblk`, where the partial write is a read and a write).
+The local 300 s and CI's 600 s per boot both stay; CI's job `timeout-minutes` goes 50 → 65 for the
+second boot. `[diag mfs]` and `[diag vfs]`, compared as each server's first-occurrence stream, are
+identical on the two backends apart from the `bdev.ds ok name=` line (`tools/diff-backends.sh`).
+Both completion interrupts counted for the driver (proc 11) — the root check's two, on a 90 s disk
+boot — were delivered immediately, none deferred. That run counted only those two; a completion
+landing before the driver's receive would be deferred, which is equally correct.
 
 **Refusal boots.** A blank disk: `root FAIL label`, then MFS's `bdev.root vblk rc=-6
 fallback=memory` and a fully working ramdisk root; that log fails both backends' marker sets, as it
@@ -558,6 +568,12 @@ for a root). 6.1's `deliver_irq` debt and 6.2's debts 4–8 are marked paid wher
 6. **`vblk` is a DS name any server could publish** (owner: Phase 8, with the rest of the DS trust
    model). MFS trusts whoever answers the name and the zero-length probe. Not reachable from user
    processes, whose IPC mask excludes DS.
+7. **The no-root fallback has no standing boot** (owner: 6.4, which builds disk images with a host
+   tool and can attach a rootless one cheaply). CI boots a good disk and no disk; the third state, a
+   disk without a root, was booted once by hand. Deleting the driver's no-root `ENXIO` arm, or a
+   root check that accepts a bad label, leaves both CI boots and `diff-backends.sh` green — mutation
+   5 was observed only on the blank-disk boot. `root::select` is host-tested; the driver's gate,
+   MFS's revoke-and-regrant and the `bdev.root vblk … fallback=memory` line are not.
 
 The two write-back orderings [`phase-6-prep.md`](phase-6-prep.md) carries from Phase 5 are **not**
 discharged by this slice or by 6.4's persistence proof. `lseek` itself landed in pre-Phase-6 chunk 5

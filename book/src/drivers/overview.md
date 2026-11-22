@@ -374,17 +374,21 @@ configuration does not offer.
   [DMA run](../memory/overview.md#the-dma-window) too, so no Rust reference to that memory may ever
   exist. `DmaRegion::new` is the one `unsafe` constructor: it adopts the run the kernel reported
   (refusing a null, empty or wrapping one from the numbers alone), on the caller's word that the run
-  stays mapped for the life of the process and is never referenced. `DmaRegion::buf(offset, len)`
-  then hands out bounds-checked `DmaBuf`s, each a virtual address, a physical address and a length;
-  a `DmaBuf`'s `read_into` and `write_from` are bounds-checked volatile copies, which is how a
-  driver touches a request header or a status byte without an `unsafe` block of its own.
+  stays mapped for the life of the process, is never referenced, and is adopted only once.
+  `DmaRegion::split_queue(len)` consumes the region and returns its first `len` bytes as a
+  `QueueMem` — a handle that is not `Copy` and offers no way to write — plus the remainder as a new
+  region; it refuses a region that has already handed out a buffer. `DmaRegion::buf(offset, len)` on
+  the remainder then hands out bounds-checked `DmaBuf`s, each a virtual address, a physical address
+  and a length; a `DmaBuf`'s `read_into` and `write_from` are bounds-checked volatile copies, which
+  is how a driver touches a request header or a status byte without an `unsafe` block of its own.
+  `DmaRegion::peek` reads the run without creating a handle.
 - **The split virtqueue** (`queue.rs`) is `queue_layout` / `clamp_queue_size` (pure arithmetic over
   a power-of-two size up to 32768; `clamp_queue_size` and `VirtQueue::new` cap it at `QUEUE_SIZE` =
   8 entries) and `VirtQueue`, the driver's half of the descriptor table and the available and used
-  rings, held as a `DmaBuf` rather than a `&mut [u8]` — the device writes that memory, so a unique
-  reference was never a contract the driver could keep. `VirtQueue::add` takes `DmaBuf`s
+  rings, built from a `QueueMem` rather than a `&mut [u8]` — the device writes that memory, so a
+  unique reference was never a contract the driver could keep. `VirtQueue::add` takes `DmaBuf`s
   (device-readable ones, then device-writable ones) and `Transport::queue_enable` takes the
-  `VirtQueue`, so every address the device is ever given comes out of a `DmaBuf`. The device is
+  `VirtQueue`, so every address the device is ever given comes out of a handle. The device is
   untrusted, and a faulty one is reported, never skipped: `pop_used` returns `Err(QueueFault)` for a
   used element naming an out-of-range chain head (`BadId`) or one that is not in flight
   (`NotInFlight`), and for a used index further ahead than the chains in flight (`Runaway`, which is
@@ -394,12 +398,13 @@ configuration does not offer.
   cannot make the walk loop or leave the queue.
 
 `unsafe` is confined to `mmio.rs` (volatile register accesses) and `dma.rs` (every access to the
-memory the device shares); `queue.rs` has none, because its ring accesses go through the `DmaBuf` it
+memory the device shares); `queue.rs` has none, because its ring accesses go through the handle it
 holds. Because `VirtQueue::new`, `add` and `queue_enable` take handles instead of addresses, all
 three are safe functions, and safe driver code cannot aim the device at memory outside its own run
-through them. That is a guard against mistakes and not a new boundary:
-[the trust model above](#what-the-boundaries-do-not-stop) is unchanged, and a driver can still
-overlap a data buffer with its own ring. `irq.rs` is the only piece that traps into the kernel. The
+through them — nor behind their backs, because the ring memory was split off before any buffer
+handle existed and no `DmaBuf` can overlap it. That is a guard against mistakes and not a new
+boundary: [the trust model above](#what-the-boundaries-do-not-stop) is unchanged, and two data
+buffers can still overlap each other. `irq.rs` is the only piece that traps into the kernel. The
 rest is host-tested against a mock transport and hand-written rings, with a second handle on the
 same memory playing the device's half.
 
@@ -472,7 +477,7 @@ still enters its receive loop, with no root to serve.
 
 The run's page 0 is the queue, page 1 holds the 16-byte request header with the one status byte
 right after it, and page 2 is the one 4096-byte bounce buffer — a BDEV block on its way to or from
-the device. The transport, the queue, the interrupt line and those three `DmaBuf`s are kept in
+the device. The transport, the queue, the interrupt line and the three buffer handles are kept in
 `main`'s frame for the life of the process.
 
 #### The root check
@@ -510,10 +515,12 @@ Every device transfer is one whole block, eight 512-byte sectors, through the bo
 4. Repeat 3 until the request's own chain head has come back, then read the status byte.
 
 The filter in step 3 is what lets "one request in flight" need no queue in the driver. A second
-client's request stays a blocked sender in the kernel, and an RS ping stays pending, until the main
-loop receives again. The wait is a blocked receive, never a poll. A device that never completes a
-request hangs the driver there, with its client in SENDREC behind it; RS's unanswered heartbeat is
-the only report, and there is no timeout because no user-space driver holds an alarm.
+client's request stays a blocked sender in the kernel until the main loop receives again. The wait
+is a blocked receive, never a poll. A device that never completes a request hangs the driver there,
+with its client in SENDREC behind it, and nothing reports it: RS's heartbeat covers DS, VM, SCHED,
+VFS and PM, not drivers. The symptom is silence — from `vblk` and from everything behind MFS, so the
+boot's marker set goes missing — and there is no timeout because no user-space driver holds an
+alarm.
 
 An interrupt that arrives in the main loop, with nothing in flight, gets the same acknowledge, walk
 and re-arm and is otherwise ignored — a configuration-change interrupt is legal. A *used element*
@@ -776,18 +783,19 @@ the band. Its own `mount ok root=1 bs=4096 blocks=256` marker, the superblock de
 block it asked for, is what retired the earlier `bdev.read`/`bdev.head` pair: a driver that replied
 `OK` to the wrong page, or returned the header for both, fails to decode there instead of printing a
 marker of its own. `bdev.tail` is the one thing `mount` cannot subsume — it reads the image's
-reserved *last* block, whose label differs from the header's, and is the only proof that the copy
-loop filling the ramdisk reached the end of the blob rather than looping over block 0.
-`bdev.partial` is the short-write contract: MFS reads block 0, which leaves a superblock in whatever
-buffer the driver staged it through, then writes the tail block's own first 16 bytes back to it as a
-partial `BDEV_WRITE`, reads the tail again, and requires the label intact and every byte past the
-header still zero. A sector driver that skipped the read half of its read-modify-write would have
-stored block 0's bytes there (`bdev.partial FAIL clobbered`); the first read is what makes that
-visible, and the probe checks that block 0 really is non-zero past its header rather than assuming
-it. The ten refusals in `bdev.deny` include the one grant check slice 5.3 could not reach — a
-`CPF_READ`-only grant used as a copy *destination* — plus, since slice 5.10a, two `BDEV_WRITE`
-probes aimed at the write path this driver now really implements, refused by the kernel's
-grant-direction and minor checks rather than by a since-retired `EROFS` stub.
+reserved *last* block, whose label differs from the header's, and so proves that a request's `block`
+field reaches the right block of the device. It is not the proof that the kernel's copy loop reached
+the end of the blob: that is the driver's own `tail=1` (above), and on a disk boot `bdev.tail` never
+touches the ramdisk at all. `bdev.partial` is the short-write contract: MFS reads block 0, which
+leaves a superblock in whatever buffer the driver staged it through, then writes the tail block's
+own first 16 bytes back to it as a partial `BDEV_WRITE`, reads the tail again, and requires the
+label intact and every byte past the header still zero. A sector driver that skipped the read half
+of its read-modify-write would have stored block 0's bytes there (`bdev.partial FAIL clobbered`);
+the first read is what makes that visible, and the probe checks that block 0 really is non-zero past
+its header rather than assuming it. The ten refusals in `bdev.deny` include the one grant check
+slice 5.3 could not reach — a `CPF_READ`-only grant used as a copy *destination* — plus, since slice
+5.10a, two `BDEV_WRITE` probes aimed at the write path this driver now really implements, refused by
+the kernel's grant-direction and minor checks rather than by a since-retired `EROFS` stub.
 
 Every one of those markers is identical with and without the `boot-stubs` feature **and** with and
 without the musl sysroot, and all but the `bdev.ds` line's `name=` are identical on both root

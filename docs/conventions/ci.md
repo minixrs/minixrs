@@ -3,8 +3,10 @@
 What runs on every PR, which gates block, and what to run locally before pushing. See
 [`build-and-boot.md`](./build-and-boot.md) for the commands themselves.
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Eleven gates run in parallel —
-`fmt`, `clippy`, `clippy-kernel` (aarch64 kernel lint + compile), `c-headers` (regenerate + `clang
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. It has thirteen jobs: eleven
+gates, listed here, plus two that are not gates of their own — `boot-scope`, the docs-only
+classifier `qemu-smoke` waits on (below), and `sonar`. The eleven gates run in parallel — `fmt`,
+`clippy`, `clippy-kernel` (aarch64 kernel lint + compile), `c-headers` (regenerate + `clang
 -fsyntax-only` the generated C ABI headers), `audit` (cargo-audit), `deny` (cargo-deny, config in
 `deny.toml`), `dco` (DCO sign-off, PR-only), `geiger`, `miri`, `qemu-smoke` (aarch64 QEMU boot
 smoke), `coverage` (cargo-llvm-cov → `lcov.info`) — then a `sonar` job feeds the LCOV report to
@@ -87,9 +89,9 @@ whole-project picture.
 - **The two boots run in sequence in one job, not as a matrix.** A matrix would rename the required
   "QEMU boot smoke" check, which needs a branch-protection edit, and two QEMUs on one runner would
   starve each other. The price is the job's `timeout-minutes`, **65** since slice 6.3 (it was 50):
-  each boot burns its full timeout, so a second one is ten more minutes on top of the build headroom
-  the 50 was sized for. Whoever raises the per-boot timeout raises `timeout-minutes` in the same
-  edit, by twice the difference
+  each boot burns its full timeout, so a second one is ten more minutes, and 65 keeps the build
+  headroom the 50 was sized for plus five. Whoever raises the per-boot timeout raises
+  `timeout-minutes` in the same edit, by twice the difference
 - **A slice can break the boot-timing budget, and "it passes locally" is not the check.** The budget
   was 45 s until slice 5.9, 120 s until 5.10a, and 240 s until 5.10b; **every raise has had the same
   cause and the same evidence**, and the number will move again. 5.9: `hello` stopped being a memcpy
@@ -195,8 +197,9 @@ The mitigation is local. Run the **three-boot matrix** when touching `build_c_*`
   `mmap ok`, `malloc ok`), and VFS's `[diag vfs] pm-exit reset closed=1`, since `worker` leaves no
   descriptor open for the exit reset to close. The two exec-trace markers still match, because
   `worker` is exec'd under those names. Any *other* missing marker is a real regression — and a
-  **135/135 on row 3 means the fallback did not engage**, so what you measured was the musl row
-  again. Rows 1 and 2 must be fully clean.
+  **full `PASS` on row 3 (every check of the common and backend sets, none missing) means the
+  fallback did not engage**, so what you measured was the musl row again. Rows 1 and 2 must be fully
+  clean.
 
 Identify the flavour from the **build-script warnings**, never from the boot log: the C markers are
 byte-identical across the SDK and musl flavours, so the log physically cannot tell them apart.

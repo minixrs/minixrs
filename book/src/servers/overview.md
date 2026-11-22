@@ -44,7 +44,7 @@ take; it has to find a home outside that span.
 | `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC`                                                                    |
 | `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE`                                                            |
 | `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` (MFS)                                  |
-| `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`)                                                                   |
+| `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`, `virtio-blk`)                                                     |
 | `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY, memory driver) / `CDEV_READ` (memory driver; TTY answers `ENOSYS` until Phase 6) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK`                                                                |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init)                                                                            |
@@ -386,7 +386,8 @@ with step 1 (see [the drivers chapter](../drivers/overview.md#virtio-blk)). What
 disk carries a root is the driver's *answer*, and the probe in step 2 cannot be answered early: the
 SENDREC blocks in the kernel until the driver reaches its receive loop, which is after its own root
 check. The decision itself — only `0` selects the disk — is `root::select`, in the library, because
-`main.rs` is compiled by no CI job but the boot.
+CI lints `main.rs` (a clippy step passes the `server` feature) and boots it, but no host test, Miri
+or coverage job sees it.
 
 A fallback is quiet by design, which is what makes it dangerous: a broken virtio path that fell back
 to the ramdisk would pass every filesystem marker. The boot-log checker therefore takes the backend
@@ -432,12 +433,13 @@ still fail on the client's own account, if the buffer it granted was unmapped. L
 against such a buffer leaked one zone per call (each `EFAULT`, none rolled back, for the reason
 above), which exhausted the image's free zones in under 200 calls and left every write after that —
 including a legitimate one — answering `ENOSPC` for the rest of the boot: a reachable denial of
-service, not a benign leak. The fix is a second `.bss` staging buffer (`Stage`) that `do_write`
-fills from the client's grant **before** anything is allocated, so no client-controlled failure can
-occur after an allocation. Note what this is not: it is a *restaging*, not a rollback — the
-corruption case above (an indirect slot's already-existing block) is exactly why rolling back was
-never the right fix. The `fs.leak` boot probe proves the closure directly: 256 writes aimed at an
-unmapped buffer must all answer `EFAULT` and allocate nothing, and a real write must still succeed
+service, not a benign leak. The fix is a second block-sized staging buffer (`Stage`, a `main`-frame
+local like the block buffer; it was a `.bss` static when the slice landed) that `do_write` fills
+from the client's grant **before** anything is allocated, so no client-controlled failure can occur
+after an allocation. Note what this is not: it is a *restaging*, not a rollback — the corruption
+case above (an indirect slot's already-existing block) is exactly why rolling back was never the
+right fix. The `fs.leak` boot probe proves the closure directly: 256 writes aimed at an unmapped
+buffer must all answer `EFAULT` and allocate nothing, and a real write must still succeed
 afterwards.
 
 The write path checks zone numbers against a **lower bound the read path deliberately lacks**

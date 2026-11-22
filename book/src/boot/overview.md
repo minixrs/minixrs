@@ -44,10 +44,13 @@ kmain()  (kernel/src/main.rs)
 User processes run  (scheduler picks the highest-priority runnable proc)
 ```
 
-There is no hand-ordered "start DS, then RS, then PM, …" sequence: `userland_bootstrap` loads every
-boot module and marks it runnable, and the scheduler takes over from there. Servers rendezvous at
-run time — each publishes its endpoint to DS at startup and looks the others up by name — so boot
-order does not matter (see [Servers](../servers/overview.md)).
+There is no hand-ordered "start DS, then RS, then PM, …" sequence in the kernel:
+`userland_bootstrap` loads every boot module and marks it runnable, and the scheduler takes over
+from there. Servers rendezvous at run time — each publishes its endpoint to DS at startup and looks
+the others up by name (see [Servers](../servers/overview.md)). That does not make the order
+irrelevant: nothing guarantees a publish precedes the lookup that needs it, and it holds only
+because of the order the modules are packed in, which is therefore load-bearing — see
+[Boot modules](#boot-modules).
 
 ### CPU state at kernel entry
 
@@ -83,13 +86,15 @@ target binary — the mechanism `worker` rides on.
 
 ### Boot modules
 
-The archive holds thirteen modules (`kernel/build.rs`'s `servers` array). Eleven have non-negative
-proc numbers and are loaded into a process slot at boot; `worker` and `bigprog` (a fixture for the
-user VA map) are tagged with the sentinel `EXEC_ONLY_PROC_NR = -1`, so the loader skips them — they
-have no boot slot and exist only to be resolved by name at `exec` time. The array's order is the
-order the boot log's `[as]` lines appear in, and it is load-bearing: DS first so every later publish
-lands, then each server before its first client's lookup (`ds < tty < memory < vblk < mfs < vfs <
-pm`). `vblk` sits before `mfs` because MFS asks DS for it first when it
+The archive holds fourteen modules: thirteen ELFs (`kernel/build.rs`'s `servers` array) and one that
+is not a program at all, the `rootfs` filesystem image. Eleven of the ELFs have non-negative proc
+numbers and are loaded into a process slot at boot; `worker` and `bigprog` (a fixture for the user
+VA map) are tagged with the sentinel `EXEC_ONLY_PROC_NR = -1`, so the loader skips them — they have
+no boot slot and exist only to be resolved by name at `exec` time. `rootfs` carries `-1` too and is
+never loaded as a process: the kernel copies it into the ramdisk. The array's order is the order the
+boot log's `[as]` lines appear in, and it is load-bearing: DS first so every later publish lands,
+then each server before its first client's lookup (`ds < tty < memory < vblk < mfs < vfs < pm`).
+`vblk` sits before `mfs` because MFS asks DS for it first when it
 [chooses its root device](../servers/overview.md#choosing-the-root-device), and a `vblk` that had
 not yet published would read as "no disk attached".
 
@@ -108,6 +113,7 @@ not yet published would read as "no disk attached".
 | `init`    |      10 | yes — becomes PID 1   |
 | `worker`  |      −1 | no — exec-only target |
 | `bigprog` |      −1 | no — exec-only target |
+| `rootfs`  |      −1 | no — not an ELF       |
 
 Proc number 8 (`PFS`) is reserved in `kernel-shared/src/com.rs` for a server that does not yet
 exist, and so are the three virtio driver slots that have no ELF: 12 (`vcon`), 13 (`vinput`) and 14

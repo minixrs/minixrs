@@ -33,7 +33,7 @@ cargo kernel-aarch64
 # the one CI builds), `hello: errno ok` -- the last required marker -- sits at
 # 26.90% of a 240 s log before slice 5.10b and 61.61% after it, i.e. ~148 s in.
 # Re-measure rather than trusting this paragraph: `grep -abo <marker> log | head -1`
-# divided by `wc -c log`, and raise the budget when the fraction climbs. The two
+# divided by `wc -c log`, and raise the budget when the fraction climbs. The three
 # things that move it most are the `hello` flavour (~47 KB with the SDK vs ~200 KB
 # with in-tree musl, all of it read through MFS and VFS), the root backend (below:
 # a disk boot completes every block request by a real interrupt instead of a

@@ -111,7 +111,14 @@ case "$ROOT_BACKEND" in
             -device "virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.$BUS_VBLK"
         )
         ;;
-    ramdisk) ;;
+    ramdisk)
+        # The disk knobs mean nothing here, and a refusal boot started with the
+        # wrong backend would otherwise run as a plain, passing ramdisk boot.
+        if [[ -n "${MINIXRS_VBLK_IMAGE:-}" || -n "${MINIXRS_VBLK_DRIVE_OPTS:-}" ]]; then
+            echo "error: MINIXRS_VBLK_IMAGE / MINIXRS_VBLK_DRIVE_OPTS need MINIXRS_ROOT=disk" >&2
+            exit 64
+        fi
+        ;;
     *)
         echo "error: MINIXRS_ROOT must be 'disk' or 'ramdisk', got '$ROOT_BACKEND'" >&2
         exit 64

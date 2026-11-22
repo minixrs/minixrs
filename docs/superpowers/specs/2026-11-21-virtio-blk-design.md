@@ -26,7 +26,7 @@ number, endpoint or errno.
 | `drivers/driver-rt`        | `VirtQueue<'a>` over `&mut [u8]`; `add` takes raw `(pa, len)` | queue over `NonNull`; typed DMA handles; a queue-fault signal; `notify` carries its barrier  |
 | `server-rt`                | `cdev.rs` (shared CDEV parse)                                 | `+ bdev.rs`: the BDEV parse **and** request validation, moved from `drivers/memory`          |
 | `drivers/memory`           | owns `bdev.rs` parse + validate + geometry                    | keeps geometry; parse and validate come from `server-rt::bdev`                               |
-| `fs/mfs` (`main.rs` only)  | resolves `memory` through DS                                  | resolves `vblk` first, probes it, falls back to `memory` (B2). Library half untouched        |
+| `fs/mfs` (+ `root.rs`)     | resolves `memory` through DS                                  | resolves `vblk` first, probes it, falls back to `memory` (B2). Library gains `root.rs` only  |
 | `kernel-shared`            | `BDEV_MINOR_RAMDISK`                                          | `+ BDEV_MINOR_ROOT`, an alias with the same value (H6)                                       |
 | `kernel/build.rs`          | packs the `rootfs` blob into the archive                      | also writes the same bytes to `rootfs.img` beside the kernel ELF (B9)                        |
 | `tools/qemu-run.sh`        | always attaches a blank 2560-sector disk                      | `MINIXRS_ROOT=disk` (default) attaches a fresh copy of `rootfs.img`; `ramdisk` attaches none |
@@ -82,9 +82,11 @@ bdev.ds ok name=vblk ep=…` or `name=memory ep=…`. That is the single line th
 differs by. Every later request uses `BDEV_MINOR_ROOT`.
 
 The change is in `main.rs`'s prologue and `Blocks`' endpoint field name. No FS-band handler, no
-library module and no VFS line moves. On fallback MFS revokes the grant it issued to `vblk`, so a
-driver that declined holds nothing over the block buffer; the fallback boot peaks at five of the
-eight `GRANT_SLOTS`.
+existing library module and no VFS line moves (as built: the library gained one module, `root.rs`,
+which holds the selection decision so that it is host-tested). On fallback MFS revokes the grant it
+issued to `vblk`, so a driver that declined holds nothing over the block buffer. (As built: the
+revoke frees the pool slot, so the fallback boot peaks at four of the eight `GRANT_SLOTS`, the same
+as a healthy boot — not the five first written here.)
 
 ### B3 — one request in flight, waited for with a source-filtered receive
 
@@ -97,10 +99,11 @@ eight `GRANT_SLOTS`.
 4. repeat 3 until the request's own head has come back.
 
 Receiving from `HARDWARE` alone is what makes "one in flight" need no queue in the driver: a second
-client's request stays queued in the kernel as a blocked sender, and an RS ping stays pending, until
-the main loop's `sef.receive` runs again. A device that never completes hangs the driver here, with
-its client in SENDREC behind it; RS's unanswered heartbeat is the only report. There is no timeout
-because no user-space driver holds an alarm yet.
+client's request stays queued in the kernel as a blocked sender until the main loop's `sef.receive`
+runs again. A device that never completes hangs the driver here, with its client in SENDREC behind
+it, and it has no report of its own (as built: RS pings only DS, VM, SCHED, VFS and PM, so there is
+no heartbeat to go unanswered; the symptom is silence from `vblk` and everything behind MFS — the
+marker set going missing). There is no timeout because no user-space driver holds an alarm yet.
 
 Bring-up's root check (B6) uses the same `serve()` path, so the interrupt path is proved before the
 first client request and by the same code.
@@ -177,6 +180,12 @@ unlike the ramdisk's length. Content, not size, is now what tells the two apart.
   `QueueNotify` store, so the ordering does not depend on what the caller did last.
 - **Queue fault (debt 4).** As B7.
 
+*As built after the whole-branch review:* the queue's memory is not a `DmaBuf`. A `Copy` handle over
+the rings let safe code keep a copy, overwrite a descriptor's address and aim the device anywhere,
+which is the thing this decision said could not happen. `DmaRegion::split_queue` now consumes the
+region and returns a non-`Copy`, unwritable `QueueMem` plus the remainder, and refuses a region that
+has already lent a buffer; `VirtQueue::new` takes the `QueueMem`.
+
 `driver-rt`'s `unsafe` is confined to `mmio.rs` and `dma.rs` (as built, `queue.rs` holds none once
 it takes handles); Miri runs over the crate. The mock transport is extended to model a device that
 completes, fails and misbehaves — it must be able to say no.
@@ -251,12 +260,16 @@ that first produces one.
 | -------------------------------------------------------------- | ---------------- |
 | block → sector arithmetic, including overflow                  | `virtio-blk`     |
 | request header encoding; status byte → errno, `0xFF` → `EIO`   | `virtio-blk`     |
-| the partial-write plan (read, overlay, write)                  | `virtio-blk`     |
+| `write_plan`'s three shapes (not the read-overlay-write I/O)   | `virtio-blk`     |
 | root-check decisions, each failure                             | `virtio-blk`     |
 | `DmaRegion::buf` bounds; `add` with typed buffers              | `driver-rt`      |
 | `QueueFault` for out-of-range, stale and unsolicited used ids  | `driver-rt`      |
 | the moved BDEV parse/validate tests, unchanged                 | `server-rt`      |
 | MFS's device-selection decision (`0`, `ENXIO`, other, DS miss) | `fs/mfs` library |
+
+(As built: the `write_plan` row covers only the classification of a length as empty, whole or
+partial. The read-overlay-write sequence itself has no host test; the `bdev.partial` boot probe
+proves it — mutation 8, below.)
 
 **Boots.** Both pass `check-boot-log.sh` with their backend, and `diff-backends.sh` passes across
 them. The full MFS battery — read, `fs.write ok`, create/truncate, the `/etc/holey` hole probe — is
@@ -315,9 +328,10 @@ one.
   use, the trust model unchanged); the MFS chapter (device selection); build-and-boot pages (the two
   backends). Each touched chapter re-read end to end.
 - **`docs/conventions/`**: `servers-and-drivers.md` (block drivers: `EIO` is now real, the shared
-  validation, `driver-rt`'s third `unsafe` module, the DS chain's `vblk < mfs` link now
-  load-bearing, the no-root `ENXIO` rule); `testing-and-markers.md` (per-backend marker files);
-  `build-and-boot.md` and `ci.md` (two boots, `MINIXRS_ROOT`, the measured budget).
+  validation, `driver-rt`'s `unsafe` modules — as built two, `mmio.rs` and `dma.rs`, not the third
+  first written here — the DS chain's `vblk < mfs` link now load-bearing, the no-root `ENXIO` rule);
+  `testing-and-markers.md` (per-backend marker files); `build-and-boot.md` and `ci.md` (two boots,
+  `MINIXRS_ROOT`, the measured budget).
 - **`docs/plans/phase-6-virtio.md`**: H5's operative paragraphs **rewritten** per B1; 6.2's debts
   4–8 marked paid; 6.3's measurements, refusal boots and mutation record; the box checked.
   `docs/plan.md`: the box.
@@ -335,7 +349,7 @@ one.
 | 1 | **B1 amends H5:** publish on device, `ENXIO` on no root, MFS probes                             | H5 as written needs a blocking DS lookup — a DS change and a new request; MFS's prologue is rewritten again |
 | 2 | B5: BDEV validation shared in `server-rt`                                                       | move two functions back; the two drivers' refusals must then be kept identical by hand                      |
 | 3 | B3: source-filtered receive, no queue, no timeout                                               | a second BDEV client that must not wait needs a pending-request slot in the driver                          |
-| 4 | B4: partial writes are read-modify-write rather than `EINVAL`                                   | refusing them changes `memory` too, and the BDEV contract in `abi.md`                                       |
+| 4 | B4: partial writes are read-modify-write rather than `EINVAL`                                   | refusing them changes `memory` too, and the BDEV short-write contract (drivers chapter; not in `abi.md`)    |
 | 5 | B8: `add`, `VirtQueue::new` and `queue_enable` take typed DMA handles; one `unsafe` constructor | API churn in `driver-rt` before 6.6 adds the second consumer                                                |
 | 6 | B9: the image is written beside the kernel ELF by `kernel/build.rs`                             | a build script writing outside `OUT_DIR`; the alternative is a host tool the runner invokes                 |
 | 7 | B10: CI runs the boots in sequence in one job, not as a matrix                                  | roughly 10 more minutes per run; a matrix renames the required check and needs a branch-protection edit     |

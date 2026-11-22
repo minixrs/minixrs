@@ -62,7 +62,7 @@
 //! notifies the device, and then blocks in a receive **filtered to `HARDWARE`**
 //! until that request's own head has come back. The filter is what makes "one in
 //! flight" need no queue here: a second client's request stays a blocked sender
-//! in the kernel, and an RS ping stays pending, until the main loop receives
+//! in the kernel until the main loop receives
 //! again. Each interrupt is handled in the order `driver-rt` documents —
 //! read `InterruptStatus`, acknowledge exactly those bits, walk the used ring,
 //! re-arm the line — by [`on_interrupt`], which the main loop also uses for an
@@ -70,8 +70,9 @@
 //! legal, and is otherwise ignored).
 //!
 //! A device that never completes a request hangs the driver in that receive,
-//! with its client in SENDREC behind it; RS's unanswered heartbeat is the only
-//! report. There is no timeout because no user-space driver holds an alarm.
+//! with its client in SENDREC behind it. Nothing reports that (RS does not ping
+//! drivers): the symptom is silence from here and from everything behind MFS.
+//! There is no timeout because no user-space driver holds an alarm.
 //!
 //! ## Blocks and sectors
 //!
@@ -418,6 +419,10 @@ fn serve(disk: &mut Disk, req_type: u32, sector: u64) -> Result<(), i32> {
             continue;
         }
         let completed = on_interrupt(disk, Some(head));
+        // Checked before `completed`: a request whose head came back in a walk
+        // that then faulted, or whose line could not be re-armed, is answered
+        // EIO even if the device did the transfer. One conservative reply from
+        // a device that is dead from here on.
         if disk.broken {
             return Err(EIO);
         }

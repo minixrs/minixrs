@@ -1,8 +1,10 @@
 # Build & Toolchain
 
-minix.rs builds as a single Cargo workspace. There is no separate C build today (the musl fork is
-future work — see [Roadmap](roadmap.md)); the only non-Cargo step is fetching the prebuilt Limine
-binary, and a couple of shell scripts in `tools/` stage the boot ESP and launch QEMU.
+minix.rs builds as a single Cargo workspace. The non-Cargo steps are fetching the prebuilt Limine
+binary and, for the C programs in the root filesystem, building the musl fork into a sysroot with
+`tools/build-musl.sh` (or pointing the build at the minix.rs SDK — see
+[The C toolchain and the musl port](libc/overview.md)); `kernel/build.rs` then compiles and links
+the C programs itself. Shell scripts in `tools/` stage the boot ESP and launch QEMU.
 
 ## Prerequisites
 
@@ -24,14 +26,16 @@ cargo kernel-aarch64
 # Build + boot under QEMU. The kernel runs indefinitely once EL0 starts, so a
 # timeout is mandatory. Redirect to a file when you need to grep the log.
 # Budget ~5 s for the rebuild + UEFI firmware startup before the kernel's first
-# byte -- `timeout 8` can yield a log with no kernel output at all, so use 25 s
-# for anything you intend to verify.
-timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+# byte -- `timeout 8` can yield a log with no kernel output at all. A default
+# boot needs 300 s to reach the last marker `tools/check-boot-log.sh` requires
+# (CI gives each boot 600 s); a shorter run shows the early boot only.
+timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # Clean, stub-free boot for debugging: --no-default-features disables the
 # `boot-stubs` feature, so only the servers + init/worker boot (no demo stubs
-# A-D flooding the trace). See "Boot stubs" under Cargo workspace below.
-timeout 25 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
+# A-D flooding the trace). It reaches the same markers far sooner, so 30 s is
+# ample. See "Boot stubs" under Cargo workspace below.
+timeout 30 cargo run -p minixrs-kernel --target aarch64-unknown-none --release --no-default-features
 ```
 
 `cargo run` invokes the cargo runner (`tools/qemu-run.sh`), which stages an ESP directory at
@@ -50,8 +54,12 @@ HHDM offset: 0xffff000000000000
 ## Cargo workspace
 
 The root `Cargo.toml` declares every crate as a workspace member: `kernel`, `kernel-shared`,
-`minixrs-ipc`, `server-rt`, the six `servers/*`, the (stub) `drivers/*` and `fs/*`, and
-`userland/{init,worker,sh,coreutils}`.
+`minixrs-ipc`, `minixrs-abi-note`, `server-rt`, the six `servers/*`, `drivers/{driver-rt,tty,memory,
+virtio-blk}` and `fs/mfs`, `userland/{init,worker,bigprog}`, the umbrella crate `minixrs`, and the
+two host tools `tools/{gen-c-headers,mkfs-mfs}`. Five more members are still empty stubs:
+`drivers/virtio-console`, `drivers/virtio-net`, `fs/pfs`, `userland/sh` and `userland/coreutils`.
+The C programs `userland/hello` and `userland/fileio` are not Cargo members; `kernel/build.rs`
+builds them.
 
 The kernel builds against the **builtin `aarch64-unknown-none` target** — not a custom JSON spec.
 `.cargo/config.toml` wires the details:
@@ -180,8 +188,10 @@ verification for kernel code, and CI smoke-boots it (below).
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Eleven jobs run in parallel
-(`sonar` waits on `coverage`):
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. It has thirteen jobs. Eleven
+are gates that run in parallel — the same eleven the repository's `docs/conventions/ci.md` counts;
+`qemu-smoke` first waits on `boot-scope`, which is a classifier rather than a gate, and `sonar`
+waits on `coverage`:
 
 | Job             | Blocking? | What it checks                                                                                                                             |
 | --------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -191,8 +201,10 @@ verification for kernel code, and CI smoke-boots it (below).
 | `c-headers`     | yes       | regenerates the C ABI headers from `kernel-shared` and compiles them with `clang -std=c11 -fsyntax-only` (host + both musl triples)        |
 | `audit`         | yes       | `cargo-audit` advisory scan                                                                                                                |
 | `deny`          | yes       | `cargo-deny` (licenses / bans, config in `deny.toml`)                                                                                      |
+| `dco`           | yes       | every commit in the PR carries a `Signed-off-by:` trailer (pull requests only)                                                             |
 | `geiger`        | advisory  | `unsafe` surface report (per package, kernel filtered out)                                                                                 |
 | `miri`          | advisory  | UB check on the host-testable crates                                                                                                       |
+| `boot-scope`    | —         | classifies the change with `tools/boot-relevant.sh`; `qemu-smoke` skips the boots when it says docs-only                                   |
 | `qemu-smoke`    | yes       | boots the kernel once per root backend and greps both serial logs                                                                          |
 | `coverage`      | yes       | `cargo-llvm-cov` → `lcov.info` (kernel excluded)                                                                                           |
 | `sonar`         | —         | feeds LCOV to SonarQube Cloud                                                                                                              |

@@ -10,8 +10,9 @@
 //! This driver asks where (`SYS_GETINFO(GET_RAMDISK)`, which only it may call) and
 //! then serves `BDEV_READ`.
 //!
-//! MINIX 3 boots the same shape, and Phase 6 swaps virtio-blk in underneath an
-//! unchanged MFS — which is why nothing here knows what a filesystem is.
+//! MINIX 3 boots the same shape, and since slice 6.3 `virtio-blk` serves the
+//! same image from a disk underneath an unchanged MFS (this driver is then the
+//! fallback root) — which is why nothing here knows what a filesystem is.
 //!
 //! ## Five things worth knowing
 //!
@@ -31,8 +32,9 @@
 //!
 //! **An over-long or out-of-range request is `EINVAL`.** Not a short read (a
 //! filesystem cannot interpret half a block) and not `EIO` (which means the device
-//! failed a well-formed request — something only `virtio-blk` can report). See `server-rt`'s `bdev` module, which
-//! `virtio-blk` shares so both drivers refuse identically.
+//! failed a well-formed request — something only `virtio-blk` can report). See
+//! `server-rt`'s `bdev` module, which `virtio-blk` shares so both drivers refuse
+//! identically.
 //!
 //! **`BDEV_WRITE` stores, as of slice 5.10a.** It was defined and answering
 //! `EROFS` from slice 5.7 — deliberately not folded into the unknown-request

@@ -435,9 +435,11 @@ that prints nothing `tests/qemu-boot.forbidden` catches, so the failure is still
   to make a quarter-megabyte staging buffer one.
 - MFS's move out of `.bss` does **not** weaken TTY's "stage in `main`'s frame, not a static" rule —
   it satisfies it. That rule's load-bearing half is *the buffer outlives every call that names it*,
-  and `main` never returns, so a `main`-frame local is as stable as a static: MFS's grant to MEM is
-  still issued once at boot and `ensure_registered` still never re-fires. A **helper's** frame would
-  compile and then leave the driver safecopying into a dead one; that is the shape to refuse.
+  and `main` never returns, so a `main`-frame local is as stable as a static: MFS's grant to the
+  block driver it selected is still issued once at boot (plus, on the fallback boot only, the one
+  issued to a `vblk` that declined and then revoked) and `ensure_registered` still never re-fires. A
+  **helper's** frame would compile and then leave the driver safecopying into a dead one; that is
+  the shape to refuse.
 - The capability token around MFS's block buffer is independent of where the buffer lives. Its
   load-bearing half is that `Blocks::read(&mut self) -> &[u8; N]` makes "hold a directory block
   across the next fetch" a borrow-check error, and that survived the move from `.bss` to `main`'s
@@ -456,7 +458,7 @@ that the obvious one-line version of it under-reports large frames by 7.5x (slic
 
 ### Replying, relaying, and register layouts
 
-Beyond the shared contracts above, three driver-specific rules:
+Beyond the shared contracts above, the driver-specific rules:
 
 - PL011 register offsets are **duplicated** in `kernel/src/arch/aarch64/uart.rs` and
   `drivers/tty/src/pl011.rs` and cannot be shared: the kernel crate is bare-metal-only and pinned by
@@ -491,10 +493,11 @@ Beyond the shared contracts above, three driver-specific rules:
   while a request is in flight. 6.2's queue skipped a bad used element silently
 - **A driver waiting for its own completion receives from `HARDWARE` only**, blocked, never polling.
   The filter is what makes one-request-in-flight need no queue in the driver: a second client stays
-  a blocked sender in the kernel and an RS ping stays pending until the main loop receives again.
-  The cost is stated, not hidden — a device that never completes hangs the driver with its client
-  behind it, RS's unanswered heartbeat is the only report, and there is no timeout because no
-  user-space driver holds an alarm
+  a blocked sender in the kernel until the main loop receives again. The cost is stated, not hidden
+  — a device that never completes hangs the driver with its client behind it, nothing reports it (RS
+  pings DS, VM, SCHED, VFS and PM, never a driver — the symptom is the marker set going missing
+  behind a silent `vblk` and MFS), and there is no timeout because no user-space driver holds an
+  alarm
 - **A virtio driver brings its device up after `sef_startup`, in straight-line code, never inside an
   `init_fresh` callback**: a callback that returns non-`OK` fails startup and leaves the driver
   spinning with no way to say why, where bring-up after the handshake can print one `[diag]` verdict
@@ -516,15 +519,21 @@ Beyond the shared contracts above, three driver-specific rules:
   to memory the device shares); keep `queue.rs` and every driver's request path free of it.**
   `DmaRegion::new` is the one `unsafe` constructor — its contract is that the kernel-reported run
   stays mapped for the life of the process and that **no Rust reference to it ever exists**, since
-  the device writes it too. Everything after that is a `DmaBuf` from `DmaRegion::buf`:
-  bounds-checked, volatile, and the only thing `VirtQueue::new`, `VirtQueue::add` and
-  `Transport::queue_enable` accept. That is why those three are safe functions: every address the
-  device is given derives from the one constructor, so safe code cannot aim it outside the run. A
-  new driver gets its buffers the same way and adds **one** `unsafe` block for the region, never a
-  raw `(pa, len)` pair and never a `&mut [u8]` over the run — 6.2's queue held one, which was a
-  contract the driver could not keep once the queue outlived bring-up. What the handles do not buy:
-  a driver can still overlap a data buffer with its own ring (a logic bug, not a memory-safety one),
-  and none of it constrains a hostile driver — there is no IOMMU
+  the device writes it too, and that the run is adopted **once**. Queue memory comes off the front
+  with `DmaRegion::split_queue`, which consumes the region, refuses one that has already lent a
+  buffer, and returns a `QueueMem` (not `Copy`, no writable view) plus the remainder; data buffers
+  are `DmaBuf`s from the remainder's `buf`, bounds-checked and volatile. `VirtQueue::new` takes the
+  `QueueMem`, `VirtQueue::add` takes `DmaBuf`s and `Transport::queue_enable` takes the queue. That
+  is why those three are safe functions: every address the device is given derives from the one
+  constructor, and **no buffer handle can ever overlap a ring**, so safe code cannot rewrite a
+  descriptor and aim the device outside the run. (The first cut handed the queue a `Copy` `DmaBuf`
+  like any other, and review found exactly that hole: keep a copy, `write_from` over a descriptor's
+  address, notify.) Read the run before the split with `DmaRegion::peek`, which lends nothing. A new
+  driver gets its buffers the same way and adds **one** `unsafe` block for the region, never a raw
+  `(pa, len)` pair and never a `&mut [u8]` over the run — 6.2's queue held one, which was a contract
+  the driver could not keep once the queue outlived bring-up. What the handles do not buy: two data
+  buffers can still overlap each other (a logic bug: the device corrupts the driver's own data), and
+  none of it constrains a hostile driver — there is no IOMMU
 - **`Transport::notify` carries its own barrier.** `MmioTransport::notify` issues a `SeqCst` fence
   before the `QueueNotify` write, so the store that published `avail.idx` is ordered before the
   device is told to look whatever the caller did in between. Do not rely on `VirtQueue::add`
@@ -584,12 +593,14 @@ Beyond the shared contracts above, three driver-specific rules:
 - **Block-to-sector arithmetic is `checked_mul`**, like every other offset computed from a request:
   drivers ship `--release` with `overflow-checks = false`, where `block * 8` on a large block wraps
   and names a valid sector (see [`rust-style.md`](./rust-style.md)).
-- That header ABI lives in **`kernel-shared::rootfs`** — mkfs writes it, MEM and VFS read it, and
-  none may depend on the others; `image.rs` re-exports it. `kernel-shared::rootfs` also holds the
-  image's *contents* (`ROOTFS_MOTD`, `ROOTFS_PATTERN_*`, `ROOTFS_HELLO_PATH`,
+- That header ABI lives in **`kernel-shared::rootfs`** — mkfs writes it, `memory`, `virtio-blk` and
+  MFS read it, and none may depend on the others; `image.rs` re-exports it. `kernel-shared::rootfs`
+  also holds the image's *contents* (`ROOTFS_MOTD`, `ROOTFS_PATTERN_*`, `ROOTFS_HELLO_PATH`,
   `rootfs_pattern_byte`), so a read proof is a *check* against the constant rather than a
   transcription of it.
-- **The driver contains no `unsafe` block and never dereferences its mapping**: client transfers are
+- **The `memory` driver contains no `unsafe` block and never dereferences its mapping**
+  (`virtio-blk` cannot say the same: it has two `unsafe` blocks in `main.rs`, the `driver-rt`
+  constructors for its DMA run and its register window): `memory`'s client transfers are
   `sys_safecopy`, and the boot self-check is `sys_copy(SELF, …, SELF, …)`, so a page that failed to
   map is an `EFAULT` *return value* rather than an EL0 abort — hence no MMIO sibling module and no
   new Sonar exclusion.
@@ -767,9 +778,9 @@ under [Block drivers](#block-drivers)). Four rules for that prologue:
   too, a positive count included: a driver that answers a zero-length read with anything else is not
   one to mount a filesystem through. The reply goes into the fallback line verbatim (`bdev.root vblk
   rc=<rc> fallback=memory`), so the log says which it was.
-- **The decision is `root::select`, in the library**, with its own host tests — `main.rs` is
-  compiled by no CI job but the boot (see [Crate shape](#crate-shape)), so the prologue only gathers
-  the probe result and prints.
+- **The decision is `root::select`, in the library**, with its own host tests — `main.rs` is linted
+  by clippy and booted, but no host test, Miri or coverage job sees it (see
+  [Crate shape](#crate-shape)), so the prologue only gathers the probe result and prints.
 - **Revoke the grant issued to a driver that declined.** The block buffer was granted to `vblk` for
   the probe; on fallback that grant is revoked before `memory` gets its own, so a declined driver
   holds nothing read/write over the buffer for the rest of the boot.
@@ -803,10 +814,11 @@ probe writes the block buffer over the superblock (slices 5.8 and 5.10a — see
 
 ### What the single block buffer forces
 
-MFS has exactly one 4 KiB `.bss` block buffer, and that constraint — not taste — fixes `do_write`'s
-step order: **read the inode, clamp, compute the grown size, place the zone, read-modify-write the
-data block, write the inode back.** Nothing may hold a block across the next fetch, so every
-intermediate is a `Copy` scalar and `place_zone` must finish with the buffer free (slice 5.10a — see
+MFS has exactly one 4 KiB block buffer (a `main`-frame local since the stack grew to 64 KiB; `.bss`
+before), and that constraint — not taste — fixes `do_write`'s step order: **read the inode, clamp,
+compute the grown size, place the zone, read-modify-write the data block, write the inode back.**
+Nothing may hold a block across the next fetch, so every intermediate is a `Copy` scalar and
+`place_zone` must finish with the buffer free (slice 5.10a — see
 [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
 ### Allocation ordering
@@ -828,8 +840,9 @@ intermediate is a `Copy` scalar and `place_zone` must finish with the buffer fre
 
 ### Stage before you allocate
 
-`do_write`'s create path copies the client's bytes into a second 4 KiB `.bss` buffer **before
-anything is allocated**, so no client-controlled failure can occur after an allocation.
+`do_write`'s create path copies the client's bytes into a second 4 KiB buffer (the `Stage`, a
+`main`-frame local like the block buffer) **before anything is allocated**, so no client-controlled
+failure can occur after an allocation.
 
 Do **not** "fix" such a path by clearing the bitmap bit on the error arm: for an indirect slot whose
 indirect block already existed on disk, the block still names the zone, so freeing the bit hands one

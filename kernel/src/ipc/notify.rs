@@ -274,8 +274,10 @@ pub(crate) fn deliver_irq(
         // with an `IMSC` store, so the interrupt is taken while TTY is running
         // and both rounds defer (mutation 4b of slice 6.1: zeroing
         // `mini_receive`'s bitmap gives `irq FAIL bits=0x0`). virtio-blk's
-        // completions are what take it — the driver is blocked in a
-        // `HARDWARE`-filtered `RECEIVE` when its line fires — and slice 6.3's
+        // completions take it whenever the driver is already blocked in its
+        // `HARDWARE`-filtered `RECEIVE` when the line fires (measured for the
+        // two root-check completions; one landing between `notify` and that
+        // receive defers instead, which is equally correct) — and slice 6.3's
         // mutation 7 is the proof: with this arm disabled the disk boot stops
         // at the driver's first read while the ramdisk boot is unmoved.
         build_notify_message(
