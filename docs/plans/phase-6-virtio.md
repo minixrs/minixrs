@@ -677,23 +677,27 @@ Silicon).**
   image repeatedly prints `persist gen=1`, then `gen=2`, then `gen=3`. In a 120 s reboot of a used
   image every write-battery probe up to `fs.hole ok` printed `ok` and none printed `FAIL`; `fs.leak`
   and later were not reached in that time. That is an observation, not an assertion (debt 4).
-- *The budget.* At a fixed 300 s the last required marker (`[diag vfs] pm-exit reset closed=1` on
-  both boots) sits at 82.0–82.7% of the disk boot's log across three boots of the final code
-  (82.00%, 82.71%, 82.68% — about 246–248 s) and 59.30% of the ramdisk boot's (about 178 s), against
-  66.8% / 48.1% for 6.3. Readings across the slice's tasks ranged 68.4%–82.7% (disk) and 47.7%–59.3%
-  (ramdisk); the budget takes the high one. Under 600 s that is 2.42x for the disk boot, so CI's two
-  full boots went **600 → 900 s** (3.63x disk, 5.06x ramdisk). **Those are SDK-flavour readings**,
-  which the review round found: every boot of the slice ran with the SDK installed and `MINIXRS_SDK`
-  unset. The one musl-flavour reading, the flavour CI builds, was taken in that round at 450 s:
-  about **396 s** for the disk boot (88.03% of the log) and about **260 s** for the ramdisk boot
-  (57.87%), which makes 900 s 2.27x and 3.46x. No timeout was changed on it; that is debt 13, and
-  [`ci.md`](../conventions/ci.md) has the full statement. The reboot gets **180 s**: its one line
-  lands about 34 s of local wall clock after `cargo run` starts (the kernel banner at about 6 s),
-  and 45 s passed locally twice. The job's `timeout-minutes` went **65 → 80** (900 + 180 + 900 s is
-  33 minutes, plus the 45 of build headroom). Locally 300 s left the SDK-flavour disk boot about
-  1.2x, so the documented local timeout for a marker-file verification became **450 s** — 1.8x for
-  that flavour, and 1.14x for a musl-flavour disk boot. Stub-free boots still reach every 6.4 marker
-  in the first 0.33% of a 60–75 s log.
+- *The budget.* Measured in the musl flavour, the one CI builds (`MINIXRS_SDK=/nonexistent`), and
+  compared in seconds because the logs differ in length. The last required marker (`[diag vfs]
+  pm-exit reset closed=1` on both boots) is about **396 s** into a disk boot (88.03% of a 450 s log)
+  and about **393 s** on a second reading (65.57% of a 600 s log), and about **260 s** into a
+  ramdisk boot (57.87% of a 450 s log, read once). Under 600 s that is 1.5x for the disk boot, so
+  CI's two full boots went **600 → 1200 s**: 3.03x for the disk boot, 4.6x for the ramdisk boot. The
+  reboot gets **180 s**: its one line lands about 34 s of local wall clock after `cargo run` starts
+  (the kernel banner at about 6 s), 45 s passed locally twice, and the line prints before any C
+  program runs, so the flavour does not move it. The job's `timeout-minutes` went **65 → 90**
+  (1200 + 180 + 1200 s is 43 minutes, plus the 45 of build headroom, rounded up from 88). The
+  documented local timeout for a marker-file verification became **600 s, in the musl flavour** —
+  1.5x, the factor 300 s had at 6.3. Stub-free boots still reach every 6.4 marker in the first 0.33%
+  of a 60–75 s log. *As first written:* the slice set 900 s, 80 minutes and a local 450 s from boots
+  that turned out to be SDK-flavour — every boot before the review round ran with the SDK installed
+  and `MINIXRS_SDK` unset — which put the marker at 82.0–82.7% of a 300 s disk log across three
+  boots of the final code (82.00%, 82.71%, 82.68% — about 246–248 s) and 59.30% of the ramdisk log
+  (about 178 s), against 66.8% / 48.1% for 6.3 (whose flavour could not be re-checked); readings
+  across the slice's tasks ranged 68.4%–82.7% (disk) and 47.7%–59.3% (ramdisk). 900 s read as 3.63x
+  on those and is 2.27x on the musl readings, so all three numbers were corrected within the slice,
+  before the branch ran on CI. [`ci.md`](../conventions/ci.md) has the full statement. The runner's
+  own TCG factor is still unmeasured (debt 13).
 - *The driver's stack.* The 20 480-byte partition-table buffer is a `.bss` static; the largest frame
   in the built driver is `main`'s, 10 080 bytes of the 64 KiB stack.
 
@@ -757,7 +761,7 @@ listed.
    other forbidden hits.
 7. **CI's firmware has not been measured** (owner: the first CI run of this branch, which is the
    measurement). Debian's `QEMU_EFI.fd` booting from a version-2 virtio-mmio disk and reading
-   `mkimage`'s FAT32 and GPT, the 900 s / 180 s budgets against the runner's TCG, whether the
+   `mkimage`'s FAT32 and GPT, the 1200 s / 180 s budgets against the runner's TCG, whether the
    pre-built `mkimage` is seen as fresh by the nested cargo on Linux, and whether the runner's QEMU
    still needs `ipxe-qemu` are all untested until then.
 8. **An unresolved rustdoc link** (owner: any slice touching `kernel-shared`).
@@ -792,16 +796,19 @@ listed.
     third, in [`servers-and-drivers.md`](../conventions/servers-and-drivers.md): the nested build is
     described as shared across "the 9 crates", and the boot archive has held thirteen ELFs for some
     time.
-13. **The budget was derived from the wrong flavour** (owner: whoever reads the timing of this
-    branch's first CI run — before merge, not after). The 900 s, 180 s and local 450 s were all set
-    from boots whose `hello` was the SDK's 47 KB, because an installed SDK is used when
-    `MINIXRS_SDK` is unset; CI builds the 234 KB in-tree-musl one, and the single musl reading taken
-    (the review round, a 450 s boot) puts the disk boot's last required marker at about 396 s. That
-    leaves CI's 900 s a 2.27x factor where the earlier raises were forced at 1.6–1.8x and 6.3 kept
-    its budget at 3.0x, and leaves a local musl boot 1.14x under 450 s. Pay by taking the fraction
-    from the first CI log — and a second local musl reading, since one is not a distribution — and
-    raising the two full boots and `timeout-minutes` together if it is thin. 6.3's own 66.8% / 48.1%
-    were not re-checked for flavour and may be the same mistake.
+13. **The budget was derived from the wrong flavour — paid within the slice, except for the runner's
+    own factor** (owner of what remains: whoever reads the timing of this branch's first CI run —
+    before merge, not after). The first 900 s and local 450 s were set from boots whose `hello` was
+    the SDK's 47 KB, because an installed SDK is used when `MINIXRS_SDK` is unset; CI builds the 234
+    KB in-tree-musl one. *Paid:* the disk boot was re-measured in the musl flavour twice (about 396
+    s and about 393 s to the last required marker) and the timeouts raised to match — CI's two full
+    boots to 1200 s (3.03x), `timeout-minutes` to 90, the local verification to 600 s in the musl
+    flavour (1.5x). *Still owed:* the runner's real TCG factor, which nothing has measured — no 6.4
+    code has run on CI. Pay by reading the last required marker's position in the first CI disk-boot
+    log: if it is thin, raise the two full boots and `timeout-minutes` together; if there is far
+    more than 3x to spare, lower them, since each full boot burns its whole timeout and 1200 s costs
+    every booting run 10 minutes over 900 s. The ramdisk boot has one musl reading, not two. 6.3's
+    own 66.8% / 48.1% were not re-checked for flavour and may be the same mistake.
 
 6.3's debt 3 (`fs.trunc ok n=0` cannot see a dropped truncate) is **not** paid here, by ruling: the
 persistence probe sits beside the write battery and does not change it.
@@ -885,14 +892,14 @@ do not fit, the answer to reach for first is a shorter marker set for the second
 larger timeout. *6.3's outcome:* they fit — the per-boot timeout did not move, and the disk boot's
 last marker lands at about two thirds of the local log. *6.4's outcome:* three boots per run — the
 disk boot, a short reboot of the image it wrote, the rootless-disk fallback boot — and the per-boot
-timeout did move, 600 → 900 s for the two full boots: with a flush after every write the disk boot's
-last marker lands at 82.7% of a 300 s local log and the ramdisk boot's at 59.3%. A shorter marker
-set for the second backend was not the answer this time, because the slower boot is the first
-backend's. The reboot is the short one, 180 s against its own seven-line set. *And a correction the
-slice's review round made:* those two figures are SDK-flavour boots. On the musl flavour CI builds,
-one 450 s reading puts the last marker about 396 s into the disk boot and about 260 s into the
-ramdisk boot, so 900 s is 2.27x, not the 3.63x it was chosen for. The first CI run of 6.4 decides
-whether it stands (6.4's debt 13).
+timeout did move, 600 → 1200 s for the two full boots: with a flush after every write the disk
+boot's last marker lands about 396 s into a local musl-flavour boot and the ramdisk boot's about 260
+s in. A shorter marker set for the second backend was not the answer this time, because the slower
+boot is the first backend's. The reboot is the short one, 180 s against its own seven-line set. *As
+first written,* the raise was to 900 s, from two figures (82.7% and 59.3% of a 300 s log) that the
+slice's review round found to be SDK-flavour boots; re-measured in the flavour CI builds, 900 s was
+2.27x rather than the 3.63x it was chosen for, and the slice corrected it to 1200 s (3.03x) before
+its first CI run. That run is still the only measurement of the runner's own factor (6.4's debt 13).
 
 ## Non-goals for Phase 6
 

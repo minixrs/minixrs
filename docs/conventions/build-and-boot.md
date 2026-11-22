@@ -25,19 +25,22 @@ cargo kernel-aarch64
 # and UEFI firmware startup before the kernel's first byte: `timeout 8` yields a
 # log with NO kernel output at all (check-boot-log.sh then fails all markers).
 #
-# HOW LONG: **450 s** for anything you mean to verify against the marker files
-# (qemu-smoke itself gives each full boot 900 s as of slice 6.4). The number is
-# NOT a constant, it tracks how far into the boot the LAST required marker sits.
-# It was 25 s through slice 5.8, 120 s through 5.10a and 300 s through 6.3, and
-# it is stale advice the moment a slice makes the boot longer. Slice 6.4 raised
-# it from 300 because the disk boot's last required marker had moved to ~248 s
-# of a boot; every measurement, and which flavour each was taken on, is in
-# ./ci.md (the bullet "A slice can break the boot-timing budget"). READ THAT
-# BEFORE TRUSTING 450 FOR A MUSL-FLAVOUR BOOT: ~248 s turned out to be the SDK
-# flavour's figure (an installed SDK is used even with MINIXRS_SDK unset). With
-# `MINIXRS_SDK=/nonexistent` -- the flavour CI builds -- the one reading taken
-# puts that marker ~396 s into a disk boot and ~260 s into a ramdisk boot, so
-# 450 s clears a musl disk boot by only ~1.14x.
+# HOW LONG: **600 s, in the MUSL flavour** (`MINIXRS_SDK=/nonexistent`, as on
+# the command below) for anything you mean to verify against the marker files
+# (qemu-smoke itself gives each full boot 1200 s as of slice 6.4). Musl because
+# that is what CI builds and what the marker files and the timeouts are sized
+# for: an installed SDK is used even with MINIXRS_SDK unset, and its smaller
+# `hello` makes a different, faster boot; if you build in a separate command,
+# set the variable there too. The number is NOT a constant, it tracks how far
+# into the boot the LAST required marker sits. It was 25 s through slice 5.8,
+# 120 s through 5.10a and 300 s through 6.3, and it is stale advice the moment a
+# slice makes the boot longer. Slice 6.4 raised it because a musl disk boot now
+# reaches its last required marker ~396 s in: 600 s is 1.5x that, the factor
+# 300 s had at 6.3. Every measurement, the factors, and which flavour each
+# reading was taken on are in ./ci.md (the bullet "A slice can break the
+# boot-timing budget") and are not restated here. An SDK-flavour boot (drop the
+# variable) gets there in ~248 s and is fine for ITERATION, but it is neither
+# the budget measurement nor a marker-file verification.
 # Re-measure rather than trusting this paragraph: `grep -abo <marker> log | head -1`
 # divided by `wc -c log`, and raise the budget when the fraction climbs. The three
 # things that move it most are the `hello` flavour (~47 KB with the SDK vs ~200 KB
@@ -58,7 +61,7 @@ cargo kernel-aarch64
 # `timeout N` run reaches far fewer than N x 100 ticks. For time-based features
 # (alarms, quantum/scheduling) read uptime-stamped traces (e.g. `[alarm ... at=N]`)
 # as the real clock, and run long enough to observe several periods.
-timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # ONE DISK, THREE ROOT BACKENDS (slice 6.4; two backends since 6.3). The machine
 # boots from ONE disk: a GPT image holding a FAT32 ESP (Limine, limine.conf, the
@@ -87,7 +90,7 @@ timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 # step 4, is the rule) -- the ramdisk backend stays green for the whole phase
 # (H7). Keep the logs apart; the checker and tools/diff-backends.sh each want to
 # be told which is which.
-MINIXRS_ROOT=ramdisk timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+MINIXRS_SDK=/nonexistent MINIXRS_ROOT=ramdisk timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # The image is BUILT ON EVERY RUN by the host tool tools/mkimage, which the
 # runner starts through a nested `cargo run -q --release -p minixrs-mkimage`

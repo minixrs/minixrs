@@ -321,7 +321,7 @@ persist gen=<n>` and stores the next digit
 `gen=0`. Booting the image a `disk` boot just wrote, with no rebuild, prints `gen=1`:
 
 ```sh
-timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > disk.log 2>&1
+timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > disk.log 2>&1
 MINIXRS_VBLK_IMAGE=target/disk.img timeout 60 \
     cargo run -p minixrs-kernel --target aarch64-unknown-none --release > reboot.log 2>&1
 tools/check-boot-log.sh reboot reboot.log

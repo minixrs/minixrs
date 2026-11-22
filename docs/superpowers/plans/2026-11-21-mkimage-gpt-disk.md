@@ -22,16 +22,16 @@ disagree, **the spec wins** and the plan gets corrected.
 - **No new `unsafe`** in `driver-rt::gpt`, `virtio-blk`'s pure modules or `mkimage`. `cargo miri
   test -p minixrs-driver-rt` after touching `driver-rt`.
 - **No third-party crate** in `mkimage` (P2).
-- **Boots.** `$S` is the session scratch directory. Build first (`cargo build -p minixrs-kernel
-  --target aarch64-unknown-none --release`), then `MINIXRS_ROOT=<disk|ramdisk> timeout 450 cargo run
-  -p minixrs-kernel --target aarch64-unknown-none --release > $S/<name>.log 2>&1`. One boot at a
-  time. Read `check-boot-log.sh`'s whole output; apply the starved-boot check before believing a
-  missing marker. (Corrected: this said `timeout 300`, which is what the run's boots used. Task 9
-  measured the disk boot's last required marker at 82.7% of a 300 s log, about 1.2x of headroom, so
-  the documented local timeout became 450 s — see the ledger. Corrected again in the review round:
-  none of the run's boots set `MINIXRS_SDK=/nonexistent`, so all of them were the SDK flavour; the
-  commands above measure the musl flavour only with that variable set on the build *and* on the
-  boot.)
+- **Boots.** `$S` is the session scratch directory. Build first (`MINIXRS_SDK=/nonexistent cargo
+  build -p minixrs-kernel --target aarch64-unknown-none --release`), then `MINIXRS_SDK=/nonexistent
+  MINIXRS_ROOT=<disk|ramdisk> timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none
+  --release > $S/<name>.log 2>&1`. The variable selects the musl flavour, the one CI builds and the
+  marker files are sized for, and goes on the build *and* on the boot. One boot at a time. Read
+  `check-boot-log.sh`'s whole output; apply the starved-boot check before believing a missing
+  marker. (As first written this said `timeout 300` with no `MINIXRS_SDK`, which is what the run's
+  boots used: all of them were therefore the SDK flavour. Task 9 made it 450 s from those boots; the
+  review round found the flavour; the budget correction in the ledger made it 600 s in the musl
+  flavour, 1.5x over the roughly 396 s a musl disk boot takes to its last required marker.)
 - **Mutation discipline** per
   [`testing-and-markers.md`](../../conventions/testing-and-markers.md#mutation-testing).
 - **Counts in markers come from constants**, never typed into a driver.
@@ -259,8 +259,9 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
 - **Task 9 (`70c9bd0`).** CI and the budget. Verified by measurement, not by a CI run: P11.3 and
   P11.5 as the spec records them — on SDK-flavour boots, as the review round found (below).
   *Rulings:* 600 → 900 s, 180 s, `timeout-minutes` 80, `mkimage` pre-built, `ipxe-qemu` kept, tests
-  in `coverage` and not under Miri (28). Not validated without a push: CI's firmware, the budgets on
-  the runner, the pre-built tool being seen as fresh on Linux, `ipxe-qemu` (phase file, 6.4 debt 7).
+  in `coverage` and not under Miri (28) — the 900 s and the 80 since superseded by the budget
+  correction below (1200 s, 90). Not validated without a push: CI's firmware, the budgets on the
+  runner, the pre-built tool being seen as fresh on Linux, `ipxe-qemu` (phase file, 6.4 debt 7).
 - **Task 10 (observation only, no commit).** The recorded boots. `nodisk`, `readonly=on` and the raw
   image as predicted. **The damaged-table boot was not:** edk2 repairs a damaged primary GPT on a
   writable disk before the kernel runs, so the driver's refusals appear only read-only (spec §3,
@@ -273,7 +274,8 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
 - **Task 12 (`182641d`, `eddd33e`).** `book/`, `docs/conventions/`, the phase file, `docs/plan.md`,
   this plan and the spec; the stale-claim sweep over comments, marker commentary and scripts
   (comment-only edits). *Ruling (coordinator):* the documented local timeout for a marker-file
-  verification is 450 s (29).
+  verification is 450 s (29) — since superseded by the budget correction below (600 s, musl
+  flavour).
 
 - **Review-fix round (2026-11-22; code in `ea41698`, documentation in the commit that carries this
   entry).** Two fresh reviewers read the whole branch — one the code diff, one the documentation
@@ -314,7 +316,7 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
     runs", and the spec's P4 contradiction about PCI.
   - *D7, fixed — and found worse than reported.* The readings on final code are 82.00%, 82.71% and
     82.68% of 300 s logs, stated the same in six places. They are all **SDK-flavour** boots: see the
-    verification below, and ruling 36.
+    verification below, and the budget correction after it.
   - *D8, fixed.* Miri is recorded under Task 2 and re-run here; the documents say `driver-rt` is in
     the advisory job's list and was run locally, not that CI ran it.
   - *D9, D10, fixed.* The reboot recipe says it is once per disk boot; `build-and-boot.md` says a
@@ -349,9 +351,34 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
   the coordinator's re-measurement — shows `hello` at 46 696 bytes, where CI builds the 234 280-byte
   musl one. On the musl flavour the last required marker is at 88.03% of the 450 s disk log (about
   396 s) and 57.87% of the ramdisk log (about 260 s), against about 248 s and 178 s on the SDK
-  flavour. *Ruling (36):* no timeout was changed on one reading. CI's 900 s is 2.27x for the disk
-  boot (3.46x for the ramdisk boot) and the local 450 s is 1.14x; the phase file's debt 13 owns the
-  decision.
+  flavour. *Ruling of this round (36 as first written):* no timeout was changed on one reading,
+  which left CI's 900 s at 2.27x for the disk boot (3.46x for the ramdisk boot) and the local 450 s
+  at 1.14x, and left the call to the user. Superseded by the next entry.
+
+- **Budget correction (2026-11-22; the commit "ci(6.4): the boot budget re-measured in the flavour
+  CI builds — full boots 1200 s, local 600 s").** The budget is re-set from measurements in the
+  flavour CI builds. Two musl-flavour disk boots exist (`MINIXRS_SDK=/nonexistent`, a 234 280-byte
+  `hello`), both passing all 165 marker checks, the last required marker `[diag vfs] pm-exit reset
+  closed=1` in both: the review-fix round's, at 88.03% of a 450 s log, about **396 s**; and the
+  coordinator's re-measurement, at byte 41 876 691 of 63 868 433, 65.57% of a 600 s log, about **393
+  s** (IPC counter 64.67 M at 600 s; the host's load average was 11.6 when that boot started and 2.7
+  when it ended, and the reading still agrees with the first within 3 s). The ramdisk boot has the
+  review-fix round's one reading: 57.87% of a 450 s log, about **260 s**. The reboot's line prints
+  before any C program runs (about 34 s locally), so the flavour does not move it. *Ruling (36, the
+  coordinator's, made on the user's behalf; it supersedes "no timeout changed" and amends rulings 28
+  and 29):* CI's two full boots 900 → **1200 s** (disk 1200 / 396 = 3.03x; ramdisk 1200 / 260 =
+  4.6x); the reboot stays 180 s; `timeout-minutes` 80 → **90** (1200 + 180 + 1200 = 2580 s = 43
+  minutes of boots, plus the 45 of build headroom, is 88, rounded up); the documented local timeout
+  for a marker-file verification 450 → **600 s, taken in the musl flavour** (600 / 396 = 1.5x, the
+  factor 300 s had at 6.3). An SDK-flavour boot reaches the last marker at about 248 s and is fine
+  for iteration; it is not the budget measurement. *If wrong:* each full CI boot burns its whole
+  timeout, so this adds 10 minutes to every booting CI run over 900 s (20 over 6.3's 600 s); if the
+  runner's real factor is better than feared, the remedy is to lower the two numbers again. Not
+  raising would have left 2.27x, below the roughly 2.5x at which every earlier slice raised. *Still
+  unmeasured:* the runner's real TCG factor — nothing has run on CI (phase file, 6.4 debt 13, what
+  remains of it). *Verification:* no boot was run for this entry beyond the two readings above; the
+  workflow parses (`yaml.safe_load`, `actionlint`), and the documentation gates pass. No code,
+  script behaviour or marker line changed.
 
 **Where the plan or the spec was wrong, and which was corrected.**
 
@@ -365,5 +392,6 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
 - *Spec's predictions wrong, reality recorded:* §3 rows 3, 4, 5, 8 and 10, and the damaged-CRC boot.
 - *Found by the review round, both corrected:* the plan's Global Constraints gave boot commands that
   measure the SDK flavour on a machine with the SDK installed; the spec's P11.3 called its readings
-  the budget without saying which flavour they were. The phase file's "Paid by 6.4" on two of 6.3's
-  debts said more than the evidence did.
+  the budget without saying which flavour they were. The budget correction then rewrote both: the
+  commands carry `MINIXRS_SDK=/nonexistent` and 600 s, and P11.3 states the musl readings first. The
+  phase file's "Paid by 6.4" on two of 6.3's debts said more than the evidence did.

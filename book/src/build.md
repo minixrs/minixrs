@@ -28,13 +28,16 @@ cargo kernel-aarch64
 # timeout is mandatory. Redirect to a file when you need to grep the log.
 # Budget ~6 s for the rebuild, the disk image and UEFI firmware startup before
 # the kernel's first byte -- `timeout 8` can yield a log with no kernel output
-# at all. A default boot is given 450 s to reach the last marker
-# `tools/check-boot-log.sh` requires (CI gives each full boot 900 s); a shorter
-# run shows the early boot only. How much of the 450 s a boot uses depends on
-# how the C programs were built: about 250 s when `hello` comes from an
-# installed minix.rs SDK, about 400 s when it is the larger in-tree musl build
-# CI uses (measured once each for a disk boot, slice 6.4).
-timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+# at all. A boot meant to be checked with `tools/check-boot-log.sh` is given
+# 600 s to reach the last marker the script requires, and is taken in the
+# flavour CI builds: `MINIXRS_SDK=/nonexistent` selects the in-tree musl build
+# of the C programs even when a minix.rs SDK is installed (CI gives each full
+# boot 1200 s). A shorter run shows the early boot only. How much of the 600 s
+# a boot uses depends on how the C programs were built: about 400 s for a disk
+# boot with the musl build, about 250 s when `hello` comes from an installed
+# SDK (slice 6.4's measurements) -- the SDK boot is fine for iterating, but it
+# is not the boot the marker files and the timeouts are sized for.
+MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # Clean, stub-free boot for debugging: --no-default-features disables the
 # `boot-stubs` feature, so only the servers + init/worker boot (no demo stubs
@@ -227,8 +230,8 @@ files and run 8 nested server builds on a blocking gate. So **`clippy-kernel` is
 that compiles kernel code** (a local `cargo clippy --workspace` does lint it) — which is why it
 blocks and runs on a native `ubuntu-24.04-arm` runner. It passes no `--all-targets`: the kernel is
 `no_std`/`no_main`, so there is no test harness to build. `qemu-smoke` (also `ubuntu-24.04-arm`)
-boots three times: `MINIXRS_ROOT=disk` for 900 s, then a 180 s reboot of the image that boot wrote
-(`MINIXRS_VBLK_IMAGE=target/disk.img`), then `MINIXRS_ROOT=ramdisk` for 900 s. It requires exit
+boots three times: `MINIXRS_ROOT=disk` for 1200 s, then a 180 s reboot of the image that boot wrote
+(`MINIXRS_VBLK_IMAGE=target/disk.img`), then `MINIXRS_ROOT=ramdisk` for 1200 s. It requires exit
 status 124 of all three — the `timeout(1)` status a healthy, never-exiting kernel must produce. It
 then runs `tools/check-boot-log.sh <disk|reboot|ramdisk> <log>` on each log. The two full boots are
 checked against the common marker files `tests/qemu-boot.expected` / `.forbidden` plus their

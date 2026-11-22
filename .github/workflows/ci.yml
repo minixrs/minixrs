@@ -280,7 +280,7 @@ jobs:
 
   # Decides whether qemu-smoke has anything to prove. A docs-only PR cannot
   # change the boot, and the boot is the slowest gate by far (every one of its
-  # three boots always burns its full timeout -- 33 minutes in all as of slice
+  # three boots always burns its full timeout -- 43 minutes in all as of slice
   # 6.4), so it skips there -- see tools/boot-relevant.sh for what counts as
   # docs-only. Pushes to main always boot.
   #
@@ -347,16 +347,19 @@ jobs:
     # boot burns its full timeout. A second 600 s boot is 10 more minutes; 65
     # keeps the build headroom the 50 was sized for, plus five.
     #
-    # Slice 6.4 (65 → 80): the job boots THREE times -- the disk boot, a short
+    # Slice 6.4 (65 → 90): the job boots THREE times -- the disk boot, a short
     # reboot of the image that boot wrote, the rootless-disk fallback boot --
-    # and the two full boots went from 600 s to 900 s each (the budget comment
+    # and the two full boots went from 600 s to 1200 s each (the budget comment
     # on the boot step has the measurement). The 65 was 20 minutes of boots
-    # plus 45 of build headroom; the boots are now 900 + 180 + 900 = 1980 s =
-    # 33 minutes, and 45 + 33 = 78, rounded up to 80. The new host-tool build
-    # (tools/mkimage and its one dependency, no build-std) is seconds and lives
-    # inside the headroom. Whoever changes any of the three timeouts changes
-    # this in the same edit, by the sum of the differences.
-    timeout-minutes: 80
+    # plus 45 of build headroom; the boots are now 1200 + 180 + 1200 = 2580 s
+    # = 43 minutes, and 45 + 43 = 88, rounded up to 90. (First set to 80 in
+    # this slice, for 900 s full boots; both were corrected before the branch
+    # ever ran here, when the budget was re-measured in the flavour this job
+    # builds.) The new host-tool build (tools/mkimage and its one dependency,
+    # no build-std) is seconds and lives inside the headroom. Whoever changes
+    # any of the three timeouts changes this in the same edit, by the sum of
+    # the differences.
+    timeout-minutes: 90
     steps:
       # submodules: external/musl is the musl fork (slice 5.6). Without it
       # kernel/build.rs falls back to packing `worker` as `hello` and the C
@@ -512,46 +515,55 @@ jobs:
           # 1.6-1.8x that forced the earlier raises -- so the per-boot budget
           # stays and only the job's `timeout-minutes` grew.
           #
-          # 6.4 (600 -> 900 for the two full boots, plus a 180 s reboot): the
+          # 6.4 (600 -> 1200 for the two full boots, plus a 180 s reboot): the
           # machine boots from one GPT disk, and two things got slower. Every
           # write to the disk is now followed by a FLUSH, a second interrupt
           # round trip per write; and the ramdisk boot is no longer device-free
           # -- it brings the rootless disk up and falls back -- while both boots
           # gained the persistence probe and MFS's whole-disk probe. Measured
-          # the same way at a fixed 300 s (dev machine, QEMU 11.0.3): the last
-          # required marker (`[diag vfs] pm-exit reset closed=1`) sits at
-          # 82.0-82.7% of the disk boot's log across three boots of the final
-          # code (82.00%, 82.71%, 82.68%: ~246-248 s) and 59.30% of the ramdisk
-          # boot's (~178 s), against 66.8% / 48.1% on the merge base. Under
-          # 600 s that is a 2.42x factor for the disk boot -- no longer the
-          # 3.0x that let 6.3 keep the budget, and heading for the 1.6-1.8x
-          # that forced the earlier raises -- and 900 s was chosen to restore
-          # 3.63x (5.06x for the ramdisk boot). One number for both full
-          # boots, budgeted for the slower. Two earlier disk boots of the
-          # slice read 74.89% and 68.43%, on code that was not yet final.
+          # on the **musl** flavour, the one this job builds (dev machine, QEMU
+          # 11.0.3, MINIXRS_SDK=/nonexistent on the build and on the boot,
+          # 2026-11-22), and compared in SECONDS because the logs differ in
+          # length -- a fraction of a 450 s log is not comparable with a
+          # fraction of a 600 s one. The last required marker (`[diag vfs]
+          # pm-exit reset closed=1`) sits at 88.03% of a 450 s disk boot's log,
+          # ~396 s, and at 65.57% of a 600 s one, ~393 s: two readings, 3 s
+          # apart. The ramdisk boot, read once: 57.87% of a 450 s log, ~260 s.
+          # Under 600 s that is a 1.5x factor for the disk boot -- below even the
+          # 1.6-1.8x that forced the earlier raises -- so the two full boots
+          # went to 1200 s: 3.03x for the disk boot (1200 / ~396), the factor
+          # that let 6.3 keep its budget, and 4.6x for the ramdisk boot. One
+          # number for both full boots, budgeted for the slower.
           #
-          # THOSE READINGS ARE THE WRONG FLAVOUR -- found in the slice's review
-          # round, after the number above was chosen. Every boot of the slice
-          # ran with the minix.rs SDK installed and MINIXRS_SDK unset, so its
-          # `hello` was the SDK's 46 696 bytes, not the 234 280-byte in-tree
-          # musl `hello` THIS job builds, which is the flavour the method
-          # above requires. The one musl reading (2026-11-22, same machine,
-          # taken at 450 s -- a fraction of a 450 s log is not comparable with
-          # a fraction of a 300 s one, so compare seconds): the last required
-          # marker at 88.03% of the disk boot's log, ~396 s, and 57.87% of the
-          # ramdisk boot's, ~260 s. Against that, 900 s is 2.27x for the
-          # disk boot (3.46x for the ramdisk boot), not 3.63x. 900 was NOT
-          # re-derived in that round: it is one reading, and the first run of
-          # this job is the measurement that settles it. If the disk boot
-          # ends here with its markers missing from some point to the end of
-          # the boot, suspect this before a regression, and raise the two
-          # full boots and `timeout-minutes` together.
+          # THE FIRST 6.4 FIGURES WERE TAKEN IN THE SDK FLAVOUR, BY MISTAKE.
+          # Every boot of the slice before its review round ran with the
+          # minix.rs SDK installed and MINIXRS_SDK unset, so its `hello` was
+          # the SDK's 46 696 bytes, not the 234 280-byte in-tree musl `hello`
+          # THIS job builds. Those boots put the last required marker at
+          # 82.0-82.7% of a 300 s disk log (~246-248 s) and 59.30% of the
+          # ramdisk log (~178 s), and the budget was first set from them: 900 s,
+          # read as 3.63x. Against the musl readings 900 s is 2.27x, under the
+          # ~2.5x at which every earlier slice raised, so it was corrected to
+          # 1200 s before the branch ever ran here. The SDK figures are right
+          # for the SDK flavour and say nothing about this job.
+          #
+          # STILL UNMEASURED: this runner's real TCG factor. Nothing of 6.4 had
+          # run on CI when 1200 was chosen; the first run of this job is that
+          # measurement. If the disk boot ends here with its markers missing
+          # from some point to the end of the boot, suspect the budget before
+          # a regression, and raise the two full boots and `timeout-minutes`
+          # together. If the logs show the last marker arriving with far more
+          # than 3x to spare, lower the two numbers again: each full boot
+          # burns its whole timeout, so 1200 costs every booting run 10
+          # minutes over 900.
           #
           # The reboot needs one line, `minix.rs init: persist gen=1`, and is
           # checked for nothing after it. In a 120 s local reboot that line is
           # at 24.36% of the log (~29 s of guest run), and ~34 s of wall clock
-          # from the start of `cargo run`; 45 s passed locally twice. 180 s is
-          # 5.3x the 34 s -- rounded up past the full boots' factor on purpose,
+          # from the start of `cargo run`; 45 s passed locally twice. That timing
+          # does not depend on the `hello` flavour: the line prints before any C
+          # program runs. 180 s is 5.3x the 34 s -- rounded up past the full
+          # boots' factor on purpose,
           # because a short boot's fixed costs (cargo's start-up, the firmware,
           # Limine) are a larger share of it and do not scale the way guest
           # work does.
@@ -571,7 +583,7 @@ jobs:
           }
 
           status=0
-          MINIXRS_ROOT=disk timeout 900 cargo run -p minixrs-kernel \
+          MINIXRS_ROOT=disk timeout 1200 cargo run -p minixrs-kernel \
             --target aarch64-unknown-none --release \
             > qemu-disk.log 2>&1 || status=$?
           expect_timeout disk "$status"
@@ -588,7 +600,7 @@ jobs:
           expect_timeout reboot "$status"
 
           status=0
-          MINIXRS_ROOT=ramdisk timeout 900 cargo run -p minixrs-kernel \
+          MINIXRS_ROOT=ramdisk timeout 1200 cargo run -p minixrs-kernel \
             --target aarch64-unknown-none --release \
             > qemu-ramdisk.log 2>&1 || status=$?
           expect_timeout ramdisk "$status"
