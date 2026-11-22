@@ -119,3 +119,7 @@ minix.rs fileio: exit-reset FAIL
 # find it and the disk boot falls back (tests/qemu-boot.disk.forbidden catches
 # that too; this names the cause).
 [diag vblk] ds FAIL
+# Slice 6.3: a partial BDEV_WRITE disturbed the bytes it did not name
+# (`FAIL clobbered`: the driver overlaid the caller's bytes on a stale bounce
+# buffer instead of on the block), or the probe could not run at all.
+[diag mfs] bdev.partial FAIL

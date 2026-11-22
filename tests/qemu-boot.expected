@@ -460,6 +460,16 @@ minix.rs hello: iov ok match=1
 # not that BDEV indexes into it correctly.
 [diag mfs] bdev.tail ok match=1
 
+# A PARTIAL BDEV_WRITE (slice 6.3): the tail block's own first 16 bytes written
+# back to it, after a read of block 0 has left the driver's bounce buffer holding
+# a superblock. The contract is that the other 4080 bytes survive. `memory`
+# satisfies that with one copy; a sector device has to read the block before it
+# overlays, and a driver that skips the read stores block 0's bytes in the tail
+# (`bdev.partial FAIL clobbered`). The filesystem never issues a partial write,
+# so without this line that read was covered by nothing -- which is what slice
+# 6.3's mutation 8 found. n=16 is IMAGE_LABEL_LEN.
+[diag mfs] bdev.partial ok n=16
+
 # Ten refusals, each well-formed but for one field: minor 7 (-> ENXIO, the
 # driver's own minor check), one block past the end (-> EINVAL, not EIO: a block
 # device's size is known to its client), BDEV_MAX_IO + 1 bytes (-> EINVAL, the

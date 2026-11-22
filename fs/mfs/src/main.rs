@@ -427,6 +427,7 @@ fn main() -> ! {
     // markers instead of blacking out `mount` / `fs.selfcheck` / `fs.indirect`.
     // Do not tidy this prologue into alphabetical order.
     tail_probe(&mut blocks);
+    partial_probe(&mut blocks);
     bdev_denials(&mut grants, &blocks);
 
     let mut msg = Message {
@@ -1815,6 +1816,70 @@ fn tail_probe(blocks: &mut Blocks<'_>) {
         }
         Ok(_) => diag_fmt(format_args!("bdev.tail FAIL label")),
         Err(rc) => diag_fmt(format_args!("bdev.tail FAIL rc={rc}")),
+    }
+}
+
+/// Store a **partial** block and prove the rest of it survived — the one check on
+/// the `BDEV_WRITE` contract's short-length case, which the filesystem itself
+/// never issues ([`Blocks::write`] always stores a whole block).
+///
+/// The contract is that a write of `len < 4096` replaces the block's first `len`
+/// bytes and leaves the remainder alone. For `memory` that is one copy into the
+/// ramdisk. For a sector device it is a read-modify-write: the driver must fetch
+/// the block into its bounce buffer before overlaying the caller's bytes, or it
+/// stores whatever that buffer last held. Slice 6.3's mutation 8 removed that
+/// fetch and moved no marker and no host test; this probe is what it moves now.
+///
+/// Three steps, and the first is what makes the other two mean anything:
+///
+/// 1. Read block 0. Its bytes past the header are *not* zero (the superblock is
+///    at [`SUPER_OFFSET`]), and it is now the last block the driver touched. If
+///    they were zero the proof would be vacuous, so that is checked, not assumed.
+/// 2. Write the tail label — the [`IMAGE_LABEL_LEN`] bytes block
+///    [`ROOTFS_TAIL_BLOCK`] already starts with — as a partial write to that
+///    block. A correct driver stores the block unchanged.
+/// 3. Read the tail back: the label must match and everything past
+///    [`IMAGE_HDR_LEN`] must still be zero, which is how `mkfs-mfs` wrote it. A
+///    driver that skipped its fetch has stored block 0's superblock there.
+///
+/// It runs after [`tail_probe`] so that probe's verdict never depends on this
+/// one, and writes only bytes the block already holds, so a healthy boot leaves
+/// the image bit-identical.
+#[cfg_attr(test, allow(dead_code))]
+fn partial_probe(blocks: &mut Blocks<'_>) {
+    match blocks.read(0) {
+        Ok(blk) if blk[IMAGE_HDR_LEN..].iter().all(|&b| b == 0) => {
+            diag_fmt(format_args!("bdev.partial FAIL vacuous"));
+            return;
+        }
+        Ok(_) => {}
+        Err(rc) => {
+            diag_fmt(format_args!("bdev.partial FAIL prime rc={rc}"));
+            return;
+        }
+    }
+    blocks.buf_mut()[..IMAGE_LABEL_LEN].copy_from_slice(&IMAGE_TAIL_LABEL);
+    let rc = bdev_request(
+        blocks.dev,
+        BDEV_WRITE,
+        BDEV_MINOR_ROOT,
+        blocks.gid,
+        IMAGE_LABEL_LEN as i32,
+        u64::from(ROOTFS_TAIL_BLOCK),
+    );
+    if rc != IMAGE_LABEL_LEN as i32 {
+        diag_fmt(format_args!("bdev.partial FAIL write rc={rc}"));
+        return;
+    }
+    match blocks.read(u64::from(ROOTFS_TAIL_BLOCK)) {
+        Ok(blk) if blk[..IMAGE_LABEL_LEN] != IMAGE_TAIL_LABEL => {
+            diag_fmt(format_args!("bdev.partial FAIL label"))
+        }
+        Ok(blk) if blk[IMAGE_HDR_LEN..].iter().any(|&b| b != 0) => {
+            diag_fmt(format_args!("bdev.partial FAIL clobbered"))
+        }
+        Ok(_) => diag_fmt(format_args!("bdev.partial ok n={IMAGE_LABEL_LEN}")),
+        Err(rc) => diag_fmt(format_args!("bdev.partial FAIL readback rc={rc}")),
     }
 }
 
