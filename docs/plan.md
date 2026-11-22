@@ -395,9 +395,12 @@ Boot modules are packed into the kernel ELF as a `.boot_image` section (MXBI hea
   `crt*.o` installed to a sysroot
 - **`tools/mkbootimage.rs`** packs server/driver ELF binaries into the boot archive linked into the
   kernel
-- **`tools/mkimage`** (a host Rust tool, slice 6.4 — not the shell script first sketched here)
-  creates the GPT disk: FAT32 boot partition (Limine + kernel) + MinixFS root
-- **`tools/qemu-run.sh`** launches QEMU with VirtIO devices and serial console
+- **`tools/mkimage`** (a host Rust crate since slice 6.4, with no third-party dependency — not the
+  shell script first sketched here) writes the GPT boot disk: a FAT32 ESP (Limine, its config, the
+  kernel) and the MinixFS root partition, the latter copied from the `rootfs.img` that
+  `kernel/build.rs` writes
+- **`tools/qemu-run.sh`**, the cargo runner, builds that image with `mkimage` on every run and
+  launches QEMU with it as the one virtio-blk device, serial console on stdio
 
 ---
 
@@ -428,7 +431,8 @@ placeholders. CLAUDE.md, LICENSE (BSD-3-Clause).
 - aarch64 exception vector table (`vectors.S` + `exception.rs`); any unexpected trap routes through
   `exception_entry` and panics with a decoded ESR_EL1/ELR_EL1/FAR_EL1 dump
 - `tools/qemu-run.sh` is the cargo runner: stages an ESP under `target/esp/`, auto-detects edk2
-  firmware, boots with `qemu-system-aarch64 -M virt` via `-drive file=fat:rw:...`
+  firmware, boots with `qemu-system-aarch64 -M virt` via `-drive file=fat:rw:...` (as Phase 1 built
+  it; slice 6.4 replaced the staged directory with a GPT disk image)
 - **Milestone:** `cargo run -p minixrs-kernel --target aarch64-unknown-none --release` boots through
   UEFI + Limine, prints `minix.rs booting on aarch64` + HHDM offset, then halts in `wfe`. Exception
   path verified by injecting a deliberate fault and observing a clean panic dump.
@@ -621,14 +625,14 @@ Designed and sliced by the pre-Phase-6 chunk-4 session (2026-09-30) — locked d
 rationale, and per-slice scope/proof in [`docs/plans/phase-6-virtio.md`](plans/phase-6-virtio.md).
 Headline decisions: four driver boot slots reserved together; the kernel probes the virtio-mmio
 slots at boot and pre-maps each driver's device page, DMA memory and one IRQ line; modern
-virtio-mmio only; the root backend is chosen by whether a virtio disk is attached, with the ramdisk
-kept as the second backend for the whole phase; one GPT disk built by a host Rust tool; and a
-framebuffer console plus a keyboard driver inside the milestone bar.
+virtio-mmio only; the root backend is chosen by whether the attached virtio disk carries a root,
+with the ramdisk kept as the second backend for the whole phase; one GPT disk built by a host Rust
+tool; and a framebuffer console plus a keyboard driver inside the milestone bar.
 
 - [x] **6.1** `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
 - [x] **6.2** `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 - [x] **6.3** `virtio-blk` behind BDEV + root backend selection
-- [ ] **6.4** `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
+- [x] **6.4** `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
 - [ ] **6.5** TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
 - [ ] **6.6** `virtio-console` as a second CDEV backend
 - [ ] **6.7** framebuffer console: Limine framebuffer → TTY

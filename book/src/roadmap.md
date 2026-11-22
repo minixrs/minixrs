@@ -6,10 +6,11 @@
 > user-space driver — TTY, which owns the PL011 and serves `CDEV_WRITE` (slice 5.3, see
 > [Drivers](drivers/overview.md)). The musl fork and the MFS file-system server have landed too (see
 > [The C toolchain and the musl port](libc/overview.md) and [Servers](servers/overview.md)), and so
-> has virtio-blk, which serves the root filesystem's blocks from a disk since slice 6.3. Still
-> absent: the other VirtIO drivers, PFS, and any x86_64 port. The rest of this book describes what
-> *does* run; this chapter describes where the project is headed. For live phase status and slice
-> tracking, see the repository's `docs/plan.md`.
+> has virtio-blk, which serves the root filesystem's blocks from a disk since slice 6.3 — since
+> slice 6.4 the one GPT disk the machine also boots from. Still absent: the other VirtIO drivers,
+> PFS, and any x86_64 port. The rest of this book describes what *does* run; this chapter describes
+> where the project is headed. For live phase status and slice tracking, see the repository's
+> `docs/plan.md`.
 
 ## Grants and safe copy (Phase 5, first)
 
@@ -89,9 +90,10 @@ restarts it. They talk to the kernel (interrupts, I/O) and to VFS (device protoc
   driver also grows in Phase 6: PL011 receive, and a text console on the bootloader-provided
   framebuffer.
 - The `driver-rt` crate already provides the interrupt-line helper, the VirtIO transport (a trait
-  with the MMIO implementation) and the split virtqueue (slice 6.2), plus typed DMA handles (slice
-  6.3); the reusable `BlockDriver` / `CharDriver` request traits are still to come. Only a console
-  story is needed for the Phase-5 `printf` milestone; the rest is Phase 6.
+  with the MMIO implementation) and the split virtqueue (slice 6.2), typed DMA handles (slice 6.3)
+  and a GPT parser for block drivers (slice 6.4); the reusable `BlockDriver` / `CharDriver` request
+  traits are still to come. Only a console story is needed for the Phase-5 `printf` milestone; the
+  rest is Phase 6.
 
 ## Copy-on-write fork
 

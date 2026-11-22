@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! minix.rs `virtio-blk` driver — the disk behind the BDEV band, and the first
-//! consumer of `driver-rt` (slices 6.2 and 6.3).
+//! consumer of `driver-rt` (slices 6.2, 6.3 and 6.4).
 //!
 //! The kernel's boot probe assigns this driver a virtio-mmio transport, pre-maps
 //! that register page and a contiguous DMA run into this address space, and puts
 //! the transport's interrupt line on this driver's allow-list. The driver brings
-//! the device up, decides whether it carries a minix.rs root, and then serves
-//! `BDEV_READ` and `BDEV_WRITE` from the device's request queue, one request at a
+//! the device up, reads its GUID Partition Table, decides whether one of the
+//! partitions is a minix.rs root, and then serves `BDEV_READ` and `BDEV_WRITE`
+//! on the disk's partitions from the device's request queue, one request at a
 //! time, each completed by a real interrupt.
 //!
 //! ## Publishing, then the verdict
@@ -17,9 +18,10 @@
 //!
 //! - **Whether there is a device** is one kernel call. `vblk_init`, the
 //!   `init_fresh` callback, asks `GET_VIRTIO_MMIO` and publishes this driver to DS
-//!   if the kernel assigned it a transport; with no disk attached (`ENOENT`) it
-//!   publishes nothing. Nothing in that callback can block on the device.
-//! - **Whether the device carries a root** takes two reads, each a completion
+//!   if the kernel assigned it a transport; with no virtio-mmio disk attached
+//!   (`ENOENT`) it publishes nothing. Nothing in that callback can block on the
+//!   device.
+//! - **Whether the device carries a root** takes several reads, each a completion
 //!   interrupt the driver blocks for. [`bring_up`] and [`root_check`] run after
 //!   `sef_startup`, before the receive loop.
 //!
@@ -33,10 +35,15 @@
 //!
 //! [`bring_up`] runs once and prints exactly one verdict line:
 //!
-//! 1. `GET_VIRTIO_MMIO` — `ENOENT` means no disk is attached: `no device`.
+//! 1. `GET_VIRTIO_MMIO` — `ENOENT` means the kernel's probe assigned this
+//!    driver no virtio-mmio device: `no device`. (Since slice 6.4 the machine
+//!    boots from its virtio-mmio disk, so only the hand-run
+//!    `MINIXRS_ROOT=nodisk` boot, whose disk is on PCI, prints it.)
 //! 2. `GET_DMA`; check the kernel's cookie (step 6's queue zeroes over it).
 //! 3. `MmioTransport::new` (magic, version 2); `DeviceID` must be 2.
-//! 4. `negotiate` with no optional feature — `VIRTIO_F_VERSION_1` alone.
+//! 4. `negotiate`, requesting `VIRTIO_BLK_F_RO | VIRTIO_BLK_F_FLUSH`: the
+//!    accepted word is `VIRTIO_F_VERSION_1` plus whichever of the two the device
+//!    offers, and it is kept for the life of the process.
 //! 5. Read `capacity`, generation-stable.
 //! 6. Lay out and enable queue 0; `DRIVER_OK`, read back.
 //! 7. Claim the INTID; a claim on `INTID + 1` must answer `EPERM`.
@@ -46,18 +53,67 @@
 //! resetting the device or releasing anything; a failure in step 5 or 6 (after
 //! `negotiate` succeeded) also sets `FAILED` through `driver-rt`'s `fail`. No bring-up step
 //! waits on a register or a ring. On success the transport, the queue, the
-//! interrupt line and the request buffers are kept in a [`Disk`] in `main`'s
-//! frame for the life of the process.
+//! interrupt line, the request buffers and the accepted feature word are kept in
+//! a [`Disk`] in `main`'s frame for the life of the process. A device that did
+//! not accept `VIRTIO_BLK_F_FLUSH` then gets one more line, `flush off`.
 //!
-//! [`root_check`] then reads block 0 and the last block through [`serve`] — the
-//! same path a client request takes, so the interrupt path is proved before the
-//! first client and by the same code — and applies `drivers/memory`'s device-level
-//! checks: the image label, the header's block count against the device's, the
-//! tail label. It prints `root ok blocks=<n> tail=1` or `root FAIL <what>`.
+//! ## The root check
+//!
+//! [`root_check`] runs once, after a successful bring-up, and prints exactly one
+//! line: `root ok blocks=<n> tail=1 part=<p> lba=<s>` or `root FAIL <what>`.
+//! Every read it makes goes through [`serve`] — the same path a client request
+//! takes, so the interrupt path is proved before the first client and by the
+//! same code. It makes no write, so it never flushes. The refusals, in the order
+//! they are decided (spec P7) — each one's text is `blk::RootFail`'s `Display`:
+//!
+//! 1. `geometry capacity=<c>` — the device is empty, not a whole number of
+//!    4096-byte blocks, or shorter than the five blocks the next step reads.
+//!    Decided before any read.
+//! 2. `gpt rc=<rc>` — a read of whole-disk blocks 0–4 failed. Those five blocks
+//!    (LBA 0–39) hold the protective MBR, the primary GPT header and all 128
+//!    partition entries; they are read into [`TABLE_BUF`].
+//! 3. `gpt <why>` — `driver-rt`'s parser refused the primary header, the entry
+//!    array's CRC, or an entry. Only the primary table is consulted. A raw
+//!    MinixFS image with no partition table ends here, as `gpt signature`.
+//! 4. `gpt ambiguous` / `no root partition` — more than one partition, or none,
+//!    carries the minix.rs root type GUID. The root is selected by type, never
+//!    by position.
+//! 5. `align` — the root partition does not start and end on a block boundary.
+//! 6. `readonly` — the device is read-only (`VIRTIO_BLK_F_RO` was accepted).
+//!    Such a disk is declined rather than mounted: nothing above this driver
+//!    can mount a filesystem read-only.
+//! 7. `head rc=<rc>`, `label`, `blocks hdr=<h> dev=<d>`, `tail rc=<rc>`,
+//!    `tail label` — `drivers/memory`'s device-level checks, applied to the
+//!    **root partition**: its first block starts with the image label and
+//!    carries the partition's own block count, and its last block starts with
+//!    the tail label.
+//!
+//! In `root ok`, `blocks` is the root partition's size, `part` its number in the
+//! table (counted from 1) and `lba` its first 512-byte sector.
+//!
+//! ## Minors
+//!
+//! A disk that passed the root check is served as a table of extents (spec P6,
+//! `part.rs`), reads and writes alike on every one:
+//!
+//! | Minor   | Extent                                                 |
+//! | ------- | ------------------------------------------------------ |
+//! | 0       | the root partition                                     |
+//! | 1       | the whole disk                                         |
+//! | `1 + n` | GPT partition `n`, counted from 1, for each used entry |
+//!
+//! So the root is reachable as minor 0 and as `1 +` its partition number. A
+//! partition that is not a whole number of blocks at a block boundary has no
+//! minor. A request's block number is relative to its minor's extent; the
+//! extent's first block is added by `checked_add` after the range check.
+//!
+//! **With no root there are no minors at all**: every request answers `ENXIO`,
+//! the whole disk (minor 1) included, and a zero-length request too. That gate
+//! is the first thing `part::locate` decides, so it is host-tested there.
 //!
 //! ## One request in flight
 //!
-//! [`serve`] builds one request in the DMA run (a 16-byte header, the one
+//! [`submit`] builds one request in the DMA run (a 16-byte header, the one
 //! 4096-byte bounce page, a status byte preset to `0xFF`), publishes the chain,
 //! notifies the device, and then blocks in a receive **filtered to `HARDWARE`**
 //! until that request's own head has come back. The filter is what makes "one in
@@ -67,7 +123,8 @@
 //! read `InterruptStatus`, acknowledge exactly those bits, walk the used ring,
 //! re-arm the line — by [`on_interrupt`], which the main loop also uses for an
 //! interrupt that arrives with nothing in flight (a configuration change is
-//! legal, and is otherwise ignored).
+//! legal, and is otherwise ignored). [`serve`] (a read or a write of one block)
+//! and [`flush`] are the two callers, so there is one wait loop.
 //!
 //! A device that never completes a request hangs the driver in that receive,
 //! with its client in SENDREC behind it. Nothing reports that (RS does not ping
@@ -84,15 +141,36 @@
 //! over its start, and writes it back: the rest of the block survives, which is
 //! what `drivers/memory` gives the same request.
 //!
+//! ## Flush before the reply
+//!
+//! When the device accepted `VIRTIO_BLK_F_FLUSH`, every `BDEV_WRITE` whose
+//! device write succeeded is followed by a `VIRTIO_BLK_T_FLUSH` **before the
+//! client is answered** (spec P8), so a client is told a write succeeded only
+//! after the device reported its cache committed. A flush is a two-descriptor
+//! chain — header and status byte, no data — completed by interrupt like any
+//! other request. There is none after a zero-length write, a refused grant, or
+//! a device write that failed. A flush that fails turns the write's reply into
+//! `EIO`.
+//!
+//! The first successful flush of a boot prints `flush ok n=1`, and no later one
+//! prints anything. Every flush the device completed with a status other than
+//! `0` prints `flush FAIL status=<s>`, the raw status byte in hexadecimal
+//! (`0xff` is the preset: the device never wrote the byte). A flush lost to a
+//! broken device has no status byte and is reported by `virtio FAIL step=io`
+//! instead.
+//!
 //! ## What a client hears
 //!
-//! - **`ENXIO`** for every BDEV request when there is no root — no device, a
-//!   failed bring-up, or labels that did not match. Minor 0 is "the root
-//!   filesystem this driver serves", and there is none.
-//! - **`ENXIO` / `EINVAL`** for a malformed request, decided by `server-rt`'s
-//!   `bdev::validate_read`, which `drivers/memory` shares so both refuse alike.
+//! - **`ENXIO`** for every BDEV request, on every minor, when there is no root —
+//!   no device, a failed bring-up, or any `root FAIL` above — and for a minor
+//!   that has no extent on a disk that has one.
+//! - **`EINVAL`** for a malformed request on a minor that exists, decided by
+//!   `server-rt`'s `bdev::validate_range` against that minor's extent — the
+//!   range half of the `validate_read` `drivers/memory` calls, so both refuse
+//!   alike.
 //! - **`EIO`** when the device failed a well-formed request: a status byte other
-//!   than `0` (including one the device never wrote), or a broken device.
+//!   than `0` (including one the device never wrote), a failed flush after a
+//!   write, or a broken device.
 //! - A refused grant or an unmapped buffer is relayed **verbatim** from
 //!   `SYS_SAFECOPY`.
 //! - **`ENOSYS`** for any other request number.
@@ -116,11 +194,13 @@ minixrs_abi_note::brand!();
 
 mod blk;
 mod bringup;
+mod part;
 
 use bringup::{
     VBLK_CONFIG_CAPACITY_OFF, VBLK_IRQ_NOTIFY_ID, VBLK_WANTED_FEATURES, capacity_from_config,
     cookie_ok, vblk_layout,
 };
+use core::cell::UnsafeCell;
 use minixrs_driver_rt::transport::{NegotiateError, config_read, driver_ok, fail, negotiate};
 use minixrs_driver_rt::{
     DmaBuf, DmaRegion, DmaRun, IrqLine, MmioError, MmioTransport, Transport, VirtQueue,
@@ -129,9 +209,10 @@ use minixrs_driver_rt::{
 use minixrs_ipc::{ipc_receive, ipc_send};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    BDEV_READ, BDEV_WRITE, GET_DMA, GET_VIRTIO_MMIO, GETINFO_DMA_LEN_OFF, GETINFO_DMA_PA_OFF,
-    GETINFO_DMA_VA_OFF, GETINFO_VIRTIO_INTID_OFF, GETINFO_VIRTIO_SLOT_OFF, GETINFO_VIRTIO_VA_OFF,
-    NOTIFY_IRQ_PENDING_OFF, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    BDEV_BLOCK_SIZE, BDEV_READ, BDEV_WRITE, GET_DMA, GET_VIRTIO_MMIO, GETINFO_DMA_LEN_OFF,
+    GETINFO_DMA_PA_OFF, GETINFO_DMA_VA_OFF, GETINFO_VIRTIO_INTID_OFF, GETINFO_VIRTIO_SLOT_OFF,
+    GETINFO_VIRTIO_VA_OFF, NOTIFY_IRQ_PENDING_OFF, SAFECOPY_FROM, SAFECOPY_TO,
+    SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{HARDWARE, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -139,10 +220,11 @@ use minixrs_kernel_shared::error::{EINVAL, EIO, ENOENT, ENOSYS, ENXIO, EPERM, OK
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minixrs_kernel_shared::rootfs::IMAGE_HDR_LEN;
 use minixrs_kernel_shared::virtio::VIRTIO_ID_BLOCK;
-use minixrs_server_rt::bdev::{parse_read, validate_read};
+use minixrs_server_rt::bdev::parse_read;
 use minixrs_server_rt::{
     SefConfig, diag_fmt, rd_i32, rd_u64, sef_publish_to_ds, sef_startup, sys_getinfo, sys_safecopy,
 };
+use part::{Located, MinorTable};
 
 /// The queue virtio-blk uses (its only one: `requestq`).
 const REQUEST_QUEUE: u16 = 0;
@@ -174,20 +256,54 @@ struct Disk {
     data: DmaBuf,
     /// The device's size in 512-byte sectors.
     capacity: u64,
+    /// The feature word `negotiate` accepted: `VIRTIO_F_VERSION_1`, plus
+    /// whichever of `VIRTIO_BLK_F_RO` and `VIRTIO_BLK_F_FLUSH` the device
+    /// offered. Read through `bringup::read_only` and `bringup::flush_enabled`.
+    features: u64,
+    /// Flushes the device has completed successfully. The first one is
+    /// announced (`flush ok n=1`); the count saturates, so it is announced once.
+    flushes: u64,
     /// The device broke the ring contract (or the driver could no longer wait
     /// for it). Set once by [`break_device`]; every later request is `EIO`.
     broken: bool,
 }
 
-/// What this driver serves as BDEV minor 0 (spec B1, H6).
+/// One request to the device: what [`submit`] chains and waits for.
 #[derive(Clone, Copy)]
-enum Root {
-    /// No device, a failed bring-up, or a device that is not a minix.rs root:
-    /// every BDEV request answers `ENXIO`.
-    None,
-    /// A verified root of `blocks` BDEV blocks.
-    Ready { blocks: u64 },
+enum Request {
+    /// `VIRTIO_BLK_T_IN`: the device fills the bounce page from `sector`.
+    Read {
+        /// The block's first 512-byte sector.
+        sector: u64,
+    },
+    /// `VIRTIO_BLK_T_OUT`: the device stores the bounce page at `sector`.
+    Write {
+        /// The block's first 512-byte sector.
+        sector: u64,
+    },
+    /// `VIRTIO_BLK_T_FLUSH`: no data buffer at all.
+    Flush,
 }
+
+/// Where the disk's first [`part::TABLE_BLOCKS`] blocks are read for
+/// [`part::scan`]: 20 480 bytes, which is why it is not a local.
+///
+/// A server's stack is 64 KiB (`uspace::USER_STACK_BYTES`) and its budget for
+/// frame-local buffers is a block or two; five blocks under the request path's
+/// own frames is not that. `.bss` costs nothing in the image. The shape is the
+/// house one for a buffer that cannot be a local (VFS's `EXEC_STAGE`): a
+/// `#[repr(transparent)]` `UnsafeCell` newtype with a hand-written `Sync`.
+///
+/// Used once per boot, by [`find_root`], and by nothing else.
+#[repr(transparent)]
+struct TableBuf(UnsafeCell<[u8; part::TABLE_BUF_BYTES]>);
+
+// SAFETY: this driver is a single EL0 thread running a straight-line receive
+// loop with no interrupt handlers of its own (an interrupt reaches it as a
+// message), so there is never a second accessor.
+unsafe impl Sync for TableBuf {}
+
+static TABLE_BUF: TableBuf = TableBuf(UnsafeCell::new([0u8; part::TABLE_BUF_BYTES]));
 
 // Only `_start` calls `main`; under `cargo test` `_start` is gone, so `main` (and
 // the helpers it alone reaches) would read as dead code.
@@ -210,10 +326,12 @@ fn main() -> ! {
     // request cannot be answered early either — it waits in the kernel until the
     // loop below receives, which is after the verdict.
     let mut disk = bring_up();
-    let root = match disk.as_mut() {
-        Some(disk) => root_check(disk),
-        None => Root::None,
-    };
+    // What this driver serves (spec B1, H6, P6): the minors of a disk with a
+    // verified root partition, or `None` — no device, a failed bring-up, or a
+    // disk that is not a minix.rs root — when every BDEV request answers
+    // `ENXIO`, on every minor. The table is about 3 KiB; it stays in this
+    // frame, which never returns, and is lent to each request.
+    let minors: Option<MinorTable> = disk.as_mut().and_then(root_check);
 
     let mut msg = Message {
         m_source: 0,
@@ -225,7 +343,7 @@ fn main() -> ! {
             continue;
         }
         // An interrupt notification is identified by the kernel-stamped source,
-        // never by payload, and gets no reply. Nothing is in flight here (`serve`
+        // never by payload, and gets no reply. Nothing is in flight here (`submit`
         // does not return while a request is), so this is at most a
         // configuration-change interrupt: acknowledge, walk, re-arm, ignore. A
         // used element now would surface from the walk as a queue fault. A broken
@@ -249,15 +367,32 @@ fn main() -> ! {
         // (never a payload field), and the reply overwrites `msg.m_source`.
         let caller_e = msg.m_source;
         let rc = match msg.m_type {
-            BDEV_READ | BDEV_WRITE => match (disk.as_mut(), root) {
-                (Some(disk), Root::Ready { blocks }) if msg.m_type == BDEV_READ => {
-                    do_read(disk, blocks, caller_e, &msg)
+            BDEV_READ | BDEV_WRITE => {
+                let req = parse_read(&msg);
+                // `part::locate` decides everything about the request before
+                // the device is touched, and it decides the no-root case first:
+                // with no table every request is `ENXIO`, on every minor, a
+                // zero-length one included (spec B1, P6). That gate is there,
+                // not here, so that a host test holds it.
+                match (part::locate(minors.as_ref(), req), disk.as_mut()) {
+                    (Err(e), _) => e,
+                    // A legal zero-length request: no grant use, no device
+                    // I/O, no flush. This is the request a client probes the
+                    // device with.
+                    (Ok(Located::Empty), _) => 0,
+                    (Ok(Located::Io { sector, len }), Some(disk)) => {
+                        if msg.m_type == BDEV_READ {
+                            do_read(disk, sector, len, caller_e, req.gid)
+                        } else {
+                            do_write(disk, sector, len, caller_e, req.gid)
+                        }
+                    }
+                    // Unreachable: `minors` is `Some` only if `disk` is — it
+                    // was built from it above — and `locate` answers `ENXIO`
+                    // without one.
+                    (Ok(Located::Io { .. }), None) => ENXIO,
                 }
-                (Some(disk), Root::Ready { blocks }) => do_write(disk, blocks, caller_e, &msg),
-                // No root: minor 0 does not exist on this driver, whatever else
-                // the request says (spec B1).
-                _ => ENXIO,
-            },
+            }
             // Unlike DS, reply rather than drop — the caller is inside a SENDREC
             // and would otherwise block forever.
             _ => ENOSYS,
@@ -271,8 +406,8 @@ fn main() -> ! {
 ///
 /// One kernel call decides it, and nothing here touches the device: the publish
 /// has to precede every step that can block, or a client that looks `vblk` up
-/// while bring-up waits for a completion finds nothing. With no disk attached
-/// (`ENOENT`) — or any other refusal — nothing is published, and [`bring_up`]
+/// while bring-up waits for a completion finds nothing. With no virtio-mmio disk
+/// attached (`ENOENT`) — or any other refusal — nothing is published, and [`bring_up`]
 /// asks again and reports it.
 ///
 /// Always `OK`: a non-`OK` return fails `sef_startup` and leaves the driver
@@ -353,32 +488,34 @@ fn on_interrupt(disk: &mut Disk, expect: Option<u16>) -> bool {
     completed
 }
 
-/// Carry out one device request — `req_type` is `VIRTIO_BLK_T_IN` (the device
-/// fills the bounce page from `sector`) or `VIRTIO_BLK_T_OUT` (the device stores
-/// the bounce page at `sector`) — and wait for its completion. `Ok(())` when the
-/// device reported success; `Err(EIO)` for a device error, a status byte the
-/// device never wrote, or a broken device.
+/// Carry out one device request and wait for its completion. `Ok` is the
+/// **status byte** the device left — success or not, and [`blk::STATUS_UNWRITTEN`]
+/// if it completed the request without writing one — for the caller to judge;
+/// `Err(EIO)` is a broken device, which has no status to report.
+///
+/// The chain is the header (device-readable), then the bounce page — readable
+/// for a write, writable for a read, absent for a flush — then the status byte
+/// (device-writable).
 ///
 /// One request is in flight at a time, and this does not return until it has
 /// completed (spec B3). The wait is a receive filtered to `HARDWARE`: blocked,
 /// never polling, and blind to every other sender, which is what keeps a second
 /// client queued in the kernel instead of in this driver. A device that never
-/// completes hangs the driver here.
+/// completes hangs the driver here. This is the only wait loop: a read, a write
+/// and a flush all complete through it.
 #[cfg_attr(test, allow(dead_code))]
-fn serve(disk: &mut Disk, req_type: u32, sector: u64) -> Result<(), i32> {
+fn submit(disk: &mut Disk, req: Request) -> Result<u8, i32> {
     if disk.broken {
         return Err(EIO);
     }
-    let write = match req_type {
-        blk::VIRTIO_BLK_T_IN => false,
-        blk::VIRTIO_BLK_T_OUT => true,
-        // No caller passes anything else; the device is not touched.
-        _ => return Err(EINVAL),
-    };
 
     // The status byte is preset to a value the device never reports, so a
     // completion that left it alone is told apart from a success.
-    let header = blk::encode_header(req_type, sector);
+    let header = match req {
+        Request::Read { sector } => blk::encode_header(blk::VIRTIO_BLK_T_IN, sector),
+        Request::Write { sector } => blk::encode_header(blk::VIRTIO_BLK_T_OUT, sector),
+        Request::Flush => blk::FLUSH_HEADER,
+    };
     if !disk.header.write_from(0, &header) || !disk.status.write_from(0, &[blk::STATUS_UNWRITTEN]) {
         // Unreachable: `vblk_layout` sized both buffers for exactly these writes.
         break_device(disk, format_args!("buffers"));
@@ -386,10 +523,11 @@ fn serve(disk: &mut Disk, req_type: u32, sector: u64) -> Result<(), i32> {
     }
 
     // Device-readable buffers first, then device-writable ones.
-    let head = if write {
-        disk.queue.add(&[disk.header, disk.data], &[disk.status])
-    } else {
-        disk.queue.add(&[disk.header], &[disk.data, disk.status])
+    let head = match req {
+        Request::Read { .. } => disk.queue.add(&[disk.header], &[disk.data, disk.status]),
+        Request::Write { .. } => disk.queue.add(&[disk.header, disk.data], &[disk.status]),
+        // Two descriptors: a flush carries no data.
+        Request::Flush => disk.queue.add(&[disk.header], &[disk.status]),
     };
     let Some(head) = head else {
         // With nothing in flight all eight descriptors are free, so this is a
@@ -436,108 +574,177 @@ fn serve(disk: &mut Disk, req_type: u32, sector: u64) -> Result<(), i32> {
         // Unreachable: the same byte was written above.
         return Err(EIO);
     }
-    blk::status_errno(status[0])
+    Ok(status[0])
 }
 
-/// Decide whether the device carries a minix.rs root, and say so (spec B6).
-///
-/// `drivers/memory`'s `selfcheck`, through the queue: block 0 must start with the
-/// image label and carry the device's own block count, and the last block must
-/// start with the tail label. Device-level only — no superblock is decoded.
-/// Prints `root ok blocks=<n> tail=1` or one `root FAIL <what>` line.
-///
-/// Both reads go through [`serve`], so the label arriving in the bounce page also
-/// proves the page the device writes by DMA is the memory this driver reads.
+/// Transfer one block through the bounce page — `req_type` is `VIRTIO_BLK_T_IN`
+/// (the device fills the page from `sector`) or `VIRTIO_BLK_T_OUT` (the device
+/// stores the page at `sector`) — and wait for its completion. `Ok(())` when the
+/// device reported success; `Err(EIO)` for a device error, a status byte the
+/// device never wrote, or a broken device.
 #[cfg_attr(test, allow(dead_code))]
-fn root_check(disk: &mut Disk) -> Root {
-    let capacity = disk.capacity;
-    let geometry = blk::device_blocks(capacity).and_then(|blocks| {
-        let tail_sector = blk::block_to_sector(blk::tail_block(blocks)?)?;
-        Some((blocks, tail_sector))
-    });
-    let Some((blocks, tail_sector)) = geometry else {
-        diag_fmt(format_args!("root FAIL geometry capacity={capacity}"));
-        return Root::None;
+fn serve(disk: &mut Disk, req_type: u32, sector: u64) -> Result<(), i32> {
+    let req = match req_type {
+        blk::VIRTIO_BLK_T_IN => Request::Read { sector },
+        blk::VIRTIO_BLK_T_OUT => Request::Write { sector },
+        // No caller passes anything else; the device is not touched.
+        _ => return Err(EINVAL),
     };
+    submit(disk, req).and_then(blk::status_errno)
+}
 
+/// Ask the device to commit its write cache, and wait for it to say it has
+/// (spec P8). `Ok(())` when the device reported success; `Err(EIO)` otherwise.
+///
+/// The first success of a boot prints `flush ok n=1` — the count is
+/// [`Disk::flushes`], not a literal — and later ones print nothing. A flush the
+/// device completed with any other status prints `flush FAIL status=<s>` every
+/// time: the raw status byte, in hexadecimal, so `0x1` is `IOERR`, `0x2` is
+/// `UNSUPP` and `0xff` is the preset the device never overwrote. A flush lost to
+/// a broken device has no status byte; [`break_device`] has already said why.
+#[cfg_attr(test, allow(dead_code))]
+fn flush(disk: &mut Disk) -> Result<(), i32> {
+    let status = submit(disk, Request::Flush)?;
+    if let Err(rc) = blk::status_errno(status) {
+        diag_fmt(format_args!("flush FAIL status={status:#x}"));
+        return Err(rc);
+    }
+    disk.flushes = disk.flushes.saturating_add(1);
+    if disk.flushes == 1 {
+        diag_fmt(format_args!("flush ok n={}", disk.flushes));
+    }
+    Ok(())
+}
+
+/// Decide whether the disk carries a minix.rs root, and say so (spec B6, P7):
+/// `root ok blocks=<n> tail=1 part=<p> lba=<s>`, or the one `root FAIL <what>`
+/// line that [`find_root`]'s refusal renders. Both lines are printed here and
+/// nowhere else; the failure's text is [`blk::RootFail`]'s `Display`. `Some` is
+/// the minors of a disk that has a root.
+#[cfg_attr(test, allow(dead_code))]
+fn root_check(disk: &mut Disk) -> Option<MinorTable> {
+    match find_root(disk) {
+        Ok(table) => {
+            diag_fmt(format_args!(
+                "root ok blocks={} tail=1 part={} lba={}",
+                table.root().blocks,
+                table.root_index(),
+                table.root_lba()
+            ));
+            Some(table)
+        }
+        Err(why) => {
+            diag_fmt(format_args!("{why}"));
+            None
+        }
+    }
+}
+
+/// Find the root partition and check it, in spec P7's order:
+///
+/// 1. the device's geometry ([`part::geometry`]) — before any read, so an
+///    empty or ragged device, or one shorter than the table's five blocks, is
+///    refused for that and not for whichever read fails on it;
+/// 2. whole-disk blocks `0..part::TABLE_BLOCKS` into [`TABLE_BUF`], one block
+///    per request;
+/// 3. [`part::scan`]: the partition table, exactly one root partition, aligned;
+/// 4. a read-only device is declined;
+/// 5. `drivers/memory`'s `selfcheck` on the **root partition's** extent: its
+///    block 0 must start with the image label and carry the extent's own block
+///    count, and its last block must start with the tail label. Device-level
+///    only — no superblock is decoded.
+///
+/// Every read goes through [`serve`], so the bytes arriving in the bounce page
+/// also prove the page the device writes by DMA is the memory this driver
+/// reads. Nothing is written, so nothing is flushed.
+///
+/// Called once, by [`root_check`].
+#[cfg_attr(test, allow(dead_code))]
+fn find_root(disk: &mut Disk) -> Result<MinorTable, blk::RootFail> {
+    use blk::RootFail;
+
+    // Before any read: an empty or ragged device, and one too short to hold
+    // the blocks the loop below asks for.
+    let capacity = disk.capacity;
+    part::geometry(capacity)?;
+
+    // SAFETY: `TABLE_BUF` is named only here, and this function runs once, from
+    // `main` through `root_check`, on the driver's single thread: no other
+    // reference to the buffer exists or is made while this one lives. The
+    // reference does not outlive this call — `scan` copies what it keeps into
+    // the `MinorTable` it returns — and nothing below re-enters this function.
+    let table_buf: &mut [u8; part::TABLE_BUF_BYTES] = unsafe { &mut *TABLE_BUF.0.get() };
+    for (block, chunk) in (0u64..).zip(table_buf.as_chunks_mut::<BDEV_BLOCK_SIZE>().0) {
+        // The `EINVAL` is unreachable: `block` is below `TABLE_BLOCKS`, and
+        // `geometry` above refused a device with fewer blocks than that.
+        let sector = blk::block_to_sector(block).ok_or(RootFail::TableIo { rc: EINVAL })?;
+        serve(disk, blk::VIRTIO_BLK_T_IN, sector)
+            .and_then(|()| read_bounce(disk, chunk))
+            .map_err(|rc| RootFail::TableIo { rc })?;
+    }
+    let table = part::scan(table_buf.as_slice(), capacity)?;
+
+    // After the table, before the labels: a read-only disk is declined whatever
+    // it holds, but a disk with no acceptable table is refused for that first.
+    if bringup::read_only(disk.features) {
+        return Err(RootFail::ReadOnly);
+    }
+
+    let root = table.root();
     let mut hdr = [0u8; IMAGE_HDR_LEN];
 
-    let head = serve(disk, blk::VIRTIO_BLK_T_IN, 0).and_then(|()| read_hdr(disk, &mut hdr));
-    if let Err(rc) = head {
-        diag_fmt(format_args!("root FAIL head rc={rc}"));
-        return Root::None;
-    }
-    if let Err(why) = blk::check_head(&hdr, blocks) {
-        report_root_fail(why);
-        return Root::None;
-    }
+    // Both `EINVAL`s are unreachable: `scan` builds no empty extent, and none
+    // whose blocks' sectors do not fit.
+    let head_sector = root.sector(0).ok_or(RootFail::HeadIo { rc: EINVAL })?;
+    serve(disk, blk::VIRTIO_BLK_T_IN, head_sector)
+        .and_then(|()| read_bounce(disk, &mut hdr))
+        .map_err(|rc| RootFail::HeadIo { rc })?;
+    blk::check_head(&hdr, root.blocks)?;
 
-    let tail =
-        serve(disk, blk::VIRTIO_BLK_T_IN, tail_sector).and_then(|()| read_hdr(disk, &mut hdr));
-    if let Err(rc) = tail {
-        diag_fmt(format_args!("root FAIL tail rc={rc}"));
-        return Root::None;
-    }
-    if let Err(why) = blk::check_tail(&hdr) {
-        report_root_fail(why);
-        return Root::None;
-    }
+    let tail_sector = blk::tail_block(root.blocks)
+        .and_then(|block| root.sector(block))
+        .ok_or(RootFail::TailIo { rc: EINVAL })?;
+    serve(disk, blk::VIRTIO_BLK_T_IN, tail_sector)
+        .and_then(|()| read_bounce(disk, &mut hdr))
+        .map_err(|rc| RootFail::TailIo { rc })?;
+    blk::check_tail(&hdr)?;
 
-    diag_fmt(format_args!("root ok blocks={blocks} tail=1"));
-    Root::Ready { blocks }
+    Ok(table)
 }
 
-/// Copy the start of the bounce page out for a label check.
+/// Copy the start of the bounce page out: a whole block of the partition
+/// table, or the first bytes of a block for a label check.
 #[cfg_attr(test, allow(dead_code))]
-fn read_hdr(disk: &Disk, hdr: &mut [u8; IMAGE_HDR_LEN]) -> Result<(), i32> {
-    // The `Err` is unreachable: the bounce page is a whole block.
-    if disk.data.read_into(0, hdr) {
+fn read_bounce(disk: &Disk, dst: &mut [u8]) -> Result<(), i32> {
+    // The `Err` is unreachable: the bounce page is a whole block, and no caller
+    // asks for more.
+    if disk.data.read_into(0, dst) {
         Ok(())
     } else {
         Err(EIO)
     }
 }
 
-/// Print the `root FAIL` line for a failed label or block-count check.
-#[cfg_attr(test, allow(dead_code))]
-fn report_root_fail(why: blk::RootFail) {
-    match why {
-        blk::RootFail::Label => diag_fmt(format_args!("root FAIL label")),
-        blk::RootFail::Blocks { hdr, dev } => {
-            diag_fmt(format_args!("root FAIL blocks hdr={hdr} dev={dev}"))
-        }
-        blk::RootFail::TailLabel => diag_fmt(format_args!("root FAIL tail label")),
-    }
-}
-
-/// Serve one `BDEV_READ`. Returns the reply `m_type`: the byte count read
-/// (`>= 0`), or a negative errno.
+/// Serve one `BDEV_READ` that [`part::locate`] placed: `n` bytes
+/// (`1..=BDEV_MAX_IO`) of the block starting at device `sector`. Returns the
+/// reply `m_type`: the byte count read (`>= 0`), or a negative errno.
 ///
-/// The device fills the bounce page with the whole block; the client's `len`
+/// The device fills the bounce page with the whole block; the client's `n`
 /// bytes are then pushed into its granted buffer. `caller_e` is the
-/// kernel-stamped source of this very message — the granter can be nothing else —
-/// and the grant offset is `0`, as on `drivers/memory`.
+/// kernel-stamped source of the request — the granter can be nothing else —
+/// `gid` is the request's grant, and the grant offset is `0`, as on
+/// `drivers/memory`.
+///
+/// Everything about the request was decided before this is called, in the main
+/// loop: whether its minor exists (`ENXIO`), whether its range is good
+/// (`EINVAL`), a zero-length read (`0`, never reaching here), and which device
+/// sector its block — relative to that minor's extent — starts at.
 #[cfg_attr(test, allow(dead_code))]
-fn do_read(disk: &mut Disk, blocks: u64, caller_e: Endpoint, msg: &Message) -> i32 {
-    let req = parse_read(msg);
-    let n = match validate_read(req, blocks) {
-        Ok((_, n)) => n,
-        Err(e) => return e,
-    };
-    if n == 0 {
-        // A legal zero-length read: no grant use, no device I/O. This is the
-        // request a client probes the device with.
-        return 0;
-    }
-    // Unreachable after validation (`block < blocks`, and `blocks * 8` is the
-    // device's own capacity), but checked.
-    let Some(sector) = blk::block_to_sector(req.block) else {
-        return EINVAL;
-    };
+fn do_read(disk: &mut Disk, sector: u64, n: usize, caller_e: Endpoint, gid: i32) -> i32 {
     if let Err(rc) = serve(disk, blk::VIRTIO_BLK_T_IN, sector) {
         return rc;
     }
-    let rc = sys_safecopy(SAFECOPY_TO, caller_e, req.gid, 0, disk.data.va(), n as u64);
+    let rc = sys_safecopy(SAFECOPY_TO, caller_e, gid, 0, disk.data.va(), n as u64);
     if rc != OK {
         // Verbatim: EPERM ("your grant does not authorize this") and EFAULT ("your
         // buffer is not mapped") are different bugs on the client's side.
@@ -546,7 +753,9 @@ fn do_read(disk: &mut Disk, blocks: u64, caller_e: Endpoint, msg: &Message) -> i
     n as i32
 }
 
-/// Serve one `BDEV_WRITE`. Returns the reply `m_type`: the byte count stored
+/// Serve one `BDEV_WRITE` that [`part::locate`] placed: `n` bytes
+/// (`1..=BDEV_MAX_IO`) of the block starting at device `sector`, taken from the
+/// grant `gid` of `caller_e`. Returns the reply `m_type`: the byte count stored
 /// (`>= 0`), or a negative errno.
 ///
 /// A whole block is copied from the client into the bounce page and written. A
@@ -554,48 +763,46 @@ fn do_read(disk: &mut Disk, blocks: u64, caller_e: Endpoint, msg: &Message) -> i
 /// `len` survive the write-back (spec B4). Either way the client's bytes are
 /// taken *before* the device write: a refused grant or an unmapped buffer is
 /// relayed verbatim and the device is never written.
+///
+/// A device write that succeeded is then flushed, if the device takes flushes,
+/// before the reply (spec P8): `blk::flush_after` decides, and a failed flush
+/// makes the reply `EIO` (`blk::write_reply`). Every earlier exit returns
+/// without one: a refused request and a zero-length one never reach this
+/// function (the main loop answers them), and a failed read-before-write, a
+/// refused grant and a failed device write return from it below.
 #[cfg_attr(test, allow(dead_code))]
-fn do_write(disk: &mut Disk, blocks: u64, caller_e: Endpoint, msg: &Message) -> i32 {
-    let req = parse_read(msg);
-    let n = match validate_read(req, blocks) {
-        Ok((_, n)) => n,
-        Err(e) => return e,
-    };
+fn do_write(disk: &mut Disk, sector: u64, n: usize, caller_e: Endpoint, gid: i32) -> i32 {
+    // Never `Empty` here: the main loop answered a zero-length write itself.
     let plan = blk::write_plan(n);
-    if plan == blk::WritePlan::Empty {
-        // A legal zero-length write: no grant use, no device I/O.
-        return 0;
-    }
-    // Unreachable after validation, but checked (see `do_read`).
-    let Some(sector) = blk::block_to_sector(req.block) else {
-        return EINVAL;
-    };
     if plan == blk::WritePlan::Partial
         && let Err(rc) = serve(disk, blk::VIRTIO_BLK_T_IN, sector)
     {
         return rc;
     }
-    let rc = sys_safecopy(
-        SAFECOPY_FROM,
-        caller_e,
-        req.gid,
-        0,
-        disk.data.va(),
-        n as u64,
-    );
+    let rc = sys_safecopy(SAFECOPY_FROM, caller_e, gid, 0, disk.data.va(), n as u64);
     if rc != OK {
         // Verbatim, as in `do_read`. Nothing has been written to the device.
         return rc;
     }
-    if let Err(rc) = serve(disk, blk::VIRTIO_BLK_T_OUT, sector) {
-        return rc;
+    let wrote = serve(disk, blk::VIRTIO_BLK_T_OUT, sector);
+    let flush_on = bringup::flush_enabled(disk.features);
+    let flushed = if blk::flush_after(flush_on, plan, Some(wrote)) {
+        Some(flush(disk))
+    } else {
+        None
+    };
+    match wrote {
+        // The device write failed: its errno, and no flush was issued.
+        Err(rc) => rc,
+        Ok(()) => blk::write_reply(n, flushed),
     }
-    n as i32
 }
 
 /// Run the eight bring-up steps once, printing one verdict line: `no device`, the
 /// first failing step's `virtio FAIL step=…`, or `virtio ok …`. `Some` only for
-/// the last: the device, its queue, its line and its request buffers.
+/// the last: the device, its queue, its line, its request buffers and the
+/// feature word it accepted. A device brought up without `VIRTIO_BLK_F_FLUSH`
+/// gets a second line, `flush off`: its writes are served unflushed.
 #[cfg_attr(test, allow(dead_code))]
 fn bring_up() -> Option<Disk> {
     let mut m = Message {
@@ -604,7 +811,8 @@ fn bring_up() -> Option<Disk> {
         payload: [0u8; 96],
     };
 
-    // Step 1: where the registers are. ENOENT is the healthy no-disk path.
+    // Step 1: where the registers are. ENOENT is the healthy no-device path
+    // (no virtio-mmio disk: the hand-run MINIXRS_ROOT=nodisk boot).
     let rc = sys_getinfo(GET_VIRTIO_MMIO, &mut m);
     if rc == ENOENT {
         diag_fmt(format_args!("no device"));
@@ -687,7 +895,8 @@ fn bring_up() -> Option<Disk> {
         return None;
     }
 
-    // Step 4: VERSION_1 and nothing else.
+    // Step 4: VERSION_1, plus whichever of F_RO and F_FLUSH the device offers.
+    // `features` is the accepted word, which is what the driver acts on.
     let features = match negotiate(&mut t, VBLK_WANTED_FEATURES) {
         Ok(f) => f,
         Err(NegotiateError::NoVersion1 { offered }) => {
@@ -782,6 +991,9 @@ fn bring_up() -> Option<Disk> {
     diag_fmt(format_args!(
         "virtio ok features={features:#x} capacity={capacity} qsize={qsize} slot={slot}"
     ));
+    if !bringup::flush_enabled(features) {
+        diag_fmt(format_args!("flush off"));
+    }
     Some(Disk {
         t,
         queue,
@@ -790,6 +1002,8 @@ fn bring_up() -> Option<Disk> {
         status: vlayout.status,
         data: vlayout.data,
         capacity,
+        features,
+        flushes: 0,
         broken: false,
     })
 }

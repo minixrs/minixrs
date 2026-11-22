@@ -33,6 +33,13 @@
 //!
 //! Both labels are 16 bytes and differ from each other, so a 32-byte read of
 //! either end is self-identifying.
+//!
+//! ## The root partition's type GUID
+//!
+//! From slice 6.4 the same image is also the contents of a GPT partition on the
+//! virtio disk. [`ROOT_PARTITION_TYPE_GUID`] is how that partition is found:
+//! `tools/mkimage` writes it and `virtio-blk` selects the root by it, and it
+//! lives here for the reason the labels do.
 
 use crate::callnr::BDEV_BLOCK_SIZE;
 use crate::uspace::RAMDISK_WINDOW_SIZE;
@@ -194,6 +201,79 @@ pub const ROOTFS_SCRATCH_GROWTH_ZONES: usize = ROOTFS_SCRATCH_LEN.div_ceil(BDEV_
 // free, which depends on the `hello` flavour and so cannot be known here. The
 // sufficient check is `kernel/build.rs`'s, against the bytes it just built.
 const _: () = assert!(ROOTFS_SCRATCH_GROWTH_ZONES < ROOTFS_IMAGE_BLOCKS as usize);
+
+/// The boot counter: a file the image ships holding [`ROOTFS_BOOTS_INITIAL`],
+/// which init reads and rewrites once per boot (slice 6.4, spec P9).
+///
+/// It is the **persistence proof**. init prints the generation it read as
+/// `persist gen=<n>` and then stores `n + 1`, so a boot of a freshly built image
+/// prints `gen=0` and a second boot of *the same disk image* prints `gen=1` —
+/// which nothing can print unless the first boot's write reached the device and
+/// outlived the machine. The ramdisk root is rebuilt from the boot archive every
+/// boot, so it prints `gen=0` forever; that is the difference the proof is of.
+///
+/// Its own file, and written by nothing else: the write battery's files are
+/// truncated, created and refilled by probes that were designed against a fresh
+/// image, so none of them holds a value one boot could hand to the next.
+pub const ROOTFS_BOOTS_PATH: &str = "/etc/boots";
+
+/// What the image ships in [`ROOTFS_BOOTS_PATH`]: one byte, ASCII `0`.
+///
+/// **One ASCII digit, not a binary counter**, so the file is readable in a
+/// hexdump of the image and the generation needs no byte order. One byte costs
+/// the image one inode and one zone; the rewrite truncates before it writes, so
+/// the file never holds more than that one zone and
+/// [`ROOTFS_RUNTIME_ZONES`] / [`ROOTFS_RUNTIME_INODES`] do not move for it.
+pub const ROOTFS_BOOTS_INITIAL: &[u8] = b"0";
+
+/// The largest generation [`ROOTFS_BOOTS_PATH`] can hold: one decimal digit.
+///
+/// [`boots_next`] saturates here, so the tenth and every later boot of one image
+/// reads `9` and writes `9` back. The proof needs `0 -> 1` (and the hand-run
+/// third boot `1 -> 2`); a counter that wrapped to `0` would make a much-booted
+/// image indistinguishable from a fresh one, which is the one thing this file
+/// exists to tell apart.
+pub const ROOTFS_BOOTS_MAX: u8 = 9;
+
+/// The generation a read of [`ROOTFS_BOOTS_PATH`] returned, or `None` when the
+/// bytes are not a generation.
+///
+/// `bytes` is **what the read returned**, however large the caller's buffer was.
+/// Exactly one byte in `'0'..='9'` is a generation; an empty file, a longer one,
+/// or any other byte is `None`, which init reports as `persist FAIL value`
+/// rather than guessing — a truncate that reached the device without its write
+/// (an empty file) and a write that landed on top of an untruncated file are the
+/// two defects this refuses to read as a number.
+pub const fn boots_generation(bytes: &[u8]) -> Option<u8> {
+    if bytes.len() != ROOTFS_BOOTS_INITIAL.len() {
+        return None;
+    }
+    let b = bytes[0];
+    if b < b'0' || b > b'0' + ROOTFS_BOOTS_MAX {
+        return None;
+    }
+    Some(b - b'0')
+}
+
+/// The byte init stores in [`ROOTFS_BOOTS_PATH`] after reading generation `n`:
+/// the ASCII digit for `n + 1`, saturating at [`ROOTFS_BOOTS_MAX`].
+///
+/// Total over `u8` — an `n` past the maximum (which [`boots_generation`] never
+/// returns) also stores the maximum — so the result is always something
+/// [`boots_generation`] reads back.
+pub const fn boots_next(n: u8) -> u8 {
+    if n >= ROOTFS_BOOTS_MAX {
+        b'0' + ROOTFS_BOOTS_MAX
+    } else {
+        b'0' + n + 1
+    }
+}
+
+// The image's own contents are a generation, and it is generation zero: the
+// common marker set requires `persist gen=0` of every fresh boot.
+const _: () = assert!(matches!(boots_generation(ROOTFS_BOOTS_INITIAL), Some(0)));
+// One digit: `boots_next` adds to `b'0'` and must stay inside `'0'..='9'`.
+const _: () = assert!(ROOTFS_BOOTS_MAX <= 9);
 
 /// Bytes per MinixFS v3 directory entry.
 ///
@@ -431,6 +511,42 @@ const _: () = assert!(ROOTFS_IMAGE_BYTES as u64 <= RAMDISK_WINDOW_SIZE);
 const _: () = assert!(ROOTFS_IMAGE_BYTES.is_multiple_of(BDEV_BLOCK_SIZE));
 const _: () = assert!(ROOTFS_IMAGE_BLOCKS > 0);
 
+// ---------------------------------------------------------------------------
+// The root partition on the GPT disk (slice 6.4).
+// ---------------------------------------------------------------------------
+
+/// The GPT partition **type** GUID of the minix.rs root partition,
+/// `10FDAC43-2E55-4E0E-8D18-2D46479E1B44`, as the 16 bytes a partition entry
+/// holds **on disk** (phase decision H6, slice 6.4).
+///
+/// `tools/mkimage` writes these bytes into the root partition's entry, and
+/// `virtio-blk` selects the root — minor [`BDEV_MINOR_ROOT`] — as the one
+/// partition whose type field equals them. Neither crate may depend on the
+/// other, so the bytes live here: one literal, shared, cannot drift. The GUID was
+/// generated for slice 6.4 and names nothing else; it is a *type*, the same on
+/// every minix.rs disk, and is not the partition's unique GUID.
+///
+/// **The byte order is not the text order.** GPT stores a GUID mixed-endian: the
+/// first three fields (a `u32` and two `u16`s) little-endian, the last two (two
+/// bytes, then six) in the order written. So `10FDAC43` is stored `43 AC FD 10`,
+/// `2E55` as `55 2E`, `4E0E` as `0E 4E`, and `8D18-2D46479E1B44` byte for byte.
+/// Compare an entry's 16 type bytes with this array directly — no decoding — and
+/// expect `sgdisk -i` to print the text form above for it. A test pins the two
+/// forms to each other.
+///
+/// Additive under D8: no existing value moved. It is not emitted into the
+/// generated C headers, like the rest of this module — no C reads a partition
+/// table.
+///
+/// [`BDEV_MINOR_ROOT`]: crate::callnr::BDEV_MINOR_ROOT
+pub const ROOT_PARTITION_TYPE_GUID: [u8; 16] = [
+    0x43, 0xAC, 0xFD, 0x10, // 10FDAC43, little-endian
+    0x55, 0x2E, // 2E55, little-endian
+    0x0E, 0x4E, // 4E0E, little-endian
+    0x8D, 0x18, // 8D18, as written
+    0x2D, 0x46, 0x47, 0x9E, 0x1B, 0x44, // 2D46479E1B44, as written
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,8 +691,11 @@ mod tests {
 
     #[test]
     fn every_image_path_is_absolute_and_distinct() {
-        // `/etc/seekhole` is not shipped, but it is created beside these and
-        // must not collide with any of them.
+        // Every file the image ships under a name, and every file a boot probe
+        // creates beside them (`/etc/seekhole`, `/etc/new`, `/etc/leak`,
+        // `/full/new`): a created file must not collide with a shipped one, and
+        // `/etc/boots` -- the one file whose contents must survive the write
+        // battery -- must be nobody else's target.
         let paths = [
             ROOTFS_HELLO_PATH,
             ROOTFS_FILEIO_PATH,
@@ -584,6 +703,12 @@ mod tests {
             ROOTFS_PATTERN_PATH,
             ROOTFS_SCRATCH_PATH,
             ROOTFS_SEEKHOLE_PATH,
+            ROOTFS_HOLEY_PATH,
+            ROOTFS_DENY_PATH,
+            ROOTFS_BOOTS_PATH,
+            ROOTFS_CREATE_PATH,
+            ROOTFS_LEAK_PATH,
+            ROOTFS_FULL_NEW_PATH,
         ];
         for p in paths {
             assert!(p.starts_with('/'), "{p} is not absolute");
@@ -606,6 +731,139 @@ mod tests {
         assert_eq!(ROOTFS_SEEKHOLE_ZONES, 1);
         assert_eq!(ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_GROWTH_ZONES + 6);
         assert_ne!(ROOTFS_SEEKHOLE_PATH, ROOTFS_HOLEY_PATH);
+    }
+
+    #[test]
+    fn the_boot_counter_ships_as_generation_zero() {
+        // One byte, ASCII '0': `persist gen=0` on a fresh image is this.
+        assert_eq!(ROOTFS_BOOTS_INITIAL, b"0");
+        assert_eq!(boots_generation(ROOTFS_BOOTS_INITIAL), Some(0));
+    }
+
+    #[test]
+    fn every_digit_is_a_generation_and_nothing_else_is() {
+        for n in 0..=ROOTFS_BOOTS_MAX {
+            assert_eq!(boots_generation(&[b'0' + n]), Some(n));
+        }
+        // The bytes either side of the digits, and the values a zeroed or
+        // erased block would hold.
+        for b in [b'0' - 1, b'9' + 1, 0x00, 0xFF, b' ', b'\n', 1, 9] {
+            assert_eq!(boots_generation(&[b]), None, "byte {b:#04x}");
+        }
+        // Every byte value, so no off-by-one at either end of the range hides.
+        let digits = (0..=u8::MAX)
+            .filter(|&b| boots_generation(&[b]).is_some())
+            .count();
+        assert_eq!(digits, 10);
+    }
+
+    #[test]
+    fn an_empty_or_longer_file_is_not_a_generation() {
+        // Empty: a truncate that reached the device without the write after it.
+        assert_eq!(boots_generation(b""), None);
+        // Longer: a write that landed on an untruncated file, or a file that is
+        // not this one. The first byte being a digit must not be enough.
+        assert_eq!(boots_generation(b"10"), None);
+        assert_eq!(boots_generation(b"1\n"), None);
+        assert_eq!(boots_generation(b"0000"), None);
+    }
+
+    #[test]
+    fn the_next_generation_counts_up_and_stops_at_nine() {
+        // 0 -> 1 is the proof; 1 -> 2 is the hand-run third boot.
+        assert_eq!(boots_next(0), b'1');
+        assert_eq!(boots_next(1), b'2');
+        assert_eq!(boots_next(8), b'9');
+        // Saturating, never wrapping to '0': a much-booted image must not read
+        // as a fresh one.
+        assert_eq!(boots_next(9), b'9');
+        assert_eq!(boots_next(u8::MAX), b'9');
+        // What is stored always reads back, as the generation after this one.
+        for n in 0..ROOTFS_BOOTS_MAX {
+            assert_eq!(boots_generation(&[boots_next(n)]), Some(n + 1));
+        }
+        assert_eq!(
+            boots_generation(&[boots_next(ROOTFS_BOOTS_MAX)]),
+            Some(ROOTFS_BOOTS_MAX)
+        );
+    }
+
+    /// The canonical text of the root partition's type GUID, as `gdisk`, `sgdisk
+    /// -i` and the UEFI specification print one. The tests below derive the
+    /// on-disk bytes from *this*, so the constant is checked against the form a
+    /// person reads rather than against a second copy of itself.
+    const ROOT_GUID_TEXT: &str = "10FDAC43-2E55-4E0E-8D18-2D46479E1B44";
+
+    /// The hex digits of `text`, in the order written, with the dashes dropped.
+    fn guid_text_bytes(text: &str) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        let mut nibbles = 0usize;
+        for c in text.chars() {
+            if c == '-' {
+                continue;
+            }
+            let digit = c.to_digit(16).expect("a GUID is hex digits and dashes") as u8;
+            out[nibbles / 2] = (out[nibbles / 2] << 4) | digit;
+            nibbles += 1;
+        }
+        assert_eq!(nibbles, 32, "a GUID is 32 hex digits");
+        out
+    }
+
+    #[test]
+    fn the_root_type_guid_is_the_mixed_endian_encoding_of_its_text() {
+        // The text groups are 8-4-4-4-12 digits, and the dashes are where the
+        // five fields end.
+        let groups: [usize; 5] = [8, 4, 4, 4, 12];
+        let mut split = ROOT_GUID_TEXT.split('-');
+        for want in groups {
+            assert_eq!(split.next().map(str::len), Some(want));
+        }
+        assert_eq!(split.next(), None);
+
+        // As written: big-endian, field by field.
+        let text = guid_text_bytes(ROOT_GUID_TEXT);
+        // GPT stores the first three fields little-endian...
+        let g = ROOT_PARTITION_TYPE_GUID;
+        assert_eq!(
+            u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
+            u32::from_be_bytes([text[0], text[1], text[2], text[3]])
+        );
+        assert_eq!(
+            u16::from_le_bytes([g[4], g[5]]),
+            u16::from_be_bytes([text[4], text[5]])
+        );
+        assert_eq!(
+            u16::from_le_bytes([g[6], g[7]]),
+            u16::from_be_bytes([text[6], text[7]])
+        );
+        // ...and the last two as written.
+        assert_eq!(g[8..], text[8..]);
+
+        // The same numbers as literals, so a typo in the text above and a
+        // matching one in the constant cannot agree with each other unnoticed.
+        assert_eq!(u32::from_le_bytes([g[0], g[1], g[2], g[3]]), 0x10FD_AC43);
+        assert_eq!(u16::from_le_bytes([g[4], g[5]]), 0x2E55);
+        assert_eq!(u16::from_le_bytes([g[6], g[7]]), 0x4E0E);
+        assert_eq!(g[8..10], [0x8D, 0x18]);
+        assert_eq!(g[10..], [0x2D, 0x46, 0x47, 0x9E, 0x1B, 0x44]);
+    }
+
+    #[test]
+    fn the_root_type_guid_is_not_the_text_order_and_not_a_well_known_type() {
+        // The byte order is the whole point of the constant: written out in text
+        // order it would be a *different* GUID that no tool prints this way, and
+        // the driver would never find the partition `mkimage` made.
+        assert_ne!(ROOT_PARTITION_TYPE_GUID, guid_text_bytes(ROOT_GUID_TEXT));
+        // Not the unused-entry type (all zero), which a parser skips...
+        assert_ne!(ROOT_PARTITION_TYPE_GUID, [0u8; 16]);
+        // ...and not the EFI System Partition's, which is the image's other
+        // partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B.
+        let esp: [u8; 16] = [
+            0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E,
+            0xC9, 0x3B,
+        ];
+        assert_ne!(ROOT_PARTITION_TYPE_GUID, esp);
     }
 
     #[test]

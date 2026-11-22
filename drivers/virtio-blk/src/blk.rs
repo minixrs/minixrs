@@ -6,6 +6,11 @@
 //! `main.rs` does the queue, the interrupt and the kernel calls around it — so
 //! everything here is host-tested.
 //!
+//! Slice 6.4 (spec P7, P8) adds the flush request, the two decisions around it
+//! ([`flush_after`], [`write_reply`]), and the rest of the root verdicts:
+//! [`RootFail`] is every reason the driver declines a disk, and its `Display` is
+//! the one place a `root FAIL …` line's text is written.
+//!
 //! All arithmetic is `checked_*`: drivers ship `--release` with
 //! `overflow-checks = false`, where `block * 8` on a large block would wrap and
 //! name a valid sector.
@@ -14,6 +19,7 @@
 // `cargo test` (which drops `_start` and `main`) it would read as dead code.
 #![cfg_attr(test, allow(dead_code))]
 
+use minixrs_driver_rt::gpt::GptError;
 use minixrs_kernel_shared::callnr::BDEV_BLOCK_SIZE;
 use minixrs_kernel_shared::error::EIO;
 use minixrs_kernel_shared::rootfs::{
@@ -35,6 +41,8 @@ const _: () = assert!(SECTORS_PER_BLOCK > 0);
 pub const VIRTIO_BLK_T_IN: u32 = 0;
 /// Request type: write (the device reads the data buffer).
 pub const VIRTIO_BLK_T_OUT: u32 = 1;
+/// Request type: flush (no data buffer; slice 6.4, spec P8).
+pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
 
 /// Status byte: the request succeeded.
 pub const VIRTIO_BLK_S_OK: u8 = 0;
@@ -52,7 +60,10 @@ pub const REQ_HEADER_LEN: usize = 16;
 
 /// The device's size in BDEV blocks, from its `capacity` in sectors. `None` for an
 /// empty device or one that is not a whole number of blocks: its last sectors
-/// would be unreachable through BDEV, and the root image is never such a size.
+/// would be unreachable through BDEV, and the disk `tools/mkimage` writes is
+/// never such a size (it is a whole number of mebibytes). `part::geometry`
+/// adds the other half of the geometry verdict: a device too short to hold a
+/// partition table.
 pub const fn device_blocks(capacity_sectors: u64) -> Option<u64> {
     if capacity_sectors == 0 || !capacity_sectors.is_multiple_of(SECTORS_PER_BLOCK) {
         return None;
@@ -75,6 +86,15 @@ pub const fn encode_header(req_type: u32, sector: u64) -> [u8; REQ_HEADER_LEN] {
         s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], // sector
     ]
 }
+
+/// The header of a flush request: type [`VIRTIO_BLK_T_FLUSH`], and sector `0`,
+/// which is what the virtio specification requires of a flush.
+///
+/// A flush has **no data descriptor**. Its chain is two buffers: this header
+/// (device-readable) and the status byte (device-writable) — where a read's is
+/// header / data / status. The status byte is preset to [`STATUS_UNWRITTEN`] and
+/// read through [`status_errno`] exactly as a read's or a write's is.
+pub const FLUSH_HEADER: [u8; REQ_HEADER_LEN] = encode_header(VIRTIO_BLK_T_FLUSH, 0);
 
 /// What a completed request's status byte means. Only [`VIRTIO_BLK_S_OK`] is
 /// success; `IOERR`, `UNSUPP`, [`STATUS_UNWRITTEN`] (the device completed the
@@ -103,9 +123,9 @@ pub enum WritePlan {
 }
 
 /// The plan for a write of `len` bytes. `len` has already been validated to be at
-/// most `BDEV_MAX_IO` (one block) by `server-rt`'s `bdev::validate_read` before
-/// this is called, so everything that is neither empty nor whole is a partial
-/// block.
+/// most `BDEV_MAX_IO` (one block) by `server-rt`'s `bdev::validate_range`
+/// (through `part::locate`) before this is called, so everything that is
+/// neither empty nor whole is a partial block.
 pub const fn write_plan(len: usize) -> WritePlan {
     if len == 0 {
         WritePlan::Empty
@@ -116,26 +136,126 @@ pub const fn write_plan(len: usize) -> WritePlan {
     }
 }
 
-/// Why a device is not a minix.rs root (spec B6): `drivers/memory`'s `selfcheck`
-/// refusals, in the same order.
+/// Whether a `BDEV_WRITE` is followed by a flush before its reply (spec P8).
+///
+/// Only when the device accepted `VIRTIO_BLK_F_FLUSH` (`flush_enabled`, from
+/// `bringup::flush_enabled`) **and** the write reached the device and the device
+/// reported success. `device_write` is what the `VIRTIO_BLK_T_OUT` request
+/// returned, or `None` if none was issued — a zero-length write, a request the
+/// validation refused, a failed read-before-write, a refused grant. So there is
+/// no flush for [`WritePlan::Empty`], none after a refused grant, and none after
+/// a device write that failed: nothing new is in the device's cache then.
+///
+/// `plan` is consulted as well as `device_write`, so an empty write is never
+/// flushed whatever the caller passes for the other.
+pub const fn flush_after(
+    flush_enabled: bool,
+    plan: WritePlan,
+    device_write: Option<Result<(), i32>>,
+) -> bool {
+    flush_enabled && !matches!(plan, WritePlan::Empty) && matches!(device_write, Some(Ok(())))
+}
+
+/// The reply to a `BDEV_WRITE` whose device write **succeeded**, storing `len`
+/// bytes: `len`, unless a flush was issued and failed, which makes it `EIO`
+/// whatever the flush's own error was (spec P8). `flush` is the flush request's
+/// result, or `None` when [`flush_after`] said not to issue one.
+///
+/// Not for a write that failed earlier: that reply is the failing step's errno,
+/// and no flush follows it.
+pub const fn write_reply(len: usize, flush: Option<Result<(), i32>>) -> i32 {
+    match flush {
+        Some(Err(_)) => EIO,
+        // `len` is at most `BDEV_MAX_IO` after validation; a length that does
+        // not fit a reply is not one this driver stored.
+        None | Some(Ok(())) => {
+            if len <= BDEV_BLOCK_SIZE {
+                len as i32
+            } else {
+                EIO
+            }
+        }
+    }
+}
+
+/// Why a device is not a minix.rs root, in the order the checks run (spec P7):
+/// the disk's geometry, the read of its partition table, the table itself, the
+/// root partition's alignment, a read-only device, and then `drivers/memory`'s
+/// `selfcheck` refusals (spec B6) applied to the root partition — each of its two
+/// reads can also fail outright.
+///
+/// The `Display` impl renders the whole boot-marker line, `root FAIL …`. It is the
+/// only place that text is written: the marker files match it literally.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RootFail {
+    /// The device is empty or not a whole number of 4096-byte blocks.
+    Geometry {
+        /// The device's capacity in 512-byte sectors.
+        capacity: u64,
+    },
+    /// The read of one of the disk's first blocks — the ones that hold the
+    /// partition table — failed.
+    TableIo {
+        /// The errno the read returned.
+        rc: i32,
+    },
+    /// The primary GPT header or its entry array was refused.
+    Gpt(GptError),
+    /// More than one partition carries the root type GUID.
+    GptAmbiguous,
+    /// No partition carries the root type GUID: a disk with no minix.rs root.
+    NoRootPartition,
+    /// The root partition does not start and end on a 4096-byte block boundary.
+    Align,
+    /// The device is read-only (`VIRTIO_BLK_F_RO` was accepted).
+    ReadOnly,
+    /// The read of the root's first block failed.
+    HeadIo {
+        /// The errno the read returned.
+        rc: i32,
+    },
     /// Block 0 does not start with `IMAGE_LABEL`.
     Label,
-    /// The header's block count is not the device's.
+    /// The header's block count is not the extent's.
     Blocks {
         /// The count the image header carries.
         hdr: u32,
-        /// The device's size in blocks.
+        /// The size in blocks of what was checked: the root partition's extent.
         dev: u64,
+    },
+    /// The read of the root's last block failed.
+    TailIo {
+        /// The errno the read returned.
+        rc: i32,
     },
     /// The last block does not start with `IMAGE_TAIL_LABEL`.
     TailLabel,
 }
 
-/// Check the first `IMAGE_HDR_LEN` bytes of block 0: the label, then that the
-/// header's little-endian block count equals the device's — mkfs's geometry bound
-/// to the device's, two independently derived numbers.
+impl core::fmt::Display for RootFail {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Geometry { capacity } => write!(f, "root FAIL geometry capacity={capacity}"),
+            Self::TableIo { rc } => write!(f, "root FAIL gpt rc={rc}"),
+            Self::Gpt(e) => write!(f, "root FAIL gpt {}", e.why()),
+            Self::GptAmbiguous => f.write_str("root FAIL gpt ambiguous"),
+            Self::NoRootPartition => f.write_str("root FAIL no root partition"),
+            Self::Align => f.write_str("root FAIL align"),
+            Self::ReadOnly => f.write_str("root FAIL readonly"),
+            Self::HeadIo { rc } => write!(f, "root FAIL head rc={rc}"),
+            Self::Label => f.write_str("root FAIL label"),
+            Self::Blocks { hdr, dev } => write!(f, "root FAIL blocks hdr={hdr} dev={dev}"),
+            Self::TailIo { rc } => write!(f, "root FAIL tail rc={rc}"),
+            Self::TailLabel => f.write_str("root FAIL tail label"),
+        }
+    }
+}
+
+/// Check the first `IMAGE_HDR_LEN` bytes of the root's block 0: the label, then
+/// that the header's little-endian block count equals `device_blocks` — mkfs's
+/// geometry bound to the size of what holds it, two independently derived
+/// numbers. From slice 6.4 `device_blocks` is the root partition's extent's block
+/// count, not the whole disk's (spec P7).
 ///
 /// Device-level only: no superblock is decoded and `minixrs-mfs` is not a
 /// dependency, because a block driver must not depend on the filesystem format.
@@ -188,7 +308,9 @@ mod tests {
     use minixrs_kernel_shared::callnr::BDEV_MAX_IO;
     use minixrs_kernel_shared::rootfs::{ROOTFS_IMAGE_BLOCKS, ROOTFS_IMAGE_BYTES};
 
-    /// The root image's size in sectors: what the disk boot's device reports.
+    /// The root image's size in sectors (2048): the size of the root
+    /// *partition*, and of 6.3's raw disk. The disk boot's device is the whole
+    /// GPT image and reports 75 776.
     const ROOT_SECTORS: u64 = (ROOTFS_IMAGE_BYTES / SECTOR_SIZE) as u64;
 
     /// A well-formed block-0 header for a device of `blocks` blocks.
@@ -347,6 +469,144 @@ mod tests {
         // The sentinel must not be a status the device can legitimately report.
         for defined in [VIRTIO_BLK_S_OK, VIRTIO_BLK_S_IOERR, VIRTIO_BLK_S_UNSUPP] {
             assert_ne!(STATUS_UNWRITTEN, defined);
+        }
+    }
+
+    #[test]
+    fn the_flush_header_is_type_4_sector_0() {
+        assert_eq!(VIRTIO_BLK_T_FLUSH, 4);
+        assert_eq!(
+            FLUSH_HEADER,
+            [
+                0x04, 0x00, 0x00, 0x00, // type, little-endian
+                0x00, 0x00, 0x00, 0x00, // reserved
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // sector 0
+            ]
+        );
+        assert_eq!(FLUSH_HEADER, encode_header(VIRTIO_BLK_T_FLUSH, 0));
+        assert_eq!(FLUSH_HEADER.len(), REQ_HEADER_LEN);
+        // Not a read or a write of sector 0.
+        assert_ne!(FLUSH_HEADER, encode_header(VIRTIO_BLK_T_IN, 0));
+        assert_ne!(FLUSH_HEADER, encode_header(VIRTIO_BLK_T_OUT, 0));
+    }
+
+    #[test]
+    fn a_successful_device_write_is_flushed_when_the_feature_is_on() {
+        assert!(flush_after(true, WritePlan::Whole, Some(Ok(()))));
+        assert!(flush_after(true, WritePlan::Partial, Some(Ok(()))));
+    }
+
+    #[test]
+    fn nothing_is_flushed_without_the_feature() {
+        for plan in [WritePlan::Empty, WritePlan::Whole, WritePlan::Partial] {
+            for write in [None, Some(Ok(())), Some(Err(EIO))] {
+                assert!(!flush_after(false, plan, write), "{plan:?} {write:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_write_is_never_flushed() {
+        assert!(!flush_after(true, WritePlan::Empty, None));
+        // Even if a caller claimed a device write for it.
+        assert!(!flush_after(true, WritePlan::Empty, Some(Ok(()))));
+    }
+
+    #[test]
+    fn a_write_that_never_reached_the_device_is_not_flushed() {
+        // A refused grant, a failed read-before-write, a refused request: no
+        // `VIRTIO_BLK_T_OUT` was issued.
+        assert!(!flush_after(true, WritePlan::Whole, None));
+        assert!(!flush_after(true, WritePlan::Partial, None));
+    }
+
+    #[test]
+    fn a_failed_device_write_is_not_flushed() {
+        for rc in [EIO, -1, 0, i32::MIN] {
+            assert!(!flush_after(true, WritePlan::Whole, Some(Err(rc))), "{rc}");
+            assert!(
+                !flush_after(true, WritePlan::Partial, Some(Err(rc))),
+                "{rc}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_write_replies_its_length_unless_its_flush_failed() {
+        // No flush issued, and a flush that succeeded.
+        assert_eq!(write_reply(4096, None), 4096);
+        assert_eq!(write_reply(4096, Some(Ok(()))), 4096);
+        assert_eq!(write_reply(1, Some(Ok(()))), 1);
+        // A failed flush is EIO whatever it failed with (mutation 7).
+        assert_eq!(write_reply(4096, Some(Err(EIO))), EIO);
+        assert_eq!(write_reply(4096, Some(Err(-22))), EIO);
+        assert_eq!(write_reply(1, Some(Err(EIO))), EIO);
+        // A length no validated request has is not replied as a count.
+        assert_eq!(write_reply(BDEV_MAX_IO + 1, None), EIO);
+        assert_eq!(write_reply(usize::MAX, Some(Ok(()))), EIO);
+    }
+
+    #[test]
+    fn every_verdict_renders_its_marker_line() {
+        let cases: [(RootFail, &str); 14] = [
+            (
+                RootFail::Geometry { capacity: 75_777 },
+                "root FAIL geometry capacity=75777",
+            ),
+            (
+                RootFail::Geometry { capacity: 0 },
+                "root FAIL geometry capacity=0",
+            ),
+            (RootFail::TableIo { rc: -5 }, "root FAIL gpt rc=-5"),
+            (
+                RootFail::Gpt(GptError::Signature),
+                "root FAIL gpt signature",
+            ),
+            (RootFail::Gpt(GptError::Crc), "root FAIL gpt crc"),
+            (
+                RootFail::Gpt(GptError::EntriesCrc),
+                "root FAIL gpt entries crc",
+            ),
+            (RootFail::GptAmbiguous, "root FAIL gpt ambiguous"),
+            (RootFail::NoRootPartition, "root FAIL no root partition"),
+            (RootFail::Align, "root FAIL align"),
+            (RootFail::ReadOnly, "root FAIL readonly"),
+            (RootFail::HeadIo { rc: -5 }, "root FAIL head rc=-5"),
+            (RootFail::Label, "root FAIL label"),
+            (
+                RootFail::Blocks { hdr: 256, dev: 320 },
+                "root FAIL blocks hdr=256 dev=320",
+            ),
+            (RootFail::TailIo { rc: -5 }, "root FAIL tail rc=-5"),
+        ];
+        for (why, text) in cases {
+            assert_eq!(why.to_string(), text, "{why:?}");
+        }
+        assert_eq!(RootFail::TailLabel.to_string(), "root FAIL tail label");
+    }
+
+    #[test]
+    fn a_gpt_refusal_renders_the_parsers_own_word() {
+        for e in [
+            GptError::HeaderShort,
+            GptError::Signature,
+            GptError::Revision,
+            GptError::HeaderSize,
+            GptError::Crc,
+            GptError::MyLba,
+            GptError::EntrySize,
+            GptError::EntryCount,
+            GptError::EntryLba,
+            GptError::UsableRange,
+            GptError::EntriesCrc,
+            GptError::EntriesShort,
+            GptError::EntryRange,
+            GptError::EntryIndex,
+        ] {
+            let line = RootFail::Gpt(e).to_string();
+            assert_eq!(line, format!("root FAIL gpt {}", e.why()), "{e:?}");
+            // No parser refusal reads as the ambiguity verdict.
+            assert_ne!(line, RootFail::GptAmbiguous.to_string(), "{e:?}");
         }
     }
 

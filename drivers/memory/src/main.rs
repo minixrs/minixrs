@@ -320,7 +320,8 @@ fn do_read(caller_e: Endpoint, msg: &Message, va: u64, blocks: u64) -> i32 {
 /// (`>= 0`), or a negative errno.
 ///
 /// The mirror of [`do_read`], and deliberately built from the same parse and the
-/// same validation: a write to minor 7 hears `ENXIO` ("no such device") before
+/// same validation: a write to a minor this driver does not have hears `ENXIO`
+/// ("no such device") before
 /// anything else, the check-order discipline `validate_read` documents.
 ///
 /// **The direction is the whole difference.** `SAFECOPY_FROM` pulls the client's

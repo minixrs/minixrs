@@ -1,12 +1,21 @@
 # tests/qemu-boot.disk.expected -- substrings required IN ADDITION to
-# tests/qemu-boot.expected when the boot has the root image attached as a
-# virtio-blk disk (MINIXRS_ROOT=disk, the default). Same format as that file.
+# tests/qemu-boot.expected when the boot disk carries the root partition
+# (MINIXRS_ROOT=disk, the default). Same format as that file.
 # tools/check-boot-log.sh disk <log> checks both.
+#
+# Since slice 6.4 the machine boots from one GPT disk image (tools/mkimage: a
+# FAT32 ESP and the MinixFS root partition) attached as a single virtio-blk
+# device, and BOTH boots attach one -- the ramdisk boot's image merely has no
+# root partition. So the device's own bring-up lines below are required by
+# tests/qemu-boot.ramdisk.expected as well; they are listed in each per-backend
+# file, not in the common one, because the hand-run MINIXRS_ROOT=nodisk boot
+# has none of them and still passes the common set. What only THIS file holds is
+# what exists because the disk carries a ROOT: `root ok`, the flush, and MFS's
+# choice of `vblk`.
 #
 # Everything the filesystem proves -- mount, read, write, create/truncate, the
 # hole probe, exec from the root -- is in the COMMON file and is therefore
-# required of both backends. This file holds only what exists because the disk
-# does.
+# required of both backends.
 
 # virtio-blk, the first consumer of driver-rt (spec T4, T5, T7, T12). The kernel's
 # boot probe finds the disk tools/qemu-run.sh pins to bus 0 -- transport slot 0,
@@ -35,24 +44,46 @@
 # name the same memory), the magic/version/DeviceID, the negotiation, the
 # generation-stable capacity read, queue 0 enabled at the run's PA with DRIVER_OK
 # read back, and its interrupt claim plus the INTID+1 refusal. features= is exactly
-# VIRTIO_F_VERSION_1 (bit 32): virtio-blk requests nothing optional, so any other
-# bit means the negotiation accepted something it was not asked for. capacity= is
-# the root image in 512-byte sectors, rootfs::ROOTFS_IMAGE_BYTES / 512 (slice 6.3:
-# the disk is the image kernel/build.rs also packs as the ramdisk). qsize= is driver-
-# rt's QUEUE_SIZE (8) under the device's QueueNumMax. slot= is not asserted. A
-# failing step prints `virtio FAIL step=<step>` instead (forbidden).
-[diag vblk] virtio ok features=0x100000000 capacity=2048 qsize=8
+# VIRTIO_F_VERSION_1 (bit 32) | VIRTIO_BLK_F_FLUSH (bit 9), measured on QEMU
+# 11.0.3 with a writable raw drive (slice 6.4, spec P8/P11.4). The driver asks
+# for two optional bits, F_FLUSH and F_RO (bit 5); a writable drive does not
+# offer F_RO, so 0x...220 here would be a read-only disk and any other bit
+# something the negotiation was not asked for. capacity= is the WHOLE disk in
+# 512-byte sectors -- 37 MiB: the 1 MiB GPT lead-in, the 34 MiB ESP, the 1 MiB
+# root partition and the backup GPT, rounded up to a multiple of 8 -- every
+# term derived from constants in tools/mkimage, and the same on the rootless
+# image. qsize= is driver-rt's QUEUE_SIZE (8) under the device's QueueNumMax.
+# slot= is not asserted. A failing step prints `virtio FAIL step=<step>` instead
+# (forbidden).
+[diag vblk] virtio ok features=0x100000200 capacity=75776 qsize=8
 
-# Slice 6.3: the root check (spec B6). After bring-up the driver reads block 0 and
-# the last block THROUGH THE QUEUE, each completed by a real interrupt it blocked
-# in receive for, and applies the memory driver's device-level checks: the image
-# label, the header's block count against the device's (capacity / 8), and the
-# tail label. blocks= is printed from the device (ROOTFS_IMAGE_BLOCKS = 256).
-# These two reads are also the first proof that the DMA run's data page is the
+# The root check (slice 6.3, spec B6; moved onto the partition in slice 6.4,
+# spec P5-P7). After bring-up the driver reads the GPT -- blocks 0-4 of the
+# whole disk -- THROUGH THE QUEUE, each read completed by a real interrupt it
+# blocked in receive for, selects the one partition carrying the root type GUID
+# (kernel-shared's ROOT_PARTITION_TYPE_GUID), and applies the memory driver's
+# device-level checks to THAT extent: the image label in its first block, the
+# header's block count against the partition's, and the tail label in its last
+# block. blocks= is the partition's size (ROOTFS_IMAGE_BLOCKS = 256). part=2 is
+# the GPT entry, counted from 1 (the ESP is 1). lba=71680 is the partition's
+# first sector -- 35 MiB in, the first 1 MiB boundary after the ESP -- and is
+# asserted because it is the proof that the root's block 0 is NOT the disk's:
+# a driver that dropped the extent base would read the protective MBR and print
+# `root FAIL label`. The line is printed whole and asserted whole.
+# These reads are also the first proof that the DMA run's data page is the
 # memory the device writes (the 6.2 cookie proved only the run's first page).
-# Mutation-tested: dropping the IRQ re-arm hangs the boot before this line, and
-# addressing sector = block (not 8 * block) turns it into `root FAIL tail label`.
-[diag vblk] root ok blocks=256 tail=1
+# Mutation-tested in 6.3: dropping the IRQ re-arm hangs the boot before this
+# line, and addressing sector = block (not 8 * block) fails the check.
+[diag vblk] root ok blocks=256 tail=1 part=2 lba=71680
+
+# Slice 6.4: the flush (spec P8). The device accepted VIRTIO_BLK_F_FLUSH, so
+# every BDEV_WRITE that reached it is followed by a VIRTIO_BLK_T_FLUSH before
+# the reply. The first one that succeeds prints this line, once (n= is the
+# driver's own count at that moment, never a running total). It shows that a
+# write reached the device and that the flush request completed with status 0
+# -- not that anything reached stable storage, which a raw image under QEMU
+# cannot show. The ramdisk boot FORBIDS it: a disk with no root is never written.
+[diag vblk] flush ok n=1
 
 # Slice 6.3: MFS chose the disk (spec B1/B2, phase decision H5). It found `vblk`
 # in DS, probed it with one zero-length read, and mounted its root through it.
@@ -60,3 +91,20 @@
 # H5's silent fallback: a broken virtio path that fell back to the ramdisk would
 # otherwise pass every filesystem marker.
 [diag mfs] bdev.ds ok name=vblk ep=
+
+# Slice 6.4: the minor table, opened once (spec P6). The driver serves minor 0
+# (the root partition), minor 1 (the whole disk) and minor 1+n (GPT partition
+# n), and the filesystem only ever opens minor 0 -- so MFS's prologue issues the
+# system's one request for another minor: a whole-block BDEV_READ of block 0 of
+# minor 1. That block starts with LBA 0, and the line is printed only if the
+# reply was one whole block carrying a PROTECTIVE MBR: the 55 AA boot signature
+# at offset 510, a first partition record of type 0xEE at offset 450, and not
+# the root image's label at offset 0 (minixrs_mfs::minor::classify, host-
+# tested). The root partition's block 0 has zeroes at both offsets, and the
+# ESP's has the signature but no 0xEE record, so a driver that answered minor 1
+# from either extent prints `bdev.minor FAIL mbr` instead (forbidden; both were
+# run -- spec mutation 11 is the root case, and the ESP case showed that
+# without the 0xEE check the probe reports a false `ok`). minor= is
+# BDEV_MINOR_WHOLE_DISK, the constant the driver's table is built from. The
+# ramdisk boot FORBIDS this line and requires `absent`.
+[diag mfs] bdev.minor ok minor=1 mbr=1

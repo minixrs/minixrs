@@ -21,73 +21,141 @@ cargo kernel-aarch64
 # Redirect to a file when you need to grep tick output -- live tail loses lines.
 # The log interleaves raw single-char tick bytes; grep it with `grep -a`
 # (force text) or matches read as "Binary file matches".
-# Budget ~5 s of every run for the cargo rebuild + UEFI firmware startup before
-# the kernel's first byte: `timeout 8` yields a log with NO kernel output at all
-# (check-boot-log.sh then fails all markers).
+# Budget ~6 s of every run for the cargo rebuild, the disk image build (below)
+# and UEFI firmware startup before the kernel's first byte: `timeout 8` yields a
+# log with NO kernel output at all (check-boot-log.sh then fails all markers).
 #
-# HOW LONG: **300 s** for anything you mean to verify against the marker files
-# (qemu-smoke itself uses 600 s as of 5.10b). The number is NOT a constant, it
-# tracks how far into the boot the LAST required marker sits. It was 25 s through
-# slice 5.8 and 120 s through 5.10a, and it is stale advice the moment a slice
-# makes the boot longer. Measured on the musl flavour (`MINIXRS_SDK=/nonexistent`,
-# the one CI builds), `hello: errno ok` -- the last required marker -- sits at
-# 26.90% of a 240 s log before slice 5.10b and 61.61% after it, i.e. ~148 s in.
+# HOW LONG: **600 s, in the MUSL flavour** (`MINIXRS_SDK=/nonexistent`, as on
+# the command below) for anything you mean to verify against the marker files
+# (qemu-smoke itself gives each full boot 1200 s as of slice 6.4). Musl because
+# that is what CI builds and what the marker files and the timeouts are sized
+# for: an installed SDK is used even with MINIXRS_SDK unset, and its smaller
+# `hello` makes a different, faster boot; if you build in a separate command,
+# set the variable there too. The number is NOT a constant, it tracks how far
+# into the boot the LAST required marker sits. It was 25 s through slice 5.8,
+# 120 s through 5.10a and 300 s through 6.3, and it is stale advice the moment a
+# slice makes the boot longer. Slice 6.4 raised it because a musl disk boot now
+# reaches its last required marker ~396 s in: 600 s is 1.5x that, the factor
+# 300 s had at 6.3. Every measurement, the factors, and which flavour each
+# reading was taken on are in ./ci.md (the bullet "A slice can break the
+# boot-timing budget") and are not restated here. An SDK-flavour boot (drop the
+# variable) gets there in ~248 s and is fine for ITERATION, but it is neither
+# the budget measurement nor a marker-file verification.
 # Re-measure rather than trusting this paragraph: `grep -abo <marker> log | head -1`
 # divided by `wc -c log`, and raise the budget when the fraction climbs. The three
 # things that move it most are the `hello` flavour (~47 KB with the SDK vs ~200 KB
 # with in-tree musl, all of it read through MFS and VFS), the root backend (below:
 # a disk boot completes every block request by a real interrupt instead of a
-# memcpy -- slice 6.3 measured the last required marker at 66.8% of a 300 s disk
-# log against 48.1% for the ramdisk boot of the same build, so 300 s still holds
-# for both) and whether the demo stubs
+# memcpy, and since 6.4 follows every write with a flush, a second interrupt
+# round trip) and whether the demo stubs
 # are on -- `--no-default-features` reaches the same markers **dramatically**
 # faster, because stub C's kernel-call flood dominates a default boot: 5.10b
-# measured the `fs.*` markers landing at ~0.14% of a 60 s stub-free log, so
-# `timeout 30` is ample there. That is the configuration to iterate and
-# mutation-test in; just remember `check-boot-log.sh` reports FAIL on the stub
-# A-D markers there by design, so judge a stub-free run by grepping the specific
-# marker rather than by the script's overall verdict.
+# measured the `fs.*` markers landing at ~0.14% of a 60 s stub-free log, and 6.4
+# measured every one of its markers inside the first 0.33% of a 60-75 s one, so
+# `timeout 30` after a separate build is ample there. That is the configuration
+# to iterate and mutation-test in; just remember `check-boot-log.sh` reports FAIL
+# on the stub A-D markers there by design, so judge a stub-free run by grepping
+# the specific marker rather than by the script's overall verdict.
 #
 # QEMU under TCG also advances *guest* time slower than wall-clock, so a
 # `timeout N` run reaches far fewer than N x 100 ticks. For time-based features
 # (alarms, quantum/scheduling) read uptime-stamped traces (e.g. `[alarm ... at=N]`)
 # as the real clock, and run long enough to observe several periods.
-timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
-# TWO ROOT BACKENDS (slice 6.3). What the runner attaches selects where MFS mounts
-# its root from, and the two are different boots with different marker sets:
+# ONE DISK, THREE ROOT BACKENDS (slice 6.4; two backends since 6.3). The machine
+# boots from ONE disk: a GPT image holding a FAT32 ESP (Limine, limine.conf, the
+# kernel) and, on a disk boot, the MinixFS root partition. The firmware reads
+# the kernel from it and `vblk` then drives the same device. `MINIXRS_ROOT`
+# selects what is on the image and which transport it sits on:
 #
-#   MINIXRS_ROOT=disk     (the default, i.e. the command above) attaches the root
-#                         image as a virtio-blk disk; MFS mounts through `vblk`.
-#   MINIXRS_ROOT=ramdisk  attaches no virtio-blk device at all; `vblk` prints
-#                         `no device` and MFS mounts the `memory` ramdisk.
+#   MINIXRS_ROOT=disk     (the default, i.e. the command above) target/disk.img:
+#                         ESP + root partition, on virtio-mmio. `vblk` finds the
+#                         root by its GPT type GUID; MFS mounts through `vblk`.
+#   MINIXRS_ROOT=ramdisk  target/disk-rootless.img: the same image WITHOUT the
+#                         root partition (same size), on virtio-mmio. `vblk`
+#                         brings it up, prints `root FAIL no root partition`, MFS
+#                         prints `bdev.root vblk rc=-6 fallback=memory` and mounts
+#                         the `memory` ramdisk. This is the no-root FALLBACK boot.
+#   MINIXRS_ROOT=nodisk   the rootless image as virtio-blk-PCI: the firmware
+#                         reads it, minix.rs has no PCI, so `vblk` prints `no
+#                         device` and MFS finds no `vblk` in DS. Hand-run only --
+#                         CI does not boot it and it has no marker pair (how its
+#                         log fares against the marker files is under "The
+#                         no-device state has no checked boot" in
+#                         ./testing-and-markers.md#markers).
 #
-# A slice that touches the block path, MFS or VFS owes BOTH boots -- the ramdisk
-# backend stays green for the whole phase (H7). Keep the logs apart; the checker
-# and tools/diff-backends.sh each want to be told which is which.
-MINIXRS_ROOT=ramdisk timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+# A slice that touches the block path, MFS or VFS owes both full boots AND the
+# reboot below (the Definition of done, ./docs-and-workflow.md#slice-workflow
+# step 4, is the rule) -- the ramdisk backend stays green for the whole phase
+# (H7). Keep the logs apart; the checker and tools/diff-backends.sh each want to
+# be told which is which.
+MINIXRS_SDK=/nonexistent MINIXRS_ROOT=ramdisk timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
-# The disk is `rootfs.img`, which kernel/build.rs writes beside the kernel ELF --
-# the very bytes it packs into the boot archive as the ramdisk, so the two backends
-# serve one image. The runner COPIES it to target/vblk-root.img on every run and
-# attaches the copy: the boot writes to its root, and a reused file would make the
-# second run a different test from the first. Nothing persists across boots.
+# The image is BUILT ON EVERY RUN by the host tool tools/mkimage, which the
+# runner starts through a nested `cargo run -q --release -p minixrs-mkimage`
+# (about a second once built; it does not wait on the outer cargo's lock). Its
+# inputs are the kernel ELF cargo handed the runner, Limine's BOOTAA64.EFI,
+# tools/limine.conf and -- for `disk` -- `rootfs.img`, which kernel/build.rs
+# writes beside the kernel ELF: the very bytes it packs into the boot archive as
+# the ramdisk, so the two backends serve one filesystem image. Rebuilt rather
+# than reused because the boot WRITES to its root: a reused image would make the
+# second run a different test from the first. The images always land in the
+# repository's own target/ (CARGO_TARGET_DIR is not honoured for them).
 # `MINIXRS_ROOT` is an environment variable, so like `$MINIXRS_SDK` it does not
 # survive into a separate shell invocation: set it on the command that boots.
 #
-# Two more knobs, for the boots that are MEANT to be refused (a disk boot only):
-#   MINIXRS_VBLK_IMAGE=<file>       attach that file as-is, no copy, instead of the
-#                                   root image -- e.g. a blank disk, which makes
-#                                   `vblk` print `root FAIL label` and MFS fall back
-#   MINIXRS_VBLK_DRIVE_OPTS=<opts>  appended to the -drive argument, e.g. `readonly=on`
+# Two more knobs (a disk boot only; `ramdisk` and `nodisk` reject them, exit 64):
+#   MINIXRS_VBLK_IMAGE=<file>       attach that file AS-IS: no build, no copy, and
+#                                   the boot's writes land in it. The machine
+#                                   boots ENTIRELY from that file, so it needs
+#                                   its own ESP with a kernel on it -- the kernel
+#                                   ELF cargo just built is NOT used, and a file
+#                                   without an ESP gives no kernel at all, only
+#                                   the firmware's boot-failure output.
+#   MINIXRS_VBLK_DRIVE_OPTS=<opts>  appended to the -drive argument, e.g.
+#                                   `readonly=on`: `vblk` then prints `root FAIL
+#                                   readonly` and MFS falls back. Without
+#                                   MINIXRS_VBLK_IMAGE the fresh image is still
+#                                   built and the options apply to it.
 #
-# The rest of the runner's QEMU command line (slice 6.2, spec T13): the `fat:rw:` ESP as a
-# virtio-blk-pci drive (read by the firmware, by nothing in minix.rs), plus `-global
-# virtio-mmio.force-legacy=false`; the disk above is a `virtio-blk-device` pinned to
-# `bus=virtio-mmio-bus.0`. Extra arguments are appended last, so a later `-global` overrides the
-# default. The disk boot prints `[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and the driver's
-# `[diag vblk] virtio ok ... capacity=2048 ...` line; 2048 is `rootfs::ROOTFS_IMAGE_BYTES / 512`, and
-# tests/qemu-boot.disk.expected is the other holder of that number.
+# THE REBOOT (the persistence proof): boot the image a disk boot just wrote,
+# as-is, and check it against the reboot marker pair. It must print
+# `minix.rs init: persist gen=1`. THE REBOOT-ORDERING RULE: it MUST run before
+# anything rebuilds target/disk.img -- every plain disk boot does -- so it comes
+# immediately after the disk boot whose image it reads. And RUN IT ONCE PER DISK
+# BOOT: each boot of the image stores the next digit, so a second reboot of the
+# same image prints gen=2 and fails the reboot set by design; take a fresh disk
+# boot first. It needs only that one line (~34 s in locally); CI gives it 180 s.
+MINIXRS_VBLK_IMAGE=target/disk.img timeout 60 cargo run -p minixrs-kernel \
+  --target aarch64-unknown-none --release > reboot.log 2>&1
+tools/check-boot-log.sh reboot reboot.log
+#
+# The runner's QEMU command line: one `-drive file=<image>,format=raw,if=none,id=vblk0`
+# plus `-device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0` (for `nodisk`,
+# one `-drive ...,if=virtio` instead), and `-global virtio-mmio.force-legacy=false`.
+# The runner attaches nothing else (`-M virt` still creates its default devices,
+# a virtio-net-pci card among them: the runner passes no `-nodefaults`). The
+# runner prints the exact argv on stderr as one
+# `qemu-run: ...` line (and `qemu-run: attaching <file> as-is ...` when it built
+# nothing) -- the first thing to read when a boot surprises. Extra arguments are
+# appended last, so a later `-global` overrides the default. Both full boots, and
+# the reboot, print `[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and the driver's
+# `[diag vblk] virtio ok features=0x100000200 capacity=75776 ...` line; 75776 is
+# the whole disk in sectors (tools/mkimage's `layout::DISK_SECTORS`), the same on
+# both images, and tests/qemu-boot.{disk,ramdisk}.expected are the other holders
+# of that number.
+#
+# A SECOND DISK, for a driver verdict the firmware would not let you reach (a disk
+# with no ESP, a damaged GPT): boot `nodisk`, so the firmware has the rootless
+# image on PCI, and pass the disk under test as the mmio drive after `--`:
+#   MINIXRS_ROOT=nodisk timeout 60 cargo run ... -- \
+#     -drive file=<img>,format=raw,if=none,id=vblk0 \
+#     -device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0
+# Caveat: the firmware tries the mmio disk FIRST. If the disk under test has a
+# usable ESP it boots from THAT, with that image's own kernel. And on a WRITABLE
+# disk edk2 repairs a damaged primary GPT from the backup before the kernel runs
+# (see ./testing-and-markers.md#mutation-testing) -- add `readonly=on`.
 
 # Clean, stub-free boot for debugging (servers + init/worker only, no demo
 # stubs A-D): add --no-default-features to disable the `boot-stubs` feature.
@@ -145,11 +213,14 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
 # extension that macOS's awk does not have.
 
 # Verify a captured boot log against the standard acceptance markers. The first
-# argument is the backend the boot ran with and is REQUIRED:
+# argument names the boot the log came from and is REQUIRED:
 #   tools/check-boot-log.sh disk    <log>   (a default boot)
 #   tools/check-boot-log.sh ramdisk <log>   (a MINIXRS_ROOT=ramdisk boot)
-# Each checks tests/qemu-boot.expected/.forbidden plus that backend's own
-# tests/qemu-boot.<backend>.expected/.forbidden. Then, with one log of each:
+#   tools/check-boot-log.sh reboot  <log>   (the reboot above)
+# `disk` and `ramdisk` each check tests/qemu-boot.expected/.forbidden plus that
+# backend's own tests/qemu-boot.<backend>.expected/.forbidden; `reboot` checks
+# tests/qemu-boot.reboot.expected/.forbidden and nothing else. Then, with one
+# full-boot log of each backend:
 #   tools/diff-backends.sh <disk-log> <ramdisk-log>
 # Update the marker files in the same PR when trace formats or the boot roster
 # change, or the qemu-smoke CI job goes red. For the marker-file contract itself
@@ -163,6 +234,7 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
 # Run host-side unit tests (note the package name, not the dir name)
 cargo test -p minixrs-kernel-shared
 cargo test -p minixrs-gen-c-headers
+cargo test -p minixrs-mkimage   # the disk-image writer, read back by independent readers
 
 # Regenerate the C ABI headers for the musl fork (slice 5.0). Output is a build
 # artifact under target/ and is NEVER committed; `--stdout` dumps it instead.

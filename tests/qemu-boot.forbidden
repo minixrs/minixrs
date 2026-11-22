@@ -115,14 +115,43 @@ minix.rs fileio: exit-reset FAIL
 # virtio-blk's bring-up failed at the named step (slice 6.2, spec T12), or the
 # device misbehaved while serving (`step=io`, slice 6.3: a queue fault, a failed
 # re-arm; the driver answers EIO from then on). `[diag vblk] no device` is not
-# forbidden HERE because the ramdisk boot requires it; the disk boot forbids it
-# in tests/qemu-boot.disk.forbidden.
+# forbidden HERE: both checked boots forbid it in their own files (each attaches
+# the boot disk as a virtio-mmio device), but it is the healthy line of the
+# hand-run MINIXRS_ROOT=nodisk boot, which this common set must still pass.
+# `[diag vblk] root FAIL` is not here either: the ramdisk boot requires one
+# spelling of it and the disk boot forbids them all.
 [diag vblk] virtio FAIL
 # Slice 6.3: vblk had a device and could not publish itself to DS, so MFS cannot
 # find it and the disk boot falls back (tests/qemu-boot.disk.forbidden catches
 # that too; this names the cause).
 [diag vblk] ds FAIL
+# Slice 6.4: the flush (spec P8). `flush FAIL status=<s>`: the device completed
+# a VIRTIO_BLK_T_FLUSH with a non-zero status, and the write it followed was
+# answered EIO. `flush off`: the device did not accept VIRTIO_BLK_F_FLUSH, so
+# writes would be served unflushed -- printed at bring-up, root or no root. QEMU
+# offers the bit on every drive this repo attaches (the per-backend files pin
+# the accepted word), so on any boot with a device this means the negotiation
+# lost it; a boot without a device (nodisk) prints neither.
+[diag vblk] flush FAIL
+[diag vblk] flush off
 # Slice 6.3: a partial BDEV_WRITE disturbed the bytes it did not name
 # (`FAIL clobbered`: the driver overlaid the caller's bytes on a stale bounce
 # buffer instead of on the block), or the probe could not run at all.
 [diag mfs] bdev.partial FAIL
+# Slice 6.4: the probe of the whole-disk minor (spec P6) got something that is
+# neither a protective MBR nor ENXIO. `FAIL mbr`: one whole block came back and
+# it is not the start of a GPT disk -- the driver resolved minor 1 to the wrong
+# extent (the root's block 0 has no boot signature; the ESP's has no 0xEE
+# record). `FAIL read rc=<rc>`: any other errno, or a reply that is not exactly
+# one block.
+[diag mfs] bdev.minor FAIL
+# Slice 6.4: the persistence probe (spec P9) could not read the boot counter or
+# could not store the next one. The word after FAIL names the step, with rc= as
+# returned where the step answered an errno: `open` (rc=-2: /etc/boots is not in
+# the image), `read`, `value` (the read did not return exactly one decimal
+# digit -- an empty file is a truncate that landed without its write), `close`,
+# then the rewrite's `reopen` (the O_TRUNC open), `write`, `short` (a byte count
+# other than one) and `close2`. A rewrite step failing AFTER `persist gen=<n>`
+# was printed is the case this line exists for: the expected marker is already
+# satisfied by then, and the next boot of the image would not count.
+minix.rs init: persist FAIL

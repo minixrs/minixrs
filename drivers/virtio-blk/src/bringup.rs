@@ -16,9 +16,16 @@ use minixrs_kernel_shared::uspace::DMA_COOKIE;
 
 /// The bit virtio-blk's interrupt notifications carry in the pending word.
 pub const VBLK_IRQ_NOTIFY_ID: u8 = 0;
-/// Optional features requested: none, so `negotiate` accepts `VIRTIO_F_VERSION_1`
-/// alone. 6.4 adds `VIRTIO_BLK_F_FLUSH`.
-pub const VBLK_WANTED_FEATURES: u64 = 0;
+/// Feature bit 5: the device is read-only.
+pub const VIRTIO_BLK_F_RO: u64 = 1 << 5;
+/// Feature bit 9: the device has a write cache and takes `VIRTIO_BLK_T_FLUSH`.
+pub const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
+/// Optional features requested (slice 6.4, spec P8): the flush, and `F_RO` so a
+/// read-only device says so. `negotiate` accepts whichever of them the device
+/// offers, plus `VIRTIO_F_VERSION_1`; a device offering neither is still brought
+/// up. What follows from the accepted word is [`flush_enabled`] and
+/// [`read_only`].
+pub const VBLK_WANTED_FEATURES: u64 = VIRTIO_BLK_F_RO | VIRTIO_BLK_F_FLUSH;
 /// Offset of `capacity` (u64, 512-byte sectors) in the device configuration.
 pub const VBLK_CONFIG_CAPACITY_OFF: usize = 0;
 /// Page of the DMA run holding queue 0 (descriptor table, available and used rings).
@@ -93,6 +100,18 @@ pub fn vblk_layout(region: DmaRegion, queue: QueueLayout) -> Option<VblkLayout> 
     })
 }
 
+/// Whether writes are followed by a flush: the **accepted** feature word (what
+/// `negotiate` returned, not what the device offered) has `VIRTIO_BLK_F_FLUSH`.
+pub const fn flush_enabled(accepted: u64) -> bool {
+    accepted & VIRTIO_BLK_F_FLUSH != 0
+}
+
+/// Whether the device is read-only: the **accepted** feature word has
+/// `VIRTIO_BLK_F_RO`. Such a disk is declined as a root (`root FAIL readonly`).
+pub const fn read_only(accepted: u64) -> bool {
+    accepted & VIRTIO_BLK_F_RO != 0
+}
+
 /// The device's `capacity` field, decoded: little-endian 512-byte sectors.
 pub const fn capacity_from_config(bytes: [u8; 8]) -> u64 {
     u64::from_le_bytes(bytes)
@@ -108,7 +127,11 @@ pub const fn cookie_ok(word: u64, pa: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use minixrs_driver_rt::transport::accept_features;
     use minixrs_driver_rt::{DmaRun, QUEUE_SIZE, queue_layout};
+
+    /// `VIRTIO_F_VERSION_1`, bit 32, by its number.
+    const VERSION_1: u64 = 1 << 32;
 
     const PA: u64 = 0x4800_0000;
     const PAGE: u64 = USER_PAGE_SIZE;
@@ -279,6 +302,47 @@ mod tests {
             // up-front checks before relying on the contract; nothing is accessed.
             assert!(unsafe { DmaRegion::new(run) }.is_none(), "{run:?}");
         }
+    }
+
+    #[test]
+    fn the_wanted_features_are_flush_and_read_only() {
+        assert_eq!(VIRTIO_BLK_F_RO, 0x20);
+        assert_eq!(VIRTIO_BLK_F_FLUSH, 0x200);
+        assert_eq!(VBLK_WANTED_FEATURES, 0x220);
+    }
+
+    #[test]
+    fn the_accepted_word_decides_flush_and_read_only() {
+        // What QEMU's writable raw drive accepts (measured, spec P11.4):
+        // VERSION_1 and FLUSH.
+        assert!(flush_enabled(0x1_0000_0200));
+        assert!(!read_only(0x1_0000_0200));
+        // The same drive with `readonly=on`.
+        assert!(flush_enabled(0x1_0000_0220));
+        assert!(read_only(0x1_0000_0220));
+        // A device with neither: 6.3's word.
+        assert!(!flush_enabled(0x1_0000_0000));
+        assert!(!read_only(0x1_0000_0000));
+        // Read-only with no write cache.
+        assert!(!flush_enabled(0x1_0000_0020));
+        assert!(read_only(0x1_0000_0020));
+        // Each looks at its own bit and no other.
+        assert!(!flush_enabled(!VIRTIO_BLK_F_FLUSH));
+        assert!(!read_only(!VIRTIO_BLK_F_RO));
+    }
+
+    #[test]
+    fn negotiation_accepts_only_what_the_device_offers() {
+        // `driver-rt` accepts `wanted ∩ offered` plus VERSION_1, so asking for
+        // a feature the device lacks is safe: it is simply not accepted.
+        let accept = |offered| accept_features(offered, VBLK_WANTED_FEATURES);
+        assert_eq!(accept(VERSION_1), Some(0x1_0000_0000));
+        assert_eq!(accept(VERSION_1 | 0x200), Some(0x1_0000_0200));
+        assert_eq!(accept(VERSION_1 | 0x220), Some(0x1_0000_0220));
+        // Bits this driver did not ask for are never accepted.
+        assert_eq!(accept(VERSION_1 | 0x200 | 0xFFFF_0000), Some(0x1_0000_0200));
+        assert_eq!(accept(u64::MAX), Some(0x1_0000_0220));
+        assert_eq!(accept(0x220), None);
     }
 
     #[test]

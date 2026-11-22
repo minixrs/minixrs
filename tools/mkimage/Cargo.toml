@@ -1,0 +1,31 @@
+[package]
+name = "minixrs-mkimage"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+name = "minixrs_mkimage"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mkimage"
+path = "src/main.rs"
+
+# One path dependency and zero third-party crates (slice 6.4, decision P2):
+# the GPT and the FAT32 volume are a few hundred lines of fixed-layout bytes, and
+# `deny.toml`'s allow-list keeps CLI and filesystem crates out of this workspace,
+# which is why argv parsing is hand-rolled — `mkfs-mfs`'s shape.
+[dependencies]
+minixrs-kernel-shared = { path = "../../kernel-shared" }
+
+# The GPT *parser* the `virtio-blk` driver uses. It is a dev-dependency only, and
+# on purpose: the writer here shares no code with it, so a test that parses a
+# built image with it checks two independently derived readings of the format
+# against each other.
+[dev-dependencies]
+minixrs-driver-rt = { path = "../../drivers/driver-rt" }
+
+[lints]
+workspace = true

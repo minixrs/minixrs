@@ -41,6 +41,8 @@
 //!     the server forever.
 //!   * [`root`] — which block driver the root is mounted from: the disk when it
 //!     carries a root, the ramdisk otherwise (slice 6.3).
+//!   * [`minor`] — the verdict of the `bdev.minor` boot probe: whether block 0
+//!     of the whole-disk minor is the start of a GPT disk (slice 6.4).
 //!
 //! The modules below it ([`superblock`], [`inode`], [`layout`], [`dirent`],
 //! [`read`]) are slice 5.7's and are untouched — the server drives exactly the
@@ -59,6 +61,7 @@
 pub mod dirent;
 pub mod inode;
 pub mod layout;
+pub mod minor;
 pub mod proto;
 pub mod read;
 pub mod root;

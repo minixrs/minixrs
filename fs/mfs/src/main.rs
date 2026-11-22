@@ -93,9 +93,10 @@ minixrs_abi_note::brand!();
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF, BDEV_MINOR_ROOT,
-    BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_CREATE, FS_LOOKUP, FS_READ, FS_READSUPER, FS_TRUNC,
-    FS_WRITE, GET_RAMDISK, NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_NONE, BDEV_MINOR_OFF,
+    BDEV_MINOR_ROOT, BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_CREATE, FS_LOOKUP, FS_READ,
+    FS_READSUPER, FS_TRUNC, FS_WRITE, GET_RAMDISK, NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO,
+    SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{MEM_PROC_NR, PM_PROC_NR, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -114,6 +115,7 @@ use minixrs_mfs::inode::{
     SINGLE_INDIRECT_SLOT,
 };
 use minixrs_mfs::layout::{Layout, layout, zmap_bit};
+use minixrs_mfs::minor::{self, MinorProbe};
 use minixrs_mfs::read::{
     ZoneLookup, inode_at, inode_location, zone_for_offset, zone_from_indirect,
 };
@@ -429,6 +431,7 @@ fn main() -> ! {
     // Do not tidy this prologue into alphabetical order.
     tail_probe(&mut blocks);
     partial_probe(&mut blocks);
+    minor_probe(&mut blocks);
     bdev_denials(&mut grants, &blocks);
 
     let mut msg = Message {
@@ -1603,7 +1606,10 @@ fn ds_key(name: &[u8]) -> [u8; SYS_GETINFO_NAME_LEN] {
 /// Select the block device the root is mounted from, grant it the block buffer,
 /// and hand back the fetch capability (slice 6.3, B2).
 ///
-/// `vblk` first. A DS miss is the healthy no-disk boot and prints nothing. On a
+/// `vblk` first. A DS miss means the driver was assigned no virtio-mmio device;
+/// it is healthy and prints nothing (since slice 6.4 only the hand-run
+/// `MINIXRS_ROOT=nodisk` boot takes it — the ramdisk boot CI runs attaches a
+/// rootless disk and takes the `ENXIO` fallback below). On a
 /// hit the buffer is granted to that endpoint and **one** request is sent: a
 /// zero-length `BDEV_READ` of the root minor, which a driver serving a root
 /// answers `0` with no grant use and no device I/O, and a driver with a device
@@ -1616,8 +1622,11 @@ fn ds_key(name: &[u8]) -> [u8; SYS_GETINFO_NAME_LEN] {
 /// through to [`mem_endpoint`], unchanged — its own `bdev.ds FAIL` line included.
 ///
 /// **The selected device is named on exactly one line**, `bdev.ds ok name=<name>
-/// ep=<ep>`, and that line is the only one the two backends' output may differ
-/// by. For `vblk` it is printed after the probe, so it never names a device this
+/// ep=<ep>`. Since slice 6.4 it is one of three places the two backends'
+/// `[diag mfs]` output may differ, with the fallback line above (the ramdisk
+/// boot only) and the `bdev.minor` verdict ([`minor_probe`]);
+/// `tools/diff-backends.sh`'s header lists all three and allows nothing else.
+/// For `vblk` it is printed after the probe, so it never names a device this
 /// server then declined.
 ///
 /// **On fallback the grant issued to `vblk` is revoked**, so a driver this server
@@ -1666,9 +1675,9 @@ fn root_device<'a>(
 /// the FS path, while the required `bdev.ds ok` marker disappears and CI goes red
 /// on the ordering regression specifically.
 ///
-/// `vblk` has no such fallback, deliberately: its absence from DS is the normal
-/// ramdisk boot, so there is no boot endpoint worth guessing at and no line to
-/// print.
+/// `vblk` has no such fallback, deliberately: its absence from DS is how a boot
+/// with no virtio-mmio disk looks (`MINIXRS_ROOT=nodisk`), so there is no boot
+/// endpoint worth guessing at and no line to print.
 #[cfg_attr(test, allow(dead_code))]
 fn mem_endpoint() -> Endpoint {
     match sef_retrieve_from_ds(&ds_key(root::MEMORY_NAME)) {
@@ -1886,6 +1895,47 @@ fn partial_probe(blocks: &mut Blocks<'_>) {
     }
 }
 
+/// Read block 0 of the **whole-disk minor** and say whether it is the start of
+/// a GPT disk — the one request in the system for a minor other than the root
+/// (slice 6.4, spec P6).
+///
+/// `virtio-blk` serves a table of minors and the filesystem opens only minor 0,
+/// so this is what keeps the rest of the table from being code no boot runs.
+/// `vblk` answers with the disk's first block, whose first 512 bytes are the
+/// protective MBR; `memory` has no such minor and answers `ENXIO`, which is the
+/// healthy line on the ramdisk boot. What the bytes must be, and why each check
+/// is there, is [`minor::classify`]'s — host-tested, which this file is not.
+///
+/// The request rides the block buffer and the grant every other read uses —
+/// [`Blocks::read`] cannot issue it only because it names the root minor — so
+/// it costs no stack and no grant slot. It leaves the buffer holding a block
+/// that is not the root's, which is safe for the reason any read is: nothing
+/// keeps a block across a request.
+///
+/// It runs after [`partial_probe`] and before the denial battery: behind every
+/// proof a driver that wedged on an unfamiliar minor could take down, and ahead
+/// of the requests that are malformed on purpose.
+#[cfg_attr(test, allow(dead_code))]
+fn minor_probe(blocks: &mut Blocks<'_>) {
+    let probed = minor::PROBE_MINOR;
+    let rc = bdev_request(
+        blocks.dev,
+        BDEV_READ,
+        probed,
+        blocks.gid,
+        MFS_BLOCK_SIZE as i32,
+        0,
+    );
+    // `&mut blocks` is held and the request has completed, so nothing else
+    // refers to the buffer and nothing is writing it.
+    match minor::classify(rc, &blocks.buf[..]) {
+        MinorProbe::Mbr => diag_fmt(format_args!("bdev.minor ok minor={probed} mbr=1")),
+        MinorProbe::Absent => diag_fmt(format_args!("bdev.minor absent minor={probed} rc={rc}")),
+        MinorProbe::FailRead(rc) => diag_fmt(format_args!("bdev.minor FAIL read rc={rc}")),
+        MinorProbe::FailMbr => diag_fmt(format_args!("bdev.minor FAIL mbr")),
+    }
+}
+
 /// One denial probe: a request well-formed in every respect but one.
 #[cfg_attr(test, allow(dead_code))]
 struct Probe {
@@ -1905,8 +1955,14 @@ struct Probe {
 /// None of the ten is reachable from the live path, which is the whole reason they
 /// exist: a check no marker exercises is a check that can regress silently.
 ///
-///   - `bad-minor` — a good grant aimed at minor 7. `ENXIO`, from the driver's own
-///     minor check: the *device* does not exist; nothing is wrong with the grant.
+///   - `bad-minor` — a good grant aimed at [`BDEV_MINOR_NONE`], the minor no
+///     block driver serves. `ENXIO`, from the driver's own minor check: the
+///     *device* does not exist; nothing is wrong with the grant. The minor is
+///     that constant and not a small literal because a literal stops being
+///     "no such device" when a driver's table reaches it: this probe named
+///     minor 7 until slice 6.4, where `vblk` made 7 the sixth GPT partition
+///     and refused it only because the boot disk has two. Each driver holds
+///     the constant outside its own minors at compile time.
 ///   - `bad-block` — one block past the end. `EINVAL` rather than `EIO`: a block
 ///     device's size is known to its client, so this is a caller bug.
 ///   - `too-long` — one byte more than `BDEV_MAX_IO`. The deliberate departure
@@ -1929,7 +1985,8 @@ struct Probe {
 ///     rather than quietly retiring. It also aims at block 1, the one block
 ///     `START_BLOCK = 2` leaves spare, so a regression in the guard is a wasted
 ///     write rather than a destroyed superblock.
-///   - `wr-minor` — a write to a device that does not exist. `ENXIO`, and the
+///   - `wr-minor` — a write to a device that does not exist: [`BDEV_MINOR_NONE`]
+///     again, for the reason `bad-minor` gives. `ENXIO`, and the
 ///     point is the *order*: the driver validates the minor before it touches the
 ///     grant, so a bad device is reported as one rather than as a grant failure.
 ///     It rides `write_only` and block 1 for the same reason `wr-dir` does — the
@@ -1971,7 +2028,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "bad-minor",
             m_type: BDEV_READ,
-            minor: 7,
+            minor: BDEV_MINOR_NONE,
             gid: good,
             len: n,
             block: 0,
@@ -2034,7 +2091,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "wr-minor",
             m_type: BDEV_WRITE,
-            minor: 7,
+            minor: BDEV_MINOR_NONE,
             gid: write_only,
             len: n,
             block: 1,

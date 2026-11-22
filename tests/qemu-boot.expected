@@ -1,6 +1,9 @@
 # tests/qemu-boot.expected -- required substrings for a healthy QEMU boot log.
 # This is the COMMON set, required on every boot; each root backend adds its own
 # pair beside it (tests/qemu-boot.{disk,ramdisk}.{expected,forbidden}).
+# (The one boot this set is NOT applied to is the reboot of a used disk image,
+# which is checked against tests/qemu-boot.reboot.{expected,forbidden} alone --
+# that file says why.)
 # One literal substring per line; blank lines and '#' comments are ignored.
 # Checked by tools/check-boot-log.sh via `grep -aF` (the log interleaves raw
 # single-char tick bytes, so it must be forced to text). Substrings stop just
@@ -22,7 +25,9 @@ minix.rs booting on aarch64
 # lookup). Both lookups fall back to boot_endpoint and say so, so a reordering
 # turns those two markers red rather than hanging the boot. vblk sits between
 # memory and mfs because MFS looks `vblk` up first (slice 6.3); a miss there has
-# no FAIL line and is caught by tests/qemu-boot.disk.expected instead.
+# no FAIL line and is caught by the per-backend files instead, both of which
+# need MFS to have found `vblk` (tests/qemu-boot.disk.expected requires
+# `name=vblk`, tests/qemu-boot.ramdisk.expected the `bdev.root vblk` fallback).
 [as] vm nr=7 ttbr0_pa=
 [as] ds nr=5 ttbr0_pa=
 [as] tty nr=4 ttbr0_pa=
@@ -426,8 +431,12 @@ minix.rs hello: iov ok match=1
 # `bdev.ds FAIL ... fallback=` line. Since slice 6.3 the line names the driver
 # chosen: `name=vblk` when a disk carrying a root is attached, `name=memory`
 # otherwise. WHICH name is required is the per-backend files' business
-# (tests/qemu-boot.{disk,ramdisk}.expected); this is the one [diag mfs] line the
-# two boots differ by, which tools/diff-backends.sh checks.
+# (tests/qemu-boot.{disk,ramdisk}.expected). The two boots' [diag mfs] output
+# differs by this line and, since slice 6.4, by the one `bdev.root vblk rc=-6
+# fallback=memory` line the ramdisk boot prints before it and by the verdict of
+# the `bdev.minor` probe (`ok minor=1 mbr=1` on the disk, `absent minor=1
+# rc=-6` on the ramdisk) -- and by nothing else, which tools/diff-backends.sh
+# checks.
 [diag mfs] bdev.ds ok name=
 
 # The mount: block 0 read over BDEV, its superblock decoded at byte 1024 and
@@ -474,9 +483,12 @@ minix.rs hello: iov ok match=1
 # 6.3's mutation 8 found. n=16 is IMAGE_LABEL_LEN.
 [diag mfs] bdev.partial ok n=16
 
-# Ten refusals, each well-formed but for one field: minor 7 (-> ENXIO, the
-# driver's own minor check), one block past the end (-> EINVAL, not EIO: a block
-# device's size is known to its client), BDEV_MAX_IO + 1 bytes (-> EINVAL, the
+# Ten refusals, each well-formed but for one field: the minor no block driver
+# serves, BDEV_MINOR_NONE (-> ENXIO, the driver's own minor check; it was the
+# literal 7 until slice 6.4, where `vblk` made 7 a GPT partition's minor and
+# refused it only because the boot disk has two), one block past the end (->
+# EINVAL, not EIO: a block device's size is known to its client), BDEV_MAX_IO + 1
+# bytes (-> EINVAL, the
 # deliberate departure from CDEV's clamp -- a short block read is useless to a
 # filesystem), a negative length (-> EINVAL, which unchecked would widen into a
 # ~16 EiB u64), a grant issued to PM (-> EPERM, the kernel's `who_to` check), a
@@ -485,9 +497,9 @@ minix.rs hello: iov ok match=1
 # carries only CPF_WRITE (-> EPERM from the KERNEL's grant-direction check, not
 # from the driver: every geometry check passes and what refuses it is
 # `verify_grant`, the guard that stops a client reading a device buffer back out
-# through a write-shaped request), a BDEV_WRITE to minor 7 (-> ENXIO: the driver
-# validates the device before it touches the grant, so a bad minor is reported as
-# one rather than as a grant failure), a request one past the band (-> ENOSYS, and
+# through a write-shaped request), a BDEV_WRITE to that same absent minor (->
+# ENXIO: the driver validates the device before it touches the grant, so a bad
+# minor is reported as one rather than as a grant failure), a request one past the band (-> ENOSYS, and
 # the reply itself is the assertion: a dropped unknown would block MFS in its
 # SENDREC forever and take every later marker with it), and a
 # SYS_GETINFO(GET_RAMDISK) issued by MFS (-> EPERM, the gate that keeps a VA
@@ -569,7 +581,8 @@ minix.rs hello: iov ok match=1
 #   -> MFS -> magic grant -> init's buffer -> VFS_WRITE -> TTY -> serial
 #
 # That is the ramdisk boot. On the default disk boot the first half is instead
-#   mkfs (build time) -> rootfs.img -> virtio disk -> virtio-blk -> BDEV_READ
+#   mkfs (build time) -> rootfs.img -> mkimage -> the root partition of the
+#   GPT boot disk -> virtio-blk (minor 0) -> BDEV_READ
 #
 # The line IS the file (kernel_shared::rootfs::ROOTFS_MOTD), written from the
 # buffer the filesystem filled -- so nothing that did not actually read /etc/motd
@@ -979,6 +992,40 @@ minix.rs fileio: malloc ok
 [diag tty] getinfo.deny ok n=2
 
 # virtio-blk's own markers -- the boot probe, the register page, the DMA run and
-# the driver's verdicts -- exist only when a disk is attached, so since slice 6.3
-# they live in tests/qemu-boot.disk.expected; the no-disk boot's counterpart
-# (`[diag vblk] no device`) is in tests/qemu-boot.ramdisk.expected.
+# the driver's verdicts -- exist only when a virtio-mmio disk is attached. Since
+# slice 6.4 both checked boots attach one (the machine boots from it), so the
+# bring-up lines are in tests/qemu-boot.disk.expected AND
+# tests/qemu-boot.ramdisk.expected, and what the two files differ in is the
+# root: `root ok` and `name=vblk` against `root FAIL no root partition` and the
+# fallback to `name=memory`. They are not in this file because the hand-run
+# no-device boot (MINIXRS_ROOT=nodisk, `[diag vblk] no device`) has none of them
+# and must still pass the common set.
+
+# ---------------------------------------------------------------------------
+# Slice 6.4: the persistence probe -- the boot counter, generation zero.
+# ---------------------------------------------------------------------------
+
+# The root image ships /etc/boots holding one byte, ASCII `0` (kernel-shared's
+# ROOTFS_BOOTS_INITIAL). After the read path and the device probes, and BEFORE
+# the write battery, init opens it, reads it, prints the generation it read --
+# formatted from the value, not a literal -- and only then rewrites the file
+# with the next digit: open(O_RDWR | O_TRUNC), one write, close, the requests
+# fs.trunc and fs.write already issue (spec P9).
+#
+# gen=0 is what a FRESH image holds, so it is required of every boot this set
+# is applied to: the disk boot, whose image tools/qemu-run.sh rebuilds on every
+# run, and the ramdisk boot, whose root is rebuilt from the boot archive on
+# every boot and can never print anything else. Here the line proves the file
+# is in the image, that the probe read exactly one digit out of it (an empty
+# file, a longer one or a non-digit is `persist FAIL value`, forbidden), and --
+# through the forbidden `persist FAIL` -- that the rewrite's truncate, write
+# and close were all accepted.
+#
+# What it does NOT prove is that the rewrite outlived the boot. That is the
+# reboot's line: the same disk image booted again with no rebuild must print
+# `persist gen=1`, which tests/qemu-boot.reboot.expected requires and which
+# FORBIDS this line. So this marker also says a full boot started from a fresh
+# image -- point a full check at a used image and it fails here by design.
+# Mutation 9 (init skips the rewrite) was run and moves nothing in this file:
+# the first boot still prints gen=0. It is the reboot that prints gen=0 again.
+minix.rs init: persist gen=0

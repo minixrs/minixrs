@@ -59,25 +59,45 @@ child.
 
 ## Markers
 
-`tools/check-boot-log.sh <disk|ramdisk> <log>` greps a captured boot log against the marker files
-(see [`build-and-boot.md`](./build-and-boot.md) for how to produce the log, which backend a boot ran
-with, and how long to budget). Update those marker files in the same PR when trace formats or the
-boot roster change, or the `qemu-smoke` CI job goes red.
+`tools/check-boot-log.sh <disk|ramdisk|reboot> <log>` greps a captured boot log against the marker
+files (see [`build-and-boot.md`](./build-and-boot.md) for how to produce the log, which backend a
+boot ran with, and how long to budget). Update those marker files in the same PR when trace formats
+or the boot roster change, or the `qemu-smoke` CI job goes red.
 
-There are three pairs of files, and the checker always reads two of them:
+There are four pairs of files — eight files since slice 6.4 — and the checker reads two pairs for a
+full boot and one for the reboot:
 
-| Pair                                      | Checked for      | Holds                                                            |
-| ----------------------------------------- | ---------------- | ---------------------------------------------------------------- |
-| `tests/qemu-boot.expected` / `.forbidden` | every boot       | everything that must hold whichever driver serves the root       |
-| `tests/qemu-boot.disk.*`                  | a `disk` boot    | what exists because the disk does; forbids the fallback's lines  |
-| `tests/qemu-boot.ramdisk.*`               | a `ramdisk` boot | `no device`, the `memory` selection, and nothing claiming a disk |
+| Pair                                      | Checked for      | Holds                                                                                    |
+| ----------------------------------------- | ---------------- | ---------------------------------------------------------------------------------------- |
+| `tests/qemu-boot.expected` / `.forbidden` | every full boot  | everything that must hold whichever driver serves the root                               |
+| `tests/qemu-boot.disk.*`                  | a `disk` boot    | the device's bring-up, `root ok`, the flush, `name=vblk`; forbids the fallback           |
+| `tests/qemu-boot.ramdisk.*`               | a `ramdisk` boot | the same bring-up, `root FAIL no root partition`, the fallback line, `name=memory`       |
+| `tests/qemu-boot.reboot.*`                | the reboot only  | `persist gen=1` and the two lines saying the root is the disk's; forbids `persist gen=0` |
 
+- **Both full boots attach the boot disk.** Since slice 6.4 the machine boots from its disk, so the
+  `ramdisk` boot is the **no-root fallback** boot: the same image without the root partition, which
+  `vblk` brings up and declines and MFS falls back from. The device's four bring-up lines are
+  therefore required by *both* per-backend files, and they are not in the common file only because
+  the hand-run `MINIXRS_ROOT=nodisk` boot has none of them and must still pass the common set.
+- **The no-device state has no checked boot.** `[diag vblk] no device` and a DS miss in MFS are
+  reached only with `MINIXRS_ROOT=nodisk`, by hand; both per-backend files forbid `no device`, so
+  that log passes the common pair and fails both backends' by design.
 - **The backend argument is required, and there is no way to check the common pair alone.** The
   common files cannot tell a disk boot that silently fell back to the ramdisk from a healthy one:
   every filesystem marker passes either way. What closes that is the **forbidden** half of the
   per-backend pair — a `disk` boot forbids `bdev.ds ok name=memory`, `bdev.root vblk`, `[diag vblk]
-  no device` and `[diag vblk] root FAIL`; a `ramdisk` boot forbids `bdev.ds ok name=vblk` and the
-  disk's bring-up lines. Each boot fails the other backend's set, observed both ways.
+  no device`, `[diag vblk] root FAIL` and `bdev.minor absent`; a `ramdisk` boot forbids `bdev.ds ok
+  name=vblk`, `[diag vblk] root ok`, `[diag vblk] no device`, `[diag vblk] flush ok` and `bdev.minor
+  ok`. Each requires a line the other forbids, so each boot fails the other backend's set.
+- **The reboot is checked against its own pair and nothing else** — not the common pair, not the
+  disk pair. It is the second boot of the image a disk boot wrote, and init's write battery was
+  designed against a fresh image: it creates files that must not exist, fills a file that ships
+  empty, grows a directory that ships exactly full. What it does on its own leftovers is not
+  defined, so a full check of a used image would judge behaviour nobody specified. The persistence
+  probe therefore runs *before* the battery and the reboot is stopped soon after its line. Two
+  consequences: `persist gen=0` is required of every full boot and forbidden on a reboot, so neither
+  log can pass as the other; and the common forbidden list is not applied to a reboot, so a panic
+  there is caught only by `persist gen=1` never appearing.
 - **A new marker goes in the common pair unless it exists because of one backend.** Everything the
   filesystem proves — mount, read, write, create/truncate, the hole probe, exec from the root — is
   common and therefore required of both drivers. A marker moved into a per-backend file stops being
@@ -85,13 +105,18 @@ There are three pairs of files, and the checker always reads two of them:
 - **`tools/diff-backends.sh <disk-log> <ramdisk-log>` checks what the marker files cannot: that
   nothing *else* differs.** It takes each log's `[diag mfs]` lines and `[diag vfs]` lines as two
   separate streams, keeps the first occurrence of each line in order, and fails unless the VFS
-  streams are identical and the MFS streams differ in exactly the `bdev.ds ok name=` line. The shape
-  was measured, not chosen: two boots of the *same* backend differ in the raw interleaved stream
-  (the servers interleave differently from boot to boot, and VFS prints one `pm-exit reset` line per
-  exit for as long as the boot runs), and agree per server by first occurrence. What it therefore
-  **cannot** see is a backend-dependent change in how often a line repeats, or in the order of lines
-  between the two servers. `--self-test` proves it still fails on a difference; CI runs that before
-  the comparison.
+  streams are identical and the MFS streams differ in exactly the `bdev.ds ok name=` line — with two
+  further allowances since slice 6.4, each for one exact line: the ramdisk side may carry `bdev.root
+  vblk rc=-6 fallback=memory` (at most once; allowed, not required — requiring it is the marker
+  file's job), and the `bdev.minor` verdict is each backend's own (`ok minor=1 mbr=1` on the disk
+  side, `absent minor=1 rc=-6` on the ramdisk side, at the same place in the two streams, at most
+  once each). Another `rc`, a longer line, a `FAIL`, or either line on the wrong side still fails.
+  The shape was measured, not chosen: two boots of the *same* backend differ in the raw interleaved
+  stream (the servers interleave differently from boot to boot, and VFS prints one `pm-exit reset`
+  line per exit for as long as the boot runs), and agree per server by first occurrence. What it
+  therefore **cannot** see is a backend-dependent change in how often a line repeats, or in the
+  order of lines between the two servers. `--self-test` proves it still fails on a difference; CI
+  runs that before the comparison.
 
 A few properties of the checker matter when you're reading its output rather than just running it:
 
@@ -104,9 +129,9 @@ A few properties of the checker matter when you're reading its output rather tha
   aside before checking; the live file grows underneath the script.
 - **Its PASS total counts expected AND forbidden lines** (5.11: 86 + 20 = 106), so a slice that adds
   N expected and M forbidden lines moves the total by N + M — don't be surprised when the total
-  moves by more than the expected-marker count alone. The total also differs between the two
-  backends, because each adds its own pair to the common one; count the marker files rather than
-  quoting a number from a plan.
+  moves by more than the expected-marker count alone. The total is per boot kind, because each adds
+  its own pair to the common one (6.4: 165 for each full boot, 7 for the reboot); count the marker
+  files rather than quoting a number from a plan.
 - **Never copy a count into a marker from a plan** — recompute it from the constant. 5.8's plan said
   `n=30` for what was actually a 31-byte `ROOTFS_MOTD`.
 - **A marker must be able to fail on the thing it proves.** The script matches with `grep -F`, so a
@@ -197,10 +222,27 @@ This runs against an **uncommitted** working tree, so the restore step has real 
   (`bdev.partial`, see
   [`servers-and-drivers.md`](./servers-and-drivers.md#writing-probes-and-denial-batteries)). A
   prediction that cannot name its test is a guess that the coverage exists.
-- **A refusal path needs a boot that provokes the refusal.** The default boots prove a disk that
-  works and a disk that is absent; a disk that is present and wrong (blank, or read-only) is a third
-  boot, run by hand with `MINIXRS_VBLK_IMAGE` / `MINIXRS_VBLK_DRIVE_OPTS` and recorded in the phase
-  file, because CI runs neither.
+- **A refusal path needs a boot that provokes the refusal.** CI's boots prove a disk with a root and
+  a disk without one (the fallback, since 6.4). Every other refusal — a read-only disk, a damaged
+  partition table, a disk with no table at all — and the no-device state are boots run by hand with
+  `MINIXRS_VBLK_IMAGE` / `MINIXRS_VBLK_DRIVE_OPTS` / `MINIXRS_ROOT=nodisk` and recorded in the phase
+  file, because CI runs none of them.
+- **The firmware writes to a writable boot disk, so boot a damaged-table image read-only.** edk2
+  repairs a damaged primary GPT header or entry array from the backup copy *before the kernel runs*
+  (6.4: one bit flipped in either, and the driver printed `root ok` with the full disk set passing).
+  A mutation or refusal boot that depends on the damage reaching the driver needs `readonly=on`, and
+  where the firmware then refuses to boot the disk at all (a damaged header), the second-drive
+  recipe in [`build-and-boot.md`](./build-and-boot.md). The same fact limits "the image is unchanged
+  afterwards" as evidence: a byte comparison of a boot disk can differ because of a write no
+  minix.rs code made.
+- **A mutation booted off the standard path needs a control boot beside it.** 6.4's deleted
+  header-CRC check had to be booted on a read-only second drive; there the mutated driver printed
+  `root FAIL readonly` — the next gate — and only the unmutated control (`root FAIL gpt crc`) shows
+  that the line moved.
+- **A mutation at a call site and the same mutation inside the pure helper are two rows.** Skipping
+  the flush where `do_write` calls it failed no host test and moved one marker; the same omission
+  inside `blk::flush_after` fails a host test. Record where the mutation was applied, and when a
+  decision is host-tested but its caller is not, run the call-site form.
 - **A guard's mutation moves the marker of the probe that exists for that guard, not a marker on a
   healthy path** — a healthy path never trips it. Slice 5.8's plan predicted that deleting a
   not-a-directory guard would break the filesystem self-check; resolving a real file only ever walks
@@ -213,7 +255,9 @@ This runs against an **uncommitted** working tree, so the restore step has real 
   predicting it.** 6.2 predicted that a wrong register page would fail the virtio magic check; an
   empty virtio-mmio slot still reads the magic, and the DeviceID check caught it instead. It also
   predicted that the status read-back would refuse a driver omitting `VIRTIO_F_VERSION_1`; QEMU
-  keeps `FEATURES_OK`, and only the exact `features=` marker text and the host tests catch that.
+  keeps `FEATURES_OK`, and only the exact `features=` marker text and the host tests catch that
+  (re-observed in 6.4 with optional features requested: `virtio ok features=0x200`, and the device
+  kept working fully).
 
 Two mechanical notes from 5.11: rust-analyzer diagnostics (`dead_code`, unused imports) that appear
 mid-run are usually residue of a mutated or half-edited file — trust `cargo clippy … -D warnings` on

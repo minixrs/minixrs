@@ -75,23 +75,57 @@ whole-project picture.
   whenever `boot-scope` did not *succeed*, so a broken classifier costs a boot rather than waving
   every PR through. Add a path to the skip list only if the kernel build provably never reads it,
   and add a self-test case with it
-- `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner and boots the kernel **twice**, once per
-  root backend: `MINIXRS_ROOT=disk` into `qemu-disk.log`, then `MINIXRS_ROOT=ramdisk` into
-  `qemu-ramdisk.log`, each for 600 s wall clock via the cargo runner and each asserting exit 124,
-  the timeout status a healthy run must produce. `tools/check-boot-log.sh <backend> <log>` then
-  greps each log against the common marker files plus that backend's own pair — both are checked
-  even if the first fails, so one run shows the whole story — and a third step runs
-  `tools/diff-backends.sh --self-test` followed by the comparison of the two logs. Both logs are
-  uploaded in the `qemu-boot-log` artifact. **Blocking** as of phase-5-prep chunk 7. The marker-file
-  contract itself — which file a marker belongs in, what the scripts match, and why expectations
-  must be first-occurrence-only — lives in
+- `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner and boots the kernel **three times**
+  through the cargo runner, each boot asserting exit 124, the timeout status a healthy run must
+  produce:
+
+  | Boot    | Command prefix                                         | Timeout | Log                |
+  | ------- | ------------------------------------------------------ | ------- | ------------------ |
+  | disk    | `MINIXRS_ROOT=disk`                                    | 1200 s  | `qemu-disk.log`    |
+  | reboot  | `MINIXRS_ROOT=disk MINIXRS_VBLK_IMAGE=target/disk.img` | 180 s   | `qemu-reboot.log`  |
+  | ramdisk | `MINIXRS_ROOT=ramdisk`                                 | 1200 s  | `qemu-ramdisk.log` |
+
+  The reboot attaches the image the disk boot just wrote, as-is, which is why the steps are in this
+  order: the reboot-ordering rule, and the once-per-disk-boot rule beside it, are in
+  [`build-and-boot.md`](./build-and-boot.md) under "THE REBOOT", with what each boot attaches.
+  `tools/check-boot-log.sh <disk|reboot|ramdisk> <log>` then greps each log — the two full boots
+  against the common marker files plus their backend's own pair, the reboot against its own pair
+  only — and all three are checked even if an earlier one fails, so one run shows the whole story. A
+  third step runs `tools/diff-backends.sh --self-test` followed by the comparison of the two
+  full-boot logs. All three logs are uploaded in the `qemu-boot-log` artifact. **Blocking** as of
+  phase-5-prep chunk 7. The marker-file contract itself — which file a marker belongs in, what the
+  scripts match, and why expectations must be first-occurrence-only — lives in
   [`testing-and-markers.md`](./testing-and-markers.md#markers)
-- **The two boots run in sequence in one job, not as a matrix.** A matrix would rename the required
+- **The boots run in sequence in one job, not as a matrix.** A matrix would rename the required
   "QEMU boot smoke" check, which needs a branch-protection edit, and two QEMUs on one runner would
-  starve each other. The price is the job's `timeout-minutes`, **65** since slice 6.3 (it was 50):
-  each boot burns its full timeout, so a second one is ten more minutes, and 65 keeps the build
-  headroom the 50 was sized for plus five. Whoever raises the per-boot timeout raises
-  `timeout-minutes` in the same edit, by twice the difference
+  starve each other. The price is the job's `timeout-minutes`, **90** since slice 6.4 (50 before
+  6.3, 65 after it): every boot burns its full timeout, so the boots cost 1200 + 180 + 1200 s = 43
+  minutes, and 90 keeps the 45 minutes of build headroom the 65 had. Whoever changes any of the
+  three timeouts changes `timeout-minutes` in the same edit, by the sum of the differences
+- **`qemu-smoke` builds `tools/mkimage` in a step of its own before the first boot.** The runner
+  builds the disk image through a nested `cargo run --release -p minixrs-mkimage`, which happens
+  *inside* the boot's `timeout`; on a cold cache that compile would be charged to the first boot and
+  skew the fraction the budget is derived from. Pre-built, the nested cargo only runs it
+- **`mkimage`'s host tests run in `coverage`, and nowhere else.** There is no `cargo test` job:
+  `coverage` runs `cargo llvm-cov --workspace --exclude minixrs-kernel`, which executes every host
+  test in the workspace, the image writer's included. `minixrs-mkimage` is deliberately not in the
+  `miri` list — it has no `unsafe` for Miri to check, and its tests build whole 37 MiB images.
+  `minixrs-driver-rt` is in the advisory `miri` job's `-p` list, so the GPT *parser* is among what
+  that job is configured to check. As of slice 6.4 that is a configuration and a local result, not a
+  CI one: `cargo miri test -p minixrs-driver-rt` was run locally on the parser's commit and again on
+  the slice's final tree (2026-11-22: 113 passed, 0 failed), and the branch had not run on CI
+- **Two things about the 6.4 boot are not validated until a CI run says so**, because both were
+  measured only against Homebrew's edk2 under QEMU 11.0.3: that Debian's `QEMU_EFI.fd` boots from a
+  modern (version 2) virtio-mmio disk and reads the FAT32 and GPT `tools/mkimage` writes, and that
+  1200 s / 180 s clear the runner's real TCG slowdown. If the firmware cannot, the disk boot's log
+  holds no kernel banner at all and the checker reports every marker missing. The job also still
+  installs `ipxe-qemu`, and why QEMU on the runner wants its `efi-virtio.rom` has not been
+  established there: the workflow's comment used to attribute it to the virtio-blk-PCI ESP drive,
+  which 6.4 removed, and that looks like a mis-attribution — on a dev machine's QEMU 11.0.3 `info
+  qtree` names `efi-virtio.rom` as the `romfile` of `virtio-net-pci`, the NIC `-M virt` creates by
+  default (the runner passes neither `-nodefaults` nor `-nic none`), and gives `virtio-blk-pci`
+  none. If the runner's QEMU agrees, the need did not go away with the ESP drive. It is untested
+  without the package, so it stays until a run without it is made on purpose
 - **A slice can break the boot-timing budget, and "it passes locally" is not the check.** The budget
   was 45 s until slice 5.9, 120 s until 5.10a, and 240 s until 5.10b; **every raise has had the same
   cause and the same evidence**, and the number will move again. 5.9: `hello` stopped being a memcpy
@@ -111,21 +145,55 @@ whole-project picture.
   base (the spread between two boots of one tree is that wide, so compare against both). The disk
   boot is the slower one because every block request is completed by a real interrupt instead of a
   memcpy; ~200 s local under a 600 s budget is a 3.0x factor, so the per-boot budget stayed and only
-  `timeout-minutes` grew. Measure **both** backends from now on and budget for the slower. CI's TCG
-  is slower than local, so raise with real headroom rather than trimming to what passes here — think
-  in the *ratio*, not the wall-clock seconds, which are a property of the dev machine. Two
-  mechanical notes: `git stash` does **not** give you the "before" once the slice is committed on a
-  branch — detach to the merge base, and stash only the doc edits so `target/` and
-  `target/musl-sysroot` survive and the two boots differ in nothing but the code. And build (`cargo
-  build`) before the timed `cargo run`, or the rebuild lands inside the timeout and skews the
-  fraction. A third, which has already cost one silently-wrong measurement: **`$MINIXRS_SDK` does
-  not persist across separate shell invocations**, so setting it in one command and booting in
-  another measures the **SDK** flavour, not the musl one the number is defined against. Confirm the
-  flavour from the embedded `hello` size — ~200 KB musl, ~47 KB SDK, ~15 KB fallback — rather than
-  trusting the build warning. A boot-time selftest that reads a **configuration-dependent** file is
-  the usual culprit: prefer `/etc/pattern` (40 KiB in every config, so its count is assertable too)
-  over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB with in-tree musl, and ~15 KB in the
-  sysroot-absent fallback
+  `timeout-minutes` grew. Measure **both** backends from now on and budget for the slower. 6.4
+  raised it again, **600 → 1200 s** for each full boot: the machine boots from one GPT disk, every
+  write to it is followed by a flush (a second interrupt round trip), and the ramdisk boot is no
+  longer device-free — it brings the rootless disk up and falls back. The measurement is two
+  musl-flavour disk boots of the final code (2026-11-22, same dev machine, QEMU 11.0.3,
+  `MINIXRS_SDK=/nonexistent` on the build and on the boot, `len=234280` in each log's `[ksys
+  SYS_EXEC] … name=hello` line), compared in *seconds* because the logs differ in length — a
+  fraction of a 450 s log is not comparable with a fraction of a 600 s one. The last required marker
+  (`[diag vfs] pm-exit reset closed=1`) sits at 88.03% of a 450 s log, **~396 s**, and at 65.57% of
+  a 600 s log (byte 41 876 691 of 63 868 433), **~393 s**; the host's load average fell from 11.6 to
+  2.7 during the second boot and the two still agree within 3 s. The ramdisk boot was read once:
+  57.87% of a 450 s log, **~260 s**. Under 600 s that is 1.5x for the disk boot, so the two full
+  boots went to 1200 s — **3.03x** for the disk boot (1200 / ~396), the factor that let 6.3 keep its
+  budget, and **4.6x** for the ramdisk boot. Each full boot burns its whole timeout, so the raise
+  costs every booting CI run 20 minutes over 6.3; if the runner turns out faster than feared, the
+  remedy is to lower the two numbers again. **The slice first set this budget from the wrong
+  flavour**, by the trap the end of this bullet describes: every boot before its review round ran
+  with the SDK installed and `MINIXRS_SDK` unset, so its `hello` was the SDK's 46 696 bytes
+  (`len=46696`), not the 234 280-byte in-tree-musl one CI builds. Those SDK-flavour boots put the
+  last required marker at 82.0–82.7% of a 300 s disk log across three boots of the final code
+  (82.00%, 82.71%, 82.68%: ~246–248 s) and 59.3% of the ramdisk log (~178 s), with a spread across
+  the slice's tasks of 68.4%–82.7% and 47.7%–59.3%; 900 s was chosen from them, read as 3.63x.
+  Against the musl readings 900 s is 2.27x — under the ~2.5x at which every earlier slice raised —
+  so it was corrected to 1200 s before the branch ever ran on CI. Up to `fs.leak` the two flavours'
+  logs agree to within a few seconds; the whole difference is the C programs' phase, where `hello`
+  and `fileio` are read through MFS and VFS a round at a time. The SDK figures remain true of an
+  SDK-flavour boot and are fine for knowing how long an iteration boot takes; they are not a budget
+  measurement. **Take the budget measurement in the musl flavour** — `MINIXRS_SDK=/nonexistent` on
+  the build *and* on the timed boot — and confirm it from the log's `len=` before using the number.
+  6.3's 66.8% / 48.1% predate this discovery and their flavour could not be re-checked, so do not
+  compare a new reading against them without re-taking the merge base. **Still unmeasured: the
+  runner's own TCG factor.** Nothing of 6.4 had run on CI when 1200 s was chosen; the branch's first
+  CI run is that measurement (what remains of 6.4's budget debt in
+  [`phase-6-virtio.md`](../plans/phase-6-virtio.md)). The reboot's 180 s comes from a different
+  number: it needs one line, `persist gen=1`, which lands about 34 s of local wall clock after
+  `cargo run` starts. CI's TCG is slower than local, so raise with real headroom rather than
+  trimming to what passes here — think in the *ratio*, not the wall-clock seconds, which are a
+  property of the dev machine. Two mechanical notes: `git stash` does **not** give you the "before"
+  once the slice is committed on a branch — detach to the merge base, and stash only the doc edits
+  so `target/` and `target/musl-sysroot` survive and the two boots differ in nothing but the code.
+  And build (`cargo build`) before the timed `cargo run`, or the rebuild lands inside the timeout
+  and skews the fraction. A third, which has already cost one silently-wrong measurement:
+  **`$MINIXRS_SDK` does not persist across separate shell invocations**, so setting it in one
+  command and booting in another measures the **SDK** flavour, not the musl one the number is
+  defined against. Confirm the flavour from the embedded `hello` size — ~200 KB musl, ~47 KB SDK,
+  ~15 KB fallback — rather than trusting the build warning. A boot-time selftest that reads a
+  **configuration-dependent** file is the usual culprit: prefer `/etc/pattern` (40 KiB in every
+  config, so its count is assertable too) over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB
+  with in-tree musl, and ~15 KB in the sysroot-absent fallback
 - Before pushing, the blocking gates must be green: `cargo fmt --all --check`, `cargo clippy
   --workspace --all-targets -- -D warnings` (locally this lints the kernel too), `cargo clippy -p
   minixrs-mfs --features server --all-targets -- -D warnings` (nothing else lints MFS's `[[bin]]`,
@@ -218,4 +286,6 @@ warning that was never meant to exist.
 Treat an image-base or stack move as a **mandatory** matrix run. `$MINIXRS_SDK` does not persist
 across separate shell invocations, which is how a matrix row silently measures the wrong flavour;
 the table above is how you confirm the flavour you actually built, and the boot-timing bullet above
-states the same trap for timing runs.
+states the same trap for timing runs — which slice 6.4 then fell into for every budget reading it
+took: an installed SDK is found without `MINIXRS_SDK` being set at all, so "I did not set it" is not
+"musl". Read `len=` off the log's `[ksys SYS_EXEC] … name=hello` line.

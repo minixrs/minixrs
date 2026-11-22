@@ -136,6 +136,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "minixrs-mkimage"
+version = "0.1.0"
+dependencies = [
+ "minixrs-driver-rt",
+ "minixrs-kernel-shared",
+]
+
+[[package]]
 name = "minixrs-pfs"
 version = "0.1.0"
 dependencies = [

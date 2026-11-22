@@ -1195,6 +1195,29 @@ pub const BDEV_MINOR_RAMDISK: i32 = 0;
 /// root device the same way whichever driver backs it.
 pub const BDEV_MINOR_ROOT: i32 = BDEV_MINOR_RAMDISK;
 
+/// The whole-disk minor: on a driver whose device carries a partition table,
+/// minor 1 is the entire device, block 0 being its first 4096 bytes (slice 6.4,
+/// spec P6). Partition *n* (counted from 1) follows at minor `1 + n`. A driver
+/// with no such device — `memory` — answers `ENXIO`, as it does for every minor
+/// but [`BDEV_MINOR_RAMDISK`]. Additive: no existing value moves. Not emitted
+/// into the C headers, like the two minors above — no C names a block minor.
+pub const BDEV_MINOR_WHOLE_DISK: i32 = 1;
+
+/// The minor **no** block driver serves: what a probe names when it needs a
+/// device that does not exist, on whichever driver it is talking to. Every
+/// driver answers it `ENXIO`.
+///
+/// `i32::MAX`, and not a small literal, because a small one exists as soon as
+/// a driver's table reaches it: MFS's denial battery used minor 7, which was
+/// "no such device" on `memory` and became GPT partition 6 on `virtio-blk` in
+/// slice 6.4 — refused only for as long as the disk had fewer partitions. This
+/// value is well-formed (a minor is non-negative, as in MINIX), so a driver
+/// refuses it for being absent and not for being malformed, and it is past any
+/// table a driver can hold: each driver that has a table const-asserts that
+/// (`virtio-blk`'s `part.rs`), and `server-rt`'s `bdev` asserts it is not the
+/// root. Additive: no existing value moves. Not emitted into the C headers.
+pub const BDEV_MINOR_NONE: i32 = i32::MAX;
+
 // The BDEV range sits strictly above the FS range and strictly below CDEV's (and
 // therefore every other server request range) and the NOTIFY marker.
 const _: () = assert!(BDEV_RQ_BASE > FS_RQ_BASE + (NR_FS_MSGS as i32 - 1));
@@ -2766,6 +2789,22 @@ mod tests {
         // H6: the root alias is the same minor, not a second one.
         assert_eq!(BDEV_MINOR_ROOT, 0);
         assert_eq!(BDEV_MINOR_ROOT, BDEV_MINOR_RAMDISK);
+        // Slice 6.4: the whole disk is the minor right after the root, and is
+        // not the root.
+        assert_eq!(BDEV_MINOR_WHOLE_DISK, 1);
+        assert_ne!(BDEV_MINOR_WHOLE_DISK, BDEV_MINOR_ROOT);
+        // The minor nobody serves: well-formed (non-negative), neither of the
+        // two above, and as far from any driver's table as an i32 goes — a GPT
+        // has at most 128 entries, so `virtio-blk`'s table ends at minor 129.
+        assert_eq!(BDEV_MINOR_NONE, i32::MAX);
+        assert_ne!(BDEV_MINOR_NONE, BDEV_MINOR_ROOT);
+        assert_ne!(BDEV_MINOR_NONE, BDEV_MINOR_WHOLE_DISK);
+        // Root, whole disk, 128 partitions: a GPT disk's minors are 0..=129.
+        // Through a closure, so the comparison is not one clippy folds
+        // (`assertions_on_constants`, `unnecessary_min_or_max`).
+        let past_a_gpt_table = |minor: i32| minor > 1 + 128;
+        assert!(past_a_gpt_table(BDEV_MINOR_NONE));
+        assert!(!past_a_gpt_table(BDEV_MINOR_WHOLE_DISK));
     }
 
     #[test]
