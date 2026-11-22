@@ -319,17 +319,19 @@ for its contents, `FS_WRITE` to replace them, `FS_CREATE` to name a new one, and
 discard one's contents, and MFS answers by moving blocks to and from a block driver over BDEV —
 `virtio-blk`'s disk or the `memory` ramdisk, [chosen once at boot](#choosing-the-root-device) —
 decoding them with the `minixrs-mfs` format library (`superblock`, `inode`, `layout`, `dirent`,
-`read`, 5.10a's `write`, and 5.10b's allocator) that slice 5.7 began and host-tested. Neither
-backend persists: the ramdisk lives in RAM, and the disk is a copy of the root image the runner
-makes afresh for every boot. A write survives until the machine stops — long enough to be read back
-and proved, not long enough to be persistence.
+`read`, 5.10a's `write`, and 5.10b's allocator) that slice 5.7 began and host-tested. The two
+backends differ in one thing a filesystem cares about. The ramdisk lives in RAM and is rebuilt from
+the boot archive on every boot, so a write to it survives only until the machine stops. The disk is
+a file: a write to the disk root is still there when the same image is booted again, and
+[the persistence probe](#the-persistence-probe) shows it. (The runner builds a fresh image for every
+ordinary run, so a boot starts from the same filesystem each time unless it is told to reuse one.)
 
 The crate is split unusually hard. Its `[[bin]]` carries `required-features = ["server"]` so the
 format library stays a one-dependency crate the kernel's build script can use for free — and the
 price is that **the binary is invisible to every CI job except the QEMU boot smoke test**. So every
 line with a decision in it lives in the library (`proto.rs` for the wire codec, `walk.rs` for
-traversal and read policy, `root.rs` for which block driver the root comes from), and `main.rs` is
-SEF/IPC/grant glue.
+traversal and read policy, `root.rs` for which block driver the root comes from, `minor.rs` for the
+verdict of the whole-disk probe), and `main.rs` is SEF/IPC/grant glue.
 
 Three things characterise the server itself:
 
@@ -363,17 +365,21 @@ caller's side.
 Two drivers can serve the root — `vblk`, which is `virtio-blk` and a disk, and `memory`, the ramdisk
 — and MFS picks one in its prologue, before it mounts anything. It prefers the disk:
 
-1. Ask DS for `vblk`. A miss means no disk is attached; that is the healthy ramdisk boot and prints
-   nothing. Any other DS failure on this lookup is treated the same way.
+1. Ask DS for `vblk`. A miss means the driver was given no virtio-mmio device; it is healthy and
+   prints nothing. Any other DS failure on this lookup is treated the same way. Since slice 6.4 the
+   machine boots from a virtio-mmio disk, so only the hand-run
+   [`MINIXRS_ROOT=nodisk`](../boot/overview.md#the-root-backend) boot takes this path.
 2. On a hit, grant the block buffer to that endpoint and send **one** request: a zero-length
    `BDEV_READ` of `BDEV_MINOR_ROOT`. The shared BDEV validation answers that `0` with no grant use
    and no device I/O, and a `virtio-blk` that has a device but found no minix.rs root on it answers
-   `ENXIO` to everything. A reply of `0` selects `vblk`.
+   `ENXIO` to everything. A reply of `0` selects `vblk`: the root is the disk's root partition.
 3. Any other reply — `ENXIO`, another errno, even a positive count — prints `bdev.root vblk rc=<rc>
    fallback=memory`, revokes the grant just issued so the declined driver holds nothing over the
    block buffer, and falls through to the `memory` lookup. That lookup keeps its own fallback: if DS
    cannot resolve `memory`, MFS uses the driver's boot endpoint and prints `bdev.ds FAIL rc=<rc>
-   fallback=<ep>`.
+   fallback=<ep>`. This is the path of the `MINIXRS_ROOT=ramdisk` boot, which CI runs: its disk has
+   no root partition, the driver answers `ENXIO`, and the line reads `bdev.root vblk rc=-6
+   fallback=memory`.
 
 The device selected is named on exactly one line, `[diag mfs] bdev.ds ok name=vblk ep=<ep>` or
 `name=memory ep=<ep>`, and every later request goes to that endpoint with `BDEV_MINOR_ROOT`. Nothing
@@ -393,7 +399,18 @@ A fallback is quiet by design, which is what makes it dangerous: a broken virtio
 to the ramdisk would pass every filesystem marker. The boot-log checker therefore takes the backend
 the boot was run with and applies a per-backend marker pair on top of the common one. A `disk` boot
 requires `bdev.ds ok name=vblk` and forbids `name=memory` and `bdev.root vblk`; a `ramdisk` boot
-requires `name=memory` and forbids `name=vblk`.
+requires the fallback line and `name=memory`, and forbids `name=vblk`.
+
+Once the device is chosen and the root mounted, the prologue runs a few probes against the block
+driver itself, described with
+[the BDEV protocol](../drivers/overview.md#what-the-boot-log-proves-1): `bdev.tail`, `bdev.partial`,
+and — since slice 6.4, between `bdev.partial` and the denial battery — `bdev.minor`, a read of block
+0 of minor 1. It is the one request in the system for a minor other than the root, there so that
+`virtio-blk`'s [minor table](../drivers/overview.md#minors) is run by a boot and not by host tests
+alone. On the disk boot it must find a protective MBR (`bdev.minor ok minor=1 mbr=1`); on the
+ramdisk boot `memory` has no such minor and the healthy line is `bdev.minor absent minor=1 rc=-6`.
+That line, the fallback line and the `name=` are the only places the two boots' `[diag mfs]` output
+may differ, which `tools/diff-backends.sh` checks.
 
 ### The write path
 
@@ -545,3 +562,39 @@ The demo stubs A–D remain installed alongside init as a live regression batter
 raw SEND/RECEIVE/SENDREC primitives, C exercises the kernel→SCHED quantum-delegation round-trip, and
 D exercises the page-fault→VM path and the out-of-region SIGSEGV kill — coverage that init and
 worker, which only fork/exec/wait/getpid, do not provide.
+
+### The persistence probe
+
+The root image ships `/etc/boots`, one byte holding the ASCII digit `0`. After the read path and the
+device probes, and **before** any of its write probes, init reads the file, prints
+
+```text
+minix.rs init: persist gen=<n>
+```
+
+and then rewrites it with the next digit: `open(O_RDWR | O_TRUNC)`, one `write`, `close` — requests
+the write probes already issue, so the probe adds none to any server, and no `O_CREAT`, so a lost
+directory entry cannot silently restart the count. The value must be exactly one decimal digit; an
+empty file, a longer one or any other byte is `persist FAIL value`, never a guess. The counter
+saturates at 9 rather than wrapping, so a much-booted image cannot read as a fresh one.
+
+The line is printed after the read and before the rewrite, and that order is the proof's shape:
+`gen=<n>` says what was on the device when this boot started. A freshly built image prints `gen=0`,
+and so does every boot from the ramdisk, which is rebuilt from the boot archive each time. A second
+boot of [the same disk image](../boot/overview.md#booting-the-same-image-twice) prints `gen=1`,
+which nothing can print unless the first boot's truncate and write went through VFS, MFS and
+`virtio-blk` into the root partition and were still there after the machine was gone.
+
+A failing step prints `minix.rs init: persist FAIL <step>` and ends the probe: `open`, `read`,
+`value`, `close`, then the rewrite's `reopen`, `write`, `short` and `close2`, with `rc=` where the
+step answered an errno. A counter that could not be read is never rewritten.
+
+The probe runs ahead of the write battery for two reasons. A reboot of a used image is judged by
+this line alone and stopped soon after it, because the battery — which creates files that must not
+exist and fills files that ship empty — was designed against a fresh image and what it does on its
+own leftovers is not defined. And the generation is then read before this boot has written a single
+block. The price is that the rewrite is the first filesystem write of every boot, ahead of
+`fs.write`: a broken write path shows as `persist FAIL` first.
+
+It proves that a write reaches the device and outlives the machine. It says nothing about *when* —
+the flush has [its own marker](../drivers/overview.md#flush-before-the-reply) in the driver.

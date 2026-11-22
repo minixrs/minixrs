@@ -23,10 +23,12 @@ disagree, **the spec wins** and the plan gets corrected.
   test -p minixrs-driver-rt` after touching `driver-rt`.
 - **No third-party crate** in `mkimage` (P2).
 - **Boots.** `$S` is the session scratch directory. Build first (`cargo build -p minixrs-kernel
-  --target aarch64-unknown-none --release`), then `MINIXRS_ROOT=<disk|ramdisk> timeout 300 cargo run
+  --target aarch64-unknown-none --release`), then `MINIXRS_ROOT=<disk|ramdisk> timeout 450 cargo run
   -p minixrs-kernel --target aarch64-unknown-none --release > $S/<name>.log 2>&1`. One boot at a
   time. Read `check-boot-log.sh`'s whole output; apply the starved-boot check before believing a
-  missing marker.
+  missing marker. (Corrected: this said `timeout 300`, which is what the run's boots used. Task 9
+  measured the disk boot's last required marker at 82.7% of a 300 s log, about 1.2x of headroom, so
+  the documented local timeout became 450 s — see the ledger.)
 - **Mutation discipline** per
   [`testing-and-markers.md`](../../conventions/testing-and-markers.md#mutation-testing).
 - **Counts in markers come from constants**, never typed into a driver.
@@ -45,18 +47,26 @@ capacity marker is the same on both boots. Backup entries at LBA 75 743–75 774
 ```text
 [diag vblk] virtio ok features=0x100000200 capacity=75776 qsize=8 slot=0
 [diag vblk] root ok blocks=256 tail=1 part=2 lba=71680
-[diag vblk] root FAIL <geometry capacity=…|gpt <why>|gpt ambiguous|no root partition|align|readonly|label|blocks hdr=… dev=…|tail label|head rc=…|tail rc=…>
+[diag vblk] root FAIL <geometry capacity=…|gpt rc=<rc>|gpt <why>|gpt ambiguous|no root partition|align|readonly|head rc=…|label|blocks hdr=… dev=…|tail rc=…|tail label>
 [diag vblk] flush ok n=1
 [diag vblk] flush off
-[diag vblk] flush FAIL status=<s>
+[diag vblk] flush FAIL status=<s in hex, e.g. 0x1, 0xff>
 [diag mfs] bdev.minor ok minor=1 mbr=1
 [diag mfs] bdev.minor absent minor=1 rc=-6
-[diag mfs] bdev.minor FAIL <read rc=…|mbr>
+[diag mfs] bdev.minor FAIL read rc=<rc>
+[diag mfs] bdev.minor FAIL mbr
 minix.rs init: persist gen=<n>
-minix.rs init: persist FAIL <step>
+minix.rs init: persist FAIL <open rc=-N|read rc=-N|value|close rc=-N|reopen rc=-N|write rc=-N|short|close2 rc=-N>
 ```
 
-`features=` is the measured word (P11.4) and is corrected here if QEMU offers otherwise.
+`features=` is the measured word (P11.4): `0x100000200` for a writable raw drive, `0x100000220` with
+`readonly=on`. `<why>` is one of `driver-rt::gpt`'s fourteen words — `header short`, `signature`,
+`revision`, `header size`, `crc`, `my lba`, `entry size`, `entry count`, `entry lba`, `usable
+range`, `entries crc`, `entries short`, `entry range`, `entry index` — so a damaged header is `gpt
+crc` and a damaged entry array `gpt entries crc`. The `root FAIL` alternatives are in the order the
+checks run. (Corrected against the code: the block first written here had no `gpt rc=<rc>`, listed
+the label checks out of order, and gave the two `bdev.minor` failures and the `persist` steps only
+as placeholders.)
 
 ## Review Focus
 
@@ -108,7 +118,8 @@ test module (not with `mkimage`).
 ### Task 3: `tools/mkimage` (P1, P2)
 
 **Files:** `tools/mkimage/{Cargo.toml,src/lib.rs,src/main.rs,src/gpt.rs,src/fat32.rs,src/crc.rs}`,
-workspace `Cargo.toml`.
+workspace `Cargo.toml`. (As built, also `src/layout.rs`, which holds every layout number, and
+`tests/image.rs`, the integration test that reads an image back.)
 
 Library + thin binary; CLI per P2. Dev-dependency on `minixrs-driver-rt` for the round-trip test.
 
@@ -144,7 +155,9 @@ fallback line, and its self-test covers the allowance. P11.4 recorded.
 
 ### Task 7: the minor-1 probe (P6)
 
-**Files:** `fs/mfs/src/main.rs` (prologue only), marker files, `tools/diff-backends.sh`.
+**Files:** `fs/mfs/src/main.rs` (prologue only), marker files, `tools/diff-backends.sh`. (As built,
+also `fs/mfs/src/minor.rs` for the host-tested verdict, and `kernel-shared/src/callnr.rs` for
+`BDEV_MINOR_WHOLE_DISK`.)
 
 **Proves it:** `bdev.minor ok minor=1 mbr=1` on the disk boot, `absent` on the ramdisk boot.
 
@@ -159,18 +172,23 @@ fallback line, and its self-test covers the allowance. P11.4 recorded.
 
 ### Task 9: CI and the budget (P10, P11.3)
 
-**Files:** `.github/workflows/ci.yml`.
+**Files:** `.github/workflows/ci.yml`. (As built, also one self-test case in
+`tools/boot-relevant.sh`.)
 
 Measure both full boots against the merge base; set the reboot's timeout and the job's
-`timeout-minutes` from the numbers.
+`timeout-minutes` from the numbers. `mkimage`'s host tests need no CI edit: there is no `cargo test`
+job (the spec's P10 first said there was), and the workspace-wide `coverage` job already runs them.
 
 ### Task 10: recorded boots (spec §3)
 
-`nodisk`, `readonly=on`, the raw image, a damaged entry-array CRC.
+`nodisk`, `readonly=on`, the raw image, a damaged entry-array CRC. (As run: the damaged-table boot
+became five boots — header and entry-array damage, writable and read-only, one and two drives — once
+the first showed the firmware repairing the table.)
 
 ### Task 11: mutations (spec §3)
 
-All eleven, stub-free where the marker allows.
+All eleven, stub-free where the marker allows. (As run: fifteen rows — 7 and 10 in more than one
+form, and E1 added for the probe's `0xEE` check.)
 
 ### Task 12: documentation, trackers, the whole-branch sweep (spec §4)
 
@@ -178,7 +196,85 @@ Book, conventions, phase file, `docs/plan.md`, the stale-claim grep, the fresh w
 
 ## Ledger
 
-- **Task 0 (2026-11-21).** P11.1: edk2 boots from a modern virtio-mmio disk — see the spec. P11.2: a
-  nested `cargo build` inside the cargo runner completes in about a second; no lock wait, so the
-  runner uses the shared target directory. P11.5: `init`'s first line lands at 21.6% of a 45 s
-  default boot (about 10 s in); the reboot's timeout is set in Task 9 from the probe's own position.
+One entry per task: its commit, what was verified, and every ruling made in it. Each ruling's cost
+if it was wrong is in the spec's §5 (rows 15–30); the measurements are in the spec's P11 and §3 and
+in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the spec's §3.
+
+- **Task 0 (2026-11-21; no commit of its own).** P11.1: edk2 boots from a modern virtio-mmio disk —
+  see the spec. P11.2: a nested `cargo build` inside the cargo runner completes in about a second;
+  no lock wait, so the runner uses the shared target directory. P11.5, first reading: `init`'s first
+  line lands at 21.6% of a 45 s default boot (about 10 s in); the reboot's timeout is set in Task 9
+  from the probe's own position.
+- **Task 1 (`ea70c7f`).** `ROOT_PARTITION_TYPE_GUID` as its 16 on-disk bytes, with a test pinning
+  the mixed-endian bytes to the text form; `bdev::validate_range`, with `validate_read` reduced to
+  the minor check followed by it. Verified: the two crates' host tests; `validate_read`'s existing
+  tests unchanged. No ruling beyond the spec. Noticed, not fixed: an unresolved rustdoc link at
+  `kernel-shared/src/execstack.rs:135`, which predates the slice (phase file, 6.4 debt 8).
+- **Task 2 (`6d8cac4`).** `driver-rt::gpt`. Verified: host tests that flip one header field at a
+  time and recompute the CRC; the `123456789` → `0xCBF43926` vector. *Rulings:* partition numbers
+  are 1-based slot numbers (§5 row 15); `FirstUsableLBA` past the entry array and overlapping
+  partitions are not checked, two refusals are added beyond P5's list, `entry range` covers both the
+  inverted and the out-of-range entry (16); the CRC is bit-at-a-time (17).
+- **Task 3 (`97693dd`).** `tools/mkimage`. Verified: the integration test reads every image back
+  with a FAT32 reader of its own, with `driver-rt::gpt`, and field by field; P11.6 — macOS's
+  `fsck_msdos -n` passes the ESP, and edk2 and Limine boot the kernel from the first image.
+  *Rulings:* the layout's three choices (21); the FAT details (22); the CLI requires an ESP file,
+  images are written sparsely, the independent reader is an integration test (23); a table-driven
+  CRC that shares nothing with the parser's (17).
+- **Task 4 (`35c7329`).** virtio-blk's pure half: `part.rs`, `RootFail` and its `Display`, the flush
+  header and the two flush decisions, the feature bits. Verified: host tests; `main.rs` did not call
+  any of it yet. *Rulings:* I/O failures are `RootFail` arms; `Extent::sector` refuses a block
+  outside the extent itself; `MinorTable::locate` owns the refusal order (18).
+- **Task 5 (`aab5166`).** `main.rs` wired to the pure half. Verified: a raw whole-disk MinixFS image
+  now reads `root FAIL gpt signature` and MFS falls back. *Rulings:* `root FAIL gpt rc=<rc>` for a
+  failed table read — a coordinator ruling, and a marker the plan's list did not have;
+  `Option<MinorTable>` instead of the `Root` enum; geometry before any read (18). The flush's status
+  in hex, no `flush FAIL` line for a flush lost to a broken device, `flush off` at the end of
+  bring-up (19). The table buffer as a `.bss` static with one `unsafe impl Sync` (20); largest stack
+  frame `main`, 10 080 bytes.
+- **Task 6 (`1506b6e`).** The runner, the two images, the per-backend marker files, the diff's first
+  allowance. Verified: 300 s disk and ramdisk boots pass `check-boot-log.sh` (160 checks each at
+  this commit) and fail each other's set; `diff-backends.sh` passes; P11.4 — `0x100000200`, and
+  `0x100000220` read-only. *Rulings:* the runner's argv line, `MINIXRS_VBLK_IMAGE` semantics,
+  validation order, `nodisk` refusing the knobs, the image names (24); `flush off` forbidden in the
+  common file, four bring-up lines required of the ramdisk pair, `slot=0` unasserted, the fallback
+  line allowed rather than required (25).
+- **Task 7 (`7cd8f73`).** The `bdev.minor` probe. Verified: `ok minor=1 mbr=1` on the disk boot,
+  `absent minor=1 rc=-6` on the ramdisk boot; mutation 11 applied, booted and reverted (`bdev.minor
+  FAIL mbr`). *Rulings:* a protective MBR, not a bare signature; `BDEV_MINOR_WHOLE_DISK`; the
+  classifier in the library; the probe's place in the prologue; the diff's placeholder (26).
+- **Task 8 (`82652be`).** Persistence. Verified: `persist gen=0` on the disk and ramdisk boots;
+  three successive reboots of one image print `gen=1`, `gen=2`, `gen=3`; both full boots pass 165
+  checks and the reboot its 7; mutation 9 applied and reverted (the reboot prints `gen=0`).
+  *Rulings:* the strict one-digit value, saturation, the eight `FAIL` steps, the print-before-write
+  order, the seven-line reboot pair without the common forbidden set, the rewrite as the first write
+  of the boot (27). No geometry constant and no existing marker moved.
+- **Task 9 (`70c9bd0`).** CI and the budget. Verified by measurement, not by a CI run: P11.3 and
+  P11.5 as the spec records them. *Rulings:* 600 → 900 s, 180 s, `timeout-minutes` 80, `mkimage`
+  pre-built, `ipxe-qemu` kept, tests in `coverage` and not under Miri (28). Not validated without a
+  push: CI's firmware, the budgets on the runner, the pre-built tool being seen as fresh on Linux,
+  `ipxe-qemu` (phase file, 6.4 debt 7).
+- **Task 10 (observation only, no commit).** The recorded boots. `nodisk`, `readonly=on` and the raw
+  image as predicted. **The damaged-table boot was not:** edk2 repairs a damaged primary GPT on a
+  writable disk before the kernel runs, so the driver's refusals appear only read-only (spec §3,
+  phase file debt 3).
+- **Task 11 (observation only, no commit).** Fifteen mutation rows, each applied, observed and
+  reverted, the tree proved clean afterwards. Rows 3, 4, 5, 8 and 10 did not match their predictions
+  (spec §3 says how). *Ruling:* row 7b — a `flush()` that reports a bad status as success — moves
+  nothing and is recorded as uncovered, with no test seam added; no new guard for a missing
+  `VERSION_1` (30).
+- **Task 12 (the two `docs(6.4)` commits that follow this plan's history).** `book/`,
+  `docs/conventions/`, the phase file, `docs/plan.md`, this plan and the spec; the stale-claim sweep
+  over comments, marker commentary and scripts (comment-only edits). *Ruling (coordinator):* the
+  documented local timeout for a marker-file verification is 450 s (29).
+
+**Where the plan or the spec was wrong, and which was corrected.**
+
+- *Plan wrong, plan corrected:* the Marker text block (no `gpt rc=`, label checks out of order,
+  placeholder failure forms); the boot timeout in Global Constraints; the file lists of Tasks 3, 7
+  and 9.
+- *Spec wrong, spec corrected:* P10's "existing `cargo test` job" (there is none); §1's "`fs/mfs` …
+  unchanged" (P6 itself adds a probe to it); P1's "padded to a multiple of 8" (a whole mebibyte);
+  P6's probe of "the `55 AA` signature" (not enough — the ESP has it too); P8's "every failure
+  prints" (not a flush lost to a broken device); P5's list of refusals (two more exist).
+- *Spec's predictions wrong, reality recorded:* §3 rows 3, 4, 5, 8 and 10, and the damaged-CRC boot.

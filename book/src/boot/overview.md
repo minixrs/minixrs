@@ -96,7 +96,7 @@ boot log's `[as]` lines appear in, and it is load-bearing: DS first so every lat
 then each server before its first client's lookup (`ds < tty < memory < vblk < mfs < vfs < pm`).
 `vblk` sits before `mfs` because MFS asks DS for it first when it
 [chooses its root device](../servers/overview.md#choosing-the-root-device), and a `vblk` that had
-not yet published would read as "no disk attached".
+not yet published would read as "no virtio disk attached".
 
 | Module    | Proc nr | Loaded at boot?       |
 | --------- | ------: | --------------------- |
@@ -140,16 +140,81 @@ What the probe reads and decides is described in
 
 ## Disk image and QEMU
 
-There is no partitioned disk yet: the virtio disk below is the bare root filesystem image, with no
-partition table around it. The cargo runner (`tools/qemu-run.sh`) stages a small ESP *directory* and
-hands it to QEMU's directory-as-FAT helper, which is enough to land the boot banner without `parted`
-/ `mtools`:
+The machine boots from **one disk**. A host tool, `tools/mkimage`, writes a GPT image holding a
+FAT32 EFI System Partition (Limine, its configuration and the kernel) and the MinixFS root
+partition; the cargo runner (`tools/qemu-run.sh`) builds that image on every run and attaches it as
+a single virtio-blk device. The firmware reads the kernel from it, and minix.rs's
+[`virtio-blk` driver](../drivers/overview.md#virtio-blk) then brings the same device up and serves
+the root partition from it. Nothing else is attached, so a kernel banner in the log is itself the
+proof that edk2 and Limine read the image.
+
+### The disk image
+
+Sectors are 512 bytes. Every number below is derived in `tools/mkimage/src/layout.rs` from a handful
+of inputs — the sector size, the shape of the GPT entry array, a 1 MiB alignment, the ESP's size and
+`rootfs::ROOTFS_IMAGE_BYTES` — and a host test pins the literals, because the boot-marker files
+carry two of them (`lba=71680` and `capacity=75776`).
+
+| LBA         | Sectors | Holds                                                                      |
+| ----------- | ------: | -------------------------------------------------------------------------- |
+| 0           |       1 | protective MBR: one record of type `0xEE` covering the disk                |
+| 1           |       1 | primary GPT header                                                         |
+| 2–33        |      32 | primary partition entry array: 128 entries of 128 bytes                    |
+| 2048–71679  |  69 632 | partition 1: the ESP, FAT32, 34 MiB                                        |
+| 71680–73727 |   2 048 | partition 2: the root, exactly the 1 MiB root image (absent when rootless) |
+| 75743–75774 |      32 | backup partition entry array                                               |
+| 75775       |       1 | backup GPT header                                                          |
+
+The disk is 75 776 sectors — 37 MiB, 38 797 312 bytes — rounded up to a whole mebibyte, and it is
+the same size **with or without** the root partition: a rootless image leaves entry 2 unused and the
+root's range zero, so the driver's `capacity=` marker reads the same on both. Both partitions start
+on a 1 MiB boundary, which makes each start on a 4096-byte block boundary — a requirement for
+anything the driver [serves as a minor](../drivers/overview.md#minors). Const assertions in
+`layout.rs` hold the alignment, the ordering and the sizes, so a layout that broke one of them does
+not compile.
+
+**The root partition is found by its type GUID**, `10FDAC43-2E55-4E0E-8D18-2D46479E1B44`, generated
+for minix.rs and defined once, as its 16 on-disk bytes, in `kernel-shared::rootfs`
+(`ROOT_PARTITION_TYPE_GUID`). The tool writes it and the driver selects by it; neither depends on
+the other. GPT stores a GUID mixed-endian — the first three fields little-endian, the rest as
+written — and a test pins the bytes to the text form.
+
+**The image is reproducible.** The disk GUID and both partitions' unique GUIDs are constants in the
+tool, FAT timestamps are zero and the volume serial is fixed, so the same inputs give the same bytes
+and two images can be compared across runs.
+
+The root partition's bytes are not produced by the tool. `kernel/build.rs` writes the MinixFS image
+it packs into the boot archive to `rootfs.img` beside the kernel ELF, and `mkimage` copies that file
+into the partition byte for byte — refusing one that is not exactly `ROOTFS_IMAGE_BYTES` long or
+does not begin with the image label. The disk's root and the ramdisk's are therefore one image by
+construction.
+
+#### The ESP
+
+The ESP is a FAT32 volume written whole and never modified, from Microsoft's FAT specification.
+Three properties matter:
+
+- **One sector per cluster, and at least 65 525 clusters.** A FAT volume's type is decided by its
+  cluster count and by nothing else: below 65 525 clusters a conforming driver reads it as FAT16
+  whatever the boot sector says. At one sector per cluster that bound is what sizes the ESP — 34 MiB
+  gives 68 520 clusters (two FATs of 540 sectors, the first data sector at 1112) — and a const
+  assertion holds it, so shrinking the ESP until it fails is a compile error rather than a volume
+  the firmware misreads.
+- **Long-name entries.** `limine.conf` does not fit an 8.3 name, so the tool writes VFAT long-name
+  entries carrying each name's exact spelling in front of a generated short alias: the name
+  upper-cased when that loses nothing (`kernel` → `KERNEL`), otherwise a basis with a numeric tail
+  (`limine.conf` → `LIMINE~1.CON`). A name that is already upper-case 8.3 (`BOOTAA64.EFI`) gets a
+  short entry alone. Paths are ASCII, and two paths that differ only in case are refused.
+- **Contiguous allocation.** The root directory, then every other directory, then every file, each a
+  run of consecutive clusters whose FAT entries name the next. The boot record (boot sector, FSInfo
+  and a third signature sector) is duplicated at sectors 6–8, as a formatter does.
+
+The runner puts three files on it:
 
 ```text
-target/esp/
-  EFI/BOOT/BOOTAA64.EFI   ← Limine (external/limine/dist/BOOTAA64.EFI)
-  limine.conf             ← tools/limine.conf
-  boot/kernel             ← the freshly built kernel ELF
+EFI/BOOT/BOOTAA64.EFI   ← Limine (external/limine/dist/BOOTAA64.EFI)
+limine.conf             ← tools/limine.conf
+boot/kernel             ← the freshly built kernel ELF
 ```
 
 `tools/limine.conf` names the kernel and nothing else — the servers are embedded:
@@ -163,50 +228,120 @@ serial: yes
     kernel_path: boot():/boot/kernel
 ```
 
-The runner then launches QEMU (firmware auto-located, or set `QEMU_EFI_AARCH64`):
+#### `tools/mkimage`
+
+`minixrs-mkimage` is a workspace host crate — a library and a thin binary, with `kernel-shared` as
+its only dependency and no third-party crate:
+
+```text
+mkimage <out.img> [--root <rootfs.img>] <esp-path>=<host-file>...
+```
+
+Without `--root` the image has no root partition. At least one ESP file is required. The image is
+built in memory (`build_image`) and written sparsely (`write_sparse` seeks over runs of zeros), so
+the 37 MiB file occupies only a few MiB on a filesystem with sparse files.
+
+**The writer and the driver's parser share no code.** `tools/mkimage/src/gpt.rs` and
+`drivers/driver-rt/src/gpt.rs` each take their field offsets from the UEFI specification, and each
+has its own CRC-32 (table-driven in the tool, bit-at-a-time in the driver). The tool's integration
+test, `tools/mkimage/tests/image.rs`, can reach only the crate's public API and checks a built image
+with readers that are not the writer: a FAT32 reader of its own that parses the boot sector, walks
+the FAT chains and reassembles long names; `driver-rt`'s parser, which must find the root by type
+and whose bytes must equal the input; and fields read straight from the offsets the specification
+gives. edk2, which reads the same GPT and FAT32 to find Limine on every boot, is a third independent
+reader.
+
+### The QEMU command line
+
+The runner launches QEMU (firmware auto-located, or set `QEMU_EFI_AARCH64`), and prints the exact
+command line on stderr as one `qemu-run: …` line:
 
 ```sh
 qemu-system-aarch64 \
     -M virt,gic-version=3 -cpu cortex-a72 -m 256M \
     -bios <edk2-aarch64-code.fd> \
-    -drive file=fat:rw:fat-type=32:target/esp,format=raw,if=virtio \
     -global virtio-mmio.force-legacy=false \
-    -drive file=target/vblk-root.img,format=raw,if=none,id=vblk0 \
+    -drive file=target/disk.img,format=raw,if=none,id=vblk0 \
     -device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0 \
     -display none -serial stdio -no-reboot
 ```
 
-The first drive is a virtio-blk-**pci** device that only the firmware reads. The second is the one
-minix.rs drives: the root filesystem image on a virtio-blk-**mmio** device pinned to transport slot
-0, which the kernel's [boot probe](#the-virtio-probe) finds and hands to `virtio-blk`.
-`force-legacy=false` makes every mmio transport modern (version 2), the only version the drivers
-accept; a later `-global` on the command line overrides it, which is how the version-refusal boot is
-produced.
+The one drive is a virtio-blk-**mmio** device pinned to transport slot 0, which the kernel's
+[boot probe](#the-virtio-probe) finds and hands to `virtio-blk`. `force-legacy=false` makes every
+mmio transport modern (version 2), the only version the drivers accept, and edk2 boots from a modern
+one; a later `-global` on the command line overrides it, which is how the version-refusal boot is
+produced. There is no directory-as-FAT drive, and on this default command line no PCI device (the
+`nodisk` backend below is the one case that uses one).
 
 ### The root backend
 
-The root filesystem can come from either of two block drivers, and **what is attached selects it**.
-`kernel/build.rs` writes the image it packs into the boot archive as the `rootfs` module to
-`rootfs.img` as well, in the directory holding the kernel ELF, so the runner finds it beside the
-kernel it was handed and the image always belongs to that kernel. The environment variable
-`MINIXRS_ROOT` then chooses:
+The root filesystem can come from either of two block drivers, and **what is on the attached disk
+selects it**. The environment variable `MINIXRS_ROOT` chooses what the runner builds and how it
+attaches it:
 
-| `MINIXRS_ROOT`   | What the runner attaches                                 | Where MFS mounts its root from       |
-| ---------------- | -------------------------------------------------------- | ------------------------------------ |
-| `disk` (default) | a copy of `rootfs.img`, as the virtio disk shown above   | `virtio-blk`, through the disk       |
-| `ramdisk`        | no virtio-blk-mmio device at all (the two lines go away) | `memory`, the ramdisk in the archive |
+| `MINIXRS_ROOT`   | What the runner attaches                                                | Where MFS mounts its root from                                |
+| ---------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `disk` (default) | `target/disk.img`: ESP + root partition, on virtio-mmio                 | `virtio-blk`, minor 0 — the root partition                    |
+| `ramdisk`        | `target/disk-rootless.img`: the same image, no root partition           | `memory`, after `virtio-blk` declined the disk — the fallback |
+| `nodisk`         | the rootless image as virtio-blk-**PCI**, which only the firmware reads | `memory`; `virtio-blk` has no device at all                   |
 
-On a `disk` boot the runner copies `rootfs.img` to `target/vblk-root.img` **on every run** and
-attaches the copy. The boot writes to its root, so a reused file would make the second run a
-different test from the first; nothing persists from one boot to the next. The ramdisk is still
-built and mapped on a `disk` boot — the `rootfs` module is in the archive either way — it is simply
-not the device MFS selects.
+A machine with no disk has nothing to boot from, so the `ramdisk` boot still attaches one. The
+driver brings it up, finds no partition of the root type and prints `root FAIL no root partition`;
+MFS, having found `vblk` in DS, is answered `ENXIO`, prints `bdev.root vblk rc=-6 fallback=memory`
+and mounts the ramdisk (see
+[Choosing the root device](../servers/overview.md#choosing-the-root-device)). That is the boot CI
+runs as its second backend. `nodisk` is the only way to reach the state where the driver has no
+device — minix.rs has no PCI — and is run by hand: CI does not boot it and it has no marker pair.
+Any other value is an error.
 
-Two further variables exist for the boots that are meant to be refused. `MINIXRS_VBLK_IMAGE=<file>`
-attaches that file as-is, with no copy, instead of the root image: a blank disk makes `virtio-blk`
-print `root FAIL label` and MFS fall back to the ramdisk. `MINIXRS_VBLK_DRIVE_OPTS=<opts>` appends
-options to the `-drive` argument, such as `readonly=on`. Any other value of `MINIXRS_ROOT` is an
-error.
+The image is **rebuilt on every run**, by a `cargo run -q --release -p minixrs-mkimage` nested
+inside the `cargo run` that started the runner. The boot writes to its root and the driver flushes
+every write, so a reused image would make the second run a different test from the first. The two
+flavours go to different files, so a `ramdisk` boot does not destroy the image a `disk` boot left
+behind. The ramdisk is still built and mapped on a `disk` boot — the `rootfs` module is in the
+archive either way — it is simply not the device MFS selects.
+
+Two further variables apply to a `disk` boot only (the other two values reject them):
+
+- `MINIXRS_VBLK_IMAGE=<file>` attaches that file **as-is**: no build, no copy, and the boot's writes
+  land in it. The machine then boots *entirely* from that file — firmware, Limine and the kernel all
+  come off its ESP, and the kernel ELF cargo just built is not used. A file with no ESP, such as the
+  raw `rootfs.img`, gives no kernel at all, only the firmware's boot-failure output.
+- `MINIXRS_VBLK_DRIVE_OPTS=<opts>` appends options to the `-drive` argument, such as `readonly=on`,
+  which makes the driver print `root FAIL readonly` and MFS fall back.
+
+### Booting the same image twice
+
+A write to the disk root survives the machine, which the ramdisk could never show. The root image
+ships `/etc/boots` holding the digit `0`; `init` prints what it reads there as `minix.rs init:
+persist gen=<n>` and stores the next digit
+([the persistence probe](../servers/overview.md#the-persistence-probe)). A fresh image prints
+`gen=0`. Booting the image a `disk` boot just wrote, with no rebuild, prints `gen=1`:
+
+```sh
+timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release > disk.log 2>&1
+MINIXRS_VBLK_IMAGE=target/disk.img timeout 60 \
+    cargo run -p minixrs-kernel --target aarch64-unknown-none --release > reboot.log 2>&1
+tools/check-boot-log.sh reboot reboot.log
+```
+
+The second command must run before anything rebuilds `target/disk.img`, which every plain `disk`
+boot does. The reboot is checked against its own marker pair and nothing else, because `init`'s
+write battery was designed against a fresh image; it needs only the probe's line, so it is a short
+boot. What it shows is that writes **reach the device**. It shows nothing about the flush: QEMU
+serves a raw image through the host's page cache, so the first boot's writes are in the file whether
+or not the guest flushed them.
+
+### The firmware writes to the disk too
+
+On a **writable** disk edk2 repairs a damaged primary GPT header or primary entry array from the
+backup copy — before the kernel runs (observed with Homebrew's edk2 under QEMU 11.0.3). An image
+with one bit flipped in either therefore boots normally, the driver accepts it, and afterwards the
+image's primary GPT sectors have been rewritten by the firmware: a write to the boot disk that no
+minix.rs code made. Two consequences. The driver consults only the primary table, but its refusals
+of a damaged one are reachable only on a disk the firmware cannot repair — one attached
+`readonly=on`. And "the image is byte-identical afterwards" is evidence about minix.rs only where
+the firmware had nothing to fix.
 
 Because the kernel runs indefinitely once EL0 starts, always wrap a boot run in `timeout`. See
 [Build & Toolchain](../build.md) for the full run recipe and the trace-forensics rules for reading a

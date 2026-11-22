@@ -26,7 +26,7 @@ milestone bar rather than after it.
 - [x] **6.1** — `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
 - [x] **6.2** — `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 - [x] **6.3** — `virtio-blk` behind BDEV + root backend selection
-- [ ] **6.4** — `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
+- [x] **6.4** — `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
 - [ ] **6.5** — TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
 - [ ] **6.6** — `virtio-console` as a second CDEV backend
 - [ ] **6.7** — framebuffer console: Limine framebuffer → TTY
@@ -90,7 +90,9 @@ measurements:
    assumed. 6.2 attaches **two** devices on buses meant to be in different pages and confirms they
    are, so the check covers the case one device cannot show.
 2. **Whether edk2 boots from a modern virtio-mmio disk** (6.4). H4 forces version 2; the firmware
-   has to read the ESP from the same device.
+   has to read the ESP from the same device. **Measured by 6.4 (2026-11-21, QEMU 11.0.3, Homebrew's
+   edk2): it does**, and the driver brings the same device up afterwards — see 6.4's figures below.
+   CI's firmware build has not been measured.
 3. **Whether the ramfb framebuffer reaches the kernel** (6.7) — that Limine reports it and that it
    survives `ExitBootServices`. How it is then mapped is not a measurement: H9 decides it.
 
@@ -203,11 +205,16 @@ setup path for a transport no current device needs.
 
 virtio-blk publishes itself to DS **whenever H2 found it a device**, in `init_fresh` and before
 anything that can block; whether the device carries a minix.rs root is decided afterwards. A driver
-with a device but no root answers `ENXIO` to every BDEV request. MFS asks DS for the virtio name
-first, **probes it with one zero-length `BDEV_READ`**, and takes the `memory` name when the lookup
-misses or the probe is refused. So the QEMU command line is the selector: with a virtio disk
-carrying a root attached the root is on it, otherwise the root is the ramdisk. No kernel command
-line, no compile-time feature, no ABI change.
+with a device but no root answers `ENXIO` to every BDEV request, on every minor. MFS asks DS for the
+virtio name first, **probes it with one zero-length `BDEV_READ`**, and takes the `memory` name when
+the lookup misses or the probe is refused. So what is attached is the selector: with a virtio disk
+carrying a root the root is on it, and otherwise the root is the ramdisk. Since 6.4 "otherwise" has
+two forms. A disk **without a root** — the machine boots from it, the driver declines it, the probe
+is refused — is the `MINIXRS_ROOT=ramdisk` boot CI runs. **No virtio-mmio disk at all** — the lookup
+misses — was 6.3's second CI boot and can no longer be one, because a machine with no disk has
+nothing to load a kernel from; it is reached by hand, with the boot disk on a transport only the
+firmware reads (`MINIXRS_ROOT=nodisk`). No kernel command line, no compile-time feature, no ABI
+change.
 
 *Amended by 6.3 (its decision B1).* This paragraph first read "publishes itself to DS only when …
 the device carries a minix.rs root". That cannot be built: the root check is two device reads, each
@@ -223,11 +230,13 @@ virtio-blk would send those nodes to the block driver. VFS's lookup does not cha
 
 **"Carries a minix.rs root" is the image-header check `memory` already performs** — the 32-byte
 header in block 0's boot area and the tail label in the reserved last zone — run against **minor 0
-as H6 defines it**, not against the raw device. In 6.3 minor 0 is the whole raw image, so the check
-reads LBA 0. In 6.4 minor 0 is the partition the GPT lookup selected, so the same check reads that
-partition's first and last blocks. Run against LBA 0 of a GPT disk it would find the protective MBR,
-decide the disk is not a root, and fall back — which the marker files would catch, but which the
-design must not invite.
+as H6 defines it**, not against the raw device. In 6.3 minor 0 was the whole raw image, so the check
+read LBA 0. Since 6.4 minor 0 is the partition the GPT lookup selected, so the same check reads that
+partition's first and last blocks — after the driver has accepted the partition table, found exactly
+one partition of the root type, checked its alignment and declined a read-only device (6.4's P7).
+Run against LBA 0 of a GPT disk it would find the protective MBR, decide the disk is not a root, and
+fall back — which the marker files would catch, but which the design must not invite. A raw,
+whole-disk MinixFS image is consequently no longer a root: it reads `root FAIL gpt signature`.
 
 The risk is a silent fallback that reports a broken virtio driver as a healthy ramdisk boot. It is
 closed by the marker files, not by the code: the disk boot's expected set **requires** a root line
@@ -242,21 +251,24 @@ kernels to keep green).
 `tools/mkimage` is a host crate in the `tools/gen-c-headers` / `tools/mkfs-mfs` mould, not the shell
 script [`../plan.md`](../plan.md) originally named: it has to run identically on macOS and the
 ubuntu runner, and `parted` / `mtools` / `hdiutil` are what `qemu-run.sh` was written to avoid. It
-writes a GPT, a FAT32 ESP holding Limine, its config and the kernel, and a MinixFS partition
-produced by the existing `mkfs-mfs` library.
+writes a GPT, a FAT32 ESP holding Limine, its config and the kernel, and a MinixFS partition. The
+partition's bytes are `rootfs.img` — the image `kernel/build.rs` already produces with the
+`mkfs-mfs` library and packs into the boot archive — copied in byte for byte: the tool takes the
+file and does not call that library itself, so the disk's root and the ramdisk's are one image by
+construction (6.4's P2).
 
 **Minor 0 is the root filesystem, on every block driver.** MFS sends every `BDEV_READ` /
 `BDEV_WRITE` as minor 0 and answers `ENXIO` to a `FS_READSUPER` for any other minor; VFS mounts with
 minor 0. Rather than change both, minor 0 is *defined* as "the root filesystem this driver serves":
-the whole ramdisk on `memory` (as today), the whole raw image on virtio-blk in 6.3, and in 6.4 the
-partition **virtio-blk** finds by its **partition type GUID** — never by index. The whole disk is
-minor 1 and GPT partition *n* is minor `1 + n`. `BDEV_MINOR_RAMDISK` gains a `BDEV_MINOR_ROOT` alias
-with the same value, so new code says what it means and no existing value moves. MFS and VFS are
-literally unchanged, which is D3's promise.
+the whole ramdisk on `memory` (as today), the whole raw image on virtio-blk in 6.3, and since 6.4
+the partition **virtio-blk** finds by its **partition type GUID** — never by index. The whole disk
+is minor 1 and GPT partition *n* is minor `1 + n`. `BDEV_MINOR_RAMDISK` gains a `BDEV_MINOR_ROOT`
+alias with the same value, so new code says what it means and no existing value moves. MFS and VFS
+are literally unchanged, which is D3's promise.
 
 The GPT parser is a host-tested module of `driver-rt`; the type GUID is a minix.rs-specific constant
 in `kernel-shared`, shared with `tools/mkimage`. Any crate the tool pulls in is BSD/MIT/Apache and
-passes `cargo deny`.
+passes `cargo deny` (as built it pulls in none: the GPT and FAT32 writers are hand-written).
 
 *Rejected:* two drives — a `fat:rw:` directory for the firmware and a raw MinixFS disk for the root
 — which is where 6.3 starts and deliberately not where the phase ends: the milestone is a machine
@@ -267,8 +279,10 @@ D3's "unchanged MFS" exists to avoid.
 ### H7. The ramdisk stays for the whole phase
 
 D3's contract and the prep tracker's sequencing rule both hold to the end of Phase 6: the `rootfs`
-blob is packed, `memory` serves it, and the no-disk boot stays green as the second backend. Whether
-to stop packing it is a Phase 7 decision, taken when nothing boots without a disk.
+blob is packed, `memory` serves it, and the ramdisk root stays green as the second backend. Since
+6.4 the boot that keeps it green is the rootless-disk **fallback** boot rather than a boot with no
+disk: the firmware needs a disk to read the kernel from, so every boot now attaches one. Whether to
+stop packing the blob is still a Phase 7 decision.
 
 ### H8. Keyboard to TTY is notify-then-pull
 
@@ -485,7 +499,11 @@ mapping granule (none exists below 4 KiB), dropping a device from that boot, or 
 9. **A wrong register page and a missing `VERSION_1` are caught only indirectly** (owner: 6.4, which
    first requests an optional feature). On QEMU an empty slot reads good magic, so the `DeviceID`
    check is what refuses a page one off; and a driver that omits `VERSION_1` is *not* refused by
-   QEMU, so only the exact `features=0x100000000` marker text and two host tests catch it.
+   QEMU, so only the exact `features=` marker text and the host tests catch it. **Recorded by 6.4,
+   not paid:** its mutation 8 omitted `VERSION_1` with optional features requested — the driver
+   printed `virtio ok features=0x200 …`, QEMU kept the device fully working, and three host tests
+   failed (two in `driver-rt`, one in `virtio-blk`). The marker text is now `features=0x100000200`.
+   No new guard was added; the debt stands as described.
 10. **No IOMMU: a virtio driver is in the TCB for memory integrity** (owner: Phase 8, or whichever
     platform gains an IOMMU). A queue enabled with `DRIVER_OK` carries raw physical addresses the
     device DMAs to, so the one-page register mapping, the one-entry allow-list and the 64 KiB DMA
@@ -550,9 +568,11 @@ for a root). 6.1's `deliver_irq` debt and 6.2's debts 4–8 are marked paid wher
 
 **Debts carried.**
 
-1. **`VIRTIO_BLK_F_RO` is not negotiated** (owner: 6.4, the first slice to request an optional
+1. ~~**`VIRTIO_BLK_F_RO` is not negotiated** (owner: 6.4, the first slice to request an optional
    feature — 6.2's debt 9 already sends it there). A read-only disk mounts as a root and fails at
-   the first write instead of being declined or mounted read-only.
+   the first write instead of being declined or mounted read-only.~~ **Paid by 6.4:** the driver
+   requests the feature and declines a read-only disk as a root (`root FAIL readonly`); MFS falls
+   back. 6.4's mutation 5 removes the gate and the old behaviour returns.
 2. **The interrupt orderings are proved by reading only** (owner: whichever slice first boots under
    a non-TCG accelerator or a multi-queue device). Acknowledge-before-walk and the fence before
    `QueueNotify` cannot be made to fail under TCG.
@@ -568,12 +588,15 @@ for a root). 6.1's `deliver_irq` debt and 6.2's debts 4–8 are marked paid wher
 6. **`vblk` is a DS name any server could publish** (owner: Phase 8, with the rest of the DS trust
    model). MFS trusts whoever answers the name and the zero-length probe. Not reachable from user
    processes, whose IPC mask excludes DS.
-7. **The no-root fallback has no standing boot** (owner: 6.4, which builds disk images with a host
+7. ~~**The no-root fallback has no standing boot** (owner: 6.4, which builds disk images with a host
    tool and can attach a rootless one cheaply). CI boots a good disk and no disk; the third state, a
    disk without a root, was booted once by hand. Deleting the driver's no-root `ENXIO` arm, or a
    root check that accepts a bad label, leaves both CI boots and `diff-backends.sh` green — mutation
    5 was observed only on the blank-disk boot. `root::select` is host-tested; the driver's gate,
-   MFS's revoke-and-regrant and the `bdev.root vblk … fallback=memory` line are not.
+   MFS's revoke-and-regrant and the `bdev.root vblk … fallback=memory` line are not.~~ **Paid by
+   6.4:** CI's ramdisk boot is now the rootless-disk fallback boot, and deleting the `ENXIO` arm
+   (6.4's mutation 4) breaks it. What was given up in exchange is the standing boot of the
+   *no-device* state, which is 6.4's debt 2.
 
 The two write-back orderings [`phase-6-prep.md`](phase-6-prep.md) carries from Phase 5 are **not**
 discharged by this slice or by 6.4's persistence proof. `lseek` itself landed in pre-Phase-6 chunk 5
@@ -593,9 +616,10 @@ moved onto that partition. `qemu-run.sh` attaches the one image as a virtio-blk-
 replying to every `BDEV_WRITE` — write-through, with no new BDEV request. A device that does not
 offer the feature is used read-write anyway, with a `[diag]` line saying so.
 
-**Measure first:** unverified fact 2. If edk2 cannot boot from a modern virtio-mmio disk, the
-fallback is a second, firmware-only attachment of the **same** image file — recorded as a deviation,
-not adopted quietly.
+**Measure first:** unverified fact 2 — measured, and edk2 can (below), so no second attachment was
+needed. CI's firmware has not been measured (debt 7). If it cannot boot from a modern virtio-mmio
+disk, the fallback is a second, firmware-only attachment of the **same** image file — recorded as a
+deviation, not adopted quietly.
 
 **Proof:** no `fat:rw:` in the QEMU command line; `/bin/hello` exec'd from the MinixFS partition; a
 write to the root survives into a second boot of the same image, which the ramdisk could never show;
@@ -604,10 +628,128 @@ the GPT disk's boot reports a root minor whose first block is not LBA 0.
 The persistence proof shows that writes **reach the device**, and nothing more. It cannot prove the
 flush: with a raw image, QEMU's writes land in the host page cache at once, so a second boot sees
 them with or without a guest flush, and `cache=writethrough` would only hide the difference. The
-flush is evidenced by its completion status in a `[diag]` count, and dropping it is recorded as a
-mutation that moves nothing, with the honest record
-[`testing-and-markers.md`](../conventions/testing-and-markers.md#mutation-testing) asks for, rather
-than claimed as covered.
+flush is evidenced by its completion status in one `[diag]` line (`flush ok n=1`), and dropping it
+is recorded as a mutation that moves that one line and nothing else — the reboot still passes — with
+the honest record [`testing-and-markers.md`](../conventions/testing-and-markers.md#mutation-testing)
+asks for, rather than claimed as covered.
+
+**Design:**
+[`2026-11-21-mkimage-gpt-disk-design.md`](../superpowers/specs/2026-11-21-mkimage-gpt-disk-design.md),
+decisions `P1…P11`. **Plan:**
+[`2026-11-21-mkimage-gpt-disk.md`](../superpowers/plans/2026-11-21-mkimage-gpt-disk.md), whose
+ledger records every ruling made during the run. **Status: done** (checked in the Status list
+above).
+
+**Measured (2026-11-21 and 2026-11-22, QEMU 11.0.3, Homebrew edk2-stable202408, macOS on Apple
+Silicon).**
+
+- *Unverified fact 2.* edk2 boots from a modern (version 2) virtio-mmio disk: it loads Limine from
+  `VenHw(837DCA9E-…,0000000A00000000)`, the kernel boots, and `vblk` then brings the same device up.
+  The driver's reset recovers the device from whatever state the firmware left it in.
+- *The image.* edk2 and Limine read `mkimage`'s FAT32 and GPT on the first image built. macOS's
+  `fsck_msdos -n` finds the ESP clean, and `gpt -r show` and `hdiutil imageinfo` read the partition
+  table. The image is 38 797 312 bytes (75 776 sectors) and about 7.4 MiB on disk, written sparsely;
+  the ESP has two FATs of 540 sectors, its first data sector at 1112, and 68 520 clusters against
+  the FAT32 bound of 65 525.
+- *The runner.* A nested `cargo run` from inside the cargo runner completes in about a second with
+  no wait on the build lock, so the tool is built in the shared target directory.
+- *What QEMU offers.* The accepted feature word is `0x100000200` (`VERSION_1 | FLUSH`) for a
+  writable raw drive and `0x100000220` (`+ RO`) with `readonly=on`.
+- *The boots.* The disk and ramdisk boots each pass 165 marker checks, the reboot passes its 7, and
+  `tools/diff-backends.sh` passes across the two full boots with its three allowances. Booting one
+  image repeatedly prints `persist gen=1`, then `gen=2`, then `gen=3`. In a 120 s reboot of a used
+  image every write-battery probe up to `fs.hole ok` printed `ok` and none printed `FAIL`; `fs.leak`
+  and later were not reached in that time. That is an observation, not an assertion (debt 4).
+- *The budget.* At a fixed 300 s the last required marker (`[diag vfs] pm-exit reset closed=1` on
+  both boots) sits at 82.68–82.71% of the disk boot's log (about 248 s) and 59.30% of the ramdisk
+  boot's (about 178 s), against 66.8% / 48.1% for 6.3. Readings across the slice's tasks ranged
+  68.4%–82.7% (disk) and 47.7%–59.3% (ramdisk); the budget takes the high one. Under 600 s that is
+  2.42x for the disk boot, so CI's two full boots went **600 → 900 s** (3.63x disk, 5.06x ramdisk).
+  The reboot gets **180 s**: its one line lands about 34 s of local wall clock after `cargo run`
+  starts (the kernel banner at about 6 s), and 45 s passed locally twice. The job's
+  `timeout-minutes` went **65 → 80** (900 + 180 + 900 s is 33 minutes, plus the 45 of build
+  headroom). Locally 300 s now leaves the disk boot about 1.2x, so the documented local timeout for
+  a marker-file verification is **450 s** (1.8x). Stub-free boots still reach every 6.4 marker in
+  the first 0.33% of a 60–75 s log.
+- *The driver's stack.* The 20 480-byte partition-table buffer is a `.bss` static; the largest frame
+  in the built driver is `main`'s, 10 080 bytes of the 64 KiB stack.
+
+**Recorded boots.** Four, each run once by hand; none is a CI boot.
+
+1. **`MINIXRS_ROOT=nodisk`** (the rootless image on virtio-blk-PCI), 300 s: `[diag vblk] no device`,
+   `bdev.ds ok name=memory ep=3` with no `bdev.root vblk` line before it, `bdev.minor absent minor=1
+   rc=-6`, `persist gen=0`. The common set passes (107 expected, 45 forbidden). It fails **both**
+   per-backend sets, by design: against the ramdisk set 6 lines are missing and `no device` is
+   forbidden; against the disk set 8 are missing and 3 forbidden.
+2. **The disk image attached `readonly=on`**, 300 s: `virtio ok features=0x100000220 …`, `root FAIL
+   readonly`, the fallback, and no flush line. The image's SHA-256 afterwards equals that of a
+   reference built with the same `mkimage` arguments. Against the ramdisk set it misses exactly two
+   lines — the feature word and the `root FAIL` reason.
+3. **6.3's raw `rootfs.img` as the only disk:** no kernel and no Limine; edk2 prints `failed to load
+   Boot0001 … Not Found` and drops to the EFI shell. The *driver's* verdict on that disk was
+   reproduced with two drives — the rootless image on PCI for the firmware (`MINIXRS_ROOT=nodisk`)
+   and the raw image added as the mmio drive: `virtio ok … capacity=2048 …`, `root FAIL gpt
+   signature`, then the fallback. The firmware tries the mmio disk first, then the PCI one.
+4. **A damaged primary GPT — not what the spec predicted.** On a **writable** disk edk2 repairs the
+   primary header (one bit flipped at image byte 532) or the primary entry array (one bit at byte
+   1720) from the backup copy *before the kernel runs*: the driver prints `root ok`, the disk set
+   passes all 165 checks, and LBA 1 or LBA 3 of the image has been rewritten by the firmware — a
+   write to the image that no minix.rs code made. The driver's refusals appear only when the disk is
+   read-only. Entry-array damage, the single disk attached `readonly=on`: edk2 still boots it and
+   the driver prints `root FAIL gpt entries crc`. Header damage, single disk read-only: edk2 refuses
+   it (`Not Found`, the EFI shell). Header damage as a read-only second drive under `nodisk`: `root
+   FAIL gpt crc`. The two-drive recipe has one trap: if the mmio disk has a usable ESP the firmware
+   boots from *it*, with that image's own kernel.
+
+**Mutations.** Eleven were planned and fifteen rows were run (rows 7 and 10 split, and one added for
+the probe's `0xEE` check), every boot stub-free, the tree proved clean afterwards. The table —
+predicted beside observed — is in the design's §3. Six predictions (five mutation rows and the
+damaged-table boot) were wrong or too loose and are listed there. Two results a later reader should
+know without opening it: skipping the flush at its call site moves only `flush ok n=1`, and a
+`flush()` that reports a bad status as success moves nothing anywhere (debt 1); and dropping the
+no-root `ENXIO` gate — 6.3's mutation 5, which no CI boot could see — now breaks the ramdisk boot in
+CI.
+
+**Amendments to phase text.** H5's selector sentence and its paragraph on where the root check
+reads, H6's account of where the root partition's bytes come from, and H7's "no-disk boot" are
+rewritten where they are stated above. Unverified fact 2 is marked measured. 6.2's debt 9 and 6.3's
+debts 1 and 7 are marked where they are listed.
+
+**Debts carried.**
+
+1. **The flush is evidenced by one line** (owner: whichever slice first has a device whose flush can
+   fail, or a backing store that is not a raw file). Dropping the flush moves only `flush ok n=1`; a
+   `flush()` in `main.rs` that treats a bad status as success is caught by no host test and no boot,
+   because QEMU's flush cannot be made to fail.
+2. **The no-device state has no standing boot** (owner: none in Phase 6; Phase 7, when the ramdisk
+   question of H7 is decided). `[diag vblk] no device` and MFS's DS miss are reached only by a
+   hand-run `MINIXRS_ROOT=nodisk`. This is what paying 6.3's debt 7 cost.
+3. **The firmware writes to the boot disk** (owner: none — recorded so the next reader does not hunt
+   for it). edk2 repairs a damaged primary GPT on a writable disk, so "the image is unchanged
+   afterwards" must allow for it, and the driver's primary-only GPT refusals are reachable only on a
+   read-only disk.
+4. **The reboot is checked against 7 lines** (owner: a slice that makes init's write battery
+   idempotent on a used image). A panic in a reboot is caught only by `persist gen=1` going missing,
+   and the battery's behaviour on a used image is observed, not asserted.
+5. **Two gaps in the GPT parser** (owner: a slice that mounts a second partition). It does not
+   require `FirstUsableLBA` to lie past the entry array, and it does not detect overlapping
+   partitions.
+6. **Several `FAIL` lines are not forbidden** (owner: the next marker-file pass). Under mutation 4
+   `mount FAIL`, `bdev.tail FAIL`, `bdev.deny FAIL`, `[diag vfs] fs.mount FAIL`, `fs.read FAIL`,
+   `exec.stage FAIL`, `fs.deny FAIL` and `exec.deny FAIL` all printed and none is in the common
+   forbidden file. The mutation is still caught several times over, by missing `ok` lines and by
+   other forbidden hits.
+7. **CI's firmware has not been measured** (owner: the first CI run of this branch, which is the
+   measurement). Debian's `QEMU_EFI.fd` booting from a version-2 virtio-mmio disk and reading
+   `mkimage`'s FAT32 and GPT, the 900 s / 180 s budgets against the runner's TCG, whether the
+   pre-built `mkimage` is seen as fresh by the nested cargo on Linux, and whether the runner's QEMU
+   still needs `ipxe-qemu` are all untested until then.
+8. **An unresolved rustdoc link** (owner: any slice touching `kernel-shared`).
+   `kernel-shared/src/execstack.rs:135` links to `sp`, which rustdoc cannot resolve. It predates
+   this slice and was only noticed by it.
+
+6.3's debt 3 (`fs.trunc ok n=0` cannot see a dropped truncate) is **not** paid here, by ruling: the
+persistence probe sits beside the write battery and does not change it.
 
 ### Slice 6.5: TTY RX — PL011 receive interrupt + `CDEV_READ`
 
@@ -686,7 +828,12 @@ phase. H5 means **two boots** per CI run from 6.3 on, and the smoke job's wall c
 And real completion interrupts under TCG are slower than the ramdisk's `memcpy`. If two full boots
 do not fit, the answer to reach for first is a shorter marker set for the second backend, not a
 larger timeout. *6.3's outcome:* they fit — the per-boot timeout did not move, and the disk boot's
-last marker lands at about two thirds of the local log.
+last marker lands at about two thirds of the local log. *6.4's outcome:* three boots per run — the
+disk boot, a short reboot of the image it wrote, the rootless-disk fallback boot — and the per-boot
+timeout did move, 600 → 900 s for the two full boots: with a flush after every write the disk boot's
+last marker lands at 82.7% of a 300 s local log and the ramdisk boot's at 59.3%. A shorter marker
+set for the second backend was not the answer this time, because the slower boot is the first
+backend's. The reboot is the short one, 180 s against its own seven-line set.
 
 ## Non-goals for Phase 6
 
