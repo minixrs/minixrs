@@ -59,12 +59,41 @@ child.
 
 ## Markers
 
-`tools/check-boot-log.sh <log>` greps a captured boot log against `tests/qemu-boot.expected` /
-`tests/qemu-boot.forbidden` (see [`build-and-boot.md`](./build-and-boot.md) for how to produce the
-log and how long to budget). Update those marker files in the same PR when trace formats or the boot
-roster change, or the `qemu-smoke` CI job goes red.
+`tools/check-boot-log.sh <disk|ramdisk> <log>` greps a captured boot log against the marker files
+(see [`build-and-boot.md`](./build-and-boot.md) for how to produce the log, which backend a boot ran
+with, and how long to budget). Update those marker files in the same PR when trace formats or the
+boot roster change, or the `qemu-smoke` CI job goes red.
 
-A few properties of the script matter when you're reading its output rather than just running it:
+There are three pairs of files, and the checker always reads two of them:
+
+| Pair                                      | Checked for      | Holds                                                            |
+| ----------------------------------------- | ---------------- | ---------------------------------------------------------------- |
+| `tests/qemu-boot.expected` / `.forbidden` | every boot       | everything that must hold whichever driver serves the root       |
+| `tests/qemu-boot.disk.*`                  | a `disk` boot    | what exists because the disk does; forbids the fallback's lines  |
+| `tests/qemu-boot.ramdisk.*`               | a `ramdisk` boot | `no device`, the `memory` selection, and nothing claiming a disk |
+
+- **The backend argument is required, and there is no way to check the common pair alone.** The
+  common files cannot tell a disk boot that silently fell back to the ramdisk from a healthy one:
+  every filesystem marker passes either way. What closes that is the **forbidden** half of the
+  per-backend pair — a `disk` boot forbids `bdev.ds ok name=memory`, `bdev.root vblk`, `[diag vblk]
+  no device` and `[diag vblk] root FAIL`; a `ramdisk` boot forbids `bdev.ds ok name=vblk` and the
+  disk's bring-up lines. Each boot fails the other backend's set, observed both ways.
+- **A new marker goes in the common pair unless it exists because of one backend.** Everything the
+  filesystem proves — mount, read, write, create/truncate, the hole probe, exec from the root — is
+  common and therefore required of both drivers. A marker moved into a per-backend file stops being
+  required of the other backend, so that is a decision, not a tidy-up.
+- **`tools/diff-backends.sh <disk-log> <ramdisk-log>` checks what the marker files cannot: that
+  nothing *else* differs.** It takes each log's `[diag mfs]` lines and `[diag vfs]` lines as two
+  separate streams, keeps the first occurrence of each line in order, and fails unless the VFS
+  streams are identical and the MFS streams differ in exactly the `bdev.ds ok name=` line. The shape
+  was measured, not chosen: two boots of the *same* backend differ in the raw interleaved stream
+  (the servers interleave differently from boot to boot, and VFS prints one `pm-exit reset` line per
+  exit for as long as the boot runs), and agree per server by first occurrence. What it therefore
+  **cannot** see is a backend-dependent change in how often a line repeats, or in the order of lines
+  between the two servers. `--self-test` proves it still fails on a difference; CI runs that before
+  the comparison.
+
+A few properties of the checker matter when you're reading its output rather than just running it:
 
 - **The marker files test first occurrences only**, never counts — keep expectations timing-robust,
   since CI's TCG is slower than local and a marker that only ever appears once is the only kind that
@@ -75,7 +104,9 @@ A few properties of the script matter when you're reading its output rather than
   aside before checking; the live file grows underneath the script.
 - **Its PASS total counts expected AND forbidden lines** (5.11: 86 + 20 = 106), so a slice that adds
   N expected and M forbidden lines moves the total by N + M — don't be surprised when the total
-  moves by more than the expected-marker count alone.
+  moves by more than the expected-marker count alone. The total also differs between the two
+  backends, because each adds its own pair to the common one; count the marker files rather than
+  quoting a number from a plan.
 - **Never copy a count into a marker from a plan** — recompute it from the constant. 5.8's plan said
   `n=30` for what was actually a 31-byte `ROOTFS_MOTD`.
 - **A marker must be able to fail on the thing it proves.** The script matches with `grep -F`, so a
@@ -100,10 +131,11 @@ grep -ao '\[ipc [0-9]*' <log> | tail -1     # final IPC counter, the throughput 
 uptime; ps -eo pcpu,comm -r | head -5       # what was competing for the machine
 ```
 
-A clean 300 s run on this branch reaches **~18.8 M**; a passing 1200 s run reached **114 M**.
-**Under ~10 M at the timeout means the run was starved, not broken.** Re-run before believing any
-marker failure, and never change code on the strength of a starved boot — a "fix" that passes on the
-re-run has proved nothing about the code.
+A clean 300 s run on this branch reaches **~18.8 M**; a passing 1200 s run reached **114 M**. (Slice
+6.3's baseline, two 300 s boots of its merge base, reached 32.3 M and 31.9 M — the floor below is
+deliberately far under any clean run.) **Under ~10 M at the timeout means the run was starved, not
+broken.** Re-run before believing any marker failure, and never change code on the strength of a
+starved boot — a "fix" that passes on the re-run has proved nothing about the code.
 
 **The shape of the missing set is the better tell, and the threshold alone will fool you.** One run
 reached 10.59 M — over the floor — and was plainly starved. Read the whole `MISSING` list:
@@ -158,6 +190,17 @@ This runs against an **uncommitted** working tree, so the restore step has real 
   one. A third case, an off-by-one in a bitmap-clear helper, moved no marker either but **is**
   caught by host unit tests — a different situation worth distinguishing. Before recording a row as
   uncovered, run `cargo test` under the mutation too, not just a boot.
+- **A mutation predicted to be caught by "a host test" must name the test.** 6.3's spec predicted
+  exactly that for skipping the read in `virtio-blk`'s partial write. The host tests cover the
+  *plan* (`write_plan` returns `Partial`), not the step in `main.rs` that acts on it, which no host
+  test calls; the mutation moved nothing at all until a boot probe was written for it
+  (`bdev.partial`, see
+  [`servers-and-drivers.md`](./servers-and-drivers.md#writing-probes-and-denial-batteries)). A
+  prediction that cannot name its test is a guess that the coverage exists.
+- **A refusal path needs a boot that provokes the refusal.** The default boots prove a disk that
+  works and a disk that is absent; a disk that is present and wrong (blank, or read-only) is a third
+  boot, run by hand with `MINIXRS_VBLK_IMAGE` / `MINIXRS_VBLK_DRIVE_OPTS` and recorded in the phase
+  file, because CI runs neither.
 - **A guard's mutation moves the marker of the probe that exists for that guard, not a marker on a
   healthy path** — a healthy path never trips it. Slice 5.8's plan predicted that deleting a
   not-a-directory guard would break the filesystem self-check; resolving a real file only ever walks

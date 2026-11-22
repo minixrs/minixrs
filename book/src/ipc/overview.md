@@ -139,23 +139,23 @@ generation 0 so they can never collide with a real `(gen, proc)` endpoint:
 **Well-known servers** are numbered contiguously from 0. minix.rs renumbers these compared to MINIX
 3 (which scatters the slots). Some numbers are *reserved* for servers that do not yet boot:
 
-| Proc nr | Server                  | Boots today?                             |
-| ------: | ----------------------- | ---------------------------------------- |
-|       0 | PM                      | yes                                      |
-|       1 | VFS                     | yes                                      |
-|       2 | RS                      | yes                                      |
-|       3 | `MEM` (memory driver)   | yes                                      |
-|       4 | `TTY`                   | yes                                      |
-|       5 | DS                      | yes                                      |
-|       6 | `MFS`                   | yes                                      |
-|       7 | VM                      | yes                                      |
-|       8 | `PFS`                   | reserved, not built                      |
-|       9 | SCHED                   | yes                                      |
-|      10 | `init` (PID 1)          | yes                                      |
-|      11 | `VBLK` (virtio-blk)     | yes — brings its disk up, serves nothing |
-|      12 | `VCON` (virtio-console) | reserved, not built                      |
-|      13 | `VINPUT` (virtio-input) | reserved, not built                      |
-|      14 | `VNET` (virtio-net)     | reserved, not built                      |
+| Proc nr | Server                  | Boots today?                               |
+| ------: | ----------------------- | ------------------------------------------ |
+|       0 | PM                      | yes                                        |
+|       1 | VFS                     | yes                                        |
+|       2 | RS                      | yes                                        |
+|       3 | `MEM` (memory driver)   | yes                                        |
+|       4 | `TTY`                   | yes                                        |
+|       5 | DS                      | yes                                        |
+|       6 | `MFS`                   | yes                                        |
+|       7 | VM                      | yes                                        |
+|       8 | `PFS`                   | reserved, not built                        |
+|       9 | SCHED                   | yes                                        |
+|      10 | `init` (PID 1)          | yes                                        |
+|      11 | `VBLK` (virtio-blk)     | yes — serves its disk when one is attached |
+|      12 | `VCON` (virtio-console) | reserved, not built                        |
+|      13 | `VINPUT` (virtio-input) | reserved, not built                        |
+|      14 | `VNET` (virtio-net)     | reserved, not built                        |
 
 Slots 15–18 hold the demo stubs and PM's fork pool starts at 19.
 
@@ -194,15 +194,19 @@ IPC and kernel operations it may perform. User processes share one user-class sl
   messages, consumed by `RECEIVE`.
 - **`sig_mgr`** — the endpoint that manages signals raised against this process.
 
-The entry also reserves `io_ranges`, `irqs`, `mem_ranges`, and a `grant_table` pointer. These are
-the hooks for two future mechanisms:
+The entry also carries a `grant_table` pointer and `irqs`, both in use, and reserves `io_ranges` and
+`mem_ranges`, which nothing reads yet:
 
-- **Grants / safe copy** — for data larger than the payload, a process will publish a grant table
-  (via `SYS_SETGRANT`) describing memory regions and permitted operations, and the kernel will
-  validate a grant before copying (`SYS_SAFECOPY`). The call numbers exist; a real grant table and
-  validated copy are an opening Phase-5 slice, so no cross-address-space bulk copy runs yet.
-- **I/O and IRQ ownership** — `io_ranges` / `irqs` will gate a driver's access to ports and
-  interrupt lines. Drivers are a later phase.
+- **Grants / safe copy** — for data larger than the payload, a process publishes a grant table (via
+  `SYS_SETGRANT`) describing memory regions and permitted operations, and the kernel validates a
+  grant before copying (`SYS_SAFECOPY`). This is how every bulk transfer between servers, drivers
+  and clients moves (live since Phase 5).
+- **IRQ ownership** — `irqs` is the allow-list of interrupt lines a driver may claim: `SYS_IRQCTL`
+  answers `EPERM` for a line that is not in it. The kernel fills it at boot — the PL011's line for
+  TTY, the assigned device's line for each virtio driver (see
+  [Drivers](../drivers/overview.md#interrupts-reach-a-driver-as-a-hardware-notification)).
+- **I/O ports and memory ranges** — `io_ranges` / `mem_ranges` are reserved for gating a driver's
+  access to ports and physical ranges; no call consults them today.
 
 ## IPC status
 

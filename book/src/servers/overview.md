@@ -44,7 +44,7 @@ take; it has to find a home outside that span.
 | `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC`                                                                    |
 | `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE`                                                            |
 | `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` (MFS)                                  |
-| `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`)                                                                   |
+| `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`, `virtio-blk`)                                                     |
 | `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY, memory driver) / `CDEV_READ` (memory driver; TTY answers `ENOSYS` until Phase 6) |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK`                                                                |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init)                                                                            |
@@ -316,17 +316,20 @@ block devices.
 5.10a, and able to create and truncate files as of 5.10b. It sits between VFS and a block driver,
 and it is the piece that makes a path resolve to bytes: VFS asks `FS_LOOKUP` for an inode, `FS_READ`
 for its contents, `FS_WRITE` to replace them, `FS_CREATE` to name a new one, and `FS_TRUNC` to
-discard one's contents, and MFS answers by moving blocks to and from the `memory` ramdisk over BDEV,
+discard one's contents, and MFS answers by moving blocks to and from a block driver over BDEV —
+`virtio-blk`'s disk or the `memory` ramdisk, [chosen once at boot](#choosing-the-root-device) —
 decoding them with the `minixrs-mfs` format library (`superblock`, `inode`, `layout`, `dirent`,
-`read`, 5.10a's `write`, and 5.10b's allocator) that slice 5.7 began and host-tested. The image
-lives in RAM, so a write survives until the machine stops — long enough to be read back and proved,
-not long enough to be persistence.
+`read`, 5.10a's `write`, and 5.10b's allocator) that slice 5.7 began and host-tested. Neither
+backend persists: the ramdisk lives in RAM, and the disk is a copy of the root image the runner
+makes afresh for every boot. A write survives until the machine stops — long enough to be read back
+and proved, not long enough to be persistence.
 
 The crate is split unusually hard. Its `[[bin]]` carries `required-features = ["server"]` so the
 format library stays a one-dependency crate the kernel's build script can use for free — and the
 price is that **the binary is invisible to every CI job except the QEMU boot smoke test**. So every
 line with a decision in it lives in the library (`proto.rs` for the wire codec, `walk.rs` for
-traversal and read policy), and `main.rs` is SEF/IPC/grant glue.
+traversal and read policy, `root.rs` for which block driver the root comes from), and `main.rs` is
+SEF/IPC/grant glue.
 
 Three things characterise the server itself:
 
@@ -334,7 +337,7 @@ Three things characterise the server itself:
   server's stack was exactly one page and a block is exactly one page, so a local's frame base would
   have landed below the mapping. The stack is 64 KiB now, so a block is a frame-sized thing again,
   and the block buffer and the staging buffer beside it are both locals in `main` — which never
-  returns, so each outlives every safecopy the `memory` driver makes against its grant. A *helper's*
+  returns, so each outlives every safecopy the block driver makes against its grant. A *helper's*
   frame would not, and that is the shape to refuse. The capability token stayed: `Blocks` still
   hands the bytes out only through `read(&mut self) -> &[u8; N]`, which makes "hold a directory
   block across the next fetch" a *borrow-check error* rather than a promise. That discipline is
@@ -354,6 +357,43 @@ Two error-relay rules sit side by side and read as contradictory. A failed `BDEV
 detail. A failed `SYS_SAFECOPY` against VFS's grant is relayed **verbatim**, because `EPERM` ("your
 grant does not authorize this") and `EFAULT` ("your buffer is not mapped") are different bugs on the
 caller's side.
+
+### Choosing the root device
+
+Two drivers can serve the root — `vblk`, which is `virtio-blk` and a disk, and `memory`, the ramdisk
+— and MFS picks one in its prologue, before it mounts anything. It prefers the disk:
+
+1. Ask DS for `vblk`. A miss means no disk is attached; that is the healthy ramdisk boot and prints
+   nothing. Any other DS failure on this lookup is treated the same way.
+2. On a hit, grant the block buffer to that endpoint and send **one** request: a zero-length
+   `BDEV_READ` of `BDEV_MINOR_ROOT`. The shared BDEV validation answers that `0` with no grant use
+   and no device I/O, and a `virtio-blk` that has a device but found no minix.rs root on it answers
+   `ENXIO` to everything. A reply of `0` selects `vblk`.
+3. Any other reply — `ENXIO`, another errno, even a positive count — prints `bdev.root vblk rc=<rc>
+   fallback=memory`, revokes the grant just issued so the declined driver holds nothing over the
+   block buffer, and falls through to the `memory` lookup. That lookup keeps its own fallback: if DS
+   cannot resolve `memory`, MFS uses the driver's boot endpoint and prints `bdev.ds FAIL rc=<rc>
+   fallback=<ep>`.
+
+The device selected is named on exactly one line, `[diag mfs] bdev.ds ok name=vblk ep=<ep>` or
+`name=memory ep=<ep>`, and every later request goes to that endpoint with `BDEV_MINOR_ROOT`. Nothing
+else in MFS knows which driver it got: no FS-band handler, no library module besides `root.rs`, and
+no line of VFS differs between the two.
+
+A DS entry for `vblk` is deliberately **not** treated as a root. The driver publishes as soon as the
+kernel assigns it a device, before it has read a sector, because a later publish would lose the race
+with step 1 (see [the drivers chapter](../drivers/overview.md#virtio-blk)). What says whether the
+disk carries a root is the driver's *answer*, and the probe in step 2 cannot be answered early: the
+SENDREC blocks in the kernel until the driver reaches its receive loop, which is after its own root
+check. The decision itself — only `0` selects the disk — is `root::select`, in the library, because
+CI lints `main.rs` (a clippy step passes the `server` feature) and boots it, but no host test, Miri
+or coverage job sees it.
+
+A fallback is quiet by design, which is what makes it dangerous: a broken virtio path that fell back
+to the ramdisk would pass every filesystem marker. The boot-log checker therefore takes the backend
+the boot was run with and applies a per-backend marker pair on top of the common one. A `disk` boot
+requires `bdev.ds ok name=vblk` and forbids `name=memory` and `bdev.root vblk`; a `ramdisk` boot
+requires `name=memory` and forbids `name=vblk`.
 
 ### The write path
 
@@ -393,12 +433,13 @@ still fail on the client's own account, if the buffer it granted was unmapped. L
 against such a buffer leaked one zone per call (each `EFAULT`, none rolled back, for the reason
 above), which exhausted the image's free zones in under 200 calls and left every write after that —
 including a legitimate one — answering `ENOSPC` for the rest of the boot: a reachable denial of
-service, not a benign leak. The fix is a second `.bss` staging buffer (`Stage`) that `do_write`
-fills from the client's grant **before** anything is allocated, so no client-controlled failure can
-occur after an allocation. Note what this is not: it is a *restaging*, not a rollback — the
-corruption case above (an indirect slot's already-existing block) is exactly why rolling back was
-never the right fix. The `fs.leak` boot probe proves the closure directly: 256 writes aimed at an
-unmapped buffer must all answer `EFAULT` and allocate nothing, and a real write must still succeed
+service, not a benign leak. The fix is a second block-sized staging buffer (`Stage`, a `main`-frame
+local like the block buffer; it was a `.bss` static when the slice landed) that `do_write` fills
+from the client's grant **before** anything is allocated, so no client-controlled failure can occur
+after an allocation. Note what this is not: it is a *restaging*, not a rollback — the corruption
+case above (an indirect slot's already-existing block) is exactly why rolling back was never the
+right fix. The `fs.leak` boot probe proves the closure directly: 256 writes aimed at an unmapped
+buffer must all answer `EFAULT` and allocate nothing, and a real write must still succeed
 afterwards.
 
 The write path checks zone numbers against a **lower bound the read path deliberately lacks**

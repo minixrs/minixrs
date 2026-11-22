@@ -14,19 +14,21 @@ page.
 There are three drivers with an ELF today: **TTY** (`drivers/tty/`), the console; **`memory`**
 (`drivers/memory/`), the boot ramdisk plus, since slice 5.11, the
 [`/dev/null` and `/dev/zero` character minors](#the-character-minors); and, since slice 6.2,
-**`virtio-blk`** (`drivers/virtio-blk/`), which [brings a virtio disk up](#virtio-drivers) and
-serves nothing yet. Three more slots (`vcon`, `vinput`, `vnet`) are wired in the kernel but hold no
-ELF, and `drivers/virtio-console` and `drivers/virtio-net` are still empty placeholders.
+**`virtio-blk`** (`drivers/virtio-blk/`), which [brings a virtio disk up](#virtio-drivers) and,
+since slice 6.3, [serves it as a block device](#virtio-blk) — the root filesystem's, when the disk
+carries one. Three more slots (`vcon`, `vinput`, `vnet`) are wired in the kernel but hold no ELF,
+and `drivers/virtio-console` and `drivers/virtio-net` are still empty placeholders.
 `drivers/driver-rt` is the runtime the virtio drivers share: the interrupt-line helper, the virtio
-transport and the virtqueue.
+transport, the typed handles on DMA memory and the virtqueue.
 
-The two are worth contrasting up front, because `memory` is the counter-example to the paragraph
-above: **its window is ordinary RAM, not MMIO**. It owns no hardware at all. What makes it a driver
-rather than a server is its *protocol* — it answers
+`memory` is worth contrasting with the other two up front, because it is the counter-example to the
+paragraph above: **its window is ordinary RAM, not MMIO**. It owns no hardware at all. What makes it
+a driver rather than a server is its *protocol* — it answers
 [BDEV](#the-bdev-protocol-and-the-memory-ramdisk) requests for the ramdisk and
 [CDEV](#the-cdev-protocol) requests for its null/zero minors, and knows nothing about what its
-blocks contain. That is exactly the property Phase 6 needs, when virtio-blk replaces it underneath
-an unchanged MFS.
+blocks contain. That is the property that lets `virtio-blk` serve the same root image underneath an
+unchanged MFS: the filesystem asks whichever of the two it selected at boot for blocks, in the same
+band, and cannot tell them apart.
 
 ## The device window
 
@@ -266,8 +268,8 @@ stub-free boot whose `init` parks) proves it with a one-shot `[idle] wake ok`.
 ## VirtIO drivers
 
 A virtio driver is the same kind of process as TTY, with three things delivered by the kernel
-instead of discovered: a register page, an interrupt line and a block of DMA memory. Slice 6.2
-builds that machinery and proves it with one device, `virtio-blk`, answering.
+instead of discovered: a register page, an interrupt line and a block of DMA memory. Slice 6.2 built
+that machinery around one device, `virtio-blk`; slice 6.3 put block requests through it.
 
 ### Four slots, one device each
 
@@ -320,7 +322,7 @@ For a driver the probe assigned, `load_boot_server` adds one arm beside TTY's an
 maps the register page `Prot::DEVICE_RW` at `VIRTIO_MMIO_PAGE_VA`, pushes the device's INTID onto
 the driver's `Priv::irqs` — so the allow-list is exactly one line long — and maps the driver's
 [DMA run](../memory/overview.md#the-dma-window) at `DMA_VA`. It logs two lines, which are required
-boot markers:
+markers of a boot with the disk attached:
 
 ```text
 [devmap] vblk va=0x40001000 pa=0xa000000 intid=48
@@ -331,8 +333,8 @@ The driver learns the addresses through two more `SYS_GETINFO` selectors,
 [`GET_VIRTIO_MMIO` (65) and `GET_DMA` (66)](../reference/syscalls.md#sys_getinfo-selectors). Both
 answer `EPERM` to any process that is not one of the four driver slots, and a driver slot with no
 device gets `ENOENT` — which is how a driver is told there is no disk, not an error: `virtio-blk`
-prints `no device` and idles. The register base a driver uses is the reply's VA, which already
-includes the device's offset inside its page.
+publishes nothing to DS and prints `no device`. The register base a driver uses is the reply's VA,
+which already includes the device's offset inside its page.
 
 ### What the boundaries do not stop
 
@@ -349,7 +351,7 @@ configuration does not offer.
 
 ### `driver-rt`
 
-`drivers/driver-rt/` has three pieces and no `std`:
+`drivers/driver-rt/` has four pieces and no `std`:
 
 - **`IrqLine`** (`irq.rs`) is a claim on one interrupt line: `new(intid, notify_id)` issues
   `IRQ_SETPOLICY`, `rearm()` issues `IRQ_ENABLE`, `fired(pending)` tests the line's bit in a
@@ -365,55 +367,193 @@ configuration does not offer.
   device that clears `FEATURES_OK` is left `FAILED`. `driver_ok` refuses to write if the device
   already shows `FAILED` or `NEEDS_RESET`; `fail` marks a device that was negotiated and then
   abandoned; `config_read` re-reads until the configuration generation is stable, a bounded number
-  of times. Nothing in the crate waits on a register or a ring.
+  of times. `MmioTransport::notify` issues a full barrier before its `QueueNotify` write, so the
+  store that published the available index is ordered before the device is told to look, whatever
+  the caller did in between. Nothing in the crate waits on a register or a ring.
+- **Typed DMA handles** (`dma.rs`). The device reads and writes the driver's
+  [DMA run](../memory/overview.md#the-dma-window) too, so no Rust reference to that memory may ever
+  exist. `DmaRegion::new` is the one `unsafe` constructor: it adopts the run the kernel reported
+  (refusing a null, empty or wrapping one from the numbers alone), on the caller's word that the run
+  stays mapped for the life of the process, is never referenced, and is adopted only once.
+  `DmaRegion::split_queue(len)` consumes the region and returns its first `len` bytes as a
+  `QueueMem` — a handle that is not `Copy` and offers no way to write — plus the remainder as a new
+  region; it refuses a region that has already handed out a buffer. `DmaRegion::buf(offset, len)` on
+  the remainder then hands out bounds-checked `DmaBuf`s, each a virtual address, a physical address
+  and a length; a `DmaBuf`'s `read_into` and `write_from` are bounds-checked volatile copies, which
+  is how a driver touches a request header or a status byte without an `unsafe` block of its own.
+  `DmaRegion::peek` reads the run without creating a handle.
 - **The split virtqueue** (`queue.rs`) is `queue_layout` / `clamp_queue_size` (pure arithmetic over
   a power-of-two size up to 32768; `clamp_queue_size` and `VirtQueue::new` cap it at `QUEUE_SIZE` =
   8 entries) and `VirtQueue`, the driver's half of the descriptor table and the available and used
-  rings over a byte buffer it shares with the device. The device is untrusted: a used element naming
-  an out-of-range or not-in-flight chain head is skipped, and the driver's own free list and chain
-  lengths live outside the shared memory, so a device that scribbles on the descriptor table cannot
-  make the walk loop or leave the queue.
+  rings, built from a `QueueMem` rather than a `&mut [u8]` — the device writes that memory, so a
+  unique reference was never a contract the driver could keep. `VirtQueue::add` takes `DmaBuf`s
+  (device-readable ones, then device-writable ones) and `Transport::queue_enable` takes the
+  `VirtQueue`, so every address the device is ever given comes out of a handle. The device is
+  untrusted, and a faulty one is reported, never skipped: `pop_used` returns `Err(QueueFault)` for a
+  used element naming an out-of-range chain head (`BadId`) or one that is not in flight
+  (`NotInFlight`), and for a used index further ahead than the chains in flight (`Runaway`, which is
+  also what a completion with nothing in flight is). A fault consumes nothing, so the next
+  `pop_used` reports it again, and the driver stops using the device. The driver's own free list and
+  chain lengths live outside the shared memory, so a device that scribbles on the descriptor table
+  cannot make the walk loop or leave the queue.
 
-`unsafe` is confined to `mmio.rs` (volatile register accesses) and `queue.rs` (volatile accesses to
-the ring memory the device shares); `irq.rs` is the only piece that traps into the kernel. The rest
-is host-tested against a mock transport and hand-written rings.
+`unsafe` is confined to `mmio.rs` (volatile register accesses) and `dma.rs` (every access to the
+memory the device shares); `queue.rs` has none, because its ring accesses go through the handle it
+holds. Because `VirtQueue::new`, `add` and `queue_enable` take handles instead of addresses, all
+three are safe functions, and safe driver code cannot aim the device at memory outside its own run
+through them — nor behind their backs, because the ring memory was split off before any buffer
+handle existed and no `DmaBuf` can overlap it. That is a guard against mistakes and not a new
+boundary: [the trust model above](#what-the-boundaries-do-not-stop) is unchanged, and two data
+buffers can still overlap each other. `irq.rs` is the only piece that traps into the kernel. The
+rest is host-tested against a mock transport and hand-written rings, with a second handle on the
+same memory playing the device's half.
 
 ### The driver loop
 
 Every virtio driver's receive loop follows one order, written once in `driver-rt`'s crate
 documentation: when a `HARDWARE` notification names the line (`IrqLine::fired`), read
 `Transport::interrupt_status`, `interrupt_ack` exactly those bits, **then** walk the used ring with
-`VirtQueue::pop_used` until it returns `None`, and only then `IrqLine::rearm`. The acknowledgement
-comes before the walk because a virtio-mmio line is level-triggered on `InterruptStatus`: a
-completion landing after the last empty `pop_used` but before an acknowledgement placed after the
-walk would be cleared by that acknowledgement, and the re-arm would find the line low and lose the
-interrupt. Acknowledged first, any later completion re-raises the line, and the walk, which runs
-afterwards, still sees everything already published.
+`VirtQueue::pop_used` until it returns `Ok(None)`, and only then `IrqLine::rearm`. An `Err` from the
+walk is a [`QueueFault`](#driver-rt): the driver stops using the device and does not re-arm. The
+acknowledgement comes before the walk because a virtio-mmio line is level-triggered on
+`InterruptStatus`: a completion landing after the last empty `pop_used` but before an
+acknowledgement placed after the walk would be cleared by that acknowledgement, and the re-arm would
+find the line low and lose the interrupt. Acknowledged first, any later completion re-raises the
+line, and the walk, which runs afterwards, still sees everything already published.
 
-### `virtio-blk` in 6.2
+### `virtio-blk`
 
-`drivers/virtio-blk/` does its bring-up once, after `sef_startup` (not inside the `init_fresh`
-callback, where a failure would leave the driver spinning), in eight steps, and prints exactly one
-verdict line:
+`drivers/virtio-blk/` is the first consumer of `driver-rt` and the second driver on the
+[BDEV band](#the-bdev-protocol-and-the-memory-ramdisk). It publishes itself under its proc name,
+`vblk`. Its pure half — block-to-sector arithmetic, the request header's bytes, what a status byte
+means, the shape of a write, the root-check decisions (`blk.rs`) and where its buffers sit in the
+DMA run (`bringup.rs`) — is host-tested; `main.rs` does the kernel calls, the queue and the
+interrupt around it.
 
-1. `GET_VIRTIO_MMIO`; `ENOENT` prints `no device` and idles.
+#### Publishing, then the verdict
+
+A client needs to know two things about this driver, and the driver learns them at different times.
+
+**Whether there is a device** is one kernel call. The `init_fresh` callback asks `GET_VIRTIO_MMIO`
+and publishes `vblk` to DS if the kernel assigned the driver a transport; with no disk attached
+(`ENOENT`) it publishes nothing. Nothing in that callback touches the device, so nothing in it can
+block.
+
+**Whether the device carries a minix.rs root** takes two block reads, each a completion interrupt
+the driver blocks for. Bring-up and the root check therefore run after `sef_startup`, before the
+receive loop.
+
+The order is the point. Publishing only after the verdict would lose a race on every boot: while the
+driver blocked for its first completion, MFS — next in
+[packing order](../boot/overview.md#boot-modules) — would ask DS for `vblk`, find nothing, and mount
+the ramdisk. Published first, the name is there when MFS looks, and MFS's first SENDREC to the
+driver then blocks in the kernel until the driver reaches its receive loop, which is after the
+verdict. So a DS entry for `vblk` means "there is a disk", not "there is a root": a driver with a
+device and no root answers every BDEV request `ENXIO`, and that answer is what
+[MFS's selection](../servers/overview.md#choosing-the-root-device) reads.
+
+#### Bring-up
+
+Bring-up runs once, in eight steps, and prints exactly one verdict line:
+
+1. `GET_VIRTIO_MMIO`; `ENOENT` prints `no device`.
 2. `GET_DMA`, then check the kernel's stamp. The kernel wrote `pa ^ DMA_COOKIE` into the run's first
-   eight bytes through the HHDM; the driver reads it through `DMA_VA`, compares it with the PA it
-   was told, and zeroes it. That proves the VA the driver holds and the PA it will hand the device
-   are the same memory.
+   eight bytes through the HHDM; the driver adopts the run as a `DmaRegion` (one of its two `unsafe`
+   blocks; the transport's constructor in step 3 is the other), reads the word through it, compares
+   it with the PA it was told, and zeroes it. That proves the VA the driver holds and the PA it will
+   hand the device are the same memory.
 3. `MmioTransport::new`, then `DeviceID` must be 2.
 4. `negotiate` with no optional feature, so the accepted word is exactly `VIRTIO_F_VERSION_1`.
 5. Read the capacity from configuration space, generation-stable.
 6. Lay out queue 0 in the first page of the run, enable it, set `DRIVER_OK`, read it back.
 7. Claim the INTID, then claim `INTID + 1`, which must be refused with `EPERM`: that is the proof
    the allow-list is one line long.
-8. `[diag vblk] virtio ok features=0x100000000 capacity=2560 qsize=8 slot=0`.
+8. `[diag vblk] virtio ok features=0x100000000 capacity=2048 qsize=8 slot=0`.
 
-A failing step prints `virtio FAIL step=<step> …` and abandons the rest; the driver still enters its
-receive loop, answers every request `ENOSYS` and publishes nothing to DS. The queue memory is the
-run's page 0, the request header the run's page 1, and the bounce buffer page 2; nothing is
-submitted yet, so a `HARDWARE` notification is unexpected and is reported once as `step=irq-extra`,
-with the line left masked. Serving BDEV requests is slice 6.3.
+`capacity=` is in 512-byte sectors: 2048 is the 1 MiB root image. A failing step prints `virtio FAIL
+step=<step> …` and abandons the rest without resetting the device or releasing anything; a failure
+in step 5 or 6 also marks the device `FAILED`. No step waits on a register or a ring. The driver
+still enters its receive loop, with no root to serve.
+
+The run's page 0 is the queue, page 1 holds the 16-byte request header with the one status byte
+right after it, and page 2 is the one 4096-byte bounce buffer — a BDEV block on its way to or from
+the device. The transport, the queue, the interrupt line and the three buffer handles are kept in
+`main`'s frame for the life of the process.
+
+#### The root check
+
+After a successful bring-up the driver reads block 0 and the last block of the device and applies
+the `memory` driver's [device-level checks](#the-driver-has-no-unsafe-block): block 0 must start
+with the image label and carry a block count equal to the device's own (`capacity / 8`), and the
+last block must start with the tail label. It decodes no superblock and does not depend on the
+filesystem format. A capacity that is zero or not a whole number of blocks fails before any read.
+The verdict is one line:
+
+```text
+[diag vblk] root ok blocks=256 tail=1
+[diag vblk] root FAIL label
+```
+
+(`root FAIL geometry capacity=<n>`, `root FAIL blocks hdr=<n> dev=<n>`, `root FAIL tail label` and
+`root FAIL head rc=<rc>` / `tail rc=<rc>` for a read that failed are the other refusals.) Both reads
+go through the same function a client request does, so the interrupt path is proved before the first
+client and by the same code. They are also the first proof that the run's *data* page is the memory
+the device writes by DMA; the cookie in step 2 proved that only for the run's first page.
+
+#### One request in flight
+
+Every device transfer is one whole block, eight 512-byte sectors, through the bounce buffer; block
+`b` starts at sector `8 * b`, computed with `checked_mul`. One transfer goes like this:
+
+1. Write the header (`type`, a reserved word, `sector`, all little-endian) and preset the status
+   byte to `0xFF`, a value the specification defines no meaning for.
+2. `add` a three-buffer chain — header, data, status, with the data buffer device-writable for a
+   read and device-readable for a write — and `notify` the device.
+3. Block in a receive **filtered to `HARDWARE`**. For each notification naming the line, follow
+   [the driver loop](#the-driver-loop): read `InterruptStatus`, acknowledge exactly those bits, walk
+   the used ring, re-arm.
+4. Repeat 3 until the request's own chain head has come back, then read the status byte.
+
+The filter in step 3 is what lets "one request in flight" need no queue in the driver. A second
+client's request stays a blocked sender in the kernel until the main loop receives again. The wait
+is a blocked receive, never a poll. A device that never completes a request hangs the driver there,
+with its client in SENDREC behind it, and nothing reports it: RS's heartbeat covers DS, VM, SCHED,
+VFS and PM, not drivers. The symptom is silence — from `vblk` and from everything behind MFS, so the
+boot's marker set goes missing — and there is no timeout because no user-space driver holds an
+alarm.
+
+An interrupt that arrives in the main loop, with nothing in flight, gets the same acknowledge, walk
+and re-arm and is otherwise ignored — a configuration-change interrupt is legal. A *used element*
+arriving with nothing in flight is not: the queue reports it as a fault.
+
+On top of that transfer, the three request shapes:
+
+- **`BDEV_READ`**: the device fills the bounce buffer, then `SAFECOPY_TO` pushes the client's `len`
+  bytes into its grant.
+- **`BDEV_WRITE` of a whole block**: `SAFECOPY_FROM` pulls the client's bytes into the bounce buffer
+  first, then the device write. A refused grant or an unmapped buffer is relayed and the device is
+  never written.
+- **`BDEV_WRITE` of part of a block**: read the block into the bounce buffer, pull the client's
+  bytes over its first `len`, write it back — two device round trips, so that the rest of the block
+  survives as [the protocol requires](#the-bdev-protocol-and-the-memory-ramdisk).
+
+A zero-length request of either kind is answered `0` with no grant use and no device I/O.
+
+#### What a client hears
+
+- **`ENXIO`** for every BDEV request when there is no root: no device, a failed bring-up, or labels
+  that did not match. Minor 0 is "the root filesystem this driver serves", and there is none.
+- **`ENXIO` / `EINVAL`** for a malformed request, decided by the validation `memory` shares.
+- **`EIO`** when the device failed a well-formed request: a status byte other than `0` — the
+  device's `IOERR` or `UNSUPP`, or the preset `0xFF` still there because the device completed the
+  request without writing it — or a broken device.
+- A negative `SYS_SAFECOPY` result, **verbatim**.
+- **`ENOSYS`** for any other request number.
+
+A device is *broken* once it can no longer be believed or waited for: a `QueueFault` from the walk,
+a line that cannot be re-armed, a failed receive, or a queue that refuses a chain with nothing in
+flight. The driver then writes `FAILED`, prints one `virtio FAIL step=io …` line naming the cause,
+leaves the line masked, and answers `EIO` to every later request.
 
 ### A virtio driver cannot exit
 
@@ -486,12 +626,12 @@ literal substrings and cannot express a carriage return).
 Block drivers answer requests in the `BDEV_RQ_BASE = 0xA00` band — between VFS (`0x800`) and CDEV
 (`0xB00`), with FS (`0x900`) between VFS and BDEV. Two requests are defined:
 
-| Field    | Payload offset | Meaning                                                  |
-| -------- | -------------- | -------------------------------------------------------- |
-| minor    | `0..4` (i32)   | which device; `BDEV_MINOR_RAMDISK = 0` is the boot image |
-| grant id | `4..8` (i32)   | names the client's buffer                                |
-| length   | `8..12` (i32)  | bytes requested; at most `BDEV_MAX_IO` = one block       |
-| block    | `16..24` (u64) | which block of the device                                |
+| Field    | Payload offset | Meaning                                               |
+| -------- | -------------- | ----------------------------------------------------- |
+| minor    | `0..4` (i32)   | which device; `BDEV_MINOR_ROOT = 0` is the root image |
+| grant id | `4..8` (i32)   | names the client's buffer                             |
+| length   | `8..12` (i32)  | bytes requested; at most `BDEV_MAX_IO` = one block    |
+| block    | `16..24` (u64) | which block of the device                             |
 
 `BDEV_READ` fills the client's buffer (so the grant needs `CPF_WRITE`, and the driver pushes with
 `SAFECOPY_TO`). `BDEV_WRITE`, real since slice 5.10a, is the same request read backwards: it pulls
@@ -501,16 +641,35 @@ arm knows which way the bytes go. The driver never checks the access bit itself,
 kernel's `verify_grant` does, and a driver that re-derived the grant rules would be a second place
 for them to drift.
 
+Two drivers serve the band: `memory`, described in the rest of this section, and
+[`virtio-blk`](#virtio-blk). On both, minor 0 is "the root filesystem this driver serves" —
+`BDEV_MINOR_ROOT`, an alias of the older `BDEV_MINOR_RAMDISK` with the same value — so a client
+names the root the same way whichever driver backs it, and any other minor is `ENXIO`.
+
+**The parse and the validation are shared, not copied.** `server-rt::bdev`'s `parse_read` and
+`validate_read` serve both drivers; the one thing a driver supplies is its device's block count. The
+checks run in a fixed order — minor, negative length, over-long length, invalid grant id, zero
+length (answered `0`), then the block range — so both drivers refuse the same request with the same
+errno, which is what lets MFS's denial battery read identically on either. CDEV shares only its
+parse through `server-rt::cdev`; BDEV shares the validation too because it has no per-driver part.
+
 Most of that table repeats CDEV's rules — no granter field, and the reply `m_type` *is* the byte
-count. Three things are deliberately different:
+count. Four things are deliberately different:
 
 **An over-long request is `EINVAL`, not a short read.** A short *write* is a POSIX contract every
 client already loops over. A short *block read* is useless: a filesystem cannot interpret half a
 block, so clamping would push a retry loop into every caller for nothing.
 
 **An out-of-range block is `EINVAL`, not `EIO`.** A block device's size is known to its client — MFS
-reads it from the superblock's `s_zones` — so asking past the end is a caller bug. `EIO` stays
-reserved for Phase 6's real media errors, where the request was well-formed and the *device* failed.
+reads it from the superblock's `s_zones` — so asking past the end is a caller bug. `EIO` means the
+request was well-formed and the *device* failed. `virtio-blk` answers it for a failed transfer or a
+broken device; `memory` has no device to fail and never does.
+
+**A short write replaces the start of the block and leaves the rest alone.** A `BDEV_WRITE` of fewer
+than 4096 bytes stores its bytes at the beginning of the block and must not disturb the remainder.
+On `memory` that is simply a shorter copy into the ramdisk; on a sector device it is a
+read-modify-write. MFS never issues one — it always stores a whole block — so its boot prologue
+carries a probe that does, [`bdev.partial`](#what-the-boot-log-proves-1).
 
 **`BDEV_WRITE` was numbered three slices before it worked.** From 5.7 to 5.10a the arm answered
 `EROFS` rather than `ENOSYS`, because `ENOSYS` is already the unknown-`m_type` answer and reusing it
@@ -523,9 +682,13 @@ handed to `sys_safecopy`.
 
 `kernel/build.rs` builds a MinixFS v3 image at compile time (`tools/mkfs-mfs`, called as a
 build-dependency library) and packs it into the MXBI archive as a **non-ELF blob** named `rootfs`.
-At boot the kernel copies it, page by page, into freshly allocated frames and maps them into the
-`memory` driver's address space — in the same `load_boot_server` arm the UART page uses, and for the
-same reason: the driver has no way to ask.
+It writes the same bytes, from the same call, to `rootfs.img` beside the kernel ELF, which is the
+file the runner [attaches as the virtio disk](../boot/overview.md#disk-image-and-qemu) — so the two
+drivers serve one image and cannot differ in content.
+
+At boot the kernel copies the blob, page by page, into freshly allocated frames and maps them into
+the `memory` driver's address space — in the same `load_boot_server` arm the UART page uses, and for
+the same reason: the driver has no way to ask.
 
 The window is declared beside the device window, and is **ordinary RAM**:
 
@@ -561,10 +724,10 @@ to exclude from coverage.
 
 The self-check is deliberately **device-level, not format-level**: it reads a 32-byte image header
 that `mkfs-mfs` writes into block 0's boot block (bytes `0..1024`, which MinixFS never reads), never
-a superblock. A block driver that decoded a superblock would depend on the filesystem format, which
-is precisely the dependency Phase 6 has to unwind when virtio-blk replaces the ramdisk. What
-licenses that shortcut is a host test in `tools/mkfs-mfs` asserting the header's three fields equal
-the real superblock's.
+a superblock. A block driver that decoded a superblock would depend on the filesystem format, and
+`virtio-blk` would then have needed the same dependency to serve the same image; instead it applies
+these same checks to what it reads off the disk. What licenses that shortcut is a host test in
+`tools/mkfs-mfs` asserting the header's three fields equal the real superblock's.
 
 It also reads a **tail label** from the image's reserved last block, whose text differs from the
 header's. That is not decoration: a kernel copy loop that failed to advance would map 256 pages of
@@ -599,10 +762,17 @@ kernel-wide one.
 ```
 [ramdisk] mem va=0x80000000 len=1048576 pages=256
 [diag memory] ramdisk ok blocks=256 tail=1
-[diag mfs] bdev.ds ok ep=3
+[diag mfs] bdev.ds ok name=memory ep=3
 [diag mfs] bdev.tail ok match=1
+[diag mfs] bdev.partial ok n=16
 [diag mfs] bdev.deny ok n=10
 ```
+
+Those are the lines of a boot with no disk attached. With the root image attached as a virtio disk —
+the runner's default — the first two still print, because the ramdisk is built and checked on every
+boot, and the third reads `bdev.ds ok name=vblk ep=…`: it is the one line that names the driver MFS
+[selected](../servers/overview.md#choosing-the-root-device), and every `[diag mfs]` line after it is
+the same on both.
 
 `blocks=256` cross-checks the header's own block count against the length `GET_RAMDISK` reported —
 two independently derived numbers, binding the build-time image geometry to the kernel's runtime
@@ -613,15 +783,23 @@ the band. Its own `mount ok root=1 bs=4096 blocks=256` marker, the superblock de
 block it asked for, is what retired the earlier `bdev.read`/`bdev.head` pair: a driver that replied
 `OK` to the wrong page, or returned the header for both, fails to decode there instead of printing a
 marker of its own. `bdev.tail` is the one thing `mount` cannot subsume — it reads the image's
-reserved *last* block, whose label differs from the header's, and is the only proof that the copy
-loop filling the ramdisk reached the end of the blob rather than looping over block 0. The ten
-refusals in `bdev.deny` include the one grant check slice 5.3 could not reach — a `CPF_READ`-only
-grant used as a copy *destination* — plus, since slice 5.10a, two `BDEV_WRITE` probes aimed at the
-write path this driver now really implements, refused by the kernel's grant-direction and minor
-checks rather than by a since-retired `EROFS` stub.
+reserved *last* block, whose label differs from the header's, and so proves that a request's `block`
+field reaches the right block of the device. It is not the proof that the kernel's copy loop reached
+the end of the blob: that is the driver's own `tail=1` (above), and on a disk boot `bdev.tail` never
+touches the ramdisk at all. `bdev.partial` is the short-write contract: MFS reads block 0, which
+leaves a superblock in whatever buffer the driver staged it through, then writes the tail block's
+own first 16 bytes back to it as a partial `BDEV_WRITE`, reads the tail again, and requires the
+label intact and every byte past the header still zero. A sector driver that skipped the read half
+of its read-modify-write would have stored block 0's bytes there (`bdev.partial FAIL clobbered`);
+the first read is what makes that visible, and the probe checks that block 0 really is non-zero past
+its header rather than assuming it. The ten refusals in `bdev.deny` include the one grant check
+slice 5.3 could not reach — a `CPF_READ`-only grant used as a copy *destination* — plus, since slice
+5.10a, two `BDEV_WRITE` probes aimed at the write path this driver now really implements, refused by
+the kernel's grant-direction and minor checks rather than by a since-retired `EROFS` stub.
 
 Every one of those markers is identical with and without the `boot-stubs` feature **and** with and
-without the musl sysroot. That is what the fixed 1 MiB image size buys: in the sysroot-absent build
-the archive packs a 15 KB `worker` ELF under the name `hello`, so a content-sized image would make
-every size-derived marker config-dependent — passing in one configuration and proving nothing in the
+without the musl sysroot, and all but the `bdev.ds` line's `name=` are identical on both root
+backends. That is what the fixed 1 MiB image size buys: in the sysroot-absent build the archive
+packs a 15 KB `worker` ELF under the name `hello`, so a content-sized image would make every
+size-derived marker config-dependent — passing in one configuration and proving nothing in the
 other.

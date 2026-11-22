@@ -10,8 +10,9 @@
 //! This driver asks where (`SYS_GETINFO(GET_RAMDISK)`, which only it may call) and
 //! then serves `BDEV_READ`.
 //!
-//! MINIX 3 boots the same shape, and Phase 6 swaps virtio-blk in underneath an
-//! unchanged MFS — which is why nothing here knows what a filesystem is.
+//! MINIX 3 boots the same shape, and since slice 6.3 `virtio-blk` serves the
+//! same image from a disk underneath an unchanged MFS (this driver is then the
+//! fallback root) — which is why nothing here knows what a filesystem is.
 //!
 //! ## Five things worth knowing
 //!
@@ -27,11 +28,13 @@
 //! **The granter comes from `m_source`.** This driver holds `SYS_SAFECOPY`; its
 //! clients do not. A granter field in the payload would let any client aim a
 //! privileged cross-address-space copy at a third party's memory through it.
-//! `bdev.rs` has no way to express one.
+//! `server-rt`'s `bdev` module has no way to express one.
 //!
 //! **An over-long or out-of-range request is `EINVAL`.** Not a short read (a
-//! filesystem cannot interpret half a block) and not `EIO` (which stays reserved
-//! for Phase 6's real media errors). See `bdev.rs`.
+//! filesystem cannot interpret half a block) and not `EIO` (which means the device
+//! failed a well-formed request — something only `virtio-blk` can report). See
+//! `server-rt`'s `bdev` module, which `virtio-blk` shares so both drivers refuse
+//! identically.
 //!
 //! **`BDEV_WRITE` stores, as of slice 5.10a.** It was defined and answering
 //! `EROFS` from slice 5.7 — deliberately not folded into the unknown-request
@@ -74,6 +77,7 @@ use minixrs_kernel_shared::rootfs::{
     HDR_BLOCKS_OFF, IMAGE_HDR_LEN, IMAGE_LABEL, IMAGE_LABEL_LEN, IMAGE_TAIL_LABEL,
 };
 use minixrs_kernel_shared::uspace::RAMDISK_VA;
+use minixrs_server_rt::bdev::{parse_read, validate_read};
 use minixrs_server_rt::{
     SefConfig, buf_addr, diag_fmt, rd_u64, sef_publish_to_ds, sef_startup, sys_copy, sys_getinfo,
     sys_safecopy,
@@ -286,8 +290,8 @@ fn rd_hdr_u32(buf: &[u8; IMAGE_HDR_LEN], off: usize) -> u32 {
 /// (`>= 0`), or a negative errno.
 #[cfg_attr(test, allow(dead_code))]
 fn do_read(caller_e: Endpoint, msg: &Message, va: u64, blocks: u64) -> i32 {
-    let req = bdev::parse_read(msg);
-    let (byte_off, n) = match bdev::validate_read(req, blocks) {
+    let req = parse_read(msg);
+    let (byte_off, n) = match validate_read(req, blocks) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -330,8 +334,8 @@ fn do_read(caller_e: Endpoint, msg: &Message, va: u64, blocks: u64) -> i32 {
 /// beginning.
 #[cfg_attr(test, allow(dead_code))]
 fn do_write(caller_e: Endpoint, msg: &Message, va: u64, blocks: u64) -> i32 {
-    let req = bdev::parse_read(msg);
-    let (byte_off, n) = match bdev::validate_read(req, blocks) {
+    let req = parse_read(msg);
+    let (byte_off, n) = match validate_read(req, blocks) {
         Ok(v) => v,
         Err(e) => return e,
     };

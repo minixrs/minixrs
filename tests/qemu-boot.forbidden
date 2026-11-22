@@ -1,6 +1,8 @@
 # tests/qemu-boot.forbidden -- substrings that must NOT appear in a healthy
 # boot log. One literal substring per line; blank lines and '#' comments are
-# ignored. These are the kernel's halt-path banners (panic.rs, exception.rs,
+# ignored. This is the COMMON set, forbidden on every boot; each root backend
+# adds its own pair beside it (tests/qemu-boot.{disk,ramdisk}.{expected,forbidden}).
+# These are the kernel's halt-path banners (panic.rs, exception.rs,
 # irq.rs). Designed [pf] faults from stubs C/D are healthy and NOT listed.
 !!! KERNEL PANIC:
 # Same-EL (EL1) exception -- what a kernel dereference of a bad user pointer
@@ -110,8 +112,17 @@ minix.rs fileio: exit-reset FAIL
 [virtio] refuse
 [diag tty] getinfo.deny FAIL
 
-# Slice 6.2: virtio-blk's bring-up failed at the named step (spec T12), or the
-# device raised an interrupt nothing had asked for (`step=irq-extra`, reported
-# once and left masked). `[diag vblk] no device` is deliberately not forbidden:
-# it becomes meaningful when 6.3 has a second boot without the disk.
+# virtio-blk's bring-up failed at the named step (slice 6.2, spec T12), or the
+# device misbehaved while serving (`step=io`, slice 6.3: a queue fault, a failed
+# re-arm; the driver answers EIO from then on). `[diag vblk] no device` is not
+# forbidden HERE because the ramdisk boot requires it; the disk boot forbids it
+# in tests/qemu-boot.disk.forbidden.
 [diag vblk] virtio FAIL
+# Slice 6.3: vblk had a device and could not publish itself to DS, so MFS cannot
+# find it and the disk boot falls back (tests/qemu-boot.disk.forbidden catches
+# that too; this names the cause).
+[diag vblk] ds FAIL
+# Slice 6.3: a partial BDEV_WRITE disturbed the bytes it did not name
+# (`FAIL clobbered`: the driver overlaid the caller's bytes on a stale bounce
+# buffer instead of on the block), or the probe could not run at all.
+[diag mfs] bdev.partial FAIL

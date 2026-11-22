@@ -130,10 +130,15 @@ No new boot priv wiring is needed — `init_boot_image` already grants every boo
 That is how `userland/worker` gets into the archive as an exec target only (slice 4.7 — see
 [phase-4-servers.md](../plans/phase-4-servers.md)).
 
-**Array position is load-bearing.** DS ordering is a chain — `ds < tty < memory < mfs < vfs` — and
-it is satisfied only by array position in `kernel/build.rs`, so that a server is in its receive loop
-before its first client looks it up (slice 5.8 — see
-[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+**Array position is load-bearing.** DS ordering is a chain — `ds < tty < memory < vblk < mfs < vfs`
+— and it is satisfied only by array position in `kernel/build.rs`, so that a server is in its
+receive loop before its first client looks it up (slice 5.8 — see
+[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)). The `vblk < mfs` link is the one with **no
+fallback line behind it**: MFS reads a missing `vblk` as "no disk attached" and mounts the ramdisk
+without a word, so a `vblk` that had not published when MFS looked would give a ramdisk boot, not a
+FAIL line. Only the disk boot's own marker pair — `bdev.ds ok name=vblk` required, `name=memory`
+forbidden — catches it (slice 6.3 — see
+[the design](../superpowers/specs/2026-11-21-virtio-blk-design.md)).
 
 ## DS: discovering peers
 
@@ -153,6 +158,18 @@ explicitly, to `sonar.coverage.exclusions`).
 so every DS lookup must **fall back to `boot_endpoint(…)`** and emit a distinguishable diag line —
 that keeps the rest of the proof alive while only the `*.ds ok` marker for that lookup disappears
 (slices 5.3 and 5.8 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+
+**A lookup whose miss is a healthy answer is the exception, and it needs a different guard.** MFS's
+`vblk` lookup has no boot-endpoint fallback and prints nothing on a miss, because "no `vblk` in DS"
+is how a boot without a disk looks. A silent miss cannot also be the alarm, so the alarm is moved to
+the marker files: the backend that expects the name requires its `ok` line and forbids the other
+backend's (see [`testing-and-markers.md`](./testing-and-markers.md#markers)).
+
+**A server publishes before anything in it can block.** The publish goes in `init_fresh` and nothing
+ahead of it may wait on a device, a peer or an interrupt. A server that blocks first is descheduled
+with its name absent, the next server in packing order runs, and its lookup misses — on every boot,
+not occasionally. DS has no blocking lookup and a retry loop in the client is polling.
+[Block drivers](#block-drivers) has the case that forced the rule.
 
 ## Privilege wiring
 
@@ -345,8 +362,9 @@ Reply `m_type` **is the byte count** (`>= 0`) on `CDEV_WRITE`, `CDEV_READ`, `BDE
 - **`FS_READ` is clamped — a short read, not `EINVAL`** — and **a short `FS_WRITE` is normal**: the
   client is VFS, whose job is hiding staging from POSIX, and a read is short at EOF regardless.
 - **`BDEV` refuses an over-long or out-of-range request with `EINVAL`, not a short read.** Its
-  client is a filesystem that cannot interpret half a block. `EIO` stays reserved for Phase 6's real
-  media errors, where the request was well-formed and the *device* failed.
+  client is a filesystem that cannot interpret half a block. `EIO` is not available for this: on the
+  BDEV band it means the request was well-formed and the *device* failed, and since slice 6.3
+  `virtio-blk` really answers it (see [Block drivers](#block-drivers)).
 - **`VFS_EXEC_STAGE` is the exception inside VFS: a short stream is `EIO`, not a short stage.** It
   is the one VFS transfer that may not be partial — an ELF cannot be loaded in pieces by a loader
   with no filesystem — so the surrounding "short transfers are normal" contract for
@@ -417,9 +435,11 @@ that prints nothing `tests/qemu-boot.forbidden` catches, so the failure is still
   to make a quarter-megabyte staging buffer one.
 - MFS's move out of `.bss` does **not** weaken TTY's "stage in `main`'s frame, not a static" rule —
   it satisfies it. That rule's load-bearing half is *the buffer outlives every call that names it*,
-  and `main` never returns, so a `main`-frame local is as stable as a static: MFS's grant to MEM is
-  still issued once at boot and `ensure_registered` still never re-fires. A **helper's** frame would
-  compile and then leave the driver safecopying into a dead one; that is the shape to refuse.
+  and `main` never returns, so a `main`-frame local is as stable as a static: MFS's grant to the
+  block driver it selected is still issued once at boot (plus, on the fallback boot only, the one
+  issued to a `vblk` that declined and then revoked) and `ensure_registered` still never re-fires. A
+  **helper's** frame would compile and then leave the driver safecopying into a dead one; that is
+  the shape to refuse.
 - The capability token around MFS's block buffer is independent of where the buffer lives. Its
   load-bearing half is that `Blocks::read(&mut self) -> &[u8; N]` makes "hold a directory block
   across the next fetch" a borrow-check error, and that survived the move from `.bss` to `main`'s
@@ -438,7 +458,7 @@ that the obvious one-line version of it under-reports large frames by 7.5x (slic
 
 ### Replying, relaying, and register layouts
 
-Beyond the shared contracts above, three driver-specific rules:
+Beyond the shared contracts above, the driver-specific rules:
 
 - PL011 register offsets are **duplicated** in `kernel/src/arch/aarch64/uart.rs` and
   `drivers/tty/src/pl011.rs` and cannot be shared: the kernel crate is bare-metal-only and pinned by
@@ -459,32 +479,73 @@ Beyond the shared contracts above, three driver-specific rules:
   (slice 6.1 — see
   [I12](../superpowers/specs/2026-09-29-sys-irqctl-design.md#i12--one-pattern-for-tty-rx-virtio-console-and-virtio-blk)).
   For a **virtio** device the acknowledgement comes *before* the drain: `InterruptStatus` is a
-  level, so acknowledge exactly the bits read, walk the used ring until `pop_used` returns `None`,
-  then `rearm` — an acknowledgement placed after the walk would clear a completion that landed
-  between the last pop and the ack, and the re-arm would find the line low. The order is written
-  once, in `driver-rt`'s crate documentation
+  level, so acknowledge exactly the bits read, walk the used ring until `pop_used` returns
+  `Ok(None)`, then `rearm` — an acknowledgement placed after the walk would clear a completion that
+  landed between the last pop and the ack, and the re-arm would find the line low. The order is
+  written once, in `driver-rt`'s crate documentation. Re-arm after **every** interrupt on a healthy
+  device, including one whose walk completed nothing: 6.3's mutation that dropped the re-arm hung
+  the disk boot before `root ok`
+- **`pop_used` returning `Err(QueueFault)` ends the device, it is not an element to skip.** A fault
+  is sticky — nothing was consumed, so popping again reports it again — so stop the walk, write
+  `FAILED`, print one `virtio FAIL step=io …` line, leave the line masked, and answer `EIO` from
+  then on. The same goes for anything else that leaves a request unanswerable: a `rearm` that fails
+  (the next completion would never arrive, so the next request would hang) and a failed receive
+  while a request is in flight. 6.2's queue skipped a bad used element silently
+- **A driver waiting for its own completion receives from `HARDWARE` only**, blocked, never polling.
+  The filter is what makes one-request-in-flight need no queue in the driver: a second client stays
+  a blocked sender in the kernel until the main loop receives again. The cost is stated, not hidden
+  — a device that never completes hangs the driver with its client behind it, nothing reports it (RS
+  pings DS, VM, SCHED, VFS and PM, never a driver — the symptom is the marker set going missing
+  behind a silent `vblk` and MFS), and there is no timeout because no user-space driver holds an
+  alarm
 - **A virtio driver brings its device up after `sef_startup`, in straight-line code, never inside an
   `init_fresh` callback**: a callback that returns non-`OK` fails startup and leaves the driver
   spinning with no way to say why, where bring-up after the handshake can print one `[diag]` verdict
   line. No bring-up step waits on a register or a ring; and a failed step prints its name (`virtio
-  FAIL step=<step>`), abandons the rest, and leaves the driver in its receive loop answering
-  `ENOSYS`. A driver whose `SYS_GETINFO(GET_VIRTIO_MMIO)` answers `ENOENT` has no device: it prints
-  `no device` and idles — healthy, not a failure
+  FAIL step=<step>`), abandons the rest, and leaves the driver in its receive loop, replying to
+  every request rather than dropping it. A driver whose `SYS_GETINFO(GET_VIRTIO_MMIO)` answers
+  `ENOENT` has no device: it publishes nothing, prints `no device` and stays in its receive loop —
+  healthy, not a failure. The one thing that **does** belong in `init_fresh` is the DS publish,
+  decided by that same one kernel call and nothing that touches the device (see
+  [Block drivers](#block-drivers))
 - **A virtio driver never exits and never execs.** Its DMA run is ordinary RAM that every
   address-space teardown frees while the device may still be writing to it; `do_exit` and `do_exec`
   halt the kernel for a process holding a virtio assignment until a device-reset path exists
   ([`kernel.md`](./kernel.md#virtio-devices-and-the-dma-window))
 - **`driver-rt` is the one place virtio register knowledge lives.** The negotiation sequence, the
   `VIRTIO_F_VERSION_1` requirement and the version-2-only refusal belong to its `Transport` and
-  `negotiate`; a driver passes the optional features it wants and decides what a refusal means. Its
-  `unsafe` is confined to `mmio.rs` and `queue.rs`
+  `negotiate`; a driver passes the optional features it wants and decides what a refusal means
+- **`driver-rt`'s `unsafe` is confined to `mmio.rs` (register accesses) and `dma.rs` (every access
+  to memory the device shares); keep `queue.rs` and every driver's request path free of it.**
+  `DmaRegion::new` is the one `unsafe` constructor — its contract is that the kernel-reported run
+  stays mapped for the life of the process and that **no Rust reference to it ever exists**, since
+  the device writes it too, and that the run is adopted **once**. Queue memory comes off the front
+  with `DmaRegion::split_queue`, which consumes the region, refuses one that has already lent a
+  buffer, and returns a `QueueMem` (not `Copy`, no writable view) plus the remainder; data buffers
+  are `DmaBuf`s from the remainder's `buf`, bounds-checked and volatile. `VirtQueue::new` takes the
+  `QueueMem`, `VirtQueue::add` takes `DmaBuf`s and `Transport::queue_enable` takes the queue. That
+  is why those three are safe functions: every address the device is given derives from the one
+  constructor, and **no buffer handle can ever overlap a ring**, so safe code cannot rewrite a
+  descriptor and aim the device outside the run. (The first cut handed the queue a `Copy` `DmaBuf`
+  like any other, and review found exactly that hole: keep a copy, `write_from` over a descriptor's
+  address, notify.) Read the run before the split with `DmaRegion::peek`, which lends nothing. A new
+  driver gets its buffers the same way and adds **one** `unsafe` block for the region, never a raw
+  `(pa, len)` pair and never a `&mut [u8]` over the run — 6.2's queue held one, which was a contract
+  the driver could not keep once the queue outlived bring-up. What the handles do not buy: two data
+  buffers can still overlap each other (a logic bug: the device corrupts the driver's own data), and
+  none of it constrains a hostile driver — there is no IOMMU
+- **`Transport::notify` carries its own barrier.** `MmioTransport::notify` issues a `SeqCst` fence
+  before the `QueueNotify` write, so the store that published `avail.idx` is ordered before the
+  device is told to look whatever the caller did in between. Do not rely on `VirtQueue::add`
+  happening to end in one, and give a second transport the same property
 - **A mock device must model the device's refusals, not accept every write.** 6.2's `negotiate`
   re-set a status bit the device had just cleared; the mock transport stored whatever it was sent,
   so the host test passed while QEMU dropped the whole write. A mock that cannot say no proves only
   that the driver talks
 - **Run `cargo miri test -p minixrs-driver-rt` after touching its `unsafe`** (CI's advisory `miri`
   job runs it too). 6.2's first virtqueue wrote through a pointer taken from a shared borrow: every
-  host test passed, and Miri rejected it under both aliasing models
+  host test passed, and Miri rejected it under both aliasing models. `queue.rs`'s tests are what
+  drive `dma.rs` under Miri, so a queue change is a reason to run it as well
 
 ### Block drivers
 
@@ -492,13 +553,54 @@ Beyond the shared contracts above, three driver-specific rules:
   device-level: `mkfs-mfs` writes a 32-byte **image header** into block 0's unused boot block (bytes
   `0..1024`, which MFS never reads) plus a 32-byte **tail label** in a reserved last zone, and the
   driver verifies those. Format-level facts are verified by a *client* through a real BDEV round
-  trip. Phase 6 unwinds this when virtio-blk replaces MEM under an unchanged MFS.
-- That header ABI lives in **`kernel-shared::rootfs`** — mkfs writes it, MEM and VFS read it, and
-  none may depend on the others; `image.rs` re-exports it. `kernel-shared::rootfs` also holds the
-  image's *contents* (`ROOTFS_MOTD`, `ROOTFS_PATTERN_*`, `ROOTFS_HELLO_PATH`,
+  trip. `virtio-blk`'s root check is the same three checks applied to what it reads through its
+  queue, and it does not depend on `minixrs-mfs` either — that independence is what let it serve the
+  same image under an unchanged MFS.
+- **BDEV parse *and* validation live in `server-rt::bdev`, and no block driver carries its own.**
+  `parse_read` and `validate_read` take the device's block count and nothing else from the driver.
+  MFS's denial battery has to read identically on both backends, so both drivers must refuse the
+  same requests with the same errno in the same order, and two copies of `validate_read` would
+  drift. This is the opposite of CDEV, where only the parse is shared: BDEV's validation has no
+  per-driver part. `validate_geometry` stays in `drivers/memory` because it is about the ramdisk
+  window, and `memory` still does not depend on `driver-rt`.
+- **`EIO` is real on the BDEV band and means exactly one thing: the request was well-formed and the
+  device failed.** `virtio-blk` answers it for a status byte other than `0` and for a broken device.
+  Preset the status byte to a value the device never reports (`0xFF`) before every request, so a
+  completion that left it alone reads as a failure rather than as whatever the last request left
+  there. Never use `EIO` for a caller's mistake (that is `EINVAL` / `ENXIO`, from the shared
+  validation) or for a refused grant or unmapped buffer (relayed verbatim, see
+  [Error relay](#error-relay)).
+- **Minor 0 is "the root filesystem this driver serves" on every block driver** — `BDEV_MINOR_ROOT`,
+  an alias of `BDEV_MINOR_RAMDISK` with the same value. A driver that has a device but no minix.rs
+  root on it (a failed bring-up, labels that do not match) answers **`ENXIO` to every BDEV
+  request**, well-formed or not: the minor does not exist there.
+- **A block driver publishes when it has a device and gives its verdict by how it answers** (slice
+  6.3, B1, which amends phase decision H5). `vblk` publishes in `init_fresh` if `GET_VIRTIO_MMIO`
+  assigned it a device, and only afterwards brings the device up and reads the two blocks that say
+  whether it carries a root. Publishing after the verdict cannot work: the verdict takes two
+  completion interrupts, the driver blocks for each, and MFS — next in packing order — runs
+  meanwhile, finds no `vblk`, and mounts the ramdisk. Checking for the root inside `init_fresh`
+  blocks before the publish just the same. Published first, the client's SENDREC waits in the kernel
+  until the driver reaches its receive loop, which is after the verdict, so nothing races and
+  nothing is answered early. The consequence for every client: **a DS entry for a block driver is
+  not a root** — ask it.
+- **Take the client's bytes before touching the device on a write, and read before overlaying on a
+  partial one.** A whole-block `BDEV_WRITE` does its `SAFECOPY_FROM` first, so a bad grant never
+  reaches the device. A write of fewer than 4096 bytes replaces the start of the block and must
+  leave the rest alone, which `memory` gets from a shorter copy and a sector device only from
+  read-modify-write: fetch the block into the bounce buffer, copy the client's bytes over its start,
+  write it back. Skip the fetch and the driver stores whatever the bounce buffer last held.
+- **Block-to-sector arithmetic is `checked_mul`**, like every other offset computed from a request:
+  drivers ship `--release` with `overflow-checks = false`, where `block * 8` on a large block wraps
+  and names a valid sector (see [`rust-style.md`](./rust-style.md)).
+- That header ABI lives in **`kernel-shared::rootfs`** — mkfs writes it, `memory`, `virtio-blk` and
+  MFS read it, and none may depend on the others; `image.rs` re-exports it. `kernel-shared::rootfs`
+  also holds the image's *contents* (`ROOTFS_MOTD`, `ROOTFS_PATTERN_*`, `ROOTFS_HELLO_PATH`,
   `rootfs_pattern_byte`), so a read proof is a *check* against the constant rather than a
   transcription of it.
-- **The driver contains no `unsafe` block and never dereferences its mapping**: client transfers are
+- **The `memory` driver contains no `unsafe` block and never dereferences its mapping**
+  (`virtio-blk` cannot say the same: it has two `unsafe` blocks in `main.rs`, the `driver-rt`
+  constructors for its DMA run and its register window): `memory`'s client transfers are
   `sys_safecopy`, and the boot self-check is `sys_copy(SELF, …, SELF, …)`, so a page that failed to
   map is an `EFAULT` *return value* rather than an EL0 abort — hence no MMIO sibling module and no
   new Sonar exclusion.
@@ -666,6 +768,28 @@ EIO`, `zone_ok` before every read. A corrupt `size = i32::MAX` would otherwise s
 VFS, blocking init. VFS's probes cannot reach that class, which is why it needs unit tests (slice
 5.8 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
+### The root device is chosen by an answer
+
+MFS resolves `vblk` first and `memory` second, and what selects the disk is **not** the DS hit but
+the driver's reply to one zero-length `BDEV_READ` of `BDEV_MINOR_ROOT` (why a hit is not enough is
+under [Block drivers](#block-drivers)). Four rules for that prologue:
+
+- **Only `0` selects the disk.** `ENXIO` is the designed refusal, but every other reply falls back
+  too, a positive count included: a driver that answers a zero-length read with anything else is not
+  one to mount a filesystem through. The reply goes into the fallback line verbatim (`bdev.root vblk
+  rc=<rc> fallback=memory`), so the log says which it was.
+- **The decision is `root::select`, in the library**, with its own host tests — `main.rs` is linted
+  by clippy and booted, but no host test, Miri or coverage job sees it (see
+  [Crate shape](#crate-shape)), so the prologue only gathers the probe result and prints.
+- **Revoke the grant issued to a driver that declined.** The block buffer was granted to `vblk` for
+  the probe; on fallback that grant is revoked before `memory` gets its own, so a declined driver
+  holds nothing read/write over the buffer for the rest of the boot.
+- **Name the selected device on exactly one line** (`bdev.ds ok name=<vblk|memory> ep=<ep>`),
+  printed after the probe so it never names a device MFS then declined. That line is the only one
+  the two backends' `[diag mfs]` output may differ by, and `tools/diff-backends.sh` enforces it — so
+  a new `[diag mfs]` line must not depend on the backend (slice 6.3 — see
+  [the design](../superpowers/specs/2026-11-21-virtio-blk-design.md)).
+
 ### Two copies, not one
 
 A `FS_READ` is **two copies** — device → MFS's block buffer → the caller's granted buffer — unlike
@@ -678,8 +802,8 @@ and a *hole* has no device block to copy from at all. This is MINIX 3's own shap
 MFS's single block buffer is reached only through the **`Blocks` capability token**, whose
 `read(&mut self) -> Result<&[u8; N], i32>` makes "hold a directory block across the next fetch" a
 **borrow-check error** rather than a comment. `Blocks` also carries `buf_mut` and `write`, and its
-standing grant to the `memory` driver is **`CPF_READ | CPF_WRITE`** — one buffer, both directions,
-one static address, so `ensure_registered` still never re-fires.
+standing grant to the block driver it was built for is **`CPF_READ | CPF_WRITE`** — one buffer, both
+directions, one fixed address, so `ensure_registered` still never re-fires.
 
 Widening those flags does **not** widen what any one call may do (the kernel checks the direction
 per call), but it *does* re-arm anything that used the pool's grant id as a
@@ -690,10 +814,11 @@ probe writes the block buffer over the superblock (slices 5.8 and 5.10a — see
 
 ### What the single block buffer forces
 
-MFS has exactly one 4 KiB `.bss` block buffer, and that constraint — not taste — fixes `do_write`'s
-step order: **read the inode, clamp, compute the grown size, place the zone, read-modify-write the
-data block, write the inode back.** Nothing may hold a block across the next fetch, so every
-intermediate is a `Copy` scalar and `place_zone` must finish with the buffer free (slice 5.10a — see
+MFS has exactly one 4 KiB block buffer (a `main`-frame local since the stack grew to 64 KiB; `.bss`
+before), and that constraint — not taste — fixes `do_write`'s step order: **read the inode, clamp,
+compute the grown size, place the zone, read-modify-write the data block, write the inode back.**
+Nothing may hold a block across the next fetch, so every intermediate is a `Copy` scalar and
+`place_zone` must finish with the buffer free (slice 5.10a — see
 [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
 ### Allocation ordering
@@ -715,8 +840,9 @@ intermediate is a `Copy` scalar and `place_zone` must finish with the buffer fre
 
 ### Stage before you allocate
 
-`do_write`'s create path copies the client's bytes into a second 4 KiB `.bss` buffer **before
-anything is allocated**, so no client-controlled failure can occur after an allocation.
+`do_write`'s create path copies the client's bytes into a second 4 KiB buffer (the `Stage`, a
+`main`-frame local like the block buffer) **before anything is allocated**, so no client-controlled
+failure can occur after an allocation.
 
 Do **not** "fix" such a path by clearing the bitmap bit on the error arm: for an indirect slot whose
 indirect block already existed on disk, the block still names the zone, so freeing the bit hands one
@@ -743,6 +869,17 @@ A server's probe battery is how these rules stay proved. Three rules for writing
 - **With the boot stubs on, two copies of one C program can run at once.** A probe that mutates
   filesystem state must be serialised (init skips the `fileio` slot while a `fileio` pid lives) or
   keep its state per pid.
+- **A probe of a device path must first put the device's hidden state where a skipped step would
+  show.** Slice 6.3's mutation that removed the read from `virtio-blk`'s partial write moved no
+  marker and no host test: the filesystem never issues a partial write, and a probe that only wrote
+  the tail block's own bytes back and read them again would have passed too, because the bounce
+  buffer still held that block from the read before. `bdev.partial` therefore reads **block 0
+  first**, leaving a superblock in the bounce buffer, and only then issues the partial write — so a
+  skipped fetch stores block 0's bytes in the tail and the read-back sees them. It also *checks*
+  that block 0 is non-zero past its header instead of assuming it (`bdev.partial FAIL vacuous`),
+  because a priming step that primes nothing makes the probe pass for the wrong reason. The general
+  shape: name the state a wrong implementation would reuse (a bounce buffer, a cached block, a
+  staging page), make it differ from the right answer, and prove that it does.
 
 Report through the path under test where that is what is being proved: a client's write proof must
 be written **through** the descriptor under test (e.g. `/dev/console`, never fd 1), because the

@@ -1,4 +1,6 @@
 # tests/qemu-boot.expected -- required substrings for a healthy QEMU boot log.
+# This is the COMMON set, required on every boot; each root backend adds its own
+# pair beside it (tests/qemu-boot.{disk,ramdisk}.{expected,forbidden}).
 # One literal substring per line; blank lines and '#' comments are ignored.
 # Checked by tools/check-boot-log.sh via `grep -aF` (the log interleaves raw
 # single-char tick bytes, so it must be forced to text). Substrings stop just
@@ -14,12 +16,13 @@ minix.rs booting on aarch64
 #
 # The order below is `kernel/build.rs`'s `servers` array, and it is load-bearing
 # rather than cosmetic: DS first so every later DS_PUBLISH lands, then each
-# server before its first client's DS_RETRIEVE -- ds < tty < memory < mfs < vfs.
+# server before its first client's DS_RETRIEVE -- ds < tty < memory < vblk < mfs
+# < vfs < pm.
 # MEM precedes MFS (MFS's `bdev.ds` lookup) and MFS precedes VFS (VFS's `fs.ds`
 # lookup). Both lookups fall back to boot_endpoint and say so, so a reordering
 # turns those two markers red rather than hanging the boot. vblk sits between
-# memory and mfs because 6.3's DS chain will need `vblk < mfs`; nothing depends
-# on it in 6.2.
+# memory and mfs because MFS looks `vblk` up first (slice 6.3); a miss there has
+# no FAIL line and is caught by tests/qemu-boot.disk.expected instead.
 [as] vm nr=7 ttbr0_pa=
 [as] ds nr=5 ttbr0_pa=
 [as] tty nr=4 ttbr0_pa=
@@ -391,8 +394,8 @@ minix.rs hello: iov ok match=1
 # advance would map 256 pages of block 0 and pass every header check.
 #
 # This is a DEVICE-level check, not a format-level one -- no superblock is
-# decoded and `minixrs-mfs` is not a dependency of this driver, so Phase 6 can
-# drop virtio-blk in under an unchanged MFS. `tools/mkfs-mfs`'s round-trip test
+# decoded and `minixrs-mfs` is not a dependency of this driver, which is what let
+# slice 6.3 put virtio-blk under an unchanged MFS. `tools/mkfs-mfs`'s round-trip test
 # `the_image_header_agrees_with_the_real_superblock` is what licenses checking the
 # header instead; slice 5.8's READSUPER closes it for real.
 [diag memory] ramdisk ok blocks=256 tail=1
@@ -417,16 +420,21 @@ minix.rs hello: iov ok match=1
 # MFS announces itself on the kernel debug channel, like every other SEF server.
 [diag mfs] sef ready
 
-# It resolves the `memory` driver through DS rather than hard-coding
-# boot_endpoint(MEM_PROC_NR) -- the 5.3 contract, with the same
-# non-deterministic-publish caveat (it works because build.rs packs memory before
-# mfs) and the same distinguishable `bdev.ds FAIL ... fallback=` line.
-[diag mfs] bdev.ds ok ep=
+# It resolves its block driver through DS rather than hard-coding a boot endpoint
+# -- the 5.3 contract, with the same non-deterministic-publish caveat (it works
+# because build.rs packs memory and vblk before mfs) and the same distinguishable
+# `bdev.ds FAIL ... fallback=` line. Since slice 6.3 the line names the driver
+# chosen: `name=vblk` when a disk carrying a root is attached, `name=memory`
+# otherwise. WHICH name is required is the per-backend files' business
+# (tests/qemu-boot.{disk,ramdisk}.expected); this is the one [diag mfs] line the
+# two boots differ by, which tools/diff-backends.sh checks.
+[diag mfs] bdev.ds ok name=
 
 # The mount: block 0 read over BDEV, its superblock decoded at byte 1024 and
 # VALIDATED as MinixFS v3. All three fields are constants, so all three are
 # asserted. `blocks=256` comes from the superblock's own s_zones, while the
-# driver's `ramdisk ok blocks=256` above comes from the image HEADER -- two
+# serving driver's own line (`ramdisk ok blocks=256` above for `memory`, `root ok
+# blocks=256` for `vblk` on a disk boot) comes from the image HEADER -- two
 # independently derived numbers that must agree, which is what makes the pair
 # worth more than either. This is also what retires 5.7's `bdev.read`/`bdev.head`:
 # a driver that replied OK, or returned the wrong page, fails to decode here.
@@ -455,6 +463,16 @@ minix.rs hello: iov ok match=1
 # `tail=1` proves only that the kernel's copy loop reached the end of the blob,
 # not that BDEV indexes into it correctly.
 [diag mfs] bdev.tail ok match=1
+
+# A PARTIAL BDEV_WRITE (slice 6.3): the tail block's own first 16 bytes written
+# back to it, after a read of block 0 has left the driver's bounce buffer holding
+# a superblock. The contract is that the other 4080 bytes survive. `memory`
+# satisfies that with one copy; a sector device has to read the block before it
+# overlays, and a driver that skips the read stores block 0's bytes in the tail
+# (`bdev.partial FAIL clobbered`). The filesystem never issues a partial write,
+# so without this line that read was covered by nothing -- which is what slice
+# 6.3's mutation 8 found. n=16 is IMAGE_LABEL_LEN.
+[diag mfs] bdev.partial ok n=16
 
 # Ten refusals, each well-formed but for one field: minor 7 (-> ENXIO, the
 # driver's own minor check), one block past the end (-> EINVAL, not EIO: a block
@@ -549,6 +567,9 @@ minix.rs hello: iov ok match=1
 #
 #   mkfs (build time) -> MXBI blob -> RAM frames -> memory driver -> BDEV_READ
 #   -> MFS -> magic grant -> init's buffer -> VFS_WRITE -> TTY -> serial
+#
+# That is the ramdisk boot. On the default disk boot the first half is instead
+#   mkfs (build time) -> rootfs.img -> virtio disk -> virtio-blk -> BDEV_READ
 #
 # The line IS the file (kernel_shared::rootfs::ROOTFS_MOTD), written from the
 # buffer the filesystem filled -- so nothing that did not actually read /etc/motd
@@ -957,37 +978,7 @@ minix.rs fileio: malloc ok
 # case=0 rc=<ENOENT>`.
 [diag tty] getinfo.deny ok n=2
 
-# virtio-blk, the first consumer of driver-rt (spec T4, T5, T7, T12). The kernel's
-# boot probe finds the disk tools/qemu-run.sh pins to bus 0 -- transport slot 0,
-# PA 0xa000000 (measured, spec T14) -- and assigns it to vblk; `ver=2` is the
-# modern transport `-global virtio-mmio.force-legacy=false` selects.
-[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk
-
-# The register page, asserted whole: every value follows from the bus pinning in
-# tools/qemu-run.sh (BUS_VBLK=0 -> slot 0 -> PA 0xa000000, in-page offset 0, INTID
-# 48 + 0 = 48), mapped at VIRTIO_MMIO_PAGE_VA (0x40001000). A prefix would also
-# match va=0x40000000 -- TTY's UART page, the off-by-one-page mapping this line
-# exists to catch.
-[devmap] vblk va=0x40001000 pa=0xa000000 intid=48
-
-# The 16-page DMA run at DMA_VA. va= and pages= are asserted; pa= follows them and
-# is not. pa= read 0x40000000 in every local boot, stub-free and default -- the
-# probe's reservation is the first bump from the first usable region -- but that
-# region's base comes from the firmware's memory map, which CI's edk2 build may
-# draw differently (the reason ttbr0_pa is never asserted either). pages= is
-# printed before pa= precisely so the run size is pinned: a wrong size also
-# trips the driver, whose `vblk_layout` refuses a run without its three pages
-# (`virtio FAIL step=queue`, forbidden).
-[dma] vblk va=0xc0000000 pages=16
-
-# The driver's verdict on T12's eight steps: the mapping, the DMA cookie (VA and PA
-# name the same memory), the magic/version/DeviceID, the negotiation, the
-# generation-stable capacity read, queue 0 enabled at the run's PA with DRIVER_OK
-# read back, and its interrupt claim plus the INTID+1 refusal. features= is exactly
-# VIRTIO_F_VERSION_1 (bit 32): virtio-blk requests nothing optional, so any other
-# bit means the negotiation accepted something it was not asked for. capacity= is
-# the blank image's sector count, VBLK_IMAGE_SECTORS in tools/qemu-run.sh -- this
-# is the other holder of that number; change the two together. qsize= is driver-
-# rt's QUEUE_SIZE (8) under the device's QueueNumMax. slot= is not asserted. A
-# failing step prints `virtio FAIL step=<step>` instead (forbidden).
-[diag vblk] virtio ok features=0x100000000 capacity=2560 qsize=8
+# virtio-blk's own markers -- the boot probe, the register page, the DMA run and
+# the driver's verdicts -- exist only when a disk is attached, so since slice 6.3
+# they live in tests/qemu-boot.disk.expected; the no-disk boot's counterpart
+# (`[diag vblk] no device`) is in tests/qemu-boot.ramdisk.expected.

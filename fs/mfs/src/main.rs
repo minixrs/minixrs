@@ -7,19 +7,25 @@
 //! to bytes. It sits between VFS and a block driver:
 //!
 //! ```text
-//!   init ──VFS_OPEN/READ──► VFS ──FS_LOOKUP/READ──► MFS ──BDEV_READ──► memory
+//!   init ──VFS_OPEN/READ──► VFS ──FS_LOOKUP/READ──► MFS ──BDEV_READ──► vblk | memory
 //!                            │                       │                    │
 //!                            │                       └── grant: block buf ─┘
 //!                            └── magic grant: init's buffer ───────────────┘
 //! ```
 //!
+//! The block driver is whichever one the boot prologue selected (slice 6.3):
+//! `vblk`, the virtio-blk disk, when one is attached and carries a minix.rs root,
+//! and otherwise `memory`, the ramdisk. Nothing past [`root_device`] knows which —
+//! see `root.rs` in the library for the choice itself.
+//!
 //! Slice 5.7 built everything under it — the compile-time MinixFS image, the
 //! ramdisk driver, and the whole `minixrs-mfs` format library. This binary is the
 //! glue: SEF startup, the FS-band receive loop, two block-sized buffers, and
 //! the grants at either end of them. **Every line with a decision in it is in the
-//! library** (`proto.rs`, `walk.rs`), because this file is behind
-//! `required-features = ["server"]` and therefore compiled by no CI job except the
-//! QEMU boot smoke test — see the note in `Cargo.toml`.
+//! library** (`proto.rs`, `walk.rs`, `root.rs`), because this file is behind
+//! `required-features = ["server"]` and therefore seen by no host test, Miri or
+//! coverage job — CI only lints it (a clippy step that passes the feature) and
+//! boots it in the QEMU smoke test. See the note in `Cargo.toml`.
 //!
 //! ## Five things worth knowing
 //!
@@ -31,7 +37,7 @@
 //! `uspace::USER_STACK_BYTES` = 64 KiB it fits, and `lib.rs`'s tripwire — written
 //! to fire when the stack grew — is what said to re-read this.
 //!
-//! The frame it lives in is not incidental. A grant issued to the `memory`
+//! The frame it lives in is not incidental. A grant issued to the block
 //! driver names this buffer's *address*, so whatever frame holds it must outlive
 //! every safecopy made against it; `main` never returns, which is why `grants`,
 //! `mount` and both capability tokens are already there rather than in
@@ -71,8 +77,10 @@
 //! **Degraded, never fatal, and never a panic.** Past `sef_startup` every failure
 //! leaves the server answering: a failed mount leaves the [`Mount`] as `None` and
 //! every FS request answers `ENODEV`, the `memory` driver's `blocks = 0`
-//! precedent. A spinning or panicking MFS would block VFS, which would block init,
-//! which would take every slice-5.4-to-5.6 marker with it.
+//! precedent. A `vblk` that is present but refuses the root is not a failure at
+//! all: it is reported on one line and the ramdisk is mounted instead. A
+//! spinning or panicking MFS would block VFS, which would block init, which
+//! would take every slice-5.4-to-5.6 marker with it.
 
 // Freestanding for the real (bare-metal) build, but a normal host binary under
 // `cargo test`. The test harness needs `std` and its own entry point, so
@@ -85,7 +93,7 @@ minixrs_abi_note::brand!();
 use minixrs_ipc::{ipc_send, ipc_sendrec};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF, BDEV_MINOR_RAMDISK,
+    BDEV_BLOCK_OFF, BDEV_GRANT_OFF, BDEV_LEN_OFF, BDEV_MAX_IO, BDEV_MINOR_OFF, BDEV_MINOR_ROOT,
     BDEV_READ, BDEV_RQ_BASE, BDEV_WRITE, FS_CREATE, FS_LOOKUP, FS_READ, FS_READSUPER, FS_TRUNC,
     FS_WRITE, GET_RAMDISK, NR_BDEV_MSGS, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
 };
@@ -109,6 +117,7 @@ use minixrs_mfs::layout::{Layout, layout, zmap_bit};
 use minixrs_mfs::read::{
     ZoneLookup, inode_at, inode_location, zone_for_offset, zone_from_indirect,
 };
+use minixrs_mfs::root::{self, RootDevice, VblkProbe};
 use minixrs_mfs::superblock::{SUPER_OFFSET, SUPER_ON_DISK_LEN, Superblock};
 use minixrs_mfs::{proto, walk, write};
 use minixrs_server_rt::{
@@ -116,9 +125,12 @@ use minixrs_server_rt::{
     sys_getinfo, sys_safecopy, wr_i32, wr_u64,
 };
 
-/// Simultaneously outstanding grants. Four are used — the block buffer's, and the
-/// three malformed ones the denial battery needs — and the pool costs `N * 32`
-/// bytes of `main`'s frame, so 8 is ample headroom at 256 bytes.
+/// Simultaneously outstanding grants. Four at the peak of every boot — the
+/// block buffer's, and the three malformed ones the denial battery needs. The
+/// fallback boot peaks no higher: the block-buffer grant issued to a `vblk`
+/// that then refused the root is revoked, which frees its slot, before the one
+/// to `memory` is issued (see [`root_device`]). The pool costs `N * 32` bytes
+/// of `main`'s frame, so 8 is headroom enough at 256 bytes.
 const GRANT_SLOTS: usize = 8;
 
 /// Mode a newly created file gets: a regular file, `rw-r--r--`.
@@ -238,8 +250,10 @@ struct Blocks<'a> {
     /// same reason `grants` lives there rather than in [`mfs_init`]. A buffer in a
     /// helper's frame would compile and then hand the driver a dangling address.
     buf: &'a mut [u8; MFS_BLOCK_SIZE],
-    /// The block driver, resolved through DS at boot.
-    mem: Endpoint,
+    /// The block driver [`root_device`] selected at boot — `vblk` or `memory`.
+    /// Every request goes to this endpoint, and [`gid`](Self::gid)'s grantee is
+    /// this endpoint and no other.
+    dev: Endpoint,
     /// Grant naming [`buf`](Self::buf) with the driver as grantee, `CPF_READ |
     /// CPF_WRITE`. Issued once at boot: the buffer is a local of a `main` that
     /// never returns, so its address never changes and
@@ -274,9 +288,9 @@ impl Blocks<'_> {
     /// `BDEV_READ` refuses an over-long request rather than clamping it.
     fn read(&mut self, block: u64) -> Result<&[u8; MFS_BLOCK_SIZE], i32> {
         let rc = bdev_request(
-            self.mem,
+            self.dev,
             BDEV_READ,
-            BDEV_MINOR_RAMDISK,
+            BDEV_MINOR_ROOT,
             self.gid,
             MFS_BLOCK_SIZE as i32,
             block,
@@ -329,9 +343,9 @@ impl Blocks<'_> {
     /// over-long request rather than clamping it.
     fn write(&mut self, block: u64) -> Result<(), i32> {
         let rc = bdev_request(
-            self.mem,
+            self.dev,
             BDEV_WRITE,
-            BDEV_MINOR_RAMDISK,
+            BDEV_MINOR_ROOT,
             self.gid,
             MFS_BLOCK_SIZE as i32,
             block,
@@ -392,14 +406,14 @@ fn main() -> ! {
     // live in `init_fresh`, whose frame is gone by the time a grantee safecopies —
     // the rule `server-rt` keeps `GrantPool` a value rather than a static for.
     //
-    // The two block buffers join them for that same reason: each is named by a
-    // grant the `memory` driver safecopies against, so the frame holding it has to
-    // outlive every such copy. `main` never returns; a helper's frame would
+    // The two block buffers join them for that same reason: the block buffer is
+    // named by a grant the block driver safecopies against, so the frame holding
+    // it has to outlive every such copy. `main` never returns; a helper's frame would
     // compile and then leave the driver copying into a dead one.
     let mut grants: GrantPool<GRANT_SLOTS> = GrantPool::new();
     let mut block_buf = [0u8; MFS_BLOCK_SIZE];
     let mut stage_buf = [0u8; MFS_BLOCK_SIZE];
-    let mut blocks = device(&mut grants, mem_endpoint(), &mut block_buf);
+    let mut blocks = root_device(&mut grants, &mut block_buf);
     let mut stage = stage(&mut stage_buf);
     let mut mount = mount_root(&mut blocks);
 
@@ -414,6 +428,7 @@ fn main() -> ! {
     // markers instead of blacking out `mount` / `fs.selfcheck` / `fs.indirect`.
     // Do not tidy this prologue into alphabetical order.
     tail_probe(&mut blocks);
+    partial_probe(&mut blocks);
     bdev_denials(&mut grants, &blocks);
 
     let mut msg = Message {
@@ -470,7 +485,7 @@ fn mfs_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
 /// else changes.
 #[cfg_attr(test, allow(dead_code))]
 fn do_readsuper(msg: &mut Message, blocks: &mut Blocks<'_>, mount: &mut Option<Mount>) -> i32 {
-    if proto::parse_readsuper(msg) != BDEV_MINOR_RAMDISK {
+    if proto::parse_readsuper(msg) != BDEV_MINOR_ROOT {
         // The *device* does not exist. Nothing is wrong with the request itself.
         return ENXIO;
     }
@@ -651,7 +666,7 @@ fn do_read(
 ///
 /// The device I/O *after* the allocation can still fail with `EIO` and still
 /// leaks a zone. That class is unchanged and unreachable by a client: it needs
-/// the ramdisk itself to fail.
+/// the block device itself to fail.
 ///
 /// **`mtime` and `ctime` are not updated, on purpose.** There is no clock a
 /// user-space filesystem can read yet — MFS holds no `SYS_SETALARM` grant and
@@ -693,7 +708,7 @@ fn do_write(
     if chunk.len == 0 {
         // A legal zero-length write, answered before the grant is touched, so a
         // client polling with `len = 0` cannot use it to probe the granting path.
-        // TTY, VFS and the `memory` driver all apply the same rule.
+        // TTY, VFS and both block drivers all apply the same rule.
         return 0;
     }
     // Computed here rather than at step 5, where it reads more naturally: it is a
@@ -1273,7 +1288,7 @@ fn alloc_inode(blocks: &mut Blocks<'_>, mount: &Mount) -> Result<u32, i32> {
 /// reservation structural rather than merely initial — without it an inode
 /// naming that zone would hand it back to [`alloc_zone`], whose own limit is
 /// `mount.blocks`, and the first write through it would overwrite the label
-/// [`tail_probe`] and the `memory` driver's init check both exist to verify.
+/// [`tail_probe`] and the serving driver's own init check both exist to verify.
 ///
 /// The scan bound is the same one [`alloc_zone`] uses, from the other end: the
 /// bit's own block index must lie inside `layout.zmap_blocks`.
@@ -1500,8 +1515,8 @@ fn lookup(blocks: &mut Blocks<'_>, mount: &Mount, path: &str) -> Result<(u32, In
 /// there is no allocator here and no second buffer, so this asks about each block
 /// in turn and keeps nothing but a `u32`. [`walk::dir_size`] is what bounds the
 /// loop — a corrupt inode claiming `size = i32::MAX` would otherwise spin — and
-/// [`walk::next_dir_chunk`] is the round itself, in the library because this file
-/// is compiled by no CI job.
+/// [`walk::next_dir_chunk`] is the round itself, in the library because no host
+/// test, Miri or coverage job sees this file.
 #[cfg_attr(test, allow(dead_code))]
 fn find_component(
     blocks: &mut Blocks<'_>,
@@ -1572,8 +1587,76 @@ fn read_chunk<'a>(
 // stepped over, never fatal.
 // ---------------------------------------------------------------------------
 
+/// A DS key: `name`, NUL-padded to the registry's fixed width.
+///
+/// Both names this server looks up are library constants that `root.rs`'s tests
+/// pin shorter than the key, so the `zip` never truncates one.
+#[cfg_attr(test, allow(dead_code))]
+fn ds_key(name: &[u8]) -> [u8; SYS_GETINFO_NAME_LEN] {
+    let mut key = [0u8; SYS_GETINFO_NAME_LEN];
+    for (dst, src) in key.iter_mut().zip(name) {
+        *dst = *src;
+    }
+    key
+}
+
+/// Select the block device the root is mounted from, grant it the block buffer,
+/// and hand back the fetch capability (slice 6.3, B2).
+///
+/// `vblk` first. A DS miss is the healthy no-disk boot and prints nothing. On a
+/// hit the buffer is granted to that endpoint and **one** request is sent: a
+/// zero-length `BDEV_READ` of the root minor, which a driver serving a root
+/// answers `0` with no grant use and no device I/O, and a driver with a device
+/// but no minix.rs root on it answers `ENXIO`. The SENDREC blocks until the
+/// driver reaches its receive loop, which is after its own root check, so the
+/// answer cannot arrive before the verdict it reports. What the answer *means*
+/// is [`root::select`]'s decision, not this function's.
+///
+/// Anything but `0` prints `bdev.root vblk rc=<rc> fallback=memory` and falls
+/// through to [`mem_endpoint`], unchanged — its own `bdev.ds FAIL` line included.
+///
+/// **The selected device is named on exactly one line**, `bdev.ds ok name=<name>
+/// ep=<ep>`, and that line is the only one the two backends' output may differ
+/// by. For `vblk` it is printed after the probe, so it never names a device this
+/// server then declined.
+///
+/// **On fallback the grant issued to `vblk` is revoked**, so a driver this server
+/// declined keeps no access to the block buffer, and the revoke frees its pool
+/// slot, so [`GRANT_SLOTS`] sees no more grants outstanding on this boot than on
+/// a healthy one. The [`Blocks`] returned is rebuilt over the same
+/// buffer — moved out of the declined token, so there is never a second path to
+/// it — with a fresh grant whose grantee is `memory`.
+#[cfg_attr(test, allow(dead_code))]
+fn root_device<'a>(
+    grants: &mut GrantPool<GRANT_SLOTS>,
+    buf: &'a mut [u8; MFS_BLOCK_SIZE],
+) -> Blocks<'a> {
+    let Ok(ep) = sef_retrieve_from_ds(&ds_key(root::VBLK_NAME)) else {
+        return device(grants, mem_endpoint(), buf);
+    };
+    let blocks = device(grants, ep, buf);
+    let rc = bdev_request(ep, BDEV_READ, BDEV_MINOR_ROOT, blocks.gid, 0, 0);
+    match root::select(VblkProbe::Answered { ep, rc }) {
+        RootDevice::Vblk(ep) => {
+            diag_fmt(format_args!("bdev.ds ok name=vblk ep={ep}"));
+            blocks
+        }
+        RootDevice::Memory { refused } => {
+            if let Some(rc) = refused {
+                diag_fmt(format_args!("bdev.root vblk rc={rc} fallback=memory"));
+            }
+            // The declined driver must not keep a read/write grant over the
+            // block buffer for the rest of the boot. A failed revoke changes
+            // nothing the fallback depends on, so it is not reported.
+            let Blocks { buf, gid, .. } = blocks;
+            let _ = grants.revoke(gid);
+            device(grants, mem_endpoint(), buf)
+        }
+    }
+}
+
 /// Resolve the `memory` driver's endpoint through DS, falling back to its boot
-/// endpoint.
+/// endpoint. Reached only when [`root_device`] did not select `vblk`.
 ///
 /// The lookup is the point — a client should not hard-code a peer's boot proc
 /// number — but DS publish-before-retrieve is **not** guaranteed by construction.
@@ -1582,13 +1665,15 @@ fn read_chunk<'a>(
 /// a *distinguishable* diag line: the rest of the boot still runs and still proves
 /// the FS path, while the required `bdev.ds ok` marker disappears and CI goes red
 /// on the ordering regression specifically.
+///
+/// `vblk` has no such fallback, deliberately: its absence from DS is the normal
+/// ramdisk boot, so there is no boot endpoint worth guessing at and no line to
+/// print.
 #[cfg_attr(test, allow(dead_code))]
 fn mem_endpoint() -> Endpoint {
-    let mut key = [0u8; SYS_GETINFO_NAME_LEN];
-    key[0..6].copy_from_slice(b"memory");
-    match sef_retrieve_from_ds(&key) {
+    match sef_retrieve_from_ds(&ds_key(root::MEMORY_NAME)) {
         Ok(ep) => {
-            diag_fmt(format_args!("bdev.ds ok ep={ep}"));
+            diag_fmt(format_args!("bdev.ds ok name=memory ep={ep}"));
             ep
         }
         Err(rc) => {
@@ -1599,9 +1684,12 @@ fn mem_endpoint() -> Endpoint {
     }
 }
 
-/// Grant the block buffer to the driver and hand back the fetch capability.
+/// Grant the block buffer to the driver at `dev` and hand back the fetch
+/// capability.
 ///
-/// **Issued once, and never re-issued.** `buf` is a local of [`main`], whose
+/// **Issued once per driver asked, and never re-issued.** That is once on every
+/// boot but the fallback one, where [`root_device`] calls this a second time
+/// for `memory` after `vblk` declined. `buf` is a local of [`main`], whose
 /// frame never goes away, so its address cannot change and
 /// `GrantPool::ensure_registered` never fires again. That the buffer is on the
 /// stack is fine; that it is on *that* frame is what makes it fine — see
@@ -1613,7 +1701,7 @@ fn mem_endpoint() -> Endpoint {
 #[cfg_attr(test, allow(dead_code))]
 fn device<'a>(
     grants: &mut GrantPool<GRANT_SLOTS>,
-    mem: Endpoint,
+    dev: Endpoint,
     buf: &'a mut [u8; MFS_BLOCK_SIZE],
 ) -> Blocks<'a> {
     // Both directions on one grant: `CPF_WRITE` because the driver copies *into*
@@ -1621,7 +1709,7 @@ fn device<'a>(
     // `BDEV_WRITE`. The kernel checks the direction bit per call, so this is not a
     // widening of what any single request may do — see the `gid` field's docs.
     let gid = match grants.grant_direct(
-        mem,
+        dev,
         buf.as_ptr() as usize as u64,
         MFS_BLOCK_SIZE as u64,
         CPF_READ | CPF_WRITE,
@@ -1632,14 +1720,15 @@ fn device<'a>(
             GRANT_INVALID
         }
     };
-    Blocks { buf, mem, gid }
+    Blocks { buf, dev, gid }
 }
 
-/// Mount the ramdisk and announce the geometry.
+/// Mount the root from the selected block device and announce the geometry.
 ///
-/// `blocks=` comes from the superblock's `s_zones`, while the `memory` driver's
-/// own `blocks=` marker comes from the image *header* — two independently derived
-/// numbers that must agree, which is what makes the pair worth more than either.
+/// `blocks=` comes from the superblock's `s_zones`, while the serving driver's
+/// own `blocks=` marker (`memory`'s `ramdisk ok`, `vblk`'s `root ok`) comes from
+/// the image *header* — two independently derived numbers that must agree, which
+/// is what makes the pair worth more than either.
 #[cfg_attr(test, allow(dead_code))]
 fn mount_root(blocks: &mut Blocks<'_>) -> Option<Mount> {
     match read_super(blocks) {
@@ -1733,6 +1822,70 @@ fn tail_probe(blocks: &mut Blocks<'_>) {
     }
 }
 
+/// Store a **partial** block and prove the rest of it survived — the one check on
+/// the `BDEV_WRITE` contract's short-length case, which the filesystem itself
+/// never issues ([`Blocks::write`] always stores a whole block).
+///
+/// The contract is that a write of `len < 4096` replaces the block's first `len`
+/// bytes and leaves the remainder alone. For `memory` that is one copy into the
+/// ramdisk. For a sector device it is a read-modify-write: the driver must fetch
+/// the block into its bounce buffer before overlaying the caller's bytes, or it
+/// stores whatever that buffer last held. Slice 6.3's mutation 8 removed that
+/// fetch and moved no marker and no host test; this probe is what it moves now.
+///
+/// Three steps, and the first is what makes the other two mean anything:
+///
+/// 1. Read block 0. Its bytes past the header are *not* zero (the superblock is
+///    at [`SUPER_OFFSET`]), and it is now the last block the driver touched. If
+///    they were zero the proof would be vacuous, so that is checked, not assumed.
+/// 2. Write the tail label — the [`IMAGE_LABEL_LEN`] bytes block
+///    [`ROOTFS_TAIL_BLOCK`] already starts with — as a partial write to that
+///    block. A correct driver stores the block unchanged.
+/// 3. Read the tail back: the label must match and everything past
+///    [`IMAGE_HDR_LEN`] must still be zero, which is how `mkfs-mfs` wrote it. A
+///    driver that skipped its fetch has stored block 0's superblock there.
+///
+/// It runs after [`tail_probe`] so that probe's verdict never depends on this
+/// one, and writes only bytes the block already holds, so a healthy boot leaves
+/// the image bit-identical.
+#[cfg_attr(test, allow(dead_code))]
+fn partial_probe(blocks: &mut Blocks<'_>) {
+    match blocks.read(0) {
+        Ok(blk) if blk[IMAGE_HDR_LEN..].iter().all(|&b| b == 0) => {
+            diag_fmt(format_args!("bdev.partial FAIL vacuous"));
+            return;
+        }
+        Ok(_) => {}
+        Err(rc) => {
+            diag_fmt(format_args!("bdev.partial FAIL prime rc={rc}"));
+            return;
+        }
+    }
+    blocks.buf_mut()[..IMAGE_LABEL_LEN].copy_from_slice(&IMAGE_TAIL_LABEL);
+    let rc = bdev_request(
+        blocks.dev,
+        BDEV_WRITE,
+        BDEV_MINOR_ROOT,
+        blocks.gid,
+        IMAGE_LABEL_LEN as i32,
+        u64::from(ROOTFS_TAIL_BLOCK),
+    );
+    if rc != IMAGE_LABEL_LEN as i32 {
+        diag_fmt(format_args!("bdev.partial FAIL write rc={rc}"));
+        return;
+    }
+    match blocks.read(u64::from(ROOTFS_TAIL_BLOCK)) {
+        Ok(blk) if blk[..IMAGE_LABEL_LEN] != IMAGE_TAIL_LABEL => {
+            diag_fmt(format_args!("bdev.partial FAIL label"))
+        }
+        Ok(blk) if blk[IMAGE_HDR_LEN..].iter().any(|&b| b != 0) => {
+            diag_fmt(format_args!("bdev.partial FAIL clobbered"))
+        }
+        Ok(_) => diag_fmt(format_args!("bdev.partial ok n={IMAGE_LABEL_LEN}")),
+        Err(rc) => diag_fmt(format_args!("bdev.partial FAIL readback rc={rc}")),
+    }
+}
+
 /// One denial probe: a request well-formed in every respect but one.
 #[cfg_attr(test, allow(dead_code))]
 struct Probe {
@@ -1806,8 +1959,8 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
     // device. This one is missing exactly the bit the copy direction needs.
     let (Ok(not_mine), Ok(read_only), Ok(write_only)) = (
         grants.grant_direct(boot_endpoint(PM_PROC_NR), addr, len, CPF_WRITE),
-        grants.grant_direct(blocks.mem, addr, len, CPF_READ),
-        grants.grant_direct(blocks.mem, addr, len, CPF_WRITE),
+        grants.grant_direct(blocks.dev, addr, len, CPF_READ),
+        grants.grant_direct(blocks.dev, addr, len, CPF_WRITE),
     ) else {
         return diag_fmt(format_args!("bdev.deny FAIL setup"));
     };
@@ -1827,7 +1980,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "bad-block",
             m_type: BDEV_READ,
-            minor: BDEV_MINOR_RAMDISK,
+            minor: BDEV_MINOR_ROOT,
             gid: good,
             len: n,
             block: u64::from(ROOTFS_IMAGE_BLOCKS),
@@ -1836,7 +1989,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "too-long",
             m_type: BDEV_READ,
-            minor: BDEV_MINOR_RAMDISK,
+            minor: BDEV_MINOR_ROOT,
             gid: good,
             len: BDEV_MAX_IO as i32 + 1,
             block: 0,
@@ -1845,7 +1998,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "neg-len",
             m_type: BDEV_READ,
-            minor: BDEV_MINOR_RAMDISK,
+            minor: BDEV_MINOR_ROOT,
             gid: good,
             len: -1,
             block: 0,
@@ -1854,7 +2007,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "not-mine",
             m_type: BDEV_READ,
-            minor: BDEV_MINOR_RAMDISK,
+            minor: BDEV_MINOR_ROOT,
             gid: not_mine,
             len: n,
             block: 0,
@@ -1863,7 +2016,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "read-only",
             m_type: BDEV_READ,
-            minor: BDEV_MINOR_RAMDISK,
+            minor: BDEV_MINOR_ROOT,
             gid: read_only,
             len: n,
             block: 0,
@@ -1872,7 +2025,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "wr-dir",
             m_type: BDEV_WRITE,
-            minor: BDEV_MINOR_RAMDISK,
+            minor: BDEV_MINOR_ROOT,
             gid: write_only,
             len: n,
             block: 1,
@@ -1890,7 +2043,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
         Probe {
             name: "unknown",
             m_type: BDEV_RQ_BASE + NR_BDEV_MSGS as i32,
-            minor: BDEV_MINOR_RAMDISK,
+            minor: BDEV_MINOR_ROOT,
             gid: good,
             len: n,
             block: 0,
@@ -1900,7 +2053,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
 
     let mut denied = 0usize;
     for p in &probes {
-        let rc = bdev_request(blocks.mem, p.m_type, p.minor, p.gid, p.len, p.block);
+        let rc = bdev_request(blocks.dev, p.m_type, p.minor, p.gid, p.len, p.block);
         if rc == p.want {
             denied += 1;
         } else {
@@ -1945,7 +2098,7 @@ fn bdev_denials(grants: &mut GrantPool<GRANT_SLOTS>, blocks: &Blocks<'_>) {
 /// anywhere but this server's own address space. There is no grant-offset field
 /// either: the block buffer's block starts at its beginning.
 #[cfg_attr(test, allow(dead_code))]
-fn bdev_request(mem: Endpoint, m_type: i32, minor: i32, gid: i32, len: i32, block: u64) -> i32 {
+fn bdev_request(dev: Endpoint, m_type: i32, minor: i32, gid: i32, len: i32, block: u64) -> i32 {
     let mut m = Message {
         m_source: 0,
         m_type,
@@ -1955,7 +2108,7 @@ fn bdev_request(mem: Endpoint, m_type: i32, minor: i32, gid: i32, len: i32, bloc
     wr_i32(&mut m, BDEV_GRANT_OFF, gid);
     wr_i32(&mut m, BDEV_LEN_OFF, len);
     wr_u64(&mut m, BDEV_BLOCK_OFF, block);
-    let trap_rc = ipc_sendrec(mem, &mut m);
+    let trap_rc = ipc_sendrec(dev, &mut m);
     if trap_rc != OK {
         return trap_rc;
     }

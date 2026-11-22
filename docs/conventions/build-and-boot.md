@@ -33,9 +33,13 @@ cargo kernel-aarch64
 # the one CI builds), `hello: errno ok` -- the last required marker -- sits at
 # 26.90% of a 240 s log before slice 5.10b and 61.61% after it, i.e. ~148 s in.
 # Re-measure rather than trusting this paragraph: `grep -abo <marker> log | head -1`
-# divided by `wc -c log`, and raise the budget when the fraction climbs. The two
+# divided by `wc -c log`, and raise the budget when the fraction climbs. The three
 # things that move it most are the `hello` flavour (~47 KB with the SDK vs ~200 KB
-# with in-tree musl, all of it read through MFS and VFS) and whether the demo stubs
+# with in-tree musl, all of it read through MFS and VFS), the root backend (below:
+# a disk boot completes every block request by a real interrupt instead of a
+# memcpy -- slice 6.3 measured the last required marker at 66.8% of a 300 s disk
+# log against 48.1% for the ramdisk boot of the same build, so 300 s still holds
+# for both) and whether the demo stubs
 # are on -- `--no-default-features` reaches the same markers **dramatically**
 # faster, because stub C's kernel-call flood dominates a default boot: 5.10b
 # measured the `fs.*` markers landing at ~0.14% of a 60 s stub-free log, so
@@ -50,14 +54,40 @@ cargo kernel-aarch64
 # as the real clock, and run long enough to observe several periods.
 timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
-# The runner's QEMU command line (slice 6.2, spec T13): the `fat:rw:` ESP as a virtio-blk-pci drive
-# (read by the firmware, by nothing in minix.rs), plus `-global virtio-mmio.force-legacy=false` and a
-# blank `target/vblk-blank.img` (2560 sectors, made with `dd` when absent or the wrong size) on a
-# `virtio-blk-device` pinned to `bus=virtio-mmio-bus.0`. The device is attached on every boot,
-# stub-free or not, so every boot prints `[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and the
-# virtio-blk driver's `[diag vblk] virtio ok ... capacity=2560 ...` line. Extra arguments are
-# appended last, so a later `-global` overrides the default. tests/qemu-boot.expected is the other
-# holder of the sector count (the capacity= marker).
+# TWO ROOT BACKENDS (slice 6.3). What the runner attaches selects where MFS mounts
+# its root from, and the two are different boots with different marker sets:
+#
+#   MINIXRS_ROOT=disk     (the default, i.e. the command above) attaches the root
+#                         image as a virtio-blk disk; MFS mounts through `vblk`.
+#   MINIXRS_ROOT=ramdisk  attaches no virtio-blk device at all; `vblk` prints
+#                         `no device` and MFS mounts the `memory` ramdisk.
+#
+# A slice that touches the block path, MFS or VFS owes BOTH boots -- the ramdisk
+# backend stays green for the whole phase (H7). Keep the logs apart; the checker
+# and tools/diff-backends.sh each want to be told which is which.
+MINIXRS_ROOT=ramdisk timeout 300 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+
+# The disk is `rootfs.img`, which kernel/build.rs writes beside the kernel ELF --
+# the very bytes it packs into the boot archive as the ramdisk, so the two backends
+# serve one image. The runner COPIES it to target/vblk-root.img on every run and
+# attaches the copy: the boot writes to its root, and a reused file would make the
+# second run a different test from the first. Nothing persists across boots.
+# `MINIXRS_ROOT` is an environment variable, so like `$MINIXRS_SDK` it does not
+# survive into a separate shell invocation: set it on the command that boots.
+#
+# Two more knobs, for the boots that are MEANT to be refused (a disk boot only):
+#   MINIXRS_VBLK_IMAGE=<file>       attach that file as-is, no copy, instead of the
+#                                   root image -- e.g. a blank disk, which makes
+#                                   `vblk` print `root FAIL label` and MFS fall back
+#   MINIXRS_VBLK_DRIVE_OPTS=<opts>  appended to the -drive argument, e.g. `readonly=on`
+#
+# The rest of the runner's QEMU command line (slice 6.2, spec T13): the `fat:rw:` ESP as a
+# virtio-blk-pci drive (read by the firmware, by nothing in minix.rs), plus `-global
+# virtio-mmio.force-legacy=false`; the disk above is a `virtio-blk-device` pinned to
+# `bus=virtio-mmio-bus.0`. Extra arguments are appended last, so a later `-global` overrides the
+# default. The disk boot prints `[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and the driver's
+# `[diag vblk] virtio ok ... capacity=2048 ...` line; 2048 is `rootfs::ROOTFS_IMAGE_BYTES / 512`, and
+# tests/qemu-boot.disk.expected is the other holder of that number.
 
 # Clean, stub-free boot for debugging (servers + init/worker only, no demo
 # stubs A-D): add --no-default-features to disable the `boot-stubs` feature.
@@ -114,12 +144,17 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
 # that to matter. And `hx` decodes hex by hand because `strtonum` is a gawk
 # extension that macOS's awk does not have.
 
-# Verify a captured boot log against the standard acceptance markers:
-#   tools/check-boot-log.sh <log>   (tests/qemu-boot.expected/.forbidden;
-# update those marker files in the same PR when trace formats or the boot
-# roster change, or the qemu-smoke CI job goes red)
-# For the marker-file contract itself (partial-log behavior, PASS-total counting,
-# etc.), see ./testing-and-markers.md.
+# Verify a captured boot log against the standard acceptance markers. The first
+# argument is the backend the boot ran with and is REQUIRED:
+#   tools/check-boot-log.sh disk    <log>   (a default boot)
+#   tools/check-boot-log.sh ramdisk <log>   (a MINIXRS_ROOT=ramdisk boot)
+# Each checks tests/qemu-boot.expected/.forbidden plus that backend's own
+# tests/qemu-boot.<backend>.expected/.forbidden. Then, with one log of each:
+#   tools/diff-backends.sh <disk-log> <ramdisk-log>
+# Update the marker files in the same PR when trace formats or the boot roster
+# change, or the qemu-smoke CI job goes red. For the marker-file contract itself
+# (which file a marker belongs in, partial-log behavior, PASS-total counting,
+# what the diff can and cannot see), see ./testing-and-markers.md.
 
 # (There is no `kernel-x86_64` alias: `forced-target` pins the kernel to
 # aarch64, so such an alias would silently build aarch64 instead of failing.

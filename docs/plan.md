@@ -627,7 +627,7 @@ framebuffer console plus a keyboard driver inside the milestone bar.
 
 - [x] **6.1** `SYS_IRQCTL` + the kernel idle path + `HARDWARE` NOTIFY
 - [x] **6.2** `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
-- [ ] **6.3** `virtio-blk` behind BDEV + root backend selection
+- [x] **6.3** `virtio-blk` behind BDEV + root backend selection
 - [ ] **6.4** `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
 - [ ] **6.5** TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
 - [ ] **6.6** `virtio-console` as a second CDEV backend

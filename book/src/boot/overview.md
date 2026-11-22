@@ -44,10 +44,13 @@ kmain()  (kernel/src/main.rs)
 User processes run  (scheduler picks the highest-priority runnable proc)
 ```
 
-There is no hand-ordered "start DS, then RS, then PM, …" sequence: `userland_bootstrap` loads every
-boot module and marks it runnable, and the scheduler takes over from there. Servers rendezvous at
-run time — each publishes its endpoint to DS at startup and looks the others up by name — so boot
-order does not matter (see [Servers](../servers/overview.md)).
+There is no hand-ordered "start DS, then RS, then PM, …" sequence in the kernel:
+`userland_bootstrap` loads every boot module and marks it runnable, and the scheduler takes over
+from there. Servers rendezvous at run time — each publishes its endpoint to DS at startup and looks
+the others up by name (see [Servers](../servers/overview.md)). That does not make the order
+irrelevant: nothing guarantees a publish precedes the lookup that needs it, and it holds only
+because of the order the modules are packed in, which is therefore load-bearing — see
+[Boot modules](#boot-modules).
 
 ### CPU state at kernel entry
 
@@ -83,13 +86,17 @@ target binary — the mechanism `worker` rides on.
 
 ### Boot modules
 
-The archive holds thirteen modules (`kernel/build.rs`'s `servers` array). Eleven have non-negative
-proc numbers and are loaded into a process slot at boot; `worker` and `bigprog` (a fixture for the
-user VA map) are tagged with the sentinel `EXEC_ONLY_PROC_NR = -1`, so the loader skips them — they
-have no boot slot and exist only to be resolved by name at `exec` time. The array's order is the
-order the boot log's `[as]` lines appear in, and it is load-bearing: DS first so every later publish
-lands, then each server before its first client's lookup (`ds < tty < memory < mfs < vfs < pm`).
-`vblk` sits between `memory` and `mfs`, where slice 6.3's DS chain will need it.
+The archive holds fourteen modules: thirteen ELFs (`kernel/build.rs`'s `servers` array) and one that
+is not a program at all, the `rootfs` filesystem image. Eleven of the ELFs have non-negative proc
+numbers and are loaded into a process slot at boot; `worker` and `bigprog` (a fixture for the user
+VA map) are tagged with the sentinel `EXEC_ONLY_PROC_NR = -1`, so the loader skips them — they have
+no boot slot and exist only to be resolved by name at `exec` time. `rootfs` carries `-1` too and is
+never loaded as a process: the kernel copies it into the ramdisk. The array's order is the order the
+boot log's `[as]` lines appear in, and it is load-bearing: DS first so every later publish lands,
+then each server before its first client's lookup (`ds < tty < memory < vblk < mfs < vfs < pm`).
+`vblk` sits before `mfs` because MFS asks DS for it first when it
+[chooses its root device](../servers/overview.md#choosing-the-root-device), and a `vblk` that had
+not yet published would read as "no disk attached".
 
 | Module    | Proc nr | Loaded at boot?       |
 | --------- | ------: | --------------------- |
@@ -106,6 +113,7 @@ lands, then each server before its first client's lookup (`ds < tty < memory < m
 | `init`    |      10 | yes — becomes PID 1   |
 | `worker`  |      −1 | no — exec-only target |
 | `bigprog` |      −1 | no — exec-only target |
+| `rootfs`  |      −1 | no — not an ELF       |
 
 Proc number 8 (`PFS`) is reserved in `kernel-shared/src/com.rs` for a server that does not yet
 exist, and so are the three virtio driver slots that have no ELF: 12 (`vcon`), 13 (`vinput`) and 14
@@ -132,9 +140,10 @@ What the probe reads and decides is described in
 
 ## Disk image and QEMU
 
-There is no partitioned root disk yet — the virtio disk below is blank and nothing reads it until
-slice 6.3. The cargo runner (`tools/qemu-run.sh`) stages a small ESP *directory* and hands it to
-QEMU's directory-as-FAT helper, which is enough to land the boot banner without `parted` / `mtools`:
+There is no partitioned disk yet: the virtio disk below is the bare root filesystem image, with no
+partition table around it. The cargo runner (`tools/qemu-run.sh`) stages a small ESP *directory* and
+hands it to QEMU's directory-as-FAT helper, which is enough to land the boot banner without `parted`
+/ `mtools`:
 
 ```text
 target/esp/
@@ -162,17 +171,42 @@ qemu-system-aarch64 \
     -bios <edk2-aarch64-code.fd> \
     -drive file=fat:rw:fat-type=32:target/esp,format=raw,if=virtio \
     -global virtio-mmio.force-legacy=false \
-    -drive file=target/vblk-blank.img,format=raw,if=none,id=vblk0 \
+    -drive file=target/vblk-root.img,format=raw,if=none,id=vblk0 \
     -device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0 \
     -display none -serial stdio -no-reboot
 ```
 
 The first drive is a virtio-blk-**pci** device that only the firmware reads. The second is the one
-minix.rs drives: a blank 2560-sector image (`dd`-created by the runner when absent) on a
-virtio-blk-**mmio** device pinned to transport slot 0, which the kernel's
-[boot probe](#the-virtio-probe) finds and hands to `virtio-blk`. `force-legacy=false` makes every
-mmio transport modern (version 2), the only version the drivers accept; a later `-global` on the
-command line overrides it, which is how the version-refusal boot is produced.
+minix.rs drives: the root filesystem image on a virtio-blk-**mmio** device pinned to transport slot
+0, which the kernel's [boot probe](#the-virtio-probe) finds and hands to `virtio-blk`.
+`force-legacy=false` makes every mmio transport modern (version 2), the only version the drivers
+accept; a later `-global` on the command line overrides it, which is how the version-refusal boot is
+produced.
+
+### The root backend
+
+The root filesystem can come from either of two block drivers, and **what is attached selects it**.
+`kernel/build.rs` writes the image it packs into the boot archive as the `rootfs` module to
+`rootfs.img` as well, in the directory holding the kernel ELF, so the runner finds it beside the
+kernel it was handed and the image always belongs to that kernel. The environment variable
+`MINIXRS_ROOT` then chooses:
+
+| `MINIXRS_ROOT`   | What the runner attaches                                 | Where MFS mounts its root from       |
+| ---------------- | -------------------------------------------------------- | ------------------------------------ |
+| `disk` (default) | a copy of `rootfs.img`, as the virtio disk shown above   | `virtio-blk`, through the disk       |
+| `ramdisk`        | no virtio-blk-mmio device at all (the two lines go away) | `memory`, the ramdisk in the archive |
+
+On a `disk` boot the runner copies `rootfs.img` to `target/vblk-root.img` **on every run** and
+attaches the copy. The boot writes to its root, so a reused file would make the second run a
+different test from the first; nothing persists from one boot to the next. The ramdisk is still
+built and mapped on a `disk` boot — the `rootfs` module is in the archive either way — it is simply
+not the device MFS selects.
+
+Two further variables exist for the boots that are meant to be refused. `MINIXRS_VBLK_IMAGE=<file>`
+attaches that file as-is, with no copy, instead of the root image: a blank disk makes `virtio-blk`
+print `root FAIL label` and MFS fall back to the ramdisk. `MINIXRS_VBLK_DRIVE_OPTS=<opts>` appends
+options to the `-drive` argument, such as `readonly=on`. Any other value of `MINIXRS_ROOT` is an
+error.
 
 Because the kernel runs indefinitely once EL0 starts, always wrap a boot run in `timeout`. See
 [Build & Toolchain](../build.md) for the full run recipe and the trace-forensics rules for reading a

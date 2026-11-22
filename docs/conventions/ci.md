@@ -3,8 +3,10 @@
 What runs on every PR, which gates block, and what to run locally before pushing. See
 [`build-and-boot.md`](./build-and-boot.md) for the commands themselves.
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. Eleven gates run in parallel —
-`fmt`, `clippy`, `clippy-kernel` (aarch64 kernel lint + compile), `c-headers` (regenerate + `clang
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`. It has thirteen jobs: eleven
+gates, listed here, plus two that are not gates of their own — `boot-scope`, the docs-only
+classifier `qemu-smoke` waits on (below), and `sonar`. The eleven gates run in parallel — `fmt`,
+`clippy`, `clippy-kernel` (aarch64 kernel lint + compile), `c-headers` (regenerate + `clang
 -fsyntax-only` the generated C ABI headers), `audit` (cargo-audit), `deny` (cargo-deny, config in
 `deny.toml`), `dco` (DCO sign-off, PR-only), `geiger`, `miri`, `qemu-smoke` (aarch64 QEMU boot
 smoke), `coverage` (cargo-llvm-cov → `lcov.info`) — then a `sonar` job feeds the LCOV report to
@@ -32,9 +34,10 @@ whole-project picture.
   not that it passes
 - Only `geiger` and `miri` are **advisory** (`continue-on-error`); the other nine block. miri only
   covers the host-testable crates — the `-p` list in the `miri` job of `.github/workflows/ci.yml` is
-  the authority, and `minixrs-driver-rt` joined it in 6.2 because its virtqueue and MMIO code are
-  the `unsafe` Miri is for — while `minixrs-ipc` stays out, having inline asm. `geiger`'s
-  per-package sweep filters out `minixrs-kernel` (it can't host-build)
+  the authority, and `minixrs-driver-rt` joined it in 6.2 because its MMIO and shared-memory code
+  (`mmio.rs`, and `dma.rs` since 6.3, driven by the virtqueue's tests) are the `unsafe` Miri is for
+  — while `minixrs-ipc` stays out, having inline asm. `geiger`'s per-package sweep filters out
+  `minixrs-kernel` (it can't host-build)
 - The `clippy` job runs a **second `run:` step**, `cargo clippy -p minixrs-mfs --features server
   --all-targets -- -D warnings`, and it blocks like the first. It exists because `fs/mfs`'s
   `[[bin]]` carries `required-features = ["server"]`, so `main.rs` is **invisible to every other CI
@@ -72,12 +75,23 @@ whole-project picture.
   whenever `boot-scope` did not *succeed*, so a broken classifier costs a boot rather than waving
   every PR through. Add a path to the skip list only if the kernel build provably never reads it,
   and add a self-test case with it
-- `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner: boots the kernel for 600 s wall clock via
-  the cargo runner (asserting exit 124, the timeout status a healthy run must produce), then
-  `tools/check-boot-log.sh` greps the serial log against the two marker files. **Blocking** as of
-  phase-5-prep chunk 7. The marker-file contract itself — what the script matches, and why
-  expectations must be first-occurrence-only — lives in
+- `qemu-smoke` runs on the free `ubuntu-24.04-arm` runner and boots the kernel **twice**, once per
+  root backend: `MINIXRS_ROOT=disk` into `qemu-disk.log`, then `MINIXRS_ROOT=ramdisk` into
+  `qemu-ramdisk.log`, each for 600 s wall clock via the cargo runner and each asserting exit 124,
+  the timeout status a healthy run must produce. `tools/check-boot-log.sh <backend> <log>` then
+  greps each log against the common marker files plus that backend's own pair — both are checked
+  even if the first fails, so one run shows the whole story — and a third step runs
+  `tools/diff-backends.sh --self-test` followed by the comparison of the two logs. Both logs are
+  uploaded in the `qemu-boot-log` artifact. **Blocking** as of phase-5-prep chunk 7. The marker-file
+  contract itself — which file a marker belongs in, what the scripts match, and why expectations
+  must be first-occurrence-only — lives in
   [`testing-and-markers.md`](./testing-and-markers.md#markers)
+- **The two boots run in sequence in one job, not as a matrix.** A matrix would rename the required
+  "QEMU boot smoke" check, which needs a branch-protection edit, and two QEMUs on one runner would
+  starve each other. The price is the job's `timeout-minutes`, **65** since slice 6.3 (it was 50):
+  each boot burns its full timeout, so a second one is ten more minutes, and 65 keeps the build
+  headroom the 50 was sized for plus five. Whoever raises the per-boot timeout raises
+  `timeout-minutes` in the same edit, by twice the difference
 - **A slice can break the boot-timing budget, and "it passes locally" is not the check.** The budget
   was 45 s until slice 5.9, 120 s until 5.10a, and 240 s until 5.10b; **every raise has had the same
   cause and the same evidence**, and the number will move again. 5.9: `hello` stopped being a memcpy
@@ -91,20 +105,27 @@ whole-project picture.
   run; 5.10a moved it from **27.98% to 56.20% of a 120 s run**, i.e. the boot roughly *doubled*,
   which cut the safety factor over local from 3.6x to 1.8x and is why the budget went to 240 s;
   5.10b moved it again, **26.90% to 61.61% of a 240 s run**, a 2.29x jump leaving a 1.62x factor,
-  and the budget went to 600 s. CI's TCG is slower than local, so raise with real headroom rather
-  than trimming to what passes here — think in the *ratio*, not the wall-clock seconds, which are a
-  property of the dev machine. Two mechanical notes: `git stash` does **not** give you the "before"
-  once the slice is committed on a branch — detach to the merge base, and stash only the doc edits
-  so `target/` and `target/musl-sysroot` survive and the two boots differ in nothing but the code.
-  And build (`cargo build`) before the timed `cargo run`, or the rebuild lands inside the timeout
-  and skews the fraction. A third, which has already cost one silently-wrong measurement:
-  **`$MINIXRS_SDK` does not persist across separate shell invocations**, so setting it in one
-  command and booting in another measures the **SDK** flavour, not the musl one the number is
-  defined against. Confirm the flavour from the embedded `hello` size — ~200 KB musl, ~47 KB SDK,
-  ~15 KB fallback — rather than trusting the build warning. A boot-time selftest that reads a
-  **configuration-dependent** file is the usual culprit: prefer `/etc/pattern` (40 KiB in every
-  config, so its count is assertable too) over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB
-  with in-tree musl, and ~15 KB in the sysroot-absent fallback
+  and the budget went to 600 s. 6.3 is the first measurement that did **not** raise it, and the
+  first taken per backend: at a fixed 300 s the last required marker sits at **66.8%** of the disk
+  boot's log and **48.1%** of the ramdisk boot's, against 48.1% and 55.7% for two boots of the merge
+  base (the spread between two boots of one tree is that wide, so compare against both). The disk
+  boot is the slower one because every block request is completed by a real interrupt instead of a
+  memcpy; ~200 s local under a 600 s budget is a 3.0x factor, so the per-boot budget stayed and only
+  `timeout-minutes` grew. Measure **both** backends from now on and budget for the slower. CI's TCG
+  is slower than local, so raise with real headroom rather than trimming to what passes here — think
+  in the *ratio*, not the wall-clock seconds, which are a property of the dev machine. Two
+  mechanical notes: `git stash` does **not** give you the "before" once the slice is committed on a
+  branch — detach to the merge base, and stash only the doc edits so `target/` and
+  `target/musl-sysroot` survive and the two boots differ in nothing but the code. And build (`cargo
+  build`) before the timed `cargo run`, or the rebuild lands inside the timeout and skews the
+  fraction. A third, which has already cost one silently-wrong measurement: **`$MINIXRS_SDK` does
+  not persist across separate shell invocations**, so setting it in one command and booting in
+  another measures the **SDK** flavour, not the musl one the number is defined against. Confirm the
+  flavour from the embedded `hello` size — ~200 KB musl, ~47 KB SDK, ~15 KB fallback — rather than
+  trusting the build warning. A boot-time selftest that reads a **configuration-dependent** file is
+  the usual culprit: prefer `/etc/pattern` (40 KiB in every config, so its count is assertable too)
+  over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB with in-tree musl, and ~15 KB in the
+  sysroot-absent fallback
 - Before pushing, the blocking gates must be green: `cargo fmt --all --check`, `cargo clippy
   --workspace --all-targets -- -D warnings` (locally this lints the kernel too), `cargo clippy -p
   minixrs-mfs --features server --all-targets -- -D warnings` (nothing else lints MFS's `[[bin]]`,
@@ -176,8 +197,9 @@ The mitigation is local. Run the **three-boot matrix** when touching `build_c_*`
   `mmap ok`, `malloc ok`), and VFS's `[diag vfs] pm-exit reset closed=1`, since `worker` leaves no
   descriptor open for the exit reset to close. The two exec-trace markers still match, because
   `worker` is exec'd under those names. Any *other* missing marker is a real regression — and a
-  **135/135 on row 3 means the fallback did not engage**, so what you measured was the musl row
-  again. Rows 1 and 2 must be fully clean.
+  **full `PASS` on row 3 (every check of the common and backend sets, none missing) means the
+  fallback did not engage**, so what you measured was the musl row again. Rows 1 and 2 must be fully
+  clean.
 
 Identify the flavour from the **build-script warnings**, never from the boot log: the C markers are
 byte-identical across the SDK and musl flavours, so the log physically cannot tell them apart.

@@ -69,8 +69,10 @@ path is its loudest trigger: a reviewer works finding-by-finding inside one crat
 living in `book/`, `tests/qemu-boot.expected` and `docs/plans/` are exactly the ones nobody looks
 at. 5.10b's review named three falsified claims; grepping the old names across the whole tree found
 four more (`book/`'s `insert_entry`, two `/etc/deny` comments in VFS, and the expected-marker file's
-commentary on a probe that had been re-aimed). Run `grep -rn '<old name>' --include='*.rs'
---include='*.md' .` before committing, every time something is renamed or relocated.
+commentary on a probe that had been re-aimed). There are six marker files under `tests/` since slice
+6.3, a common pair and one pair per root backend, and all six carry commentary. Run `grep -rn '<old
+name>' --include='*.rs' --include='*.md' .` before committing, every time something is renamed or
+relocated.
 
 A review fix that **rewords a claim** owes the same sweep as a rename: 5.11 corrected "the first
 `CPF_WRITE`-required refusal" in four files and left the fifth copy in `tests/qemu-boot.expected`'s
@@ -118,8 +120,10 @@ are actually carried out.
    - each behaviour in the spec's Verification section has a host test or boot marker that was
      observed to pass, and each new guard has a mutation observed to move its marker, or an honest
      "nothing moves" row (see [Mutation testing](./testing-and-markers.md#mutation-testing));
-   - every gate [`ci.md`](./ci.md) lists as run-locally passes, and the default boot passes
-     `check-boot-log.sh`;
+   - every gate [`ci.md`](./ci.md) lists as run-locally passes, and **both** boots pass
+     `check-boot-log.sh` with their backend — the default `disk` boot and a `MINIXRS_ROOT=ramdisk`
+     one — with `tools/diff-backends.sh` clean across the pair (see
+     [Markers](./testing-and-markers.md#markers));
    - the stale-claim sweep and the `book/` sweep from [Documentation](#documentation) are done;
    - the slice's box is checked in `docs/plan.md` and its phase file, as
      [`git-and-prs.md`](./git-and-prs.md) requires.

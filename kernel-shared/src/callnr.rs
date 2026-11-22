@@ -1138,8 +1138,8 @@ pub const BDEV_RQ_BASE: i32 = 0xA00;
 /// push a retry loop into every FS caller for no gain. An out-of-range `block` is
 /// `EINVAL` for the same reason: a block device's size is known to its client
 /// (MFS reads it from the superblock's `s_zones`), so asking past the end is a
-/// caller bug rather than a media condition. `EIO` stays reserved for Phase 6's
-/// real media errors, where the request was well-formed and the *device* failed.
+/// caller bug rather than a media condition. `EIO` is the answer when the request
+/// was well-formed and the *device* failed (`virtio-blk`, since slice 6.3).
 pub const BDEV_READ: i32 = BDEV_RQ_BASE;
 
 /// Client → block driver: write one block. Payload is [`BDEV_READ`]'s, with the
@@ -1188,6 +1188,12 @@ pub const BDEV_MAX_IO: usize = BDEV_BLOCK_SIZE;
 /// The ramdisk minor: the `memory` driver's boot-image-backed root filesystem.
 /// Any other minor is `ENXIO`.
 pub const BDEV_MINOR_RAMDISK: i32 = 0;
+
+/// The root minor: on *every* block driver, minor 0 is "the root filesystem this
+/// driver serves" (phase decision H6). An alias of [`BDEV_MINOR_RAMDISK`] with
+/// the same value — additive, no existing value moves — so a client names the
+/// root device the same way whichever driver backs it.
+pub const BDEV_MINOR_ROOT: i32 = BDEV_MINOR_RAMDISK;
 
 // The BDEV range sits strictly above the FS range and strictly below CDEV's (and
 // therefore every other server request range) and the NOTIFY marker.
@@ -2757,6 +2763,9 @@ mod tests {
         // The reply `m_type` carries the byte count as an i32.
         assert_eq!(i32::try_from(BDEV_MAX_IO), Ok(4096));
         assert_eq!(BDEV_MINOR_RAMDISK, 0);
+        // H6: the root alias is the same minor, not a second one.
+        assert_eq!(BDEV_MINOR_ROOT, 0);
+        assert_eq!(BDEV_MINOR_ROOT, BDEV_MINOR_RAMDISK);
     }
 
     #[test]

@@ -1488,8 +1488,8 @@ Two deliberate departures from CDEV, each with its own doc comment:
 
 - **An over-long or out-of-range request is `EINVAL`, not a short read.** A short *write* is a POSIX
   contract clients loop over; a short *block read* is useless, because a filesystem cannot interpret
-  half a block. `EIO` stays reserved for Phase 6's real media errors, where the request was
-  well-formed and the *device* failed.
+  half a block. `EIO` stays reserved for Phase 6's real media errors (real since 6.3), where the
+  request was well-formed and the *device* failed.
 - **`BDEV_WRITE` was defined by this slice and answered `EROFS`** — it stores for real as of 5.10a —
   rather than `ENOSYS`, because `ENOSYS` is already the unknown-`m_type` answer and reusing it would
   make "doesn't know about writes" and "knows and refuses" indistinguishable. That is what let 5.10a

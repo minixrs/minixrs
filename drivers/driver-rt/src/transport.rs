@@ -9,6 +9,8 @@
 //! Nothing here reads a register in a loop waiting for a value: the only loop
 //! is [`config_read`]'s bounded generation check.
 
+use crate::queue::VirtQueue;
+
 /// Status bit: the guest has noticed the device.
 pub const STATUS_ACKNOWLEDGE: u32 = 1;
 /// Status bit: the guest knows how to drive the device.
@@ -53,9 +55,21 @@ pub trait Transport {
     fn set_driver_features(&mut self, features: u64);
     /// Largest size the device supports for `queue`; 0 means the queue is unavailable.
     fn queue_max(&mut self, queue: u16) -> u16;
-    /// Program and enable `queue` with `size` entries at `addrs`.
-    fn queue_enable(&mut self, queue: u16, size: u16, addrs: &QueueAddrs);
+    /// Program and enable `queue` as `q`: its size ([`VirtQueue::size`]) and the
+    /// three addresses of its areas ([`VirtQueue::addrs`]).
+    ///
+    /// Taking the queue rather than a size and three numbers is what keeps this
+    /// safe to call: the addresses derive from the `QueueMem` the queue was built
+    /// over, which lies inside the driver's DMA run, so the rings themselves cannot
+    /// be placed outside it. Where the device goes from there is decided by the
+    /// descriptor table, which only the queue can write: `QueueMem` is disjoint
+    /// from every buffer handle a driver can hold (see `dma.rs`).
+    fn queue_enable(&mut self, queue: u16, q: &VirtQueue);
     /// Tell the device `queue` has new available buffers.
+    ///
+    /// An implementation orders all prior queue stores before the notification:
+    /// the store that published `avail.idx` must be visible to the device by the
+    /// time it is told to look, whatever the caller did last.
     fn notify(&mut self, queue: u16);
     /// The pending interrupt reasons.
     fn interrupt_status(&self) -> u32;
@@ -197,6 +211,8 @@ mod tests {
         generations: RefCell<Vec<u32>>,
         last_gen: Cell<u32>,
         raw_reads: Cell<usize>,
+        /// Every `queue_enable`: `(queue, size, addrs)`.
+        enabled: Vec<(u16, u16, QueueAddrs)>,
     }
 
     impl MockTransport {
@@ -213,6 +229,7 @@ mod tests {
                 generations: RefCell::new(Vec::new()),
                 last_gen: Cell::new(0),
                 raw_reads: Cell::new(0),
+                enabled: Vec::new(),
             }
         }
     }
@@ -252,7 +269,9 @@ mod tests {
         fn queue_max(&mut self, _queue: u16) -> u16 {
             8
         }
-        fn queue_enable(&mut self, _queue: u16, _size: u16, _addrs: &QueueAddrs) {}
+        fn queue_enable(&mut self, queue: u16, q: &VirtQueue) {
+            self.enabled.push((queue, q.size(), q.addrs()));
+        }
         fn notify(&mut self, _queue: u16) {}
         fn interrupt_status(&self) -> u32 {
             0
@@ -394,6 +413,30 @@ mod tests {
         t.status |= STATUS_NEEDS_RESET;
         fail(&mut t);
         assert_eq!(t.status_writes.last(), Some(&(before | STATUS_FAILED)));
+    }
+
+    #[test]
+    fn queue_enable_is_handed_the_queues_own_size_and_addresses() {
+        use crate::dma::testmem::HostDma;
+        use crate::queue::queue_layout;
+
+        let host = HostDma::new(0x4800_0000);
+        let layout = queue_layout(4).unwrap();
+        let q = VirtQueue::new(host.queue_mem(4096, 4096), layout).unwrap();
+        let mut t = MockTransport::new(VIRTIO_F_VERSION_1);
+        t.queue_enable(0, &q);
+        assert_eq!(
+            t.enabled,
+            [(
+                0,
+                4,
+                QueueAddrs {
+                    desc_pa: 0x4800_1000,
+                    avail_pa: 0x4800_1040,
+                    used_pa: 0x4800_1050,
+                }
+            )]
+        );
     }
 
     #[test]
