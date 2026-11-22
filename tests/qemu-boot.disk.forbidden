@@ -1,12 +1,18 @@
 # tests/qemu-boot.disk.forbidden -- substrings forbidden IN ADDITION to
-# tests/qemu-boot.forbidden when the root image is attached as a virtio-blk disk.
+# tests/qemu-boot.forbidden when the boot disk carries the root partition
+# (MINIXRS_ROOT=disk).
 
-# The silent fallback H5 warns of: the disk is attached and the root came from
-# the ramdisk anyway.
+# The silent fallback H5 warns of: the disk carries a root and the root came
+# from the ramdisk anyway.
 [diag mfs] bdev.ds ok name=memory
 # MFS found vblk in DS and the driver said it serves no root.
 [diag mfs] bdev.root vblk
 # The driver was given no device although one is attached.
 [diag vblk] no device
-# The device did not carry the image this build made.
+# The driver declined the disk as a root: an unreadable or damaged GPT, no
+# partition (or two) of the root type, a misaligned or read-only one, or a
+# partition that does not carry the image this build made. The ramdisk boot
+# REQUIRES one spelling of this (`root FAIL no root partition`).
 [diag vblk] root FAIL
+# (`[diag vblk] flush off` and `flush FAIL` are forbidden on every boot, in the
+# common file: the device is brought up the same way with or without a root.)

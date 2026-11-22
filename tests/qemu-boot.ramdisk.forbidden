@@ -1,7 +1,16 @@
 # tests/qemu-boot.ramdisk.forbidden -- substrings forbidden IN ADDITION to
-# tests/qemu-boot.forbidden when no virtio-blk device is attached.
+# tests/qemu-boot.forbidden when the boot disk carries no root partition
+# (MINIXRS_ROOT=ramdisk).
 
-# No disk is attached, so nothing may claim to have used one.
+# The disk has no root, so nothing may claim to have mounted one from it.
 [diag mfs] bdev.ds ok name=vblk
-[diag vblk] virtio ok
-[virtio] slot=0 pa=0xa000000 id=2
+[diag vblk] root ok
+# A device IS attached (the machine booted from it). `no device` here would mean
+# the kernel's probe or the driver lost it, and MFS's fallback line -- required
+# by tests/qemu-boot.ramdisk.expected -- would be missing with it.
+[diag vblk] no device
+# A disk with no root must never be written: the driver answers ENXIO on every
+# minor before any request reaches the device, so no write can be followed by a
+# flush. This line appearing means something wrote to the boot disk -- whose
+# only contents are the ESP and the GPT.
+[diag vblk] flush ok

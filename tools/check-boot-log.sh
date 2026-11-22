@@ -6,9 +6,12 @@
 #   usage: tools/check-boot-log.sh <disk|ramdisk> <qemu-log>
 #
 # The first argument is the root backend the boot ran with (MINIXRS_ROOT in
-# tools/qemu-run.sh; `disk` is that script's default). It is REQUIRED: the
-# common lists alone cannot tell a disk boot that silently fell back to the
-# ramdisk from a healthy one, so there is no way to check them alone.
+# tools/qemu-run.sh; `disk` is that script's default). Both boots attach the
+# boot disk; `disk` means it carries the root partition and MFS mounted through
+# it, `ramdisk` means it carries none and MFS fell back to the ramdisk. It is
+# REQUIRED: the common lists alone cannot tell a disk boot that silently fell
+# back to the ramdisk from a healthy one, so there is no way to check them
+# alone. (MINIXRS_ROOT=nodisk, the hand-run no-device boot, has no pair here.)
 #
 # Every substring in tests/qemu-boot.expected AND tests/qemu-boot.<backend>.expected
 # must appear in the log; no substring in tests/qemu-boot.forbidden or

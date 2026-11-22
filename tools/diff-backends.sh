@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # tools/diff-backends.sh -- prove the filesystem behaves identically on the two
-# root backends (slice 6.3, spec B10).
+# root backends (slice 6.3, spec B10; slice 6.4, spec P4).
 #
 #   usage: tools/diff-backends.sh <disk-log> <ramdisk-log>
 #          tools/diff-backends.sh --self-test
@@ -15,7 +15,18 @@
 #
 #   * the two VFS streams must be identical, and
 #   * the two MFS streams must differ in exactly one line -- `bdev.ds ok name=`,
-#     the line that names the backend.
+#     the line that names the backend -- except that
+#   * the RAMDISK side may carry one more line, exactly
+#     `[diag mfs] bdev.root vblk rc=-6 fallback=memory`.
+#
+# That last line is how the ramdisk boot reaches its root since slice 6.4: the
+# boot disk is attached but carries no root partition, so MFS finds `vblk`,
+# is told ENXIO (-6), and falls back. It is allowed on the ramdisk side only (on
+# the disk side it is the silent fallback), as that exact line only (another rc
+# is another failure and still fails here), and at most once -- counted in the
+# raw log, before repeats are dropped, because a second one would mean MFS
+# probed twice. It is allowed, not required: requiring it is
+# tests/qemu-boot.ramdisk.expected's job.
 #
 # Why this shape, all three measured on two boots of the SAME backend (the
 # control, 6.3 Task 0): the servers interleave differently from boot to boot,
@@ -29,6 +40,7 @@
 set -euo pipefail
 
 NAME_LINE='[diag mfs] bdev.ds ok name='
+FALLBACK_LINE='[diag mfs] bdev.root vblk rc=-6 fallback=memory'
 
 # Print one server's first-occurrence stream from a log.
 stream() { # <server> <log>
@@ -52,11 +64,21 @@ compare() { # <disk-log> <ramdisk-log>; prints findings, returns 0 if clean
         printf '%s\n' "$out" | sed 's/^/    /'
         bad=1
     fi
-    # The MFS streams with the naming line removed must be identical...
+    # The MFS streams with the naming line removed -- and, on the RAMDISK side
+    # only, the fallback line, matched as a whole line (-x) so that neither a
+    # different rc nor a longer line is excused -- must be identical...
     if ! out="$(diff <(printf '%s\n' "$d_mfs" | grep -vF -- "$NAME_LINE") \
-        <(printf '%s\n' "$r_mfs" | grep -vF -- "$NAME_LINE"))"; then
-        echo "DIFF      [diag mfs] differs beyond the line naming the backend:"
+        <(printf '%s\n' "$r_mfs" | grep -vF -- "$NAME_LINE" | grep -vxF -- "$FALLBACK_LINE"))"; then
+        echo "DIFF      [diag mfs] differs beyond the line naming the backend and the ramdisk's one fallback line:"
         printf '%s\n' "$out" | sed 's/^/    /'
+        bad=1
+    fi
+    # ...the fallback line may be there at most once. The stream cannot show a
+    # repeat (it keeps first occurrences), so this counts the raw log.
+    local r_fallbacks
+    r_fallbacks="$(grep -ac -F -- "$FALLBACK_LINE" "$ram" || true)"
+    if [[ "$r_fallbacks" -gt 1 ]]; then
+        echo "DIFF      ramdisk log carries the fallback line $r_fallbacks times, not at most once"
         bad=1
     fi
     # ...and each must carry exactly one naming line, naming its own backend.
@@ -94,8 +116,29 @@ self_test() {
     }
     expect pass "a clean pair passes"
     cp "$ram" "$dir/ram.keep"
+    cp "$disk" "$dir/disk.keep"
+    # The one allowance (slice 6.4): the fallback line, on the ramdisk side.
     printf '[diag mfs] bdev.root vblk rc=-6 fallback=memory\r\n' >>"$ram"
-    expect fail "an extra [diag mfs] line on one side"
+    expect pass "the fallback line once on the ramdisk side"
+    # A literal repeat is invisible to the first-occurrence stream, so this case
+    # passes or fails on the raw-log count alone.
+    printf 'C[diag mfs] bdev.root vblk rc=-6 fallback=memory\r\n' >>"$ram"
+    expect fail "the fallback line twice on the ramdisk side"
+    cp "$dir/ram.keep" "$ram"
+    printf '[diag mfs] bdev.root vblk rc=-5 fallback=memory\r\n' >>"$ram"
+    expect fail "a fallback line with a different rc"
+    cp "$dir/ram.keep" "$ram"
+    printf '[diag mfs] bdev.root vblk rc=-6 fallback=memory again\r\n' >>"$ram"
+    expect fail "a longer line that merely starts with the fallback line"
+    cp "$dir/ram.keep" "$ram"
+    printf '[diag mfs] bdev.root vblk rc=-6 fallback=memory\r\n' >>"$disk"
+    expect fail "the fallback line on the disk side"
+    printf '[diag mfs] bdev.root vblk rc=-6 fallback=memory\r\n' >>"$ram"
+    expect fail "the fallback line on both sides"
+    cp "$dir/disk.keep" "$disk"
+    cp "$dir/ram.keep" "$ram"
+    printf '[diag mfs] some other line\r\n' >>"$ram"
+    expect fail "any other extra [diag mfs] line on the ramdisk side"
     cp "$dir/ram.keep" "$ram"
     sed -i.bak 's/fs.mount ok/fs.mount FAIL/' "$ram"
     expect fail "a [diag vfs] line that differs"
@@ -129,7 +172,7 @@ for f in "$1" "$2"; do
     fi
 done
 if compare "$1" "$2"; then
-    echo "PASS: [diag mfs] and [diag vfs] are identical on both backends apart from the line naming the backend"
+    echo "PASS: [diag mfs] and [diag vfs] are identical on both backends apart from the line naming the backend and the ramdisk's one allowed fallback line"
 else
     echo "FAIL: the two backends' filesystem output differs (see above)"
     exit 1

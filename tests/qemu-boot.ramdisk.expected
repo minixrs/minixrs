@@ -1,12 +1,43 @@
 # tests/qemu-boot.ramdisk.expected -- substrings required IN ADDITION to
-# tests/qemu-boot.expected when no virtio-blk device is attached
+# tests/qemu-boot.expected when the boot disk carries NO root partition
 # (MINIXRS_ROOT=ramdisk). tools/check-boot-log.sh ramdisk <log> checks both.
+#
+# Since slice 6.4 (spec P4) this is the FALLBACK boot, not a device-less one. The
+# firmware needs a disk to read the kernel from, so tools/qemu-run.sh attaches
+# the same GPT image as the disk boot with the root partition left out, on the
+# same virtio-mmio transport. The kernel finds the device, `vblk` brings it up
+# and publishes itself, finds no partition of the root type, and answers ENXIO
+# on every minor; MFS, having found `vblk` in DS, is refused and mounts the
+# ramdisk. So this boot exercises the driver's no-root gate and MFS's
+# revoke-and-regrant on every CI run, and proves the ramdisk root (H7).
+#
+# The no-device state -- `[diag vblk] no device`, a DS miss in MFS -- has no
+# checked boot any more; it is reached by hand with MINIXRS_ROOT=nodisk.
 
-# The kernel's probe found no block device, so GET_VIRTIO_MMIO answered ENOENT:
-# healthy, not a failure (phase decision H2). The driver publishes nothing to DS
-# and idles.
-[diag vblk] no device
+# The device is there, and is brought up exactly as on the disk boot: these four
+# lines are tests/qemu-boot.disk.expected's, character for character, and that
+# file explains each field. They are required here so that this boot cannot
+# quietly turn back into a device-less one (which would also satisfy `name=
+# memory` below), and capacity= is the same 75776 because the rootless image
+# keeps the disk's size and leaves the root's range unused.
+[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk
+[devmap] vblk va=0x40001000 pa=0xa000000 intid=48
+[dma] vblk va=0xc0000000 pages=16
+[diag vblk] virtio ok features=0x100000200 capacity=75776 qsize=8
 
-# MFS found no `vblk` in DS and resolved the `memory` driver -- the ramdisk root,
-# kept green for the whole phase (H7).
+# The driver read the GPT through the queue, found it well-formed, and found no
+# entry carrying the root partition type GUID. Asserted whole: every other
+# `root FAIL <why>` is a different failure -- `gpt signature` or `gpt crc` would
+# mean mkimage and the driver disagree about the table, which this boot would
+# otherwise survive by falling back just the same.
+[diag vblk] root FAIL no root partition
+
+# MFS found `vblk` in DS, probed it with one zero-length read, and was answered
+# ENXIO (-6) -- the driver's gate for a device with no root (H5). It revokes the
+# grant, says so, and resolves `memory` instead. rc= is asserted: another errno
+# here is another path. This is the one extra [diag mfs] line tools/
+# diff-backends.sh allows the ramdisk side.
+[diag mfs] bdev.root vblk rc=-6 fallback=memory
+
+# ...and mounted the ramdisk root, kept green for the whole phase (H7).
 [diag mfs] bdev.ds ok name=memory ep=
