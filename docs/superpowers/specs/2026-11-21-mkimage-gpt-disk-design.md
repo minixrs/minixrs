@@ -1,6 +1,6 @@
 # Slice 6.4 — `tools/mkimage`: one GPT disk, partitions as minors
 
-**Date:** 2026-11-21 **Status:** draft, awaiting approval **Branch:** `feature/6.4-mkimage`
+**Date:** 2026-11-21 **Status:** approved 2026-11-21 **Branch:** `feature/6.4-mkimage`
 **Predecessor:** slice 6.3 (`virtio-blk`, PR #73) **Tracker:**
 [`docs/plans/phase-6-virtio.md`](../../plans/phase-6-virtio.md) slice 6.4
 
