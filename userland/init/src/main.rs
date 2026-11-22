@@ -68,11 +68,11 @@ use minixrs_kernel_shared::execstack::EXEC_STACK_PROBE_PASS;
 use minixrs_kernel_shared::fcntl::{O_CREAT, O_RDWR, O_TRUNC, O_UNKNOWN_BIT};
 use minixrs_kernel_shared::message::USER_VA_TOP;
 use minixrs_kernel_shared::rootfs::{
-    ROOTFS_CREATE_PATH, ROOTFS_CREATE_TEXT, ROOTFS_DIRGROW_TEXT, ROOTFS_FILEIO_PATH,
-    ROOTFS_FULL_NEW_PATH, ROOTFS_HELLO_PATH, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH,
-    ROOTFS_HOLEY_TEXT, ROOTFS_LEAK_PATH, ROOTFS_LEAK_PROBES, ROOTFS_LEAK_TEXT, ROOTFS_MOTD,
-    ROOTFS_MOTD_PATH, ROOTFS_SCRATCH_LEN, ROOTFS_SCRATCH_PATH, ROOTFS_SCRATCH_PERIOD,
-    rootfs_holey_byte, rootfs_scratch_byte,
+    ROOTFS_BOOTS_INITIAL, ROOTFS_BOOTS_PATH, ROOTFS_CREATE_PATH, ROOTFS_CREATE_TEXT,
+    ROOTFS_DIRGROW_TEXT, ROOTFS_FILEIO_PATH, ROOTFS_FULL_NEW_PATH, ROOTFS_HELLO_PATH,
+    ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_HOLEY_TEXT, ROOTFS_LEAK_PATH, ROOTFS_LEAK_PROBES,
+    ROOTFS_LEAK_TEXT, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_SCRATCH_LEN, ROOTFS_SCRATCH_PATH,
+    ROOTFS_SCRATCH_PERIOD, boots_generation, boots_next, rootfs_holey_byte, rootfs_scratch_byte,
 };
 use minixrs_kernel_shared::uspace::USER_DEVICE_WINDOW_BASE;
 
@@ -237,6 +237,19 @@ fn main() -> ! {
     // through `VFS_OPEN` like any other) and before the write battery, so a hang
     // here localizes to the `dev.*` markers. Cheap — no filesystem traffic.
     dev_demo(vfs);
+    // Slice 6.4: the persistence probe. After the read path and the device
+    // probes -- it needs `open`, `read` and `close` to work, and a hang inside
+    // it then localizes to `persist` instead of taking `fs.read` and `dev.*`
+    // with it -- and **before** the write battery, for two reasons. A reboot of
+    // a used disk image is judged by this probe's line alone and stopped right
+    // after it (spec P9), so nothing the battery does to its own leftovers is
+    // in the way; and the generation it prints is then what the *previous*
+    // boot left on the device, read before this boot has written a single
+    // block. The cost of the placement is that its rewrite is the first
+    // filesystem write of the boot, ahead of `fs.write`: a broken write path
+    // shows as `persist FAIL` first and `fs.write FAIL` right behind it. See
+    // [`persist_demo`].
+    persist_demo(vfs);
     // The filesystem write path runs after the read path it depends on — the
     // same rule — so a hang inside it localizes to the `fs.write` marker instead
     // of taking 5.4's, 5.5's, 5.6's and 5.8's with it. See [`write_demo`].
@@ -907,6 +920,118 @@ fn console_demo(vfs: Endpoint) {
     }
     if closed != OK {
         report_line(vfs, b"minix.rs init: dev.console FAIL close");
+    }
+}
+
+// ----- Slice 6.4: the persistence probe -------------------------------------
+
+/// Bytes [`persist_demo`] asks for when it reads the boot counter.
+///
+/// **More than the file holds**, deliberately: the counter is one byte, and
+/// asking for four is what lets a file that is longer than it should be come
+/// back as more than one byte and be refused by `boots_generation`, instead of
+/// being read as its first digit.
+const BOOTS_BUF_LEN: usize = 4;
+
+const _: () = assert!(BOOTS_BUF_LEN > ROOTFS_BOOTS_INITIAL.len());
+
+/// Read the boot counter, print it, and store the next one — the persistence
+/// proof (slice 6.4, spec P9).
+///
+/// [`ROOTFS_BOOTS_PATH`] ships holding `0`. Each boot prints what it read as
+/// `minix.rs init: persist gen=<n>` and rewrites the file with `n + 1`, so:
+///
+/// - a boot of a freshly built image, and every boot from the ramdisk (which is
+///   rebuilt from the boot archive each time), prints `gen=0`;
+/// - a second boot of **the same disk image** prints `gen=1`, which cannot be
+///   printed unless the first boot's truncate and write reached the device and
+///   were still there after the machine was gone.
+///
+/// **The line is printed after the read and before the rewrite**, and that order
+/// is the proof's shape. `gen=<n>` is a statement about what was on the device
+/// when this boot started — the previous boot's rewrite, or the image's own
+/// byte — so it must not wait on, or be coloured by, anything this boot writes.
+/// A failing rewrite then reads `persist gen=<n>` followed by `persist FAIL
+/// <step>`: what was there, and that it was not replaced. `<n>` is formatted
+/// from the value read, never a literal.
+///
+/// The rewrite is `open(O_RDWR | O_TRUNC)`, one `write`, `close` — the requests
+/// [`trunc_demo`] and [`write_demo`] already issue, so the probe adds no request
+/// to any server. **No `O_CREAT`**: the file must already exist, and a counter
+/// that could be created here would turn a lost directory entry into a silent
+/// restart at whatever the write stored. The counter saturates at 9 (see
+/// `ROOTFS_BOOTS_MAX`): the tenth boot of one image stops counting.
+///
+/// It proves that a write reaches the device and survives the machine. It says
+/// nothing about *when* — the flush is `virtio-blk`'s own marker.
+///
+/// The failing steps, each `minix.rs init: persist FAIL <step>` on fd 2:
+///
+/// | step           | what failed                                                  |
+/// | -------------- | ------------------------------------------------------------ |
+/// | `open rc=-N`   | the first open; `rc=-2` is the file missing from the image   |
+/// | `read rc=-N`   | the read answered an errno                                   |
+/// | `value`        | the read did not return exactly one decimal digit            |
+/// | `close rc=-N`  | closing the read descriptor (printed *after* `gen=`)         |
+/// | `reopen rc=-N` | the `O_TRUNC` open                                           |
+/// | `write rc=-N`  | the write answered an errno                                  |
+/// | `short`        | the write moved a byte count other than one                  |
+/// | `close2 rc=-N` | closing the written descriptor                               |
+///
+/// Best-effort like every probe here: a failure is reported and stepped over,
+/// and the first failing step ends the probe — a counter that could not be read
+/// is never rewritten, since there is no generation to add one to.
+#[cfg_attr(test, allow(dead_code))]
+fn persist_demo(vfs: Endpoint) {
+    let fd = vfs_open(vfs, ROOTFS_BOOTS_PATH);
+    if fd < 0 {
+        return report_rc(vfs, b"persist", b"open", fd);
+    }
+    let mut buf = [0u8; BOOTS_BUF_LEN];
+    let n = vfs_read(vfs, fd, &mut buf);
+    if n < 0 {
+        let _ = vfs_close(vfs, fd);
+        return report_rc(vfs, b"persist", b"read", n);
+    }
+    // `get` rather than an index: a peer reporting more than it was asked for
+    // is a `value` failure, not a panic in PID 1.
+    let Some(generation) = buf.get(..n as usize).and_then(boots_generation) else {
+        let _ = vfs_close(vfs, fd);
+        return report_step(vfs, b"persist", b"value");
+    };
+
+    // The marker: what the device held when this boot started. Before the
+    // close and before any write, so nothing below can change what it says.
+    let mut line = [0u8; 64];
+    let mut len = append(&mut line, 0, b"minix.rs init: persist gen=");
+    len = append_dec(&mut line, len, u64::from(generation));
+    len = append(&mut line, len, b"\n");
+    let _ = vfs_write(vfs, STDOUT, &line[..len]);
+
+    let rc = vfs_close(vfs, fd);
+    if rc != OK {
+        return report_rc(vfs, b"persist", b"close", rc);
+    }
+
+    // The rewrite: truncate, then one byte. No `O_CREAT`.
+    let fd = vfs_open_flags(vfs, ROOTFS_BOOTS_PATH, O_RDWR | O_TRUNC);
+    if fd < 0 {
+        return report_rc(vfs, b"persist", b"reopen", fd);
+    }
+    let next = [boots_next(generation)];
+    // VFS absorbs short writes (slice 5.4), so anything but the full count is a
+    // failure here rather than something to retry.
+    let n = vfs_write(vfs, fd, &next);
+    if n != next.len() as i32 {
+        let _ = vfs_close(vfs, fd);
+        if n < 0 {
+            return report_rc(vfs, b"persist", b"write", n);
+        }
+        return report_step(vfs, b"persist", b"short");
+    }
+    let rc = vfs_close(vfs, fd);
+    if rc != OK {
+        report_rc(vfs, b"persist", b"close2", rc);
     }
 }
 

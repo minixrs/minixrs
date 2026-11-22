@@ -1,0 +1,60 @@
+# tests/qemu-boot.reboot.expected -- required substrings for the REBOOT: a
+# second boot of the disk image a disk boot left behind. Same format as
+# tests/qemu-boot.expected. tools/check-boot-log.sh reboot <log> checks this
+# file and tests/qemu-boot.reboot.forbidden, AND NOTHING ELSE.
+#
+# The boot under test (slice 6.4, spec P9): run a disk boot, which builds
+# target/disk.img fresh and writes to it; then, before anything rebuilds that
+# file, boot it again exactly as it was left --
+#
+#     MINIXRS_VBLK_IMAGE=target/disk.img cargo run -p minixrs-kernel \
+#         --target aarch64-unknown-none --release
+#
+# MINIXRS_VBLK_IMAGE makes tools/qemu-run.sh attach the named file AS-IS: no
+# build, no copy. The machine boots entirely from it (firmware, Limine and the
+# kernel come off its ESP), and MFS mounts its root partition, which now holds
+# whatever the first boot wrote there.
+#
+# THIS PAIR ONLY -- the common set (tests/qemu-boot.{expected,forbidden}) and
+# the disk pair are deliberately not applied. The write battery was designed
+# against a fresh image: it creates files that must not exist, fills a file
+# that ships empty, grows a directory that ships exactly full. What it does on
+# its own leftovers is not defined by this slice (spec P9, ruling 13), so a
+# full check of a used image would be judging behaviour nobody specified. The
+# persistence probe runs BEFORE the battery for that reason, and the reboot is
+# a short boot: it needs to get only as far as the probe's line.
+#
+# What it shows: a write made during one boot is on the device in the next --
+# writes REACH THE DEVICE and survive the machine. What it does not show:
+# anything about the flush. QEMU serves a raw image through the host's page
+# cache, so the first boot's writes are expected to be in the file whether or
+# not the driver flushed them (spec P9; spec mutation 6 -- drop the flush -- is
+# the check of that, predicted to move `flush ok n=1` on the disk boot and
+# nothing here). The flush has its own marker, in tests/qemu-boot.disk.expected.
+
+# The proof. init read /etc/boots before writing anything, and it held `1`: the
+# image ships `0` (ROOTFS_BOOTS_INITIAL), and the only thing that stores `1` is
+# the previous boot's rewrite -- an O_TRUNC open, a one-byte write and a close,
+# through VFS, MFS and virtio-blk, into the root partition. The digit is
+# formatted from the byte that was read. The ramdisk root could never print
+# this: it is rebuilt from the boot archive on every boot.
+#
+# It is gen=1 exactly, not "anything but 0": the reboot is the SECOND boot of
+# the image. A third boot prints gen=2 (run by hand, recorded in the phase
+# file), which is what shows the counter counts rather than merely changes.
+# Mutation 9 (init skips the rewrite) was run: the disk boot is unchanged and
+# the reboot prints `persist gen=0` -- missing here, forbidden beside.
+minix.rs init: persist gen=1
+
+# The two lines that make gen=1 a statement about THE DISK: the root the
+# counter was read from is the GPT partition of the attached image (part=2,
+# first sector 71680, 256 blocks), mounted through `vblk`. Both are
+# tests/qemu-boot.disk.expected's, character for character, and that file
+# explains every field. On a used image `root ok` says one thing more: the image
+# label in the partition's first block and the tail label in its reserved last
+# block are still there after a boot's worth of writes, so the first boot wrote
+# inside the filesystem. (A reboot that fell back to the ramdisk would fail on
+# gen=1 regardless -- the ramdisk always reads 0 -- so these two are not what
+# catches the fallback; they are what says where the 1 came from.)
+[diag vblk] root ok blocks=256 tail=1 part=2 lba=71680
+[diag mfs] bdev.ds ok name=vblk ep=

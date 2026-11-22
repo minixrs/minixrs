@@ -202,6 +202,79 @@ pub const ROOTFS_SCRATCH_GROWTH_ZONES: usize = ROOTFS_SCRATCH_LEN.div_ceil(BDEV_
 // sufficient check is `kernel/build.rs`'s, against the bytes it just built.
 const _: () = assert!(ROOTFS_SCRATCH_GROWTH_ZONES < ROOTFS_IMAGE_BLOCKS as usize);
 
+/// The boot counter: a file the image ships holding [`ROOTFS_BOOTS_INITIAL`],
+/// which init reads and rewrites once per boot (slice 6.4, spec P9).
+///
+/// It is the **persistence proof**. init prints the generation it read as
+/// `persist gen=<n>` and then stores `n + 1`, so a boot of a freshly built image
+/// prints `gen=0` and a second boot of *the same disk image* prints `gen=1` —
+/// which nothing can print unless the first boot's write reached the device and
+/// outlived the machine. The ramdisk root is rebuilt from the boot archive every
+/// boot, so it prints `gen=0` forever; that is the difference the proof is of.
+///
+/// Its own file, and written by nothing else: the write battery's files are
+/// truncated, created and refilled by probes that were designed against a fresh
+/// image, so none of them holds a value one boot could hand to the next.
+pub const ROOTFS_BOOTS_PATH: &str = "/etc/boots";
+
+/// What the image ships in [`ROOTFS_BOOTS_PATH`]: one byte, ASCII `0`.
+///
+/// **One ASCII digit, not a binary counter**, so the file is readable in a
+/// hexdump of the image and the generation needs no byte order. One byte costs
+/// the image one inode and one zone; the rewrite truncates before it writes, so
+/// the file never holds more than that one zone and
+/// [`ROOTFS_RUNTIME_ZONES`] / [`ROOTFS_RUNTIME_INODES`] do not move for it.
+pub const ROOTFS_BOOTS_INITIAL: &[u8] = b"0";
+
+/// The largest generation [`ROOTFS_BOOTS_PATH`] can hold: one decimal digit.
+///
+/// [`boots_next`] saturates here, so the tenth and every later boot of one image
+/// reads `9` and writes `9` back. The proof needs `0 -> 1` (and the hand-run
+/// third boot `1 -> 2`); a counter that wrapped to `0` would make a much-booted
+/// image indistinguishable from a fresh one, which is the one thing this file
+/// exists to tell apart.
+pub const ROOTFS_BOOTS_MAX: u8 = 9;
+
+/// The generation a read of [`ROOTFS_BOOTS_PATH`] returned, or `None` when the
+/// bytes are not a generation.
+///
+/// `bytes` is **what the read returned**, however large the caller's buffer was.
+/// Exactly one byte in `'0'..='9'` is a generation; an empty file, a longer one,
+/// or any other byte is `None`, which init reports as `persist FAIL value`
+/// rather than guessing — a truncate that reached the device without its write
+/// (an empty file) and a write that landed on top of an untruncated file are the
+/// two defects this refuses to read as a number.
+pub const fn boots_generation(bytes: &[u8]) -> Option<u8> {
+    if bytes.len() != ROOTFS_BOOTS_INITIAL.len() {
+        return None;
+    }
+    let b = bytes[0];
+    if b < b'0' || b > b'0' + ROOTFS_BOOTS_MAX {
+        return None;
+    }
+    Some(b - b'0')
+}
+
+/// The byte init stores in [`ROOTFS_BOOTS_PATH`] after reading generation `n`:
+/// the ASCII digit for `n + 1`, saturating at [`ROOTFS_BOOTS_MAX`].
+///
+/// Total over `u8` — an `n` past the maximum (which [`boots_generation`] never
+/// returns) also stores the maximum — so the result is always something
+/// [`boots_generation`] reads back.
+pub const fn boots_next(n: u8) -> u8 {
+    if n >= ROOTFS_BOOTS_MAX {
+        b'0' + ROOTFS_BOOTS_MAX
+    } else {
+        b'0' + n + 1
+    }
+}
+
+// The image's own contents are a generation, and it is generation zero: the
+// common marker set requires `persist gen=0` of every fresh boot.
+const _: () = assert!(matches!(boots_generation(ROOTFS_BOOTS_INITIAL), Some(0)));
+// One digit: `boots_next` adds to `b'0'` and must stay inside `'0'..='9'`.
+const _: () = assert!(ROOTFS_BOOTS_MAX <= 9);
+
 /// Bytes per MinixFS v3 directory entry.
 ///
 /// Duplicated from `minixrs_mfs::dirent::DIRENT_SIZE` — `fs/mfs` depends on this
@@ -618,8 +691,11 @@ mod tests {
 
     #[test]
     fn every_image_path_is_absolute_and_distinct() {
-        // `/etc/seekhole` is not shipped, but it is created beside these and
-        // must not collide with any of them.
+        // Every file the image ships under a name, and every file a boot probe
+        // creates beside them (`/etc/seekhole`, `/etc/new`, `/etc/leak`,
+        // `/full/new`): a created file must not collide with a shipped one, and
+        // `/etc/boots` -- the one file whose contents must survive the write
+        // battery -- must be nobody else's target.
         let paths = [
             ROOTFS_HELLO_PATH,
             ROOTFS_FILEIO_PATH,
@@ -627,6 +703,12 @@ mod tests {
             ROOTFS_PATTERN_PATH,
             ROOTFS_SCRATCH_PATH,
             ROOTFS_SEEKHOLE_PATH,
+            ROOTFS_HOLEY_PATH,
+            ROOTFS_DENY_PATH,
+            ROOTFS_BOOTS_PATH,
+            ROOTFS_CREATE_PATH,
+            ROOTFS_LEAK_PATH,
+            ROOTFS_FULL_NEW_PATH,
         ];
         for p in paths {
             assert!(p.starts_with('/'), "{p} is not absolute");
@@ -649,6 +731,61 @@ mod tests {
         assert_eq!(ROOTFS_SEEKHOLE_ZONES, 1);
         assert_eq!(ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_GROWTH_ZONES + 6);
         assert_ne!(ROOTFS_SEEKHOLE_PATH, ROOTFS_HOLEY_PATH);
+    }
+
+    #[test]
+    fn the_boot_counter_ships_as_generation_zero() {
+        // One byte, ASCII '0': `persist gen=0` on a fresh image is this.
+        assert_eq!(ROOTFS_BOOTS_INITIAL, b"0");
+        assert_eq!(boots_generation(ROOTFS_BOOTS_INITIAL), Some(0));
+    }
+
+    #[test]
+    fn every_digit_is_a_generation_and_nothing_else_is() {
+        for n in 0..=ROOTFS_BOOTS_MAX {
+            assert_eq!(boots_generation(&[b'0' + n]), Some(n));
+        }
+        // The bytes either side of the digits, and the values a zeroed or
+        // erased block would hold.
+        for b in [b'0' - 1, b'9' + 1, 0x00, 0xFF, b' ', b'\n', 1, 9] {
+            assert_eq!(boots_generation(&[b]), None, "byte {b:#04x}");
+        }
+        // Every byte value, so no off-by-one at either end of the range hides.
+        let digits = (0..=u8::MAX)
+            .filter(|&b| boots_generation(&[b]).is_some())
+            .count();
+        assert_eq!(digits, 10);
+    }
+
+    #[test]
+    fn an_empty_or_longer_file_is_not_a_generation() {
+        // Empty: a truncate that reached the device without the write after it.
+        assert_eq!(boots_generation(b""), None);
+        // Longer: a write that landed on an untruncated file, or a file that is
+        // not this one. The first byte being a digit must not be enough.
+        assert_eq!(boots_generation(b"10"), None);
+        assert_eq!(boots_generation(b"1\n"), None);
+        assert_eq!(boots_generation(b"0000"), None);
+    }
+
+    #[test]
+    fn the_next_generation_counts_up_and_stops_at_nine() {
+        // 0 -> 1 is the proof; 1 -> 2 is the hand-run third boot.
+        assert_eq!(boots_next(0), b'1');
+        assert_eq!(boots_next(1), b'2');
+        assert_eq!(boots_next(8), b'9');
+        // Saturating, never wrapping to '0': a much-booted image must not read
+        // as a fresh one.
+        assert_eq!(boots_next(9), b'9');
+        assert_eq!(boots_next(u8::MAX), b'9');
+        // What is stored always reads back, as the generation after this one.
+        for n in 0..ROOTFS_BOOTS_MAX {
+            assert_eq!(boots_generation(&[boots_next(n)]), Some(n + 1));
+        }
+        assert_eq!(
+            boots_generation(&[boots_next(ROOTFS_BOOTS_MAX)]),
+            Some(ROOTFS_BOOTS_MAX)
+        );
     }
 
     /// The canonical text of the root partition's type GUID, as `gdisk`, `sgdisk

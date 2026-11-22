@@ -145,3 +145,13 @@ minix.rs fileio: exit-reset FAIL
 # record). `FAIL read rc=<rc>`: any other errno, or a reply that is not exactly
 # one block.
 [diag mfs] bdev.minor FAIL
+# Slice 6.4: the persistence probe (spec P9) could not read the boot counter or
+# could not store the next one. The word after FAIL names the step, with rc= as
+# returned where the step answered an errno: `open` (rc=-2: /etc/boots is not in
+# the image), `read`, `value` (the read did not return exactly one decimal
+# digit -- an empty file is a truncate that landed without its write), `close`,
+# then the rewrite's `reopen` (the O_TRUNC open), `write`, `short` (a byte count
+# other than one) and `close2`. A rewrite step failing AFTER `persist gen=<n>`
+# was printed is the case this line exists for: the expected marker is already
+# satisfied by then, and the next boot of the image would not count.
+minix.rs init: persist FAIL

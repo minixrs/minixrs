@@ -3,46 +3,68 @@
 # tools/check-boot-log.sh -- verify a QEMU serial boot log against the
 # checked-in marker lists.
 #
-#   usage: tools/check-boot-log.sh <disk|ramdisk> <qemu-log>
+#   usage: tools/check-boot-log.sh <disk|ramdisk|reboot> <qemu-log>
 #
-# The first argument is the root backend the boot ran with (MINIXRS_ROOT in
-# tools/qemu-run.sh; `disk` is that script's default). Both boots attach the
+# The first argument names the boot the log came from, and so which marker
+# files it is checked against. It is REQUIRED.
+#
+# `disk` and `ramdisk` are the root backend a FULL boot ran with (MINIXRS_ROOT
+# in tools/qemu-run.sh; `disk` is that script's default). Both boots attach the
 # boot disk; `disk` means it carries the root partition and MFS mounted through
-# it, `ramdisk` means it carries none and MFS fell back to the ramdisk. It is
-# REQUIRED: the common lists alone cannot tell a disk boot that silently fell
-# back to the ramdisk from a healthy one, so there is no way to check them
-# alone. (MINIXRS_ROOT=nodisk, the hand-run no-device boot, has no pair here.)
-#
-# Every substring in tests/qemu-boot.expected AND tests/qemu-boot.<backend>.expected
+# it, `ramdisk` means it carries none and MFS fell back to the ramdisk. Every
+# substring in tests/qemu-boot.expected AND tests/qemu-boot.<backend>.expected
 # must appear in the log; no substring in tests/qemu-boot.forbidden or
-# tests/qemu-boot.<backend>.forbidden may appear. Blank lines and '#' comment
-# lines are ignored. Every violation is reported (not just the first) before
-# the non-zero exit, so one run shows the whole story.
+# tests/qemu-boot.<backend>.forbidden may appear. The common lists alone cannot
+# tell a disk boot that silently fell back to the ramdisk from a healthy one, so
+# there is no way to check them alone. (MINIXRS_ROOT=nodisk, the hand-run
+# no-device boot, has no pair here.)
+#
+# `reboot` is the second boot of the disk image a disk boot left behind
+# (MINIXRS_VBLK_IMAGE=target/disk.img, attached as-is). It is checked against
+# tests/qemu-boot.reboot.expected and tests/qemu-boot.reboot.forbidden ONLY --
+# the common lists are NOT applied, because the write battery was designed
+# against a fresh image and what it does on its own leftovers is not defined
+# (tests/qemu-boot.reboot.expected says more). The pair requires what a fresh
+# boot cannot print and forbids what a fresh boot must, so a `disk` log fails
+# `reboot` and a reboot's log fails `disk`.
+#
+# Blank lines and '#' comment lines are ignored. Every violation is reported
+# (not just the first) before the non-zero exit, so one run shows the whole
+# story.
 #
 # grep needs -a (the log interleaves raw single-char tick bytes, so it reads
 # as binary) and -F (the marker files hold literal substrings, not regexes).
 
 set -euo pipefail
 
+USAGE="usage: $0 <disk|ramdisk|reboot> <qemu-log>"
+
 if [[ $# -ne 2 ]]; then
-    echo "usage: $0 <disk|ramdisk> <qemu-log>" >&2
+    echo "$USAGE" >&2
     exit 64
 fi
 
 BACKEND="$1"
 LOG="$2"
+ROOT="$(git rev-parse --show-toplevel)"
+
+# Which lists apply. A full boot reads the common pair and its backend's; the
+# reboot reads its own pair and nothing else.
 case "$BACKEND" in
-    disk | ramdisk) ;;
+    disk | ramdisk)
+        EXPECTED=("$ROOT/tests/qemu-boot.expected" "$ROOT/tests/qemu-boot.$BACKEND.expected")
+        FORBIDDEN=("$ROOT/tests/qemu-boot.forbidden" "$ROOT/tests/qemu-boot.$BACKEND.forbidden")
+        ;;
+    reboot)
+        EXPECTED=("$ROOT/tests/qemu-boot.reboot.expected")
+        FORBIDDEN=("$ROOT/tests/qemu-boot.reboot.forbidden")
+        ;;
     *)
-        echo "error: backend must be 'disk' or 'ramdisk', got '$BACKEND'" >&2
-        echo "usage: $0 <disk|ramdisk> <qemu-log>" >&2
+        echo "error: the first argument must be 'disk', 'ramdisk' or 'reboot', got '$BACKEND'" >&2
+        echo "$USAGE" >&2
         exit 64
         ;;
 esac
-
-ROOT="$(git rev-parse --show-toplevel)"
-EXPECTED=("$ROOT/tests/qemu-boot.expected" "$ROOT/tests/qemu-boot.$BACKEND.expected")
-FORBIDDEN=("$ROOT/tests/qemu-boot.forbidden" "$ROOT/tests/qemu-boot.$BACKEND.forbidden")
 
 if [[ ! -f "$LOG" ]]; then
     echo "error: log file not found: $LOG" >&2

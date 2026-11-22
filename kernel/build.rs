@@ -471,6 +471,11 @@ fn write_disk_image(out_dir: &std::path::Path, image: &[u8]) {
 ///     block, but the fallback `worker` is 15 KB and fits inside the seven direct
 ///     zones, so without a constant-size file past that boundary the indirect path
 ///     would be dead code in exactly the configuration CI's non-QEMU jobs build.
+///   * `/etc/boots` — one byte, `0`: the boot counter init reads and rewrites
+///     (slice 6.4, spec P9). It is what a second boot of the same disk image
+///     reads `1` from, and so the only file here that exists to be *different*
+///     the next time the image is booted. One inode and one zone; the rewrite
+///     truncates first, so it adds nothing to `ROOTFS_RUNTIME_ZONES`.
 ///
 /// **Every path and every byte comes from `kernel_shared::rootfs`** as of slice
 /// 5.8, not from literals here. The MFS server reads the same constants back over
@@ -479,11 +484,11 @@ fn write_disk_image(out_dir: &std::path::Path, image: &[u8]) {
 /// edited together and the proof keeps passing while the content silently changed.
 fn build_rootfs(hello_bytes: &[u8], fileio_bytes: &[u8]) -> Vec<u8> {
     use minixrs_kernel_shared::rootfs::{
-        ROOTFS_DENY_PATH, ROOTFS_FILEIO_PATH, ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES,
-        ROOTFS_HELLO_PATH, ROOTFS_HOLEY_HOLE, ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH,
-        ROOTFS_LEAK_PROBES, ROOTFS_MOTD, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
-        ROOTFS_RUNTIME_INODES, ROOTFS_RUNTIME_ZONES, ROOTFS_SCRATCH_PATH, rootfs_holey_byte,
-        rootfs_pattern_byte,
+        ROOTFS_BOOTS_INITIAL, ROOTFS_BOOTS_PATH, ROOTFS_DENY_PATH, ROOTFS_FILEIO_PATH,
+        ROOTFS_FULL_DIR, ROOTFS_FULL_ENTRIES, ROOTFS_HELLO_PATH, ROOTFS_HOLEY_HOLE,
+        ROOTFS_HOLEY_LEN, ROOTFS_HOLEY_PATH, ROOTFS_LEAK_PROBES, ROOTFS_MOTD, ROOTFS_MOTD_PATH,
+        ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH, ROOTFS_RUNTIME_INODES, ROOTFS_RUNTIME_ZONES,
+        ROOTFS_SCRATCH_PATH, rootfs_holey_byte, rootfs_pattern_byte,
     };
     use minixrs_mkfs_mfs::Manifest;
 
@@ -503,7 +508,10 @@ fn build_rootfs(hello_bytes: &[u8], fileio_bytes: &[u8]) -> Vec<u8> {
         // since with no `lseek` every write runs forward and extends the file.
         .add_sparse(ROOTFS_HOLEY_PATH, holey, ROOTFS_HOLEY_HOLE)
         // The `EEXIST` probe's target, read by nothing else.
-        .add(ROOTFS_DENY_PATH, Vec::new());
+        .add(ROOTFS_DENY_PATH, Vec::new())
+        // Slice 6.4: the boot counter, generation zero. Added after every file
+        // that was already here, so those keep their inode and zone numbers.
+        .add(ROOTFS_BOOTS_PATH, ROOTFS_BOOTS_INITIAL.to_vec());
 
     // `/full` ships exactly enough zero-length files that its single directory
     // block is full, so the one create init makes in it *must* allocate a second

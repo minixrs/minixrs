@@ -1,0 +1,30 @@
+# tests/qemu-boot.reboot.forbidden -- substrings that must NOT appear in the
+# REBOOT's log: the second boot of the disk image a disk boot left behind
+# (MINIXRS_VBLK_IMAGE=target/disk.img). Checked with
+# tests/qemu-boot.reboot.expected by tools/check-boot-log.sh reboot <log>, and
+# with nothing else -- the common forbidden set is NOT applied, for the reason
+# that file's header gives. So a kernel panic in a reboot is not caught by this
+# pair as such; it is caught by `persist gen=1` never being printed.
+
+# The counter did not move: the image was booted, written, booted again, and
+# still holds the `0` it shipped with. Either the first boot's rewrite never
+# reached the device (spec mutation 9 skips it in init; a driver that
+# acknowledged writes without issuing them looks the same), or this is not the
+# image the first boot wrote -- the runner rebuilt it, or attached a copy.
+# This line is REQUIRED of every full boot, which is the point: the reboot's
+# set cannot be satisfied by a fresh boot, nor a fresh boot's by a reboot.
+minix.rs init: persist gen=0
+# The probe could not read the counter or could not store the next one; the
+# common forbidden file names the steps. On a reboot `FAIL value` is the
+# interesting one: the previous boot's truncate reached the device and its
+# write did not (an empty file), or the file holds something that is not one
+# decimal digit.
+minix.rs init: persist FAIL
+# The root did not come from the disk. `bdev.root vblk ... fallback=memory`:
+# MFS found `vblk` and the driver served no root, so the counter above was read
+# from the ramdisk (and would have been 0). `root FAIL <why>`: the driver
+# declined the used image -- on a reboot the spellings that matter are `label`
+# and `tail label`, a first boot that wrote outside the filesystem, and
+# `gpt ...`, one that wrote outside the partition.
+[diag mfs] bdev.root vblk
+[diag vblk] root FAIL

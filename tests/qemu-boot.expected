@@ -1,6 +1,9 @@
 # tests/qemu-boot.expected -- required substrings for a healthy QEMU boot log.
 # This is the COMMON set, required on every boot; each root backend adds its own
 # pair beside it (tests/qemu-boot.{disk,ramdisk}.{expected,forbidden}).
+# (The one boot this set is NOT applied to is the reboot of a used disk image,
+# which is checked against tests/qemu-boot.reboot.{expected,forbidden} alone --
+# that file says why.)
 # One literal substring per line; blank lines and '#' comments are ignored.
 # Checked by tools/check-boot-log.sh via `grep -aF` (the log interleaves raw
 # single-char tick bytes, so it must be forced to text). Substrings stop just
@@ -994,3 +997,32 @@ minix.rs fileio: malloc ok
 # fallback to `name=memory`. They are not in this file because the hand-run
 # no-device boot (MINIXRS_ROOT=nodisk, `[diag vblk] no device`) has none of them
 # and must still pass the common set.
+
+# ---------------------------------------------------------------------------
+# Slice 6.4: the persistence probe -- the boot counter, generation zero.
+# ---------------------------------------------------------------------------
+
+# The root image ships /etc/boots holding one byte, ASCII `0` (kernel-shared's
+# ROOTFS_BOOTS_INITIAL). After the read path and the device probes, and BEFORE
+# the write battery, init opens it, reads it, prints the generation it read --
+# formatted from the value, not a literal -- and only then rewrites the file
+# with the next digit: open(O_RDWR | O_TRUNC), one write, close, the requests
+# fs.trunc and fs.write already issue (spec P9).
+#
+# gen=0 is what a FRESH image holds, so it is required of every boot this set
+# is applied to: the disk boot, whose image tools/qemu-run.sh rebuilds on every
+# run, and the ramdisk boot, whose root is rebuilt from the boot archive on
+# every boot and can never print anything else. Here the line proves the file
+# is in the image, that the probe read exactly one digit out of it (an empty
+# file, a longer one or a non-digit is `persist FAIL value`, forbidden), and --
+# through the forbidden `persist FAIL` -- that the rewrite's truncate, write
+# and close were all accepted.
+#
+# What it does NOT prove is that the rewrite outlived the boot. That is the
+# reboot's line: the same disk image booted again with no rebuild must print
+# `persist gen=1`, which tests/qemu-boot.reboot.expected requires and which
+# FORBIDS this line. So this marker also says a full boot started from a fresh
+# image -- point a full check at a used image and it fails here by design.
+# Mutation 9 (init skips the rewrite) was run and moves nothing in this file:
+# the first boot still prints gen=0. It is the reboot that prints gen=0 again.
+minix.rs init: persist gen=0
