@@ -41,3 +41,12 @@
 
 # ...and mounted the ramdisk root, kept green for the whole phase (H7).
 [diag mfs] bdev.ds ok name=memory ep=
+
+# Slice 6.4: the same probe of minor 1 the disk boot makes (spec P6; see
+# tests/qemu-boot.disk.expected), answered here by `memory`, which serves the
+# ramdisk as minor 0 and nothing else. ENXIO (-6) is what it has always said to
+# any other minor, and is the healthy answer. rc= is asserted: another errno is
+# `bdev.minor FAIL read` (forbidden), and minor= and rc= are printed from the
+# constant and the reply, not typed into MFS. This is the second of the two
+# [diag mfs] lines tools/diff-backends.sh treats as naming the backend.
+[diag mfs] bdev.minor absent minor=1 rc=-6

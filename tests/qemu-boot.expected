@@ -430,8 +430,10 @@ minix.rs hello: iov ok match=1
 # otherwise. WHICH name is required is the per-backend files' business
 # (tests/qemu-boot.{disk,ramdisk}.expected). The two boots' [diag mfs] output
 # differs by this line and, since slice 6.4, by the one `bdev.root vblk rc=-6
-# fallback=memory` line the ramdisk boot prints before it -- and by nothing
-# else, which tools/diff-backends.sh checks.
+# fallback=memory` line the ramdisk boot prints before it and by the verdict of
+# the `bdev.minor` probe (`ok minor=1 mbr=1` on the disk, `absent minor=1
+# rc=-6` on the ramdisk) -- and by nothing else, which tools/diff-backends.sh
+# checks.
 [diag mfs] bdev.ds ok name=
 
 # The mount: block 0 read over BDEV, its superblock decoded at byte 1024 and

@@ -91,3 +91,19 @@
 # H5's silent fallback: a broken virtio path that fell back to the ramdisk would
 # otherwise pass every filesystem marker.
 [diag mfs] bdev.ds ok name=vblk ep=
+
+# Slice 6.4: the minor table, opened once (spec P6). The driver serves minor 0
+# (the root partition), minor 1 (the whole disk) and minor 1+n (GPT partition
+# n), and the filesystem only ever opens minor 0 -- so MFS's prologue issues the
+# system's one request for another minor: a whole-block BDEV_READ of block 0 of
+# minor 1. That block starts with LBA 0, and the line is printed only if the
+# reply was one whole block carrying a PROTECTIVE MBR: the 55 AA boot signature
+# at offset 510, a first partition record of type 0xEE at offset 450, and not
+# the root image's label at offset 0 (minixrs_mfs::minor::classify, host-
+# tested). The root partition's block 0 has zeroes at both offsets, and the
+# ESP's has the signature but no 0xEE record, so a driver that answered minor 1
+# from either extent prints `bdev.minor FAIL mbr` instead (forbidden; spec
+# mutation 11 is the root case, and was run). minor= is
+# BDEV_MINOR_WHOLE_DISK, the constant the driver's table is built from. The
+# ramdisk boot FORBIDS this line and requires `absent`.
+[diag mfs] bdev.minor ok minor=1 mbr=1

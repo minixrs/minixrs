@@ -114,6 +114,7 @@ use minixrs_mfs::inode::{
     SINGLE_INDIRECT_SLOT,
 };
 use minixrs_mfs::layout::{Layout, layout, zmap_bit};
+use minixrs_mfs::minor::{self, MinorProbe};
 use minixrs_mfs::read::{
     ZoneLookup, inode_at, inode_location, zone_for_offset, zone_from_indirect,
 };
@@ -429,6 +430,7 @@ fn main() -> ! {
     // Do not tidy this prologue into alphabetical order.
     tail_probe(&mut blocks);
     partial_probe(&mut blocks);
+    minor_probe(&mut blocks);
     bdev_denials(&mut grants, &blocks);
 
     let mut msg = Message {
@@ -1883,6 +1885,47 @@ fn partial_probe(blocks: &mut Blocks<'_>) {
         }
         Ok(_) => diag_fmt(format_args!("bdev.partial ok n={IMAGE_LABEL_LEN}")),
         Err(rc) => diag_fmt(format_args!("bdev.partial FAIL readback rc={rc}")),
+    }
+}
+
+/// Read block 0 of the **whole-disk minor** and say whether it is the start of
+/// a GPT disk — the one request in the system for a minor other than the root
+/// (slice 6.4, spec P6).
+///
+/// `virtio-blk` serves a table of minors and the filesystem opens only minor 0,
+/// so this is what keeps the rest of the table from being code no boot runs.
+/// `vblk` answers with the disk's first block, whose first 512 bytes are the
+/// protective MBR; `memory` has no such minor and answers `ENXIO`, which is the
+/// healthy line on the ramdisk boot. What the bytes must be, and why each check
+/// is there, is [`minor::classify`]'s — host-tested, which this file is not.
+///
+/// The request rides the block buffer and the grant every other read uses —
+/// [`Blocks::read`] cannot issue it only because it names the root minor — so
+/// it costs no stack and no grant slot. It leaves the buffer holding a block
+/// that is not the root's, which is safe for the reason any read is: nothing
+/// keeps a block across a request.
+///
+/// It runs after [`partial_probe`] and before the denial battery: behind every
+/// proof a driver that wedged on an unfamiliar minor could take down, and ahead
+/// of the requests that are malformed on purpose.
+#[cfg_attr(test, allow(dead_code))]
+fn minor_probe(blocks: &mut Blocks<'_>) {
+    let probed = minor::PROBE_MINOR;
+    let rc = bdev_request(
+        blocks.dev,
+        BDEV_READ,
+        probed,
+        blocks.gid,
+        MFS_BLOCK_SIZE as i32,
+        0,
+    );
+    // `&mut blocks` is held and the request has completed, so nothing else
+    // refers to the buffer and nothing is writing it.
+    match minor::classify(rc, &blocks.buf[..]) {
+        MinorProbe::Mbr => diag_fmt(format_args!("bdev.minor ok minor={probed} mbr=1")),
+        MinorProbe::Absent => diag_fmt(format_args!("bdev.minor absent minor={probed} rc={rc}")),
+        MinorProbe::FailRead(rc) => diag_fmt(format_args!("bdev.minor FAIL read rc={rc}")),
+        MinorProbe::FailMbr => diag_fmt(format_args!("bdev.minor FAIL mbr")),
     }
 }
 

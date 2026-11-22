@@ -38,7 +38,7 @@
 
 use crate::blk::{RootFail, SECTORS_PER_BLOCK, block_to_sector, device_blocks};
 use minixrs_driver_rt::gpt::{self, Lookup, Partition};
-use minixrs_kernel_shared::callnr::{BDEV_BLOCK_SIZE, BDEV_MINOR_ROOT};
+use minixrs_kernel_shared::callnr::{BDEV_BLOCK_SIZE, BDEV_MINOR_ROOT, BDEV_MINOR_WHOLE_DISK};
 use minixrs_kernel_shared::error::{EINVAL, ENXIO};
 use minixrs_kernel_shared::rootfs::ROOT_PARTITION_TYPE_GUID;
 use minixrs_server_rt::bdev::{ReadRequest, validate_range};
@@ -53,8 +53,9 @@ pub const TABLE_BUF_BYTES: usize = TABLE_BLOCKS * BDEV_BLOCK_SIZE;
 const _: () = assert!(TABLE_BLOCKS == 5);
 const _: () = assert!(TABLE_BUF_BYTES >= gpt::TABLE_BYTES);
 
-/// The minor that is the whole disk.
-pub const MINOR_WHOLE_DISK: i32 = 1;
+/// The minor that is the whole disk — the shared constant, so that the one
+/// client that opens it (MFS's `bdev.minor` boot probe) cannot disagree.
+pub const MINOR_WHOLE_DISK: i32 = BDEV_MINOR_WHOLE_DISK;
 /// Minors the table has room for: the root, the whole disk, and one per GPT
 /// slot — `0..=129`.
 pub const MINORS: usize = 2 + gpt::MAX_ENTRIES as usize;

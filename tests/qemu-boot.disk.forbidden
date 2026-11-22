@@ -16,3 +16,7 @@
 [diag vblk] root FAIL
 # (`[diag vblk] flush off` and `flush FAIL` are forbidden on every boot, in the
 # common file: the device is brought up the same way with or without a root.)
+# Slice 6.4: `vblk` serves a root and therefore a whole-disk minor. `absent` --
+# ENXIO for minor 1 -- is the ramdisk boot's line; here it means the driver's
+# minor table lost its second slot while the root still mounted.
+[diag mfs] bdev.minor absent

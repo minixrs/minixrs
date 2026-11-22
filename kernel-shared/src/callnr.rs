@@ -1195,6 +1195,14 @@ pub const BDEV_MINOR_RAMDISK: i32 = 0;
 /// root device the same way whichever driver backs it.
 pub const BDEV_MINOR_ROOT: i32 = BDEV_MINOR_RAMDISK;
 
+/// The whole-disk minor: on a driver whose device carries a partition table,
+/// minor 1 is the entire device, block 0 being its first 4096 bytes (slice 6.4,
+/// spec P6). Partition *n* (counted from 1) follows at minor `1 + n`. A driver
+/// with no such device — `memory` — answers `ENXIO`, as it does for every minor
+/// but [`BDEV_MINOR_RAMDISK`]. Additive: no existing value moves. Not emitted
+/// into the C headers, like the two minors above — no C names a block minor.
+pub const BDEV_MINOR_WHOLE_DISK: i32 = 1;
+
 // The BDEV range sits strictly above the FS range and strictly below CDEV's (and
 // therefore every other server request range) and the NOTIFY marker.
 const _: () = assert!(BDEV_RQ_BASE > FS_RQ_BASE + (NR_FS_MSGS as i32 - 1));
@@ -2766,6 +2774,10 @@ mod tests {
         // H6: the root alias is the same minor, not a second one.
         assert_eq!(BDEV_MINOR_ROOT, 0);
         assert_eq!(BDEV_MINOR_ROOT, BDEV_MINOR_RAMDISK);
+        // Slice 6.4: the whole disk is the minor right after the root, and is
+        // not the root.
+        assert_eq!(BDEV_MINOR_WHOLE_DISK, 1);
+        assert_ne!(BDEV_MINOR_WHOLE_DISK, BDEV_MINOR_ROOT);
     }
 
     #[test]

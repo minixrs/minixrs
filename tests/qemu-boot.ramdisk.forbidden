@@ -14,3 +14,7 @@
 # flush. This line appearing means something wrote to the boot disk -- whose
 # only contents are the ESP and the GPT.
 [diag vblk] flush ok
+# Slice 6.4: the root is the ramdisk, and `memory` has no whole-disk minor. A
+# protective MBR read through minor 1 would mean MFS's requests are reaching
+# `vblk` -- which has no root on this boot and must answer ENXIO to everything.
+[diag mfs] bdev.minor ok

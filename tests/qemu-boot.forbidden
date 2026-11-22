@@ -138,3 +138,10 @@ minix.rs fileio: exit-reset FAIL
 # (`FAIL clobbered`: the driver overlaid the caller's bytes on a stale bounce
 # buffer instead of on the block), or the probe could not run at all.
 [diag mfs] bdev.partial FAIL
+# Slice 6.4: the probe of the whole-disk minor (spec P6) got something that is
+# neither a protective MBR nor ENXIO. `FAIL mbr`: one whole block came back and
+# it is not the start of a GPT disk -- the driver resolved minor 1 to the wrong
+# extent (the root's block 0 has no boot signature; the ESP's has no 0xEE
+# record). `FAIL read rc=<rc>`: any other errno, or a reply that is not exactly
+# one block.
+[diag mfs] bdev.minor FAIL
