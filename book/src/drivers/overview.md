@@ -16,11 +16,11 @@ There are three drivers with an ELF today: **TTY** (`drivers/tty/`), the console
 [`/dev/null` and `/dev/zero` character minors](#the-character-minors); and, since slice 6.2,
 **`virtio-blk`** (`drivers/virtio-blk/`), which [brings a virtio disk up](#virtio-drivers) and,
 since slice 6.3, [serves it as a block device](#virtio-blk) — since slice 6.4 the machine's GPT boot
-disk, whose partitions it serves as minors, the root filesystem's among them when the disk carries
-one. Three more slots (`vcon`, `vinput`, `vnet`) are wired in the kernel but hold no ELF, and
-`drivers/virtio-console` and `drivers/virtio-net` are still empty placeholders. `drivers/driver-rt`
-is the runtime the virtio drivers share: the interrupt-line helper, the virtio transport, the typed
-handles on DMA memory, the virtqueue, and a GPT parser for block drivers.
+disk, whose partitions it serves as minors when the disk carries a minix.rs root partition, and none
+at all when it does not. Three more slots (`vcon`, `vinput`, `vnet`) are wired in the kernel but
+hold no ELF, and `drivers/virtio-console` and `drivers/virtio-net` are still empty placeholders.
+`drivers/driver-rt` is the runtime the virtio drivers share: the interrupt-line helper, the virtio
+transport, the typed handles on DMA memory, the virtqueue, and a GPT parser for block drivers.
 
 `memory` is worth contrasting with the other two up front, because it is the counter-example to the
 paragraph above: **its window is ordinary RAM, not MMIO**. It owns no hardware at all. What makes it
@@ -324,7 +324,7 @@ For a driver the probe assigned, `load_boot_server` adds one arm beside TTY's an
 maps the register page `Prot::DEVICE_RW` at `VIRTIO_MMIO_PAGE_VA`, pushes the device's INTID onto
 the driver's `Priv::irqs` — so the allow-list is exactly one line long — and maps the driver's
 [DMA run](../memory/overview.md#the-dma-window) at `DMA_VA`. It logs two lines, which are required
-markers of both boots CI runs, since each attaches the boot disk:
+markers of both full boots, since each attaches the boot disk:
 
 ```text
 [devmap] vblk va=0x40001000 pa=0xa000000 intid=48
@@ -350,6 +350,15 @@ integrity, which fits how the image table treats it: every `SRV_T` row, the four
 included, gets the full kernel-call mask (`kernel/src/proc/table.rs`). The boundaries contain
 mistakes; isolating a driver from the rest of the machine needs an IOMMU, which this platform
 configuration does not offer.
+
+The trust runs the other way too. The same table gives every `SRV_T` row an IPC mask covering every
+other boot process, so each server and driver — PM, VFS, RS, `memory`, TTY, DS, MFS, VM, SCHED — may
+send `virtio-blk` a `BDEV_WRITE`; a user process may not (its mask is PM, VFS and VM). Since slice
+6.4 that reaches further than the root filesystem: [every minor is read-write](#minors), the disk
+behind the driver is the one the machine boots from, and so any of those servers could overwrite the
+kernel on the ESP (minor 2) or the partition table and its backup (minor 1), and the damage would
+outlast a reboot. In 6.3 the same request could reach only the root image. Nothing in the system
+sends such a write, and nothing but the IPC mask prevents it.
 
 ### `driver-rt`
 
@@ -499,7 +508,8 @@ step=<step> …` and abandons the rest without resetting the device or releasing
 in step 5 or 6 also marks the device `FAILED`. No step waits on a register or a ring. The driver
 still enters its receive loop, with no root to serve. A device brought up without the flush feature
 gets one more line, `flush off`, and its writes are served unflushed; QEMU offers the feature on
-every drive the runner attaches, so that line is a forbidden marker on every boot.
+every drive the runner attaches, so that line is a forbidden marker on every full boot (the reboot
+is checked against its own pair, which does not include the common forbidden file).
 
 The run's page 0 is the queue, page 1 holds the 16-byte request header with the one status byte
 right after it, and page 2 is the one 4096-byte bounce buffer — a BDEV block on its way to or from
@@ -529,28 +539,29 @@ would read the protective MBR instead of the image label.
 
 The refusals, in the order the checks run — the first that holds is the one printed:
 
-| Line                               | What was wrong                                                                         |
-| ---------------------------------- | -------------------------------------------------------------------------------------- |
-| `root FAIL geometry capacity=<c>`  | the device is empty or not a whole number of 4096-byte blocks; decided before any read |
-| `root FAIL gpt rc=<rc>`            | a read of the partition table's blocks failed                                          |
-| `root FAIL gpt <why>`              | the parser refused the primary header, the entry array or an entry (below)             |
-| `root FAIL gpt ambiguous`          | more than one partition carries the root type GUID                                     |
-| `root FAIL no root partition`      | none does                                                                              |
-| `root FAIL align`                  | the root partition does not start and end on a 4096-byte block boundary                |
-| `root FAIL readonly`               | the device is read-only (`VIRTIO_BLK_F_RO` was accepted)                               |
-| `root FAIL head rc=<rc>`           | the read of the root partition's first block failed                                    |
-| `root FAIL label`                  | that block does not start with the image label                                         |
-| `root FAIL blocks hdr=<h> dev=<d>` | the image header's block count is not the partition's                                  |
-| `root FAIL tail rc=<rc>`           | the read of the root partition's last block failed                                     |
-| `root FAIL tail label`             | that block does not start with the tail label                                          |
+| Line                               | What was wrong                                                                        |
+| ---------------------------------- | ------------------------------------------------------------------------------------- |
+| `root FAIL geometry capacity=<c>`  | empty, not whole 4096-byte blocks, or under the table's five; decided before any read |
+| `root FAIL gpt rc=<rc>`            | a read of the partition table's blocks failed                                         |
+| `root FAIL gpt <why>`              | the parser refused the primary header, the entry array or an entry (below)            |
+| `root FAIL gpt ambiguous`          | more than one partition carries the root type GUID                                    |
+| `root FAIL no root partition`      | none does                                                                             |
+| `root FAIL align`                  | the root partition does not start and end on a 4096-byte block boundary               |
+| `root FAIL readonly`               | the device is read-only (`VIRTIO_BLK_F_RO` was accepted)                              |
+| `root FAIL head rc=<rc>`           | the read of the root partition's first block failed                                   |
+| `root FAIL label`                  | that block does not start with the image label                                        |
+| `root FAIL blocks hdr=<h> dev=<d>` | the image header's block count is not the partition's                                 |
+| `root FAIL tail rc=<rc>`           | the read of the root partition's last block failed                                    |
+| `root FAIL tail label`             | that block does not start with the tail label                                         |
 
 **The partition table.** The driver reads whole-disk blocks 0–4 (LBA 0–39), which hold the
-protective MBR, the primary GPT header and all 128 partition entries, and hands the bytes to
-`driver-rt`'s [GPT parser](#driver-rt). The parser checks the header in a fixed order, and `<why>`
-is the first check that fails: `header short`, `signature`, `revision` (must be 1.0), `header size`
-(92 bytes up to one sector), `crc` (the header's CRC-32), `my lba` (must be 1), `entry size` (must
-be 128), `entry count` (1 to 128), `entry lba` (the array must start at LBA 2), `usable range`
-(`FirstUsableLBA ≤ LastUsableLBA <` the disk's size). Then the entry array: `entries short`,
+protective MBR, the primary GPT header and all 128 partition entries — a device with fewer than five
+blocks was already refused for its geometry, so no read names a sector past the end — and hands the
+bytes to `driver-rt`'s [GPT parser](#driver-rt). The parser checks the header in a fixed order, and
+`<why>` is the first check that fails: `header short`, `signature`, `revision` (must be 1.0),
+`header size` (92 bytes up to one sector), `crc` (the header's CRC-32), `my lba` (must be 1), `entry
+size` (must be 128), `entry count` (1 to 128), `entry lba` (the array must start at LBA 2), `usable
+range` (`FirstUsableLBA ≤ LastUsableLBA <` the disk's size). Then the entry array: `entries short`,
 `entries crc`. Then each used entry — an all-zero type GUID is an unused slot — whose range must not
 be inverted and must lie inside the usable range: `entry range`, which condemns the whole table
 rather than the one entry. (`entry index`, the parser's refusal of a partition number outside the
@@ -612,7 +623,10 @@ The offset is added only after the range check, and the translation refuses a bl
 extent a second time on its own, so a request can never reach past its partition into the next one.
 
 **With no root there are no minors at all.** A driver with a device but no root answers `ENXIO` on
-every minor — the whole disk included.
+every minor — the whole disk included, and a zero-length request too, which is the request MFS
+probes the driver with. That gate is decided first, by the same pure function that then applies the
+four steps above (`part::locate`), so host tests hold it; no boot marker can, because on the
+rootless boot MFS's one request for another minor goes to `memory`.
 
 Nothing in the system mounts any minor but 0. So that the table is not code no boot runs, MFS's
 prologue issues the system's one request for another minor,
@@ -684,12 +698,14 @@ step=io` has already said why, and the write still answers `EIO`.
 **What `flush ok n=1` proves, and what it does not.** It proves that a write reached the device and
 that a flush request was issued and completed with status 0. It does not prove that anything reached
 stable storage: QEMU serves a raw image through the host's page cache, so a second boot of the same
-image sees the first boot's writes with or without a guest flush. Dropping the flush from the write
-path moves this one marker and nothing else — the image still
-[reboots with its writes intact](../boot/overview.md#booting-the-same-image-twice) — and a driver
-that treated a failed flush's status as success would move nothing at all under QEMU, whose flush
-cannot be made to fail. The decisions around the flush are host-tested; the device's side of it is
-taken on its status byte.
+image sees the first boot's writes with or without a guest flush. In one hand-run stub-free boot of
+slice 6.4, dropping the flush from the write path moved this one marker and nothing else — the image
+still [rebooted with its writes intact](../boot/overview.md#booting-the-same-image-twice) — and a
+driver changed to treat a failed flush's status as success moved nothing at all, in a boot or in a
+host test, because QEMU's flush cannot be made to fail. The decisions around the flush are
+host-tested; the calls in `main.rs` that act on them, and the early returns that keep a zero-length
+write or a refused grant from being flushed, are covered by that one marker and by reading; the
+device's side of it is taken on its status byte.
 
 #### What a client hears
 
@@ -971,7 +987,10 @@ bytes — but no `0xEE` record (`bdev.minor FAIL mbr`). `memory` has no such min
 ten refusals in `bdev.deny` include the one grant check slice 5.3 could not reach — a
 `CPF_READ`-only grant used as a copy *destination* — plus, since slice 5.10a, two `BDEV_WRITE`
 probes aimed at the write path this driver now really implements, refused by the kernel's
-grant-direction and minor checks rather than by a since-retired `EROFS` stub.
+grant-direction check and by the driver's own minor check rather than by a since-retired `EROFS`
+stub. The two probes of the minor check, one read and one write, name `BDEV_MINOR_NONE` — a minor no
+block driver serves, whatever is on its disk — and not a small literal, which `virtio-blk`'s
+partition minors could grow to reach.
 
 Every one of those markers is identical with and without the `boot-stubs` feature **and** with and
 without the musl sysroot, and all but the three backend-specific lines — `bdev.root`, the `name=` of

@@ -28,10 +28,12 @@ cargo kernel-aarch64
 # timeout is mandatory. Redirect to a file when you need to grep the log.
 # Budget ~6 s for the rebuild, the disk image and UEFI firmware startup before
 # the kernel's first byte -- `timeout 8` can yield a log with no kernel output
-# at all. A default
-# boot needs 450 s to reach the last marker `tools/check-boot-log.sh` requires
-# with headroom (CI gives each full boot 900 s); a shorter run shows the early
-# boot only.
+# at all. A default boot is given 450 s to reach the last marker
+# `tools/check-boot-log.sh` requires (CI gives each full boot 900 s); a shorter
+# run shows the early boot only. How much of the 450 s a boot uses depends on
+# how the C programs were built: about 250 s when `hello` comes from an
+# installed minix.rs SDK, about 400 s when it is the larger in-tree musl build
+# CI uses (measured once each for a disk boot, slice 6.4).
 timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # Clean, stub-free boot for debugging: --no-default-features disables the

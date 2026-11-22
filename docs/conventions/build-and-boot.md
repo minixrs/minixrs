@@ -29,13 +29,15 @@ cargo kernel-aarch64
 # (qemu-smoke itself gives each full boot 900 s as of slice 6.4). The number is
 # NOT a constant, it tracks how far into the boot the LAST required marker sits.
 # It was 25 s through slice 5.8, 120 s through 5.10a and 300 s through 6.3, and
-# it is stale advice the moment a slice makes the boot longer. The measurement
-# behind 450 (slice 6.4, QEMU 11.0.3, musl flavour -- `MINIXRS_SDK=/nonexistent`,
-# the one CI builds): the last required marker, `[diag vfs] pm-exit reset
-# closed=1`, sits at 82.7% of a 300 s disk log (~248 s in) and 59.3% of a 300 s
-# ramdisk log (~178 s). Readings across that slice's boots ranged 68.4%-82.7%
-# (disk) and 47.7%-59.3% (ramdisk); budget for the high one. 300 s therefore
-# leaves the disk boot only ~1.2x, and 450 s is 1.8x.
+# it is stale advice the moment a slice makes the boot longer. Slice 6.4 raised
+# it from 300 because the disk boot's last required marker had moved to ~248 s
+# of a boot; every measurement, and which flavour each was taken on, is in
+# ./ci.md (the bullet "A slice can break the boot-timing budget"). READ THAT
+# BEFORE TRUSTING 450 FOR A MUSL-FLAVOUR BOOT: ~248 s turned out to be the SDK
+# flavour's figure (an installed SDK is used even with MINIXRS_SDK unset). With
+# `MINIXRS_SDK=/nonexistent` -- the flavour CI builds -- the one reading taken
+# puts that marker ~396 s into a disk boot and ~260 s into a ramdisk boot, so
+# 450 s clears a musl disk boot by only ~1.14x.
 # Re-measure rather than trusting this paragraph: `grep -abo <marker> log | head -1`
 # divided by `wc -c log`, and raise the budget when the fraction climbs. The three
 # things that move it most are the `hello` flavour (~47 KB with the SDK vs ~200 KB
@@ -47,11 +49,10 @@ cargo kernel-aarch64
 # faster, because stub C's kernel-call flood dominates a default boot: 5.10b
 # measured the `fs.*` markers landing at ~0.14% of a 60 s stub-free log, and 6.4
 # measured every one of its markers inside the first 0.33% of a 60-75 s one, so
-# `timeout 30` is ample there (25-40 after a separate build). That is the
-# configuration to iterate and
-# mutation-test in; just remember `check-boot-log.sh` reports FAIL on the stub
-# A-D markers there by design, so judge a stub-free run by grepping the specific
-# marker rather than by the script's overall verdict.
+# `timeout 30` after a separate build is ample there. That is the configuration
+# to iterate and mutation-test in; just remember `check-boot-log.sh` reports FAIL
+# on the stub A-D markers there by design, so judge a stub-free run by grepping
+# the specific marker rather than by the script's overall verdict.
 #
 # QEMU under TCG also advances *guest* time slower than wall-clock, so a
 # `timeout N` run reaches far fewer than N x 100 ticks. For time-based features
@@ -76,12 +77,16 @@ timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 #   MINIXRS_ROOT=nodisk   the rootless image as virtio-blk-PCI: the firmware
 #                         reads it, minix.rs has no PCI, so `vblk` prints `no
 #                         device` and MFS finds no `vblk` in DS. Hand-run only --
-#                         CI does not boot it and it has no marker pair (it
-#                         passes the common files and fails both per-backend sets).
+#                         CI does not boot it and it has no marker pair (how its
+#                         log fares against the marker files is under "The
+#                         no-device state has no checked boot" in
+#                         ./testing-and-markers.md#markers).
 #
-# A slice that touches the block path, MFS or VFS owes BOTH checked boots -- the
-# ramdisk backend stays green for the whole phase (H7). Keep the logs apart; the
-# checker and tools/diff-backends.sh each want to be told which is which.
+# A slice that touches the block path, MFS or VFS owes both full boots AND the
+# reboot below (the Definition of done, ./docs-and-workflow.md#slice-workflow
+# step 4, is the rule) -- the ramdisk backend stays green for the whole phase
+# (H7). Keep the logs apart; the checker and tools/diff-backends.sh each want to
+# be told which is which.
 MINIXRS_ROOT=ramdisk timeout 450 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 
 # The image is BUILT ON EVERY RUN by the host tool tools/mkimage, which the
@@ -113,9 +118,12 @@ MINIXRS_ROOT=ramdisk timeout 450 cargo run -p minixrs-kernel --target aarch64-un
 #
 # THE REBOOT (the persistence proof): boot the image a disk boot just wrote,
 # as-is, and check it against the reboot marker pair. It must print
-# `minix.rs init: persist gen=1`. It MUST run before anything rebuilds
-# target/disk.img -- every plain disk boot does. It needs only that one line
-# (~34 s in locally); CI gives it 180 s.
+# `minix.rs init: persist gen=1`. THE REBOOT-ORDERING RULE: it MUST run before
+# anything rebuilds target/disk.img -- every plain disk boot does -- so it comes
+# immediately after the disk boot whose image it reads. And RUN IT ONCE PER DISK
+# BOOT: each boot of the image stores the next digit, so a second reboot of the
+# same image prints gen=2 and fails the reboot set by design; take a fresh disk
+# boot first. It needs only that one line (~34 s in locally); CI gives it 180 s.
 MINIXRS_VBLK_IMAGE=target/disk.img timeout 60 cargo run -p minixrs-kernel \
   --target aarch64-unknown-none --release > reboot.log 2>&1
 tools/check-boot-log.sh reboot reboot.log
@@ -123,11 +131,13 @@ tools/check-boot-log.sh reboot reboot.log
 # The runner's QEMU command line: one `-drive file=<image>,format=raw,if=none,id=vblk0`
 # plus `-device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0` (for `nodisk`,
 # one `-drive ...,if=virtio` instead), and `-global virtio-mmio.force-legacy=false`.
-# Nothing else is attached. The runner prints the exact argv on stderr as one
+# The runner attaches nothing else (`-M virt` still creates its default devices,
+# a virtio-net-pci card among them: the runner passes no `-nodefaults`). The
+# runner prints the exact argv on stderr as one
 # `qemu-run: ...` line (and `qemu-run: attaching <file> as-is ...` when it built
 # nothing) -- the first thing to read when a boot surprises. Extra arguments are
-# appended last, so a later `-global` overrides the default. Both checked boots
-# print `[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and the driver's
+# appended last, so a later `-global` overrides the default. Both full boots, and
+# the reboot, print `[virtio] slot=0 pa=0xa000000 id=2 ver=2 drv=vblk` and the driver's
 # `[diag vblk] virtio ok features=0x100000200 capacity=75776 ...` line; 75776 is
 # the whole disk in sectors (tools/mkimage's `layout::DISK_SECTORS`), the same on
 # both images, and tests/qemu-boot.{disk,ramdisk}.expected are the other holders

@@ -1622,8 +1622,11 @@ fn ds_key(name: &[u8]) -> [u8; SYS_GETINFO_NAME_LEN] {
 /// through to [`mem_endpoint`], unchanged — its own `bdev.ds FAIL` line included.
 ///
 /// **The selected device is named on exactly one line**, `bdev.ds ok name=<name>
-/// ep=<ep>`, and that line is the only one the two backends' output may differ
-/// by. For `vblk` it is printed after the probe, so it never names a device this
+/// ep=<ep>`. Since slice 6.4 it is one of three places the two backends'
+/// `[diag mfs]` output may differ, with the fallback line above (the ramdisk
+/// boot only) and the `bdev.minor` verdict ([`minor_probe`]);
+/// `tools/diff-backends.sh`'s header lists all three and allows nothing else.
+/// For `vblk` it is printed after the probe, so it never names a device this
 /// server then declined.
 ///
 /// **On fallback the grant issued to `vblk` is revoked**, so a driver this server

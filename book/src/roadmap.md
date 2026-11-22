@@ -90,9 +90,10 @@ restarts it. They talk to the kernel (interrupts, I/O) and to VFS (device protoc
   driver also grows in Phase 6: PL011 receive, and a text console on the bootloader-provided
   framebuffer.
 - The `driver-rt` crate already provides the interrupt-line helper, the VirtIO transport (a trait
-  with the MMIO implementation) and the split virtqueue (slice 6.2), plus typed DMA handles (slice
-  6.3); the reusable `BlockDriver` / `CharDriver` request traits are still to come. Only a console
-  story is needed for the Phase-5 `printf` milestone; the rest is Phase 6.
+  with the MMIO implementation) and the split virtqueue (slice 6.2), typed DMA handles (slice 6.3)
+  and a GPT parser for block drivers (slice 6.4); the reusable `BlockDriver` / `CharDriver` request
+  traits are still to come. Only a console story is needed for the Phase-5 `printf` milestone; the
+  rest is Phase 6.
 
 ## Copy-on-write fork
 

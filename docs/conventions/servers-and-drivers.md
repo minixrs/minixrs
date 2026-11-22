@@ -134,8 +134,8 @@ That is how `userland/worker` gets into the archive as an exec target only (slic
 — and it is satisfied only by array position in `kernel/build.rs`, so that a server is in its
 receive loop before its first client looks it up (slice 5.8 — see
 [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)). The `vblk < mfs` link is the one with **no
-fallback line behind it**: MFS reads a missing `vblk` as "no virtio disk attached" and mounts the
-ramdisk without a word, so a `vblk` that had not published when MFS looked would give a ramdisk
+fallback line behind it**: MFS reads a missing `vblk` as "no virtio-mmio disk attached" and mounts
+the ramdisk without a word, so a `vblk` that had not published when MFS looked would give a ramdisk
 root, not a FAIL line. Only the per-backend marker pairs catch it, and since slice 6.4 both do: the
 disk boot requires `bdev.ds ok name=vblk` and forbids `name=memory`, and the ramdisk boot requires
 the `bdev.root vblk rc=-6 fallback=memory` line, which MFS prints only after finding `vblk` (slices
@@ -146,8 +146,9 @@ the `bdev.root vblk rc=-6 fallback=memory` line, which MFS prints only after fin
 
 Servers discover each other via **DS** (the name→endpoint registry, `servers/ds/`): every server
 publishes its endpoint at SEF init by setting `init_fresh: Some(...)` to a callback that calls
-`server-rt::sef_publish_to_ds(endpoint, name)` (a `DS_PUBLISH` SENDREC; key = 16-byte NUL-padded
-name in payload `0..16`, endpoint `i32` in `16..20`).
+`server-rt::sef_publish_to_ds(name)` (a `DS_PUBLISH` SENDREC; key = 16-byte NUL-padded name in
+payload `0..16`, and no endpoint — DS registers the kernel-stamped `m_source`, so a server can
+publish only itself; an endpoint `i32` rides in `16..20` only on a `DS_RETRIEVE` reply).
 
 **DS is the exception** — it seeds its *own* entry in-process in `ds_init` (`registry::publish(name,
 endpoint)`), because a SENDREC to itself before reaching its receive loop would deadlock. The
@@ -549,10 +550,11 @@ Beyond the shared contracts above, the driver-specific rules:
   re-set a status bit the device had just cleared; the mock transport stored whatever it was sent,
   so the host test passed while QEMU dropped the whole write. A mock that cannot say no proves only
   that the driver talks
-- **Run `cargo miri test -p minixrs-driver-rt` after touching its `unsafe`** (CI's advisory `miri`
-  job runs it too). 6.2's first virtqueue wrote through a pointer taken from a shared borrow: every
-  host test passed, and Miri rejected it under both aliasing models. `queue.rs`'s tests are what
-  drive `dma.rs` under Miri, so a queue change is a reason to run it as well
+- **Run `cargo miri test -p minixrs-driver-rt` after touching its `unsafe`** (the crate is in the
+  `-p` list of CI's advisory `miri` job as well, but that job cannot fail a PR, so the local run is
+  the one that counts). 6.2's first virtqueue wrote through a pointer taken from a shared borrow:
+  every host test passed, and Miri rejected it under both aliasing models. `queue.rs`'s tests are
+  what drive `dma.rs` under Miri, so a queue change is a reason to run it as well
 
 ### Block drivers
 
@@ -580,7 +582,8 @@ Beyond the shared contracts above, the driver-specific rules:
   `validate_range` answers in blocks relative to the extent; `virtio-blk`'s `Extent::sector` adds
   the extent's first block and refuses a block outside the extent again on its own. A request can
   therefore never reach past its partition into the next one, and the order (resolve the minor,
-  validate, then translate) lives in `MinorTable::locate` so no request path can reorder it.
+  validate, then translate) lives in `MinorTable::locate` so no request path can reorder it. The
+  driver's main loop reaches it through `part::locate`, which decides the no-root case first.
 - **`EIO` is real on the BDEV band and means exactly one thing: the request was well-formed and the
   device failed.** `virtio-blk` answers it for a status byte other than `0` and for a broken device.
   Preset the status byte to a value the device never reports (`0xFF`) before every request, so a
@@ -598,13 +601,19 @@ Beyond the shared contracts above, the driver-specific rules:
 - **A driver that has a device but no minix.rs root on it answers `ENXIO` to every BDEV request, on
   every minor**, well-formed or not — a failed bring-up, no acceptable partition table, no root
   partition, a read-only disk, labels that do not match. The whole-disk minor is included: with no
-  root there are no minors at all.
+  root there are no minors at all. A zero-length request is included too — it is the request MFS
+  probes with, and a `0` there would mount a disk with no root. The gate is `part::locate` called
+  with no table: a pure function, so host tests hold it. Keep it there. As a `match` arm in
+  `main.rs` it had no test, and no boot marker can cover it, because on the rootless boot MFS's only
+  request for another minor goes to `memory`.
 - **The partition table is read by the driver and parsed by `driver-rt::gpt`.** The driver reads
-  whole-disk blocks 0–4 through its ordinary request path and hands the bytes over. Only the
-  **primary** header and entry array are consulted; a disk whose primary copy is damaged has no root
-  as far as the driver is concerned, and repairing from the backup is a tool's job. The writer
-  (`tools/mkimage`) shares no code with the parser — a host test in the tool parses a built image
-  with the driver's parser, so the two are derived separately and checked against each other.
+  whole-disk blocks 0–4 through its ordinary request path and hands the bytes over — after
+  `part::geometry` has refused a device that does not have five whole blocks, so the driver never
+  asks a device for sectors past its end and leaves the refusal to it. Only the **primary** header
+  and entry array are consulted; a disk whose primary copy is damaged has no root as far as the
+  driver is concerned, and repairing from the backup is a tool's job. The writer (`tools/mkimage`)
+  shares no code with the parser — a host test in the tool parses a built image with the driver's
+  parser, so the two are derived separately and checked against each other.
 - **Flush before the reply.** When the device accepted `VIRTIO_BLK_F_FLUSH`, every `BDEV_WRITE`
   whose device write succeeded is followed by a `VIRTIO_BLK_T_FLUSH` — a two-descriptor chain,
   header and status, completed by interrupt like any request — before the client is answered, and a
@@ -612,7 +621,8 @@ Beyond the shared contracts above, the driver-specific rules:
   failed device write. There is no BDEV flush request: write-through is the driver's, so a client
   that was told a write succeeded needs nothing more. The decision (`blk::flush_after`) and the
   reply (`blk::write_reply`) are pure and host-tested; the call in `main.rs` is evidenced only by
-  the `flush ok n=1` marker.
+  the `flush ok n=1` marker, and the three "no flush" cases only by reading: each is an early return
+  ahead of the call, so `flush_after`'s tests for them exercise arms the driver never reaches.
 - **A read-only disk is declined as a root, not mounted.** The driver requests `VIRTIO_BLK_F_RO` so
   a read-only device says so, and answers `root FAIL readonly`; MFS falls back. Nothing above the
   driver can mount a filesystem read-only, and before 6.4 such a disk mounted and failed at its
@@ -908,7 +918,7 @@ zone to two files — corruption rather than a leak (slice 5.10b — see
 
 ## Writing probes and denial batteries
 
-A server's probe battery is how these rules stay proved. Three rules for writing one:
+A server's probe battery is how these rules stay proved. The rules for writing one:
 
 - **Write every denial probe so that a growing capability makes it fail loudly, not pass
   vacuously.** A probe asserting `EROFS` from `write()` on a file descriptor stopped being a denial
@@ -918,6 +928,14 @@ A server's probe battery is how these rules stay proved. Three rules for writing
   literal neighbour of an existing request. `VFS_WRITE + 1` became a real `VFS_OPEN` the moment the
   band grew. Spell a flag probe relative to the known set the same way: `fcntl::O_UNKNOWN_BIT` is
   *derived* from `O_KNOWN`, so a flag becoming real makes the probe fail loudly.
+- **Spell a "no such device" probe with `BDEV_MINOR_NONE`, never a small literal minor.** MFS's
+  `bad-minor` and `wr-minor` named minor 7, which was nobody's on `memory` and became GPT partition
+  6 on `virtio-blk` in slice 6.4 — still `ENXIO`, but only because the boot disk has two partitions:
+  the probe's premise had become a fact about one disk image instead of about the driver. The
+  constant is `i32::MAX`, and each block driver holds it outside its own minors at compile time
+  (`virtio-blk`'s `part.rs`, `server-rt`'s `bdev`), so a table that grows to reach it fails the
+  build. The CDEV probes still use a literal 7; they are a different namespace with two fixed
+  tables, and owe the same treatment the day one of them grows.
 - **Never aim a "must be refused" probe at a file or block whose accidental write would destroy
   something**, and retire a probe visibly — decrement the `n=` in its marker so the retirement is a
   diff rather than a deletion nobody reviews.

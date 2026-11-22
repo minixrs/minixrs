@@ -85,9 +85,9 @@ whole-project picture.
   | reboot  | `MINIXRS_ROOT=disk MINIXRS_VBLK_IMAGE=target/disk.img` | 180 s   | `qemu-reboot.log`  |
   | ramdisk | `MINIXRS_ROOT=ramdisk`                                 | 900 s   | `qemu-ramdisk.log` |
 
-  The reboot attaches the image the disk boot just wrote, as-is, and must come **immediately after
-  it**: every plain disk boot rebuilds `target/disk.img`, so the image the reboot needs exists only
-  until the next one. What each boot attaches is in [`build-and-boot.md`](./build-and-boot.md).
+  The reboot attaches the image the disk boot just wrote, as-is, which is why the steps are in this
+  order: the reboot-ordering rule, and the once-per-disk-boot rule beside it, are in
+  [`build-and-boot.md`](./build-and-boot.md) under "THE REBOOT", with what each boot attaches.
   `tools/check-boot-log.sh <disk|reboot|ramdisk> <log>` then greps each log — the two full boots
   against the common marker files plus their backend's own pair, the reboot against its own pair
   only — and all three are checked even if an earlier one fails, so one run shows the whole story. A
@@ -110,15 +110,22 @@ whole-project picture.
   `coverage` runs `cargo llvm-cov --workspace --exclude minixrs-kernel`, which executes every host
   test in the workspace, the image writer's included. `minixrs-mkimage` is deliberately not in the
   `miri` list — it has no `unsafe` for Miri to check, and its tests build whole 37 MiB images.
-  `minixrs-driver-rt` is in the list, so the GPT *parser* does run under Miri
+  `minixrs-driver-rt` is in the advisory `miri` job's `-p` list, so the GPT *parser* is among what
+  that job is configured to check. As of slice 6.4 that is a configuration and a local result, not a
+  CI one: `cargo miri test -p minixrs-driver-rt` was run locally on the parser's commit and again on
+  the slice's final tree (2026-11-22: 113 passed, 0 failed), and the branch had not run on CI
 - **Two things about the 6.4 boot are not validated until a CI run says so**, because both were
   measured only against Homebrew's edk2 under QEMU 11.0.3: that Debian's `QEMU_EFI.fd` boots from a
   modern (version 2) virtio-mmio disk and reads the FAT32 and GPT `tools/mkimage` writes, and that
   900 s / 180 s clear the runner's real TCG slowdown. If the firmware cannot, the disk boot's log
   holds no kernel banner at all and the checker reports every marker missing. The job also still
-  installs `ipxe-qemu`: its `efi-virtio.rom` was needed for the virtio-blk-PCI ESP drive that 6.4
-  removed, but whether QEMU on the runner wants the ROM for some other default device has not been
-  tested, so it stays until a run without it is made on purpose
+  installs `ipxe-qemu`, and why QEMU on the runner wants its `efi-virtio.rom` has not been
+  established there: the workflow's comment used to attribute it to the virtio-blk-PCI ESP drive,
+  which 6.4 removed, and that looks like a mis-attribution — on a dev machine's QEMU 11.0.3 `info
+  qtree` names `efi-virtio.rom` as the `romfile` of `virtio-net-pci`, the NIC `-M virt` creates by
+  default (the runner passes neither `-nodefaults` nor `-nic none`), and gives `virtio-blk-pci`
+  none. If the runner's QEMU agrees, the need did not go away with the ESP drive. It is untested
+  without the package, so it stays until a run without it is made on purpose
 - **A slice can break the boot-timing budget, and "it passes locally" is not the check.** The budget
   was 45 s until slice 5.9, 120 s until 5.10a, and 240 s until 5.10b; **every raise has had the same
   cause and the same evidence**, and the number will move again. 5.9: `hello` stopped being a memcpy
@@ -142,26 +149,41 @@ whole-project picture.
   raised it again, **600 → 900 s** for each full boot: the machine boots from one GPT disk, every
   write to it is followed by a flush (a second interrupt round trip), and the ramdisk boot is no
   longer device-free — it brings the rootless disk up and falls back. At a fixed 300 s the last
-  required marker (`[diag vfs] pm-exit reset closed=1`) sits at **82.7%** of the disk boot's log
-  (~248 s) and **59.3%** of the ramdisk boot's (~178 s), against 66.8% / 48.1% at the merge base;
-  under 600 s that is 2.42x for the disk boot, and 900 s restores 3.63x (5.06x for the ramdisk
-  boot). The readings are noisy — the slice's disk boots ranged 68.4%–82.7% and its ramdisk boots
-  47.7%–59.3% — so budget for the worst one. The reboot's 180 s comes from a different number: it
-  needs one line, `persist gen=1`, which lands about 34 s of local wall clock after `cargo run`
-  starts. CI's TCG is slower than local, so raise with real headroom rather than trimming to what
-  passes here — think in the *ratio*, not the wall-clock seconds, which are a property of the dev
-  machine. Two mechanical notes: `git stash` does **not** give you the "before" once the slice is
-  committed on a branch — detach to the merge base, and stash only the doc edits so `target/` and
-  `target/musl-sysroot` survive and the two boots differ in nothing but the code. And build (`cargo
-  build`) before the timed `cargo run`, or the rebuild lands inside the timeout and skews the
-  fraction. A third, which has already cost one silently-wrong measurement: **`$MINIXRS_SDK` does
-  not persist across separate shell invocations**, so setting it in one command and booting in
-  another measures the **SDK** flavour, not the musl one the number is defined against. Confirm the
-  flavour from the embedded `hello` size — ~200 KB musl, ~47 KB SDK, ~15 KB fallback — rather than
-  trusting the build warning. A boot-time selftest that reads a **configuration-dependent** file is
-  the usual culprit: prefer `/etc/pattern` (40 KiB in every config, so its count is assertable too)
-  over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB with in-tree musl, and ~15 KB in the
-  sysroot-absent fallback
+  required marker (`[diag vfs] pm-exit reset closed=1`) sits at **82.0–82.7%** of the disk boot's
+  log across three boots of the final code (82.00%, 82.71%, 82.68%: ~246–248 s) and **59.3%** of the
+  ramdisk boot's (~178 s), against 66.8% / 48.1% at the merge base; under 600 s that is 2.42x for
+  the disk boot, and 900 s was chosen to restore 3.63x (5.06x for the ramdisk boot). The readings
+  are noisy — across the slice's tasks the disk boots ranged 68.4%–82.7% and the ramdisk boots
+  47.7%–59.3% — so budget for the worst one. **And every one of those readings is the wrong
+  flavour**, by the trap the end of this bullet describes: the slice's boots all ran with the SDK
+  installed and `MINIXRS_SDK` unset, so their `hello` was the SDK's 46 696 bytes (`len=46696` in
+  each log's `[ksys SYS_EXEC] … name=hello` line), not the 234 280-byte in-tree-musl one CI builds.
+  The slice's review round took the one musl reading there is (2026-11-22, same machine, QEMU
+  11.0.3, `MINIXRS_SDK=/nonexistent` on the build and on the boot). It was taken at 450 s, and a
+  fraction of a 450 s log is not comparable with a fraction of a 300 s one, so compare seconds: the
+  last required marker at 88.03% of the disk boot's log, **~396 s**, and 57.87% of the ramdisk
+  boot's, **~260 s**. Up to `fs.leak` the two flavours' logs agree to within a few seconds; the
+  whole difference is the C programs' phase, where `hello` and `fileio` are read through MFS and VFS
+  a round at a time. Against the musl reading 900 s is **2.27x** for the disk boot (3.46x for the
+  ramdisk boot) — under the 3.0x that let 6.3 keep its budget — and the local 450 s is 1.14x.
+  **Neither number was re-derived in that round**: it is one reading, and the branch's first CI run
+  is the measurement that settles it (tracked as 6.4's debt 13 in
+  [`phase-6-virtio.md`](../plans/phase-6-virtio.md)). The reboot's 180 s comes from a different
+  number: it needs one line, `persist gen=1`, which lands about 34 s of local wall clock after
+  `cargo run` starts. CI's TCG is slower than local, so raise with real headroom rather than
+  trimming to what passes here — think in the *ratio*, not the wall-clock seconds, which are a
+  property of the dev machine. Two mechanical notes: `git stash` does **not** give you the "before"
+  once the slice is committed on a branch — detach to the merge base, and stash only the doc edits
+  so `target/` and `target/musl-sysroot` survive and the two boots differ in nothing but the code.
+  And build (`cargo build`) before the timed `cargo run`, or the rebuild lands inside the timeout
+  and skews the fraction. A third, which has already cost one silently-wrong measurement:
+  **`$MINIXRS_SDK` does not persist across separate shell invocations**, so setting it in one
+  command and booting in another measures the **SDK** flavour, not the musl one the number is
+  defined against. Confirm the flavour from the embedded `hello` size — ~200 KB musl, ~47 KB SDK,
+  ~15 KB fallback — rather than trusting the build warning. A boot-time selftest that reads a
+  **configuration-dependent** file is the usual culprit: prefer `/etc/pattern` (40 KiB in every
+  config, so its count is assertable too) over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB
+  with in-tree musl, and ~15 KB in the sysroot-absent fallback
 - Before pushing, the blocking gates must be green: `cargo fmt --all --check`, `cargo clippy
   --workspace --all-targets -- -D warnings` (locally this lints the kernel too), `cargo clippy -p
   minixrs-mfs --features server --all-targets -- -D warnings` (nothing else lints MFS's `[[bin]]`,
@@ -254,4 +276,6 @@ warning that was never meant to exist.
 Treat an image-base or stack move as a **mandatory** matrix run. `$MINIXRS_SDK` does not persist
 across separate shell invocations, which is how a matrix row silently measures the wrong flavour;
 the table above is how you confirm the flavour you actually built, and the boot-timing bullet above
-states the same trap for timing runs.
+states the same trap for timing runs — which slice 6.4 then fell into for every budget reading it
+took: an installed SDK is found without `MINIXRS_SDK` being set at all, so "I did not set it" is not
+"musl". Read `len=` off the log's `[ksys SYS_EXEC] … name=hello` line.

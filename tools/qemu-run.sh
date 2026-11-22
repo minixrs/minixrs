@@ -7,9 +7,10 @@
 # (Limine, its config, the kernel) and -- on a disk boot -- the MinixFS root
 # partition. It is attached as a single modern virtio-blk device on
 # virtio-mmio-bus.0; the firmware reads the kernel from it and minix.rs's
-# `vblk` driver then brings the same device up. Nothing else is attached, so a
-# kernel banner in the log is itself the proof that edk2 and Limine read the
-# image (slice 6.4, spec P3/P4).
+# `vblk` driver then brings the same device up. This script attaches nothing
+# else (`-M virt`'s own default devices are still there: no -nodefaults), and
+# nothing else on the machine holds a kernel, so a kernel banner in the log is
+# itself the proof that edk2 and Limine read the image (slice 6.4, spec P3/P4).
 #
 # stdout is the guest's serial log, which callers redirect and grep. Everything
 # the runner itself says -- the nested cargo's output, mkimage's summary, and

@@ -19,7 +19,7 @@ existing value, and none is emitted into the generated C headers.
 Where what was built differs from what this document first said, the operative text has been
 rewritten and the difference is marked *(As built: …)*. §3 keeps the predictions and adds what was
 observed beside them; §5 keeps the fourteen rulings approved with the spec and adds the ones made
-during the run.
+during the run and in the whole-branch review round that followed it (rows 31–36).
 
 ---
 
@@ -32,14 +32,16 @@ during the run.
 | `drivers/virtio-blk`       | minor 0 is the whole raw image; root check reads LBA 0         | minors per H6 (P6); root check on the GUID-selected partition (P7); flush and `F_RO` (P8)     |
 | `server-rt::bdev`          | `validate_read` checks the minor and the range together        | the range check is callable without the minor check; `memory` keeps `validate_read` unchanged |
 | `kernel-shared`            | `rootfs` labels, `BDEV_MINOR_ROOT`                             | `+` the root partition type GUID, `BDEV_MINOR_WHOLE_DISK`, the `/etc/boots` constants (P9)    |
+| ↳ review round             | denial probes name the literal minor 7                         | `+ BDEV_MINOR_NONE` (`i32::MAX`), the minor no block driver serves (ruling 31)                |
 | `userland/init`            | write battery only                                             | `+` one persistence probe before the battery (P9)                                             |
 | `kernel/build.rs`          | writes `rootfs.img`; manifest has no `/etc/boots`              | manifest gains `/etc/boots`; `rootfs.img` is still written and is `mkimage`'s input           |
 | `tools/qemu-run.sh`        | `fat:rw:` ESP on virtio-blk-pci; raw root image on virtio-mmio | builds `target/disk.img` (or `disk-rootless.img`) with `mkimage`, attaches it alone (P3, P4)  |
-| `tools/check-boot-log.sh`  | backends `disk`, `ramdisk`                                     | `+ reboot`, which checks its own pair only (P9)                                               |
+| `tools/check-boot-log.sh`  | backends `disk`, `ramdisk`                                     | `+ reboot`, which checks its own pair only (P9); refuses a boot kind with no required marker  |
 | `tools/diff-backends.sh`   | MFS streams differ in the `bdev.ds ok name=` line only         | also allows the ramdisk side's fallback line (P4) and each side's `bdev.minor` verdict (P6)   |
 | `tests/`                   | six marker files                                               | eight: disk and ramdisk pairs rewritten; `+ qemu-boot.reboot.{expected,forbidden}`            |
 | `.github/workflows/ci.yml` | `qemu-smoke` boots twice                                       | boots three times: disk, a short reboot of the same image, ramdisk (P10)                      |
 | `fs/mfs`                   | prologue probes `bdev.tail`, `bdev.partial`, the denials       | `+` the `bdev.minor` probe and its library module `minor.rs` (P6); FS-band handlers unchanged |
+| ↳ review round             | `bad-minor` / `wr-minor` aim at minor 7                        | both aim at `BDEV_MINOR_NONE`; the battery is still ten (`bdev.deny ok n=10`)                 |
 | `servers/vfs`              | —                                                              | unchanged                                                                                     |
 
 ---
@@ -133,15 +135,16 @@ images are `target/disk.img` and `target/disk-rootless.img` under the repository
 `CARGO_TARGET_DIR` is not honoured for them. The runner prints its QEMU argv on stderr as one
 `qemu-run:` line, and validates the backend before it searches for firmware.)
 
-A nested `cargo run` is safe under the `cargo run` that invoked the runner: measured (P11.2), it
-completes in about a second with no wait on the build lock, so the tool is built in the shared
-target directory and the `--target-dir` alternative was not needed. The runner unsets `RUSTFLAGS`,
-`CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and `CARGO_BUILD_TARGET` for the nested build, as
-`kernel/build.rs` does for its own.
+A nested `cargo run` is safe under the `cargo run` that invoked the runner: measured (P11.2, with a
+nested `cargo build`), it completes in about a second with no wait on the build lock, so the tool is
+built in the shared target directory and the `--target-dir` alternative was not needed. The runner
+unsets `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and `CARGO_BUILD_TARGET` for
+the nested build, as `kernel/build.rs` does for its own.
 
 ### P4 — two images, and the ramdisk boot becomes the fallback boot
 
-There is no `fat:rw:` drive in any mode, and no virtio-blk-pci device. The one drive is
+There is no `fat:rw:` drive in any mode, and no virtio-blk-pci device in either checked mode; the
+hand-run `nodisk` mode below is the one exception. In the two checked modes the one drive is
 `virtio-blk-device` on `virtio-mmio-bus.0`.
 
 - `MINIXRS_ROOT=disk` (default): ESP and root partition. MFS mounts through `vblk`.
@@ -150,13 +153,19 @@ There is no `fat:rw:` drive in any mode, and no virtio-blk-pci device. The one d
   of the root type, prints `root FAIL no root partition`, and MFS prints `bdev.root vblk rc=-6
   fallback=memory` and mounts the ramdisk.
 
-This pays 6.3's debt 7: the no-root fallback — the driver's `ENXIO` gate, MFS's revoke-and-regrant,
-the fallback line — gets a standing CI boot. The cost is that the **no-device** state (`[diag vblk]
-no device`, a DS miss in MFS) loses its standing boot, because a machine with no disk at all has
-nothing to boot from. It is the smaller path — one `ENOENT` branch and a lookup miss — and stays
-reachable by hand with `MINIXRS_ROOT=nodisk`, which attaches the rootless image as virtio-blk-pci
-(the firmware reads it, minix.rs does not see it). That boot is run once in this slice and recorded.
-(As built: `ramdisk` and `nodisk` both reject `MINIXRS_VBLK_IMAGE` and `MINIXRS_VBLK_DRIVE_OPTS`.)
+This pays 6.3's debt 7 **in part**. The no-root fallback — the driver's `ENXIO` gate, MFS's
+revoke-and-regrant, the fallback line — gets a boot CI is configured to run. (As built and as
+measured: the gate and the fallback line are covered — mutation 4 below, the ramdisk marker file,
+and since the review round three host tests of `part::locate`. Two things the debt named are not: a
+root check that accepts a bad label still passes both checked boots, because the rootless disk is
+refused at `no root partition` before any label is read, and no mutation was run against MFS's
+revoke. The phase file carries the remainder as 6.4's debt 10.) The cost is that the **no-device**
+state (`[diag vblk] no device`, a DS miss in MFS) loses its standing boot, because a machine with no
+disk at all has nothing to boot from. It is the smaller path — one `ENOENT` branch and a lookup miss
+— and stays reachable by hand with `MINIXRS_ROOT=nodisk`, which attaches the rootless image as
+virtio-blk-pci (the firmware reads it, minix.rs does not see it). That boot is run once in this
+slice and recorded. (As built: `ramdisk` and `nodisk` both reject `MINIXRS_VBLK_IMAGE` and
+`MINIXRS_VBLK_DRIVE_OPTS`.)
 
 The ramdisk marker pair changes accordingly: it requires the `root FAIL no root partition` and
 fallback lines and `bdev.ds ok name=memory`, and no longer requires `no device`. `diff-backends.sh`
@@ -168,8 +177,8 @@ cannot quietly turn back into a device-less one; it forbids `no device`, `root o
 is the marker file's job.)
 
 *Rejected:* keeping `fat:rw:` for the ramdisk boot (two ways to load a kernel, and the fallback
-still unbooted); a third full CI boot for the no-device state (ten more minutes per run for the
-smallest of the three paths).
+still unbooted); a third full CI boot for the no-device state (fifteen more minutes per run, a full
+boot being 900 s since P10, for the smallest of the three paths).
 
 ### P5 — the GPT parser
 
@@ -232,7 +241,11 @@ extent's first block added, by `checked_add`, after the range check. (As built: 
 `MinorTable::locate`, owns the whole refusal order — minor, range, zero length, translation — and
 `Extent::sector`, which does the addition, also refuses a block outside the extent on its own.) A
 driver with a device but **no root answers `ENXIO` on every minor**, as H5 says — the whole disk
-included.
+included. (As built since the review round: that gate is the free function `part::locate(table,
+req)`, which answers `ENXIO` for everything when `table` is `None` — a zero-length request too, the
+one MFS probes with — and otherwise defers to `MinorTable::locate`. The main loop calls it before
+anything else, so the gate is host-tested; it was first a `match` arm in `main.rs` that nothing
+tested.)
 
 `server-rt::bdev` exposes the range half of `validate_read` on its own (`validate_range`), taking
 the extent's block count. `virtio-blk` resolves the minor first (`ENXIO`), then calls it, which
@@ -270,10 +283,12 @@ line gains where the root is:
 
 The `lba=` value is the proof H6 asks for that the root's first block is not LBA 0, and the disk
 marker file requires it literally. The verdicts, in the order they can occur: `root FAIL geometry
-capacity=<c>` (decided before any read), `root FAIL gpt rc=<rc>` (a read of the table's blocks
-failed), `root FAIL gpt <why>`, `root FAIL gpt ambiguous`, `root FAIL no root partition`, `root FAIL
-align`, `root FAIL readonly` (P8), then 6.3's `head rc=<rc>` / `label` / `blocks hdr=… dev=…` /
-`tail rc=<rc>` / `tail label`.
+capacity=<c>` (decided before any read — an empty device, one that is not a whole number of blocks,
+and, since the review round, one shorter than the five blocks the table read names:
+`part::geometry`), `root FAIL gpt rc=<rc>` (a read of the table's blocks failed), `root FAIL gpt
+<why>`, `root FAIL gpt ambiguous`, `root FAIL no root partition`, `root FAIL align`, `root FAIL
+readonly` (P8), then 6.3's `head rc=<rc>` / `label` / `blocks hdr=… dev=…` / `tail rc=<rc>` / `tail
+label`.
 
 (As built: `gpt rc=<rc>` was not on the first list; it was added by ruling so that an I/O failure is
 not reported as a parse failure. `<why>` is the parser's word, so a damaged header is `gpt crc` and
@@ -299,7 +314,9 @@ with `readonly=on` (measured, P11.4).
   failure prints": a flush lost to a *broken* device has no status byte and prints no `flush FAIL`
   line — `virtio FAIL step=io` has already been printed and the write still replies `EIO`.)
 - **Read-only.** When the device offers `F_RO` the driver accepts it and declines the disk as a
-  root: `root FAIL readonly`, and MFS falls back. This pays 6.3's debt 1. Mounting such a disk
+  root: `root FAIL readonly`, and MFS falls back. This pays 6.3's debt 1 — on the evidence of one
+  hand-run `readonly=on` boot (mutation 5): no host test fails with the gate deleted and no CI boot
+  attaches a read-only disk, which the phase file carries as 6.4's debt 9. Mounting such a disk
   read-only would need a read-only mount in MFS and VFS, which nothing in Phase 6 asks for.
 
 Requesting an optional feature for the first time is also where 6.2's debt 9 was sent. This slice
@@ -352,7 +369,10 @@ of the whole workspace run inside `coverage`'s `cargo llvm-cov`. `mkimage` is de
 to the Miri list: it has no `unsafe`, and its tests build 37 MiB images. The two full boots get 900
 s each, up from 600; the reboot 180 s; `timeout-minutes` 80, up from 65. `mkimage` is built in a
 step of its own before the first boot, so its compile is not charged to that boot's timeout.
-`ipxe-qemu` stays installed, untested without it.)
+`ipxe-qemu` stays installed, untested without it; the reason the workflow's comment used to give for
+it — the virtio-blk-PCI ESP drive — looks like a mis-attribution, since on QEMU 11.0.3
+`efi-virtio.rom` is the ROM of `-M virt`'s default `virtio-net-pci` card and not of
+`virtio-blk-pci`.)
 
 ### P11 — measure first
 
@@ -363,16 +383,26 @@ step of its own before the first boot, so its compile is not charged to that boo
    ok features=0x100000000 … slot=0`). No firmware-only attachment is needed, and the driver's reset
    recovers the device from whatever state the firmware left it in.
 2. **A nested `cargo run` from the runner** completes rather than waiting on the build lock.
-   **Measured 2026-11-21:** it does, in about a second. The runner is handed no `RUSTFLAGS` or
-   `CARGO_BUILD_TARGET` by `cargo run`; it unsets them for the nested build all the same.
+   **Measured 2026-11-21:** a nested cargo does, in about a second — the measurement was a `cargo
+   build -q --release` of another host crate from a stand-in runner, `mkimage` not existing yet; the
+   real `cargo run -p minixrs-mkimage` has run inside every boot since. The runner is handed no
+   `RUSTFLAGS` or `CARGO_BUILD_TARGET` by `cargo run`; it unsets them for the nested build all the
+   same.
 3. **Budget.** The last required marker's position in a fixed-timeout log for both full boots,
    against the merge base — each write now costs a second interrupt round trip, and the ramdisk boot
    now brings a device up. **Measured 2026-11-22, 300 s local boots:** the last required marker
-   (`[diag vfs] pm-exit reset closed=1`) is at 82.68–82.71% of the disk log (about 248 s) and 59.30%
-   of the ramdisk log (about 178 s), against 66.8% / 48.1% for 6.3 on `main`. Readings across the
-   run's tasks ranged 68.4%–82.7% (disk) and 47.7%–59.3% (ramdisk). CI's full boots go 600 → 900 s
-   (3.63x disk, 5.06x ramdisk); the job's `timeout-minutes` 65 → 80; the documented local timeout
-   300 → 450 s.
+   (`[diag vfs] pm-exit reset closed=1`) is at 82.0–82.7% of the disk log across three boots of the
+   final code (82.00%, 82.71%, 82.68% — about 246–248 s) and 59.30% of the ramdisk log (about 178
+   s), against 66.8% / 48.1% for 6.3 on `main`. Readings across the run's tasks ranged 68.4%–82.7%
+   (disk) and 47.7%–59.3% (ramdisk). CI's full boots go 600 → 900 s (3.63x disk, 5.06x ramdisk, on
+   those readings); the job's `timeout-minutes` 65 → 80; the documented local timeout 300 → 450 s.
+   **Found in the review round: all of those readings are the SDK flavour**, not the musl flavour
+   the method requires and CI builds — the SDK was installed and `MINIXRS_SDK` unset, and every log
+   of the run shows `hello` at 46 696 bytes. **The one musl reading (2026-11-22, a 450 s boot with
+   `MINIXRS_SDK=/nonexistent`; seconds, since a fraction of a 450 s log is not comparable with a
+   fraction of a 300 s one):** the last required marker at 88.03% of the disk log, about 396 s, and
+   57.87% of the ramdisk log, about 260 s. On that reading 900 s is 2.27x for the disk boot (3.46x
+   ramdisk) and 450 s locally is 1.14x. No timeout was changed on one reading (ruling 36).
 4. **What QEMU offers**: the feature word with a raw drive, and with `readonly=on`. **Measured
    2026-11-21:** `0x100000200` (`VERSION_1 | FLUSH`) and `0x100000220` (`+ RO`).
 5. **Where `persist gen=` lands** in a default boot, which fixes the reboot's timeout. **Measured
@@ -406,9 +436,12 @@ that measurement.
 | the written image parsed by `driver-rt::gpt`; root bytes equal the input           | `mkimage`    |
 | the same inputs give the same bytes; a bad `--root` file is refused                | `mkimage`    |
 
-Miri keeps running over `driver-rt`. (As built: `mkimage`'s rows are the integration test
-`tools/mkimage/tests/image.rs`, read back by a FAT32 reader written for the test; the unit tests in
-the crate's modules cover the pieces.)
+`driver-rt` stays in the advisory `miri` job's `-p` list, so the parser is among what that job is
+configured to check; no CI run of this branch has happened, so that is a configuration, not a
+result. Run locally: `cargo miri test -p minixrs-driver-rt` on the parser's commit (Task 2) and
+again on the final tree in the review round, 2026-11-22 — 113 passed, 0 failed, both times. (As
+built: `mkimage`'s rows are the integration test `tools/mkimage/tests/image.rs`, read back by a
+FAT32 reader written for the test; the unit tests in the crate's modules cover the pieces.)
 
 **Boots.** The disk and ramdisk boots pass `check-boot-log.sh` with their backend, the reboot passes
 its own pair, and `diff-backends.sh` passes across the two full boots. The disk boot's banner is
@@ -439,6 +472,11 @@ itself the proof that the firmware read the image, since the runner attaches not
 
 The firmware tries the mmio disk before the PCI one, so the two-drive form works only while the mmio
 disk has no usable ESP; otherwise the firmware boots from it, with that image's own kernel.
+
+Against the per-backend marker sets, which both logs are meant to fail: the `nodisk` log misses 6
+lines of the ramdisk set and trips its forbidden `no device`, and misses 8 lines of the disk set and
+trips 3 of its forbidden ones; the `readonly=on` log misses exactly two lines of the ramdisk set,
+the feature word and the `root FAIL` reason.
 
 **Mutations**, each applied, observed and reverted:
 
@@ -508,6 +546,38 @@ run in more than one form, and row E1 was added for the probe's `0xEE` check:
 Rows 6 and 7 came out as expected: a boot says almost nothing about the flush. Row 7b is the honest
 "nothing moves" row.
 
+Every row above was observed on a developer machine. "In CI" in row 4's prediction is a statement
+about which boot the mutation fails — the ramdisk boot, which CI is configured to run — and not a CI
+result: the branch had not run on CI when this was written.
+
+**After the whole-branch review round (2026-11-22).** Five things in this section changed or were
+found wanting; code moved for three of them and a script for a fourth:
+
+- **Row 4's gate now has host tests.** It was a `match` arm in `main.rs`, and "none" in the last
+  column was the finding: on the rootless boot MFS's `bdev.minor` probe goes to `memory`, so no
+  marker saw this driver's no-root answer for any minor but the root. The gate is now
+  `part::locate(None, …)`. Making that arm answer through instead of `ENXIO` fails
+  `with_no_root_every_request_is_enxio_on_every_minor`,
+  `with_no_root_a_zero_length_request_is_enxio_not_empty` and
+  `with_no_root_enxio_comes_before_every_other_refusal` (applied, observed, reverted; no boot).
+- **A disk shorter than five blocks is `geometry`.** `find_root` read whole-disk blocks 0–4 of any
+  device whose capacity was a whole number of blocks, so a one-to-four-block device was sent reads
+  past its end and the verdict was whatever the device made of them. `part::geometry` refuses it
+  before any read; `a_device_shorter_than_the_table_is_refused_for_its_geometry` (which failed
+  before the fix) and `a_five_block_device_reaches_the_gpt_checks` hold the boundary at 40 sectors.
+- **The denial probes named a minor that exists.** MFS's `bad-minor` and `wr-minor` used the literal
+  7, which on `vblk` is GPT partition 6: `ENXIO` only because the image has two partitions. They
+  name `BDEV_MINOR_NONE` now (ruling 31). No marker text carried the number.
+- **`check-boot-log.sh` passed an empty required set.** The reboot leans on one three-line file;
+  with it emptied the script printed `PASS … 4 marker checks`. It now exits 1 before reading the log
+  when a boot kind requires nothing (shown on a scratch copy; the tracked files were not touched).
+- **Review Focus 6 is less covered than the host tests suggest — recorded, not fixed.** Three of
+  `blk::flush_after`'s tests exercise arms production never reaches: `do_write` always passes
+  `Some(wrote)` and a non-empty plan, because a zero-length write, a refused grant and a failed
+  read-before-write have all returned earlier, in `main.rs`, where no host test and no marker looks.
+  "Not issued for a zero-length write or a refused grant" therefore rests on reading. Same seam as
+  row 7b; the phase file's 6.4 debt 1 carries both.
+
 ---
 
 ## 4. Documentation owed in the same PR
@@ -531,44 +601,74 @@ Rows 6 and 7 came out as expected: a boot says almost nothing about the flush. R
 
 ## 5. Rulings to check
 
-| #  | Ruling                                                                                  | If wrong                                                                                      |
-| -- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| 1  | P4: the ramdisk CI boot becomes the rootless-disk fallback boot; no-device is hand-run  | a third full boot in CI (about ten minutes), or `fat:rw:` kept for one mode                   |
-| 2  | P2: FAT32 and GPT writers are hand-written, no `fatfs` / `gpt` crate                    | swap the writer's internals for the crates; the CLI and the image layout do not move          |
-| 3  | P2: `mkimage` takes `rootfs.img` as a file instead of calling the `mkfs-mfs` library    | one path dependency and a manifest argument added to the tool                                 |
-| 4  | P1: fixed disk and partition GUIDs, zero timestamps                                     | two images attached to one machine would collide; nothing here attaches two                   |
-| 5  | P5: primary GPT header only; a damaged primary means no root                            | a backup-header path in the parser and a decision about which copy wins                       |
-| 6  | P5: two root-type partitions is a refusal, not first-wins                               | one arm changes; multi-root disks need a selector that does not exist                         |
-| 7  | P6: every minor is read-write, and all answer `ENXIO` when there is no root             | a per-minor access rule in the request path; `EROFS` or `EACCES` joins the driver's errno set |
-| 8  | P6: an MFS prologue probe of minor 1, a second backend-specific line in `diff-backends` | the minor table is covered by host tests alone                                                |
-| 9  | P7: a raw whole-disk MinixFS image is no longer accepted as a root                      | a no-GPT arm in the root check, and two disk formats to keep booting                          |
-| 10 | P8: a read-only disk is declined as a root rather than mounted read-only                | read-only mount support in MFS and VFS                                                        |
-| 11 | P8: `flush ok n=1` once, not a running count                                            | a periodic line whose value varies with boot length and cannot be a marker                    |
-| 12 | P9: the probe lives in `init` and seeds `/etc/boots` in the root image                  | the image's geometry-derived markers move once more if it is relocated                        |
-| 13 | P9: the reboot is checked against its own pair, not the common set                      | the write battery must be made idempotent on a used image                                     |
-| 14 | 6.3's debt 3 (`fs.trunc` cannot see a dropped truncate) is **not** paid here            | it stays owed; the persistence probe is beside the write battery, not a change to it          |
+| #  | Ruling                                                                                  | If wrong                                                                                   |
+| -- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| 1  | P4: the ramdisk CI boot becomes the rootless-disk fallback boot; no-device is hand-run  | a third full boot in CI (fifteen minutes at 900 s), or `fat:rw:` kept for one mode         |
+| 2  | P2: FAT32 and GPT writers are hand-written, no `fatfs` / `gpt` crate                    | swap the writer's internals for the crates; the CLI and the image layout do not move       |
+| 3  | P2: `mkimage` takes `rootfs.img` as a file instead of calling the `mkfs-mfs` library    | one path dependency and a manifest argument added to the tool                              |
+| 4  | P1: fixed disk and partition GUIDs, zero timestamps                                     | two images attached to one machine would collide; nothing here attaches two                |
+| 5  | P5: primary GPT header only; a damaged primary means no root                            | a backup-header path in the parser and a decision about which copy wins                    |
+| 6  | P5: two root-type partitions is a refusal, not first-wins                               | one arm changes; multi-root disks need a selector that does not exist                      |
+| 7  | P6: every minor is read-write, and all answer `ENXIO` when there is no root             | a per-minor access rule in the request path; until then any server can write any minor (†) |
+| 8  | P6: an MFS prologue probe of minor 1, a second backend-specific line in `diff-backends` | the minor table is covered by host tests alone                                             |
+| 9  | P7: a raw whole-disk MinixFS image is no longer accepted as a root                      | a no-GPT arm in the root check, and two disk formats to keep booting                       |
+| 10 | P8: a read-only disk is declined as a root rather than mounted read-only                | read-only mount support in MFS and VFS                                                     |
+| 11 | P8: `flush ok n=1` once, not a running count                                            | a periodic line whose value varies with boot length and cannot be a marker                 |
+| 12 | P9: the probe lives in `init` and seeds `/etc/boots` in the root image                  | the image's geometry-derived markers move once more if it is relocated                     |
+| 13 | P9: the reboot is checked against its own pair, not the common set                      | the write battery must be made idempotent on a used image                                  |
+| 14 | 6.3's debt 3 (`fs.trunc` cannot see a dropped truncate) is **not** paid here            | it stays owed; the persistence probe is beside the write battery, not a change to it       |
 
-**Rulings made during the run**, grouped by the task that made them. The plan's ledger has each with
-its commit.
+† *Ruling 7, in full.* Every `SRV_T` row of the boot image is given `ipc_to` over all active priv
+slots, so PM, VFS, RS, `memory`, TTY, DS, MFS, VM and SCHED can each send `vblk` a `BDEV_WRITE`; no
+user process can. In 6.3 such a write could reach only the root image, because the ESP was on a PCI
+drive minix.rs could not see. With every minor read-write, any of those servers can now rewrite the
+kernel on the ESP (minor 2) and the GPT and its backup (minor 1), and that survives a reboot. The
+ruling stands; what it costs is stated here because the review round found it unstated (phase file,
+6.4 debt 11).
 
-| #  | Ruling                                                                                                                                                                                                                                                                                                                                | If wrong                                                                                                                     |
-| -- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| 15 | Task 2: partition numbers are 1-based slot numbers, so minor = 1 + *n*                                                                                                                                                                                                                                                                | 0-based numbering moves every partition minor and the `part=` marker by one                                                  |
-| 16 | Task 2: the parser does not require `FirstUsableLBA` past the entry array and does not detect overlapping partitions; two refusals beyond P5 (`header short`, `entry index`); `entry range` covers inverted and out-of-range                                                                                                          | a table that overlaps itself is accepted — harmless while only the root is mounted (phase file, 6.4 debt 5)                  |
-| 17 | Tasks 2 and 3: the driver's CRC-32 is bit-at-a-time, the tool's table-driven, and they share nothing                                                                                                                                                                                                                                  | none in behaviour; a kilobyte of table in every driver that links `driver-rt` if swapped                                     |
-| 18 | Tasks 4 and 5: a failed read of the table's blocks is its own verdict, `root FAIL gpt rc=<rc>` (coordinator ruling, not in the plan's first list); `Option<MinorTable>` replaces the `Root` enum; geometry is checked before any read; `MinorTable::locate` owns the refusal order                                                    | one more marker spelling to keep stable                                                                                      |
-| 19 | Task 5: `flush FAIL status=` prints the raw status byte in hex; a flush lost to a broken device prints no `flush FAIL` line (narrows P8); `flush off` is printed at the end of bring-up                                                                                                                                               | a flush that failed because the device broke is told from any other breakage only by its place in the log                    |
-| 20 | Task 5: the GPT table buffer is a 20 480-byte `.bss` static in `main.rs`, with one `unsafe impl Sync` and one borrow                                                                                                                                                                                                                  | one more `unsafe` site in the driver; the alternatives are a block-at-a-time parser or a 20 KiB stack frame                  |
-| 21 | Task 3: the disk rounds up to a whole MiB (75 776 sectors); the ESP's 34 MiB is a named input; the FAT is sized by Microsoft's formula (540 sectors, over-provisioned)                                                                                                                                                                | the `capacity=` and `lba=` markers move if any of the three changes                                                          |
-| 22 | Task 3: FAT details — protective MBR CHS `FF FF FF`; short aliases as Windows makes them; ASCII-only names; case-insensitive duplicates refused; label `MINIXRS ESP`, serial `0x6D780604`; a third boot-record sector; zero dates; multi-cluster directories                                                                          | a firmware stricter than edk2 or Limine rejects the volume; each is one constant or one function                             |
-| 23 | Task 3: the CLI requires at least one ESP file; images are written sparsely; the independent FAT reader lives in an integration test                                                                                                                                                                                                  | an image with an empty ESP can be built only through the library                                                             |
-| 24 | Task 6: the runner prints its QEMU argv on stderr; `MINIXRS_VBLK_IMAGE` skips the Limine fetch and ignores the kernel ELF; the backend is validated before the firmware search; `nodisk` rejects the disk knobs; the images are `target/disk.img` and `target/disk-rootless.img`, and `CARGO_TARGET_DIR` is not honoured for them     | a caller with a custom target directory finds the images in the repository's `target/`                                       |
-| 25 | Task 6: `flush off` is forbidden in the **common** file; the ramdisk pair requires all four bring-up lines; `slot=0` is still not asserted; `diff-backends` allows, and does not require, the fallback line                                                                                                                           | a device without `FLUSH` fails every boot's check, not one backend's                                                         |
-| 26 | Task 7: `mbr=1` means a *protective* MBR (`55 AA`, type `0xEE`, no image label); `BDEV_MINOR_WHOLE_DISK = 1` is added to `kernel-shared` (additive, not in the C headers); the classifier is `fs/mfs/src/minor.rs`; probe order tail, partial, minor, denials; the diff passes a pair with the verdict missing on both sides          | a second additive constant under D8; a disk with a non-protective MBR at LBA 0 fails the probe                               |
-| 27 | Task 8: `/etc/boots` must be exactly one decimal digit; the counter saturates at 9; eight `FAIL` steps; `gen=` is printed after the decode and before any write, with no "ok" line after the rewrite; the reboot pair is 7 lines and the common forbidden set is not applied; the rewrite is the first filesystem write of every boot | the tenth boot of one image stops counting; a panic in a reboot is caught only by `gen=1` going missing (6.4 debt 4)         |
-| 28 | Task 9: CI's two full boots go 600 → 900 s, one number budgeted for the slower; the reboot gets 180 s; `timeout-minutes` 80; `mkimage` is pre-built in its own step and tested in `coverage`, not under Miri; `ipxe-qemu` is kept                                                                                                     | 13 more minutes of CI per run; if the runner's TCG is slower than 3.6x local, raise the boots and `timeout-minutes` together |
-| 29 | Coordinator: the documented local timeout for a marker-file verification goes 300 → 450 s                                                                                                                                                                                                                                             | two and a half more minutes for each local full boot                                                                         |
-| 30 | Task 11: mutation 7b (a `flush()` that reports a bad status as success) is recorded as uncovered rather than given a host-test seam; no new guard is added for a missing `VERSION_1`                                                                                                                                                  | 6.4's debt 1 and 6.2's debt 9 stay owed                                                                                      |
+**Rulings made during the run**, grouped by the task that made them, and after it in the
+whole-branch review round (31–36). The plan's ledger has each with its commit.
+
+| #  | Ruling                                                                                                                                                                                                                                                                                                                                | If wrong                                                                                                                |
+| -- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 15 | Task 2: partition numbers are 1-based slot numbers, so minor = 1 + *n*                                                                                                                                                                                                                                                                | 0-based numbering moves every partition minor and the `part=` marker by one                                             |
+| 16 | Task 2: the parser does not require `FirstUsableLBA` past the entry array and does not detect overlapping partitions; two refusals beyond P5 (`header short`, `entry index`); `entry range` covers inverted and out-of-range                                                                                                          | a table that overlaps itself is accepted — harmless while only the root is mounted (phase file, 6.4 debt 5)             |
+| 17 | Tasks 2 and 3: the driver's CRC-32 is bit-at-a-time, the tool's table-driven, and they share nothing                                                                                                                                                                                                                                  | none in behaviour; a kilobyte of table in every driver that links `driver-rt` if swapped                                |
+| 18 | Tasks 4 and 5: a failed read of the table's blocks is its own verdict, `root FAIL gpt rc=<rc>` (coordinator ruling, not in the plan's first list); `Option<MinorTable>` replaces the `Root` enum; geometry is checked before any read; `MinorTable::locate` owns the refusal order                                                    | one more marker spelling to keep stable                                                                                 |
+| 19 | Task 5: `flush FAIL status=` prints the raw status byte in hex; a flush lost to a broken device prints no `flush FAIL` line (narrows P8); `flush off` is printed at the end of bring-up                                                                                                                                               | a flush that failed because the device broke is told from any other breakage only by its place in the log               |
+| 20 | Task 5: the GPT table buffer is a 20 480-byte `.bss` static in `main.rs`, with one `unsafe impl Sync` and one borrow                                                                                                                                                                                                                  | one more `unsafe` site in the driver; the alternatives are a block-at-a-time parser or a 20 KiB stack frame             |
+| 21 | Task 3: the disk rounds up to a whole MiB (75 776 sectors); the ESP's 34 MiB is a named input; the FAT is sized by Microsoft's formula (540 sectors, over-provisioned)                                                                                                                                                                | the `capacity=` and `lba=` markers move if any of the three changes                                                     |
+| 22 | Task 3: FAT details — protective MBR CHS `FF FF FF`; short aliases as Windows makes them; ASCII-only names; case-insensitive duplicates refused; label `MINIXRS ESP`, serial `0x6D780604`; a third boot-record sector; zero dates; multi-cluster directories                                                                          | a firmware stricter than edk2 or Limine rejects the volume; each is one constant or one function                        |
+| 23 | Task 3: the CLI requires at least one ESP file; images are written sparsely; the independent FAT reader lives in an integration test                                                                                                                                                                                                  | an image with an empty ESP can be built only through the library                                                        |
+| 24 | Task 6: the runner prints its QEMU argv on stderr; `MINIXRS_VBLK_IMAGE` skips the Limine fetch and ignores the kernel ELF; the backend is validated before the firmware search; `nodisk` rejects the disk knobs; the images are `target/disk.img` and `target/disk-rootless.img`, and `CARGO_TARGET_DIR` is not honoured for them     | a caller with a custom target directory finds the images in the repository's `target/`                                  |
+| 25 | Task 6: `flush off` is forbidden in the **common** file; the ramdisk pair requires all four bring-up lines; `slot=0` is still not asserted; `diff-backends` allows, and does not require, the fallback line                                                                                                                           | a device without `FLUSH` fails every boot's check, not one backend's                                                    |
+| 26 | Task 7: `mbr=1` means a *protective* MBR (`55 AA`, type `0xEE`, no image label); `BDEV_MINOR_WHOLE_DISK = 1` is added to `kernel-shared` (additive, not in the C headers); the classifier is `fs/mfs/src/minor.rs`; probe order tail, partial, minor, denials; the diff passes a pair with the verdict missing on both sides          | a second additive constant under D8; a disk with a non-protective MBR at LBA 0 fails the probe                          |
+| 27 | Task 8: `/etc/boots` must be exactly one decimal digit; the counter saturates at 9; eight `FAIL` steps; `gen=` is printed after the decode and before any write, with no "ok" line after the rewrite; the reboot pair is 7 lines and the common forbidden set is not applied; the rewrite is the first filesystem write of every boot | the tenth boot of one image stops counting; a panic in a reboot is caught only by `gen=1` going missing (6.4 debt 4)    |
+| 28 | Task 9: CI's two full boots go 600 → 900 s, one number budgeted for the slower; the reboot gets 180 s; `timeout-minutes` 80; `mkimage` is pre-built in its own step and tested in `coverage`, not under Miri; `ipxe-qemu` is kept                                                                                                     | 13 more minutes of CI per run; if the runner's TCG is slower than the factor over local, raise both (ruling 36)         |
+| 29 | Coordinator: the documented local timeout for a marker-file verification goes 300 → 450 s                                                                                                                                                                                                                                             | two and a half more minutes per local full boot; a musl-flavour disk boot clears it by only 1.14x (ruling 36)           |
+| 30 | Task 11: mutation 7b (a `flush()` that reports a bad status as success) is recorded as uncovered rather than given a host-test seam; no new guard is added for a missing `VERSION_1`                                                                                                                                                  | 6.4's debt 1 and 6.2's debt 9 stay owed                                                                                 |
+| 31 | Review round (C1): MFS's `bad-minor` / `wr-minor` probes name `BDEV_MINOR_NONE = i32::MAX`, a third additive `kernel-shared` constant (not in the C headers) that each block driver const-asserts outside its own minors — not a constant local to MFS, and not a negative minor (note below)                                         | a third additive constant under D8; undone by inlining `i32::MAX` in MFS and deleting two const asserts and their tests |
+| 32 | Review round (C2, C3): the no-root gate and the short-disk refusal are pure functions in `part.rs` (`locate`, `geometry`), called from the main loop and `find_root`; `do_read` / `do_write` take an already-located request; a disk under five blocks is `root FAIL geometry`, not a new verdict                                     | one marker spelling has three causes, told apart by `capacity=`; a new verdict is one more spelling to keep stable      |
+| 33 | Review round (C5): `check-boot-log.sh` exits 1, before reading the log, when a boot kind's expected files hold no marker                                                                                                                                                                                                              | a boot kind checked by forbidden lines alone cannot be expressed; none exists                                           |
+| 34 | Review round (D10): the Definition of done in `docs-and-workflow.md`, as this branch changed it, requires the reboot check as well as the two full boots — of every slice that owes the boots, not of 6.4 alone                                                                                                                       | one sentence removed from the Definition of done; the reboot stays a CI step                                            |
+| 35 | Review round (C6, C7, C8, D2): recorded, not fixed — three `flush_after` arms production never reaches; every server's reach over the boot disk; `MINIXRS_VBLK_IMAGE` resolving against the caller's directory; `mkimage`'s `basis()` on a name like `". .txt"`; 6.3's debts 1 and 7 restated as hand-held and partly paid            | each stays owed: phase file, 6.4 debts 1, 9, 10 and 11                                                                  |
+| 36 | Review round: its boots ran in the musl flavour (`MINIXRS_SDK=/nonexistent`), which showed every budget reading of the slice to be SDK-flavour; the musl disk boot's last required marker is about 396 s in. No timeout was changed on one reading: 900 s, 180 s and the local 450 s stand                                            | CI's disk boot has 2.27x, not 3.63x: a slow runner fails the first CI run by timeout (note below; 6.4 debt 13)          |
+
+*Ruling 31, the alternatives.* A constant local to MFS would have fixed the probes and nothing else:
+MFS and the drivers share no crate but `kernel-shared`, so nothing could tie a local value to
+`virtio-blk`'s table bound, and the next table to grow would falsify it as silently as this one did.
+A negative minor is absent from both drivers today (`memory` compares against the root minor;
+`virtio-blk` fails the `usize` conversion), but a minor is non-negative by convention, as in MINIX,
+and a driver is entitled to refuse a negative one as *malformed* (`EINVAL`) — which is not what a
+"no such device" probe is for. `i32::MAX` is well-formed and out of every table: `virtio-blk`
+asserts `BDEV_MINOR_NONE >= MINORS` and `server-rt::bdev` asserts it is not the root minor.
+
+*Ruling 36, what it costs.* If the runner's TCG is more than about 2.2x slower than the developer
+machine, the branch's first CI run fails its disk boot by timeout, with markers missing from some
+point to the end of the boot — the starved-boot shape, not a regression. The fix is the two full
+boots and `timeout-minutes` raised together. The earlier raises were forced at 1.6–1.8x and 6.3 kept
+its budget at 3.0x, so 2.27x on a single reading is a judgement the user has not made; it is 6.4's
+debt 13.
 
 ---
 

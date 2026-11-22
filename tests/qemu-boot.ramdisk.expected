@@ -8,8 +8,11 @@
 # same virtio-mmio transport. The kernel finds the device, `vblk` brings it up
 # and publishes itself, finds no partition of the root type, and answers ENXIO
 # on every minor; MFS, having found `vblk` in DS, is refused and mounts the
-# ramdisk. So this boot exercises the driver's no-root gate and MFS's
-# revoke-and-regrant on every CI run, and proves the ramdisk root (H7).
+# ramdisk. So this boot runs the driver's no-root gate and MFS's
+# revoke-and-regrant every time it is booted -- CI is configured to boot it --
+# and proves the ramdisk root (H7). Of those two it PROVES only the gate, by the
+# fallback line below (the gate also has host tests, in virtio-blk's part.rs);
+# no line here would move if MFS skipped the revoke.
 #
 # The no-device state -- `[diag vblk] no device`, a DS miss in MFS -- has no
 # checked boot any more; it is reached by hand with MINIXRS_ROOT=nodisk.

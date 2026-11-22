@@ -96,7 +96,7 @@ boot log's `[as]` lines appear in, and it is load-bearing: DS first so every lat
 then each server before its first client's lookup (`ds < tty < memory < vblk < mfs < vfs < pm`).
 `vblk` sits before `mfs` because MFS asks DS for it first when it
 [chooses its root device](../servers/overview.md#choosing-the-root-device), and a `vblk` that had
-not yet published would read as "no virtio disk attached".
+not yet published would read as "no virtio-mmio disk attached".
 
 | Module    | Proc nr | Loaded at boot?       |
 | --------- | ------: | --------------------- |
@@ -145,8 +145,8 @@ FAT32 EFI System Partition (Limine, its configuration and the kernel) and the Mi
 partition; the cargo runner (`tools/qemu-run.sh`) builds that image on every run and attaches it as
 a single virtio-blk device. The firmware reads the kernel from it, and minix.rs's
 [`virtio-blk` driver](../drivers/overview.md#virtio-blk) then brings the same device up and serves
-the root partition from it. Nothing else is attached, so a kernel banner in the log is itself the
-proof that edk2 and Limine read the image.
+the root partition from it. The runner attaches nothing else, and nothing else on the machine holds
+a kernel, so a kernel banner in the log is itself the proof that edk2 and Limine read the image.
 
 ### The disk image
 
@@ -270,8 +270,10 @@ The one drive is a virtio-blk-**mmio** device pinned to transport slot 0, which 
 [boot probe](#the-virtio-probe) finds and hands to `virtio-blk`. `force-legacy=false` makes every
 mmio transport modern (version 2), the only version the drivers accept, and edk2 boots from a modern
 one; a later `-global` on the command line overrides it, which is how the version-refusal boot is
-produced. There is no directory-as-FAT drive, and on this default command line no PCI device (the
-`nodisk` backend below is the one case that uses one).
+produced. There is no directory-as-FAT drive, and on this default command line the runner attaches
+no PCI device of its own (the `nodisk` backend below is the one case where it does). The machine is
+not PCI-free for all that: `-M virt` still creates its default devices, a `virtio-net-pci` network
+card among them, because the runner does not pass `-nodefaults`. Nothing in minix.rs sees it.
 
 ### The root backend
 
@@ -326,11 +328,13 @@ tools/check-boot-log.sh reboot reboot.log
 ```
 
 The second command must run before anything rebuilds `target/disk.img`, which every plain `disk`
-boot does. The reboot is checked against its own marker pair and nothing else, because `init`'s
-write battery was designed against a fresh image; it needs only the probe's line, so it is a short
-boot. What it shows is that writes **reach the device**. It shows nothing about the flush: QEMU
-serves a raw image through the host's page cache, so the first boot's writes are in the file whether
-or not the guest flushed them.
+boot does. Run it once per disk boot: every boot of the image stores the next digit, so a second
+reboot of the same image prints `gen=2` and fails the reboot set by design; take a fresh disk boot
+first. The reboot is checked against its own marker pair and nothing else, because `init`'s write
+battery was designed against a fresh image; it needs only the probe's line, so it is a short boot.
+What it shows is that writes **reach the device**. It shows nothing about the flush: QEMU serves a
+raw image through the host's page cache, so the first boot's writes are in the file whether or not
+the guest flushed them.
 
 ### The firmware writes to the disk too
 

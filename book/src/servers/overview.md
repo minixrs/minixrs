@@ -65,17 +65,19 @@ The classifier (`server-rt/src/classify.rs`, host-tested) gates each control eve
 *source*, not its type alone: an RS ping is only honored from RS, a signal only from a signal
 manager, an init only from RS. A client holding a mere `ipc_to` bit to the server cannot spoof one.
 `server-rt` is `#![forbid(unsafe_code)]` — callbacks travel in the config struct, not global state.
-The `init_fresh` body most servers use is the shared `sef_publish_to_ds(endpoint, name)` helper,
-which registers the server in DS.
+The `init_fresh` body most servers use is the shared `sef_publish_to_ds(name)` helper, which
+registers the server in DS; the endpoint it registers is not an argument, because DS records the
+kernel-stamped sender.
 
 ## DS: the name registry
 
 Servers discover each other by name through **DS** (`servers/ds/`), a name→endpoint registry backed
 by a static `[Entry; 16]` table (`servers/ds/src/registry.rs`; the pure `publish` / `retrieve` /
 `check` helpers are host-tested). A `DS_PUBLISH` request carries a 16-byte NUL-padded name in
-payload `0..16` and the publisher's endpoint in `16..20`. DS is the one server that *cannot* publish
-to itself over IPC — a SENDREC to itself before reaching its receive loop would deadlock — so it
-seeds its own entry in-process during `ds_init`.
+payload `0..16` and nothing else: the endpoint DS records is the kernel-stamped sender, so a server
+can publish only itself. (An endpoint travels in payload `16..20` only in a `DS_RETRIEVE` reply.) DS
+is the one server that *cannot* publish to itself over IPC — a SENDREC to itself before reaching its
+receive loop would deadlock — so it seeds its own entry in-process during `ds_init`.
 
 ## SCHED: user-space scheduling
 

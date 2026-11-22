@@ -372,14 +372,17 @@ jobs:
         run: |
           sudo apt-get update
           # ipxe-qemu ships efi-virtio.rom, a Recommends that
-          # --no-install-recommends skips. Until slice 6.4 QEMU needed it for
-          # the ESP drive, which was virtio-blk-PCI. Since 6.4 neither CI boot
-          # attaches a PCI virtio-blk device (the one disk is virtio-blk-device
-          # on virtio-mmio; only the hand-run MINIXRS_ROOT=nodisk uses PCI), so
-          # that reason is gone -- but whether QEMU on this runner still wants
-          # the ROM for a device `-M virt` creates by default has NOT been
-          # tested: that takes a CI run without the package. Kept until one is
-          # made on purpose.
+          # --no-install-recommends skips. KEPT. Why QEMU on THIS runner wants
+          # it has not been established here. This comment used to attribute
+          # it to the virtio ESP drive (virtio-blk-PCI), which slice 6.4
+          # removed: the runner's one disk is now virtio-blk-device on
+          # virtio-mmio. That attribution looks wrong: on a dev machine's QEMU
+          # 11.0.3, `info qtree` shows efi-virtio.rom as the romfile of
+          # virtio-net-pci -- the NIC `-M virt` creates by default, since the
+          # runner passes neither -nodefaults nor -nic none -- and none on
+          # virtio-blk-pci. If the runner's QEMU is the same, nothing about the
+          # need changed in 6.4. Untested without the package: that takes a CI
+          # run made on purpose.
           sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-efi-aarch64 ipxe-qemu
           qemu-system-aarch64 --version
       - name: Fetch Limine bootloader (pinned commit)
@@ -517,16 +520,32 @@ jobs:
           # gained the persistence probe and MFS's whole-disk probe. Measured
           # the same way at a fixed 300 s (dev machine, QEMU 11.0.3): the last
           # required marker (`[diag vfs] pm-exit reset closed=1`) sits at
-          # 82.71% of the disk boot's log and 59.30% of the ramdisk boot's,
-          # against 66.8% / 48.1% on the merge base. That is ~248 s local for
-          # the disk boot, which under 600 s is a 2.42x factor -- no longer the
+          # 82.0-82.7% of the disk boot's log across three boots of the final
+          # code (82.00%, 82.71%, 82.68%: ~246-248 s) and 59.30% of the ramdisk
+          # boot's (~178 s), against 66.8% / 48.1% on the merge base. Under
+          # 600 s that is a 2.42x factor for the disk boot -- no longer the
           # 3.0x that let 6.3 keep the budget, and heading for the 1.6-1.8x
-          # that forced the earlier raises. 900 s restores 3.63x for the disk
-          # boot (5.06x for the ramdisk boot's ~178 s). One number for both
-          # full boots, budgeted for the slower. The readings are noisy and the
-          # budget takes the worst: four disk boots across this slice's tasks
-          # measured 74.89%, 68.43%, 82.00% and 82.71%, the last two being the
-          # final code.
+          # that forced the earlier raises -- and 900 s was chosen to restore
+          # 3.63x (5.06x for the ramdisk boot). One number for both full
+          # boots, budgeted for the slower. Two earlier disk boots of the
+          # slice read 74.89% and 68.43%, on code that was not yet final.
+          #
+          # THOSE READINGS ARE THE WRONG FLAVOUR -- found in the slice's review
+          # round, after the number above was chosen. Every boot of the slice
+          # ran with the minix.rs SDK installed and MINIXRS_SDK unset, so its
+          # `hello` was the SDK's 46 696 bytes, not the 234 280-byte in-tree
+          # musl `hello` THIS job builds, which is the flavour the method
+          # above requires. The one musl reading (2026-11-22, same machine,
+          # taken at 450 s -- a fraction of a 450 s log is not comparable with
+          # a fraction of a 300 s one, so compare seconds): the last required
+          # marker at 88.03% of the disk boot's log, ~396 s, and 57.87% of the
+          # ramdisk boot's, ~260 s. Against that, 900 s is 2.27x for the
+          # disk boot (3.46x for the ramdisk boot), not 3.63x. 900 was NOT
+          # re-derived in that round: it is one reading, and the first run of
+          # this job is the measurement that settles it. If the disk boot
+          # ends here with its markers missing from some point to the end of
+          # the boot, suspect this before a regression, and raise the two
+          # full boots and `timeout-minutes` together.
           #
           # The reboot needs one line, `minix.rs init: persist gen=1`, and is
           # checked for nothing after it. In a 120 s local reboot that line is

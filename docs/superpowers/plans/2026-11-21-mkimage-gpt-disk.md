@@ -28,7 +28,10 @@ disagree, **the spec wins** and the plan gets corrected.
   time. Read `check-boot-log.sh`'s whole output; apply the starved-boot check before believing a
   missing marker. (Corrected: this said `timeout 300`, which is what the run's boots used. Task 9
   measured the disk boot's last required marker at 82.7% of a 300 s log, about 1.2x of headroom, so
-  the documented local timeout became 450 s — see the ledger.)
+  the documented local timeout became 450 s — see the ledger. Corrected again in the review round:
+  none of the run's boots set `MINIXRS_SDK=/nonexistent`, so all of them were the SDK flavour; the
+  commands above measure the musl flavour only with that variable set on the build *and* on the
+  boot.)
 - **Mutation discipline** per
   [`testing-and-markers.md`](../../conventions/testing-and-markers.md#mutation-testing).
 - **Counts in markers come from constants**, never typed into a driver.
@@ -197,14 +200,16 @@ Book, conventions, phase file, `docs/plan.md`, the stale-claim grep, the fresh w
 ## Ledger
 
 One entry per task: its commit, what was verified, and every ruling made in it. Each ruling's cost
-if it was wrong is in the spec's §5 (rows 15–30); the measurements are in the spec's P11 and §3 and
+if it was wrong is in the spec's §5 (rows 15–36); the measurements are in the spec's P11 and §3 and
 in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the spec's §3.
 
 - **Task 0 (2026-11-21; no commit of its own).** P11.1: edk2 boots from a modern virtio-mmio disk —
-  see the spec. P11.2: a nested `cargo build` inside the cargo runner completes in about a second;
-  no lock wait, so the runner uses the shared target directory. P11.5, first reading: `init`'s first
-  line lands at 21.6% of a 45 s default boot (about 10 s in); the reboot's timeout is set in Task 9
-  from the probe's own position.
+  see the spec. P11.2: a nested `cargo build -q --release -p minixrs-mkfs-mfs` inside a stand-in
+  cargo runner completes in about a second with no lock wait, so the runner uses the shared target
+  directory. (What was measured is `cargo build` of another host crate — `mkimage` did not exist
+  yet; the runner as built issues `cargo run -p minixrs-mkimage`, which every boot since has
+  exercised.) P11.5, first reading: `init`'s first line lands at 21.6% of a 45 s default boot (about
+  10 s in); the reboot's timeout is set in Task 9 from the probe's own position.
 - **Task 1 (`ea70c7f`).** `ROOT_PARTITION_TYPE_GUID` as its 16 on-disk bytes, with a test pinning
   the mixed-endian bytes to the text form; `bdev::validate_range`, with `validate_read` reduced to
   the minor check followed by it. Verified: the two crates' host tests; `validate_read`'s existing
@@ -214,7 +219,9 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
   time and recompute the CRC; the `123456789` → `0xCBF43926` vector. *Rulings:* partition numbers
   are 1-based slot numbers (§5 row 15); `FirstUsableLBA` past the entry array and overlapping
   partitions are not checked, two refusals are added beyond P5's list, `entry range` covers both the
-  inverted and the out-of-range entry (16); the CRC is bit-at-a-time (17).
+  inverted and the out-of-range entry (16); the CRC is bit-at-a-time (17). Miri: `cargo miri test -p
+  minixrs-driver-rt` on this commit, 113 passed, 0 failed (Miri 0.1.0, the 2026-09-30 toolchain;
+  134.75 s by Miri's own clock). Re-run on the final tree in the review round, below.
 - **Task 3 (`97693dd`).** `tools/mkimage`. Verified: the integration test reads every image back
   with a FAT32 reader of its own, with `driver-rt::gpt`, and field by field; P11.6 — macOS's
   `fsck_msdos -n` passes the ESP, and edk2 and Limine boot the kernel from the first image.
@@ -250,10 +257,10 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
   order, the seven-line reboot pair without the common forbidden set, the rewrite as the first write
   of the boot (27). No geometry constant and no existing marker moved.
 - **Task 9 (`70c9bd0`).** CI and the budget. Verified by measurement, not by a CI run: P11.3 and
-  P11.5 as the spec records them. *Rulings:* 600 → 900 s, 180 s, `timeout-minutes` 80, `mkimage`
-  pre-built, `ipxe-qemu` kept, tests in `coverage` and not under Miri (28). Not validated without a
-  push: CI's firmware, the budgets on the runner, the pre-built tool being seen as fresh on Linux,
-  `ipxe-qemu` (phase file, 6.4 debt 7).
+  P11.5 as the spec records them — on SDK-flavour boots, as the review round found (below).
+  *Rulings:* 600 → 900 s, 180 s, `timeout-minutes` 80, `mkimage` pre-built, `ipxe-qemu` kept, tests
+  in `coverage` and not under Miri (28). Not validated without a push: CI's firmware, the budgets on
+  the runner, the pre-built tool being seen as fresh on Linux, `ipxe-qemu` (phase file, 6.4 debt 7).
 - **Task 10 (observation only, no commit).** The recorded boots. `nodisk`, `readonly=on` and the raw
   image as predicted. **The damaged-table boot was not:** edk2 repairs a damaged primary GPT on a
   writable disk before the kernel runs, so the driver's refusals appear only read-only (spec §3,
@@ -263,10 +270,88 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
   (spec §3 says how). *Ruling:* row 7b — a `flush()` that reports a bad status as success — moves
   nothing and is recorded as uncovered, with no test seam added; no new guard for a missing
   `VERSION_1` (30).
-- **Task 12 (the two `docs(6.4)` commits that follow this plan's history).** `book/`,
-  `docs/conventions/`, the phase file, `docs/plan.md`, this plan and the spec; the stale-claim sweep
-  over comments, marker commentary and scripts (comment-only edits). *Ruling (coordinator):* the
-  documented local timeout for a marker-file verification is 450 s (29).
+- **Task 12 (`182641d`, `eddd33e`).** `book/`, `docs/conventions/`, the phase file, `docs/plan.md`,
+  this plan and the spec; the stale-claim sweep over comments, marker commentary and scripts
+  (comment-only edits). *Ruling (coordinator):* the documented local timeout for a marker-file
+  verification is 450 s (29).
+
+- **Review-fix round (2026-11-22; code in `ea41698`, documentation in the commit that carries this
+  entry).** Two fresh reviewers read the whole branch — one the code diff, one the documentation
+  against the code — and found no blocker. Each finding, and what was done with it:
+  - *C1, fixed.* MFS's `bad-minor` and `wr-minor` named minor 7, GPT partition 6 on `vblk`. They
+    name `BDEV_MINOR_NONE` now; `bdev.deny ok n=10` is unchanged and no marker text carried the
+    number. *Ruling (31):* a shared constant, `i32::MAX`, with a const assert in each driver.
+  - *C2, fixed.* The no-root `ENXIO` gate moved from an untested `match` arm in `main.rs` to
+    `part::locate`, with host tests for no table against minors 0, 1, 2, 3 and −1, a normal and a
+    zero-length request; `do_read` and `do_write` take the located request. Mutation: the `None` arm
+    answering through fails `with_no_root_every_request_is_enxio_on_every_minor`,
+    `with_no_root_a_zero_length_request_is_enxio_not_empty` and
+    `with_no_root_enxio_comes_before_every_other_refusal`. *Ruling (32).*
+  - *C3, fixed.* `part::geometry` refuses a device with fewer than five blocks before the table is
+    read; `a_device_shorter_than_the_table_is_refused_for_its_geometry` was written first and seen
+    to fail (capacity 8 read as one block), and `a_five_block_device_reaches_the_gpt_checks` holds
+    the boundary. *Ruling (32).*
+  - *C4, fixed.* Two comments in `blk.rs` that described the device as the root image, and two doc
+    lines far over width, in `blk.rs` and `main.rs`.
+  - *C5, fixed.* `check-boot-log.sh` fails a boot kind with no required marker. Shown on a scratch
+    copy: with the reboot's expected file emptied the old script printed `PASS … 4 marker checks`
+    and the new one exits 1. *Ruling (33).*
+  - *C6, recorded.* Three `blk::flush_after` tests exercise arms `do_write` never reaches; the "no
+    flush after a zero-length write or a refused grant" half of Review Focus 6 rests on early
+    returns no test or marker covers (spec §3, phase debt 1).
+  - *C7, recorded.* Every `SRV_T` boot process can send `vblk` a write, and since 6.4 that reaches
+    the ESP and the partition table and survives a reboot (spec ruling 7, phase debt 11, the drivers
+    chapter).
+  - *C8, known and left.* `MINIXRS_VBLK_IMAGE` given as a relative path resolves against the
+    caller's directory, not the repository's; and `mkimage`'s `basis()` can yield an empty base for
+    a name like `". .txt"`, which none of the runner's three files is.
+  - *D1, fixed.* H6 no longer says MFS sends every request as minor 0 and is "literally unchanged".
+  - *D2, fixed.* 6.3's debt 7 is "partly paid", with what is covered and what is not, and its
+    remainder is 6.4's debt 10; 6.3's debt 1 says it is held by a hand-run boot (debt 9). The spec's
+    P4 and P8 say the same.
+  - *D3, fixed.* The two sentences that read as CI results say what was observed and where.
+  - *D4–D6, fixed.* The book's "partitions as minors … when the disk carries one", "both boots CI
+    runs", and the spec's P4 contradiction about PCI.
+  - *D7, fixed — and found worse than reported.* The readings on final code are 82.00%, 82.71% and
+    82.68% of 300 s logs, stated the same in six places. They are all **SDK-flavour** boots: see the
+    verification below, and ruling 36.
+  - *D8, fixed.* Miri is recorded under Task 2 and re-run here; the documents say `driver-rt` is in
+    the advisory job's list and was run locally, not that CI ran it.
+  - *D9, D10, fixed.* The reboot recipe says it is once per disk boot; `build-and-boot.md` says a
+    slice owes both full boots and the reboot. *Ruling (34).*
+  - *D11, fixed.* The MFS comment that called `bdev.ds` the only backend-specific line.
+  - *D12, fixed.* One home each: the budget in `ci.md`, the reboot-ordering rule in
+    `build-and-boot.md`, the `nodisk` verdict in `testing-and-markers.md`, the recorded boots in the
+    spec's *Observed* table with a summary and a link from the phase file.
+  - *D13, fixed, with one fact added.* `ipxe-qemu`: on QEMU 11.0.3 `info qtree` names
+    `efi-virtio.rom` as the ROM of `-M virt`'s default `virtio-net-pci` card and gives
+    `virtio-blk-pci` none, so the workflow comment's old reason was a mis-attribution there. Not
+    checked on the runner's QEMU; the package stays.
+  - *D14, fixed* — the nits, including `sef_publish_to_ds(name)` in two documents. Left and listed
+    as debt 12: two contradictions that predate the slice.
+  - *Beyond the findings.* The same sentence that had the wrong `sef_publish_to_ds` signature also
+    put the publisher's endpoint in the `DS_PUBLISH` payload, in both documents; DS takes it from
+    `m_source`. `servers-and-drivers.md`, read end to end, also had a rule list headed "Three rules"
+    over six, and gained the `BDEV_MINOR_NONE` rule and the gate's home.
+
+  *Verification.* Host tests: `kernel-shared` 217, `server-rt` 61, `mfs` 148, `memory` 8,
+  `virtio-blk` 86 (79 before the round), all passing; the three clippy gates, `cargo fmt --check`
+  and `shellcheck` clean. Miri: `cargo miri test -p minixrs-driver-rt` on the final tree, 2026-11-22
+  — 113 passed, 0 failed, 134.75 s by Miri's own (virtual) clock, the same figure Task 2 recorded,
+  and about 46 s of wall clock. Boots, one at a time, 450 s, QEMU 11.0.3, **musl flavour**:
+  `check-boot-log.sh disk` — PASS, all 165 marker checks; the reboot of that image, 60 s: PASS, all
+  7 marker checks (`persist gen=1`); the ramdisk boot: `check-boot-log.sh ramdisk` — PASS, all 165
+  marker checks; `diff-backends.sh`: PASS (`--self-test` too). `bdev.deny ok n=10` on both full
+  boots.
+
+  *What the boots found.* The round's boots set `MINIXRS_SDK=/nonexistent`; none of the run's had.
+  With the SDK installed an unset variable selects the SDK flavour, so every log of Tasks 5–11 — and
+  the coordinator's re-measurement — shows `hello` at 46 696 bytes, where CI builds the 234 280-byte
+  musl one. On the musl flavour the last required marker is at 88.03% of the 450 s disk log (about
+  396 s) and 57.87% of the ramdisk log (about 260 s), against about 248 s and 178 s on the SDK
+  flavour. *Ruling (36):* no timeout was changed on one reading. CI's 900 s is 2.27x for the disk
+  boot (3.46x for the ramdisk boot) and the local 450 s is 1.14x; the phase file's debt 13 owns the
+  decision.
 
 **Where the plan or the spec was wrong, and which was corrected.**
 
@@ -278,3 +363,7 @@ in the phase file's 6.4 section. "As predicted" and "not predicted" refer to the
   P6's probe of "the `55 AA` signature" (not enough — the ESP has it too); P8's "every failure
   prints" (not a flush lost to a broken device); P5's list of refusals (two more exist).
 - *Spec's predictions wrong, reality recorded:* §3 rows 3, 4, 5, 8 and 10, and the damaged-CRC boot.
+- *Found by the review round, both corrected:* the plan's Global Constraints gave boot commands that
+  measure the SDK flavour on a machine with the SDK installed; the spec's P11.3 called its readings
+  the budget without saying which flavour they were. The phase file's "Paid by 6.4" on two of 6.3's
+  debts said more than the evidence did.
