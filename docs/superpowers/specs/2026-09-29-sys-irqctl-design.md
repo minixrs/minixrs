@@ -375,10 +375,13 @@ and every other file operation in the system with it. Slice 6.5 decided what hap
 with `EAGAIN`, records the caller and sends it one `NOTIFY` when input arrives; VFS parks the read
 without replying, holds no grant meanwhile, and retries its parked reads oldest-first on that
 notification. There is still no ABI change — `CDEV_READ` and `EAGAIN` both existed, and no value
-moved (6.5's R10) — and no kernel change. The post-proof guard I13's execution added to TTY (any
-notification after the proof is `irq FAIL extra`) was retired by the same slice, since the line now
-keeps firing by design. **virtio-console** is the same loop with a used ring in place of a FIFO, and
-the same `EAGAIN`-and-`NOTIFY` contract on its `CDEV_READ`.
+moved (6.5's R10). The kernel did change, by one guard this spec did not foresee: a server that
+`SENDREC`s a driver which also notifies it needs a pending notification never to be delivered as the
+reply to that `SENDREC`, and `mini_receive` lacked MINIX 3's `MF_REPLY_PEND` check until 6.5
+restored it (6.5's R9). The post-proof guard I13's execution added to TTY (any notification after
+the proof is `irq FAIL extra`) was retired by the same slice, since the line now keeps firing by
+design. **virtio-console** is the same loop with a used ring in place of a FIFO, and the same
+`EAGAIN`-and-`NOTIFY` contract on its `CDEV_READ`.
 
 **No polling.** A blk driver that spins on the used ring passes under TCG, where the device
 completes inside the `QueueNotify` write, and proves nothing about a disk root under real completion

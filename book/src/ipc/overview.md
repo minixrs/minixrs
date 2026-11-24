@@ -60,19 +60,24 @@ stub:
 delivered immediately and the destination is unblocked; otherwise the caller blocks and is queued on
 the destination's `caller_q`.
 
-**RECEIVE** — the kernel checks, in order: pending notifications (`notify_pending`), pending async
-messages (`asyn_pending`), then the caller queue (`caller_q`). If nothing is ready, the caller
-blocks with `RTS_RECEIVING` set.
+**RECEIVE** — the kernel checks, in order: pending notifications (`notify_pending`), then the caller
+queue (`caller_q`). (MINIX 3 checks pending async messages between the two; `SENDA` is a stub here,
+so there are none.) If nothing is ready, the caller blocks with `RTS_RECEIVING` set. The first check
+is skipped for the receive half of a `SENDREC` —
+[see below](#a-notification-is-never-the-reply-to-a-sendrec).
 
 **SENDREC** — a `SEND` immediately followed by a `RECEIVE`, but atomic: the caller transitions
 straight from sending to receiving without returning to user space. This is what a POSIX wrapper
 uses — send a request to a server and block for the reply.
 
-**NOTIFY** — if the target is waiting, a synthetic notification message (`m_type == NOTIFY_MESSAGE`,
-`0x1000`) is delivered immediately; otherwise a bit is set in the target's `notify_pending` bitmap.
-`NOTIFY` never blocks, and repeated notifications from the same source coalesce into one bit. Used
-for timer expiry (`CLOCK` → server), kernel-raised signals (`SYSTEM` → PM), and hardware-interrupt
-delivery (`HARDWARE` → driver).
+**NOTIFY** — if the target is waiting in a plain `RECEIVE` that would accept the sender, a synthetic
+notification message (`m_type == NOTIFY_MESSAGE`, `0x1000`) is delivered immediately; otherwise a
+bit is set in the target's `notify_pending` bitmap and the message is built at the target's next
+plain `RECEIVE`. `NOTIFY` never blocks, and repeated notifications from the same source coalesce
+into one bit. Used for timer expiry (`CLOCK` → server), kernel-raised signals (`SYSTEM` → PM),
+hardware-interrupt delivery (`HARDWARE` → driver), and — since slice 6.5 — one server telling
+another to ask again (TTY → VFS, see
+[Drivers](../drivers/overview.md#notify-then-pull-a-read-with-nothing-to-give)).
 
 A `NOTIFY` from `HARDWARE` is the one notification with a payload: the owner's `int_pending` bitmap
 sits at payload `0..4`, one bit per `notify_id` that fired, taken (read and zeroed) when the message
@@ -84,6 +89,39 @@ ready to receive.
 **SENDA** is defined for ABI completeness but is not implemented: it returns `ENOSYS`, and it cannot
 be reached anyway because the `trap_mask` gate is a `u16` and `SENDA`'s bit is 16 — outside the
 mask. Making it real is deferred (see [Roadmap](../roadmap.md)).
+
+### A notification is never the reply to a `SENDREC`
+
+A `SENDREC` is two steps inside one trap. `do_sendrec` runs the send half, and once that has
+succeeded it sets the caller's `MF_REPLY_PEND` flag and runs the receive half against the same
+partner. From that moment until a message is delivered to it, the caller is owed exactly one thing —
+its partner's reply — and the kernel delivers it **no notification, from anyone**:
+
+- **`NOTIFY` does not deliver at once to a flagged target.** `mini_notify` (and the three
+  kernel-originated forms, for `CLOCK`, `SYSTEM` and `HARDWARE`) tests two things before building
+  the message: that the target is blocked in a receive that would accept the sender, and that
+  `MF_REPLY_PEND` is clear. Otherwise it sets the bit in `notify_pending`.
+- **`RECEIVE` does not collect a pending bit for a flagged caller.** `mini_receive` skips the
+  pending-notification check when the caller has `MF_REPLY_PEND` set, and goes straight to the
+  caller queue. The bit stays set, and the notification is built at the caller's next *plain*
+  `RECEIVE`.
+
+The second half is the subtle one. The receive half of a `SENDREC` filters on the partner's
+endpoint, and a notification from *that same partner* passes the filter. Deliver it, and the caller
+returns from its `SENDREC` holding a message of type `NOTIFY_MESSAGE` where a reply should be; the
+real reply turns up later, at the caller's ordinary receive loop, looking like a request nobody
+sent. MINIX 3 guards exactly this in `mini_receive` ("pending notifications, except for SENDREC").
+The Rust translation carried the first half from the start and lacked the second until slice 6.5 —
+the first slice with a pair of processes where one both calls the other and is notified by it.
+
+The flag is cleared when a message is delivered to its owner, and by `do_sendrec` itself if the
+receive half fails (a dead partner, or `ELOCKED` from the deadlock check): that caller returns to
+user space with an error and is owed nothing, and a flag left behind would withhold every later
+notification from it.
+
+Two lines in every boot log prove the rule, and they do not depend on timing, because TTY
+[arranges the collision deliberately](../drivers/overview.md#what-the-boot-log-proves): `[diag vfs]
+cdev.short ok n=256` and `[diag vfs] cons.notify ok`.
 
 ### The user-space trap (aarch64)
 
@@ -191,7 +229,8 @@ IPC and kernel operations it may perform. User processes share one user-class sl
 - **`k_call_mask`** — bitmap of permitted kernel calls (empty for user processes). See
   [System Calls & ABI](../reference/syscalls.md).
 - **`notify_pending` / `asyn_pending`** — per-source bitmaps of deferred notifications and async
-  messages, consumed by `RECEIVE`.
+  messages. A plain `RECEIVE` consumes `notify_pending`; the receive half of a `SENDREC` leaves it
+  alone. Nothing sets `asyn_pending` while `SENDA` is a stub.
 - **`sig_mgr`** — the endpoint that manages signals raised against this process.
 
 The entry also carries a `grant_table` pointer and `irqs`, both in use, and reserves `io_ranges` and

@@ -7,8 +7,9 @@
 //! accept a message from the caller (or `ANY`), the kernel synthesizes a
 //! [`NOTIFY_MESSAGE`]-typed message directly into the destination's
 //! `deliver_msg` and unblocks them. Otherwise it sets a bit in the
-//! destination's `priv.notify_pending` bitmap so the next `RECEIVE` will
-//! collect the deferred notification.
+//! destination's `priv.notify_pending` bitmap so the next plain `RECEIVE` will
+//! collect the deferred notification — never the receive half of a SENDREC,
+//! which is owed its partner's reply (see `mini_receive`).
 //!
 //! Three kernel tasks also originate notifications, with no `ipc_to` check:
 //! `CLOCK` for an expired alarm ([`deliver_alarm`]), `SYSTEM` for a pending

@@ -342,6 +342,20 @@ request** — its sender is not in a SENDREC — so VFS replies to none, whoever
 may be deferred**, as long as exactly one is eventually sent. Both arrived with slice 6.5 and both
 are stated under [Parking a console read](#parking-a-console-read).
 
+**The hazard this rule carries: two processes that each answer an unknown message can answer each
+other for ever.** The rule assumes every message a server receives is a request from a caller
+blocked in `SENDREC`. A message that is *not* one — a reply that arrives at the receive loop instead
+of at the `SENDREC` it belonged to — is unknown to the receiver, gets `ENOSYS` **sent** back, is
+unknown to *that* receiver, and so on. Slice 6.5 saw VFS and TTY trade 32,525 of them, silently:
+nothing fails, nothing prints, and both servers keep serving in between. The one known way to
+deliver such a message was a kernel defect, since fixed
+([`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec)), so the rule
+stands unhardened and the exposure is a carried debt
+([`phase-6-virtio.md`](../plans/phase-6-virtio.md#slice-65-tty-rx--pl011-receive-interrupt--cdev_read)).
+Until it is paid: a server pair in which each side both calls and answers the other must never be
+sent a message outside a `SENDREC`, and a stray `ENOSYS` exchange in a trace means exactly that
+happened.
+
 ### Define and refuse, never fold into `ENOSYS`
 
 A request you know about but decline gets its own errno, never `ENOSYS` — because `ENOSYS` is
@@ -746,8 +760,15 @@ process waiting on a keyboard would stop every file operation in the system. So 
   retry may itself hear `EAGAIN`.
 - **Record the waiter before replying `EAGAIN`.** A single-threaded driver takes no interrupt
   between the two, so the notification for the next byte cannot be decided before the waiter exists;
-  and the caller parks before its next `RECEIVE`, where a notification sent early is latched by the
-  kernel. That pair is why there is no lost wakeup.
+  and the caller parks before its next plain `RECEIVE`, which is the only place a notification sent
+  early can be delivered. Those two are the servers' part of why there is no lost wakeup. The third
+  part is the kernel's, and the argument is false without it:
+  [a pending notification is never the reply to a `SENDREC`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec).
+- **A wake-up `NOTIFY` that fails keeps the waiter.** It is the only wake-up a parked reader gets,
+  so TTY checks `ipc_notify`'s result: on anything but `OK` it records the waiter again, so the next
+  byte tries again, and prints `[diag tty] rx FAIL notify rc=…` once per boot — forbidden, under the
+  `[diag tty] rx FAIL` line. A reader left parked with nothing in the log would look exactly like
+  one nobody typed at.
 - **A driver that answers `EAGAIN` without owing a `NOTIFY` hangs its reader**, silently: VFS parks
   on the answer, whoever gave it, and nothing else will ever retry the read. So a driver that cannot
   deliver the notification must not say `EAGAIN`. TTY answers **`EIO`** when it failed to claim its
@@ -842,9 +863,12 @@ waited on:
 - **The notifier check is one endpoint today**: `m_source == tty`, the DS-resolved endpoint VFS
   already holds. 6.6 widens it to the set of character drivers; `park.rs` does not change.
 
-Two markers, both VFS's because nothing outside VFS can know either: `[diag vfs] cons.park` at the
-first park of a boot, and `[diag vfs] cons.beside ok` the first time a file read that made a real
-`FS_READ` round trip completes while a read is parked. The second is ordered, not synchronised — see
+Three markers, all VFS's because nothing outside VFS can know any of them: `[diag vfs] cons.notify
+ok` for the first notification of a boot that reaches the receive loop from the console driver,
+`[diag vfs] cons.park` at the first park, and `[diag vfs] cons.beside ok` the first time a file read
+that made a real `FS_READ` round trip completes while a read is parked. The first is TTY's
+[notify probe](#writing-probes-and-denial-batteries) arriving, before anything is parked, and proves
+a kernel rule rather than anything about parking. The last is ordered, not synchronised — see
 [Fed boots](./build-and-boot.md#fed-boots).
 
 ### Grants on the write path
@@ -1097,6 +1121,21 @@ A server's probe battery is how these rules stay proved. The rules for writing o
   because a priming step that primes nothing makes the probe pass for the wrong reason. The general
   shape: name the state a wrong implementation would reuse (a bounce buffer, a cached block, a
   staging page), make it differ from the right answer, and prove that it does.
+- **When what is being proved is an interleaving, arrange it on every boot; a marker that passes by
+  timing has proved nothing.** Slice 6.5's markers all passed, repeatedly, over a kernel that
+  delivered a notification as the reply to a `SENDREC`, because the boot only fails when a
+  notification happens to be latched at VFS at the moment it next calls TTY. The probe that closed
+  it lives in **TTY's production loop**: TTY notifies its *first client* before replying to that
+  client's first request — one `ipc_notify`, behind a one-shot flag. The client is VFS,
+  mid-`SENDREC` in its prologue, so the notification is latched, and VFS's second prologue request
+  always meets it. The verdict is two VFS lines, `cdev.short ok n=256` and `cons.notify ok`; what
+  they prove, and what prints instead, is in
+  [`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec). Three things
+  make a probe in a production path tolerable here and are the test for the next one: it uses a
+  shape the contract already allows (to VFS it is one spurious "ask again"); it runs once; and it
+  could not be placed anywhere else, since only the notifier can choose when to notify. **Do not
+  delete it as dead weight** — it is the kernel rule's only boot proof, and the kernel has no host
+  tests.
 
 Report through the path under test where that is what is being proved: a client's write proof must
 be written **through** the descriptor under test (e.g. `/dev/console`, never fd 1), because the

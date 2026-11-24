@@ -236,10 +236,21 @@ sends that endpoint one `NOTIFY` and forgets it. The caller then asks again with
 names no request — so the second ask may hear `EAGAIN` too, and a driver needs to remember exactly
 one thing: who to notify.
 
-Nothing can be lost between the refusal and the notification. The driver records the waiter before
-it replies, and it is single-threaded, so no interrupt is serviced between the two. The caller
-receives the `EAGAIN` before it can receive anything else, and a `NOTIFY` sent while the caller is
-busy is latched by the kernel and delivered at its next `RECEIVE`.
+Nothing can be lost between the refusal and the notification, and three things make that true. The
+driver records the waiter before it replies, and it is single-threaded, so no interrupt is serviced
+between the two. The caller receives the `EAGAIN` before it can receive anything else. And a
+`NOTIFY` sent while the caller is busy is latched by the kernel and delivered at its next *plain*
+`RECEIVE` — never as the reply to a `SENDREC` the caller has in flight, not even one addressed to
+the driver that sent the notification.
+
+That last clause is a kernel rule
+([IPC](../ipc/overview.md#a-notification-is-never-the-reply-to-a-sendrec)), and this contract is the
+first thing in the system to depend on it: the caller here both calls the driver and is notified by
+it, so a wake-up can be waiting at the very moment the caller sends the driver its next request. If
+the kernel handed that wake-up over as the request's reply, the request would appear to fail, the
+wake-up would be spent, and the reader it was meant for would never be retried. The kernel did hand
+it over, until the slice that introduced this contract found out; a guard in `mini_receive` now
+prevents it, and the [boot log](#what-the-boot-log-proves) proves the guard on every boot.
 
 The details that make the contract usable:
 
@@ -283,10 +294,11 @@ its owner exits or `exec`s — except that a virtio driver cannot do either,
 **Delivery.** When a hooked SPI fires, `irq_dispatch` **masks the line at the distributor before the
 EOI**, sets the hook's `notify_id` bit in the owner's `int_pending`, and `deliver_irq` sends a
 `NOTIFY` from `HARDWARE`. The line is level-triggered; EOI on an unmasked line would re-enter
-immediately, and the driver cannot have quiesced the device yet. If the owner is blocked in
-`RECEIVE` the message is built at once; otherwise the notification is deferred through
-`notify_pending` and built by the owner's next `RECEIVE`. Either way the bitmap is *taken* — read
-and zeroed — so every line that fired in between arrives in one message, at payload `0..4`.
+immediately, and the driver cannot have quiesced the device yet. If the owner is blocked in a plain
+`RECEIVE` the message is built at once; otherwise — the owner is running, or is inside a `SENDREC`
+waiting for a reply — the notification is deferred through `notify_pending` and built by the owner's
+next plain `RECEIVE`. Either way the bitmap is *taken* — read and zeroed — so every line that fired
+in between arrives in one message, at payload `0..4`.
 
 **The driver pattern.** The line stays masked until the driver says otherwise, so the order inside
 the receive loop is load-bearing:
@@ -834,6 +846,20 @@ frame, never in the init callback's — the kernel reads and writes it while TTY
 the next is received. And an **unknown `m_type` gets a reply**, where DS harmlessly drops one: a
 driver's clients all SENDREC, so a dropped request blocks the caller forever.
 
+A notification is the exception, because its sender is not waiting for anything. The loop looks for
+one before it dispatches: a `NOTIFY_MESSAGE` from `HARDWARE` is the interrupt line (next section),
+and a `NOTIFY_MESSAGE` from anybody else is dropped without a reply. Nothing sends TTY one today;
+the keyboard driver will, and its arm goes there.
+
+The loop also does one thing that serves no client. Before it replies to the **first** request it
+ever receives, TTY sends that request's sender a `NOTIFY` — once per boot. The sender is VFS, in the
+middle of a `SENDREC` to TTY, so the kernel cannot deliver the notification and latches it; VFS's
+next request to TTY then meets a notification latched from the very process it is asking. That is
+the collision the kernel rule in
+[IPC](../ipc/overview.md#a-notification-is-never-the-reply-to-a-sendrec) is about, made to happen on
+every boot instead of once in a while, and [the boot log](#what-the-boot-log-proves) shows its
+outcome. To VFS it is one spurious "ask again", which the read contract already allows.
+
 ### The interrupt line: a proof, then receive
 
 TTY claims INTID 33 at startup and runs a battery of claims that must each be refused. One object,
@@ -862,18 +888,22 @@ NOTIFY the waiter, if any              only if a byte was stored; then forget th
 
 The last line is `main`'s, not `irq.rs`'s: `IrqService::on_notify` re-arms and only *reports* that
 bytes arrived, so the waiter is notified **after** the line is live again and cannot come back with
-a read while it is still masked. `DR`'s error flags (framing, parity, break, overrun) are discarded
-and the byte kept. TTY writes neither `UARTLCR_H` nor `UARTIFLS`: the kernel's console shares the
-UART, the firmware configured it, and the loop is correct whether the FIFO is on or off. (As
-measured under QEMU 11 with edk2, it is on — and QEMU raises the receive interrupt on the first byte
-regardless of the trigger level.)
+a read while it is still masked. If that `NOTIFY` is refused, TTY does not forget the waiter after
+all — it records it again, so the next byte tries again — and prints `[diag tty] rx FAIL notify
+rc=…` once: it is the only wake-up a parked reader gets, and a reader left waiting with nothing in
+the log would look exactly like one nobody typed at. `DR`'s error flags (framing, parity, break,
+overrun) are discarded and the byte kept. TTY writes neither `UARTLCR_H` nor `UARTIFLS`: the
+kernel's console shares the UART, the firmware configured it, and the loop is correct whether the
+FIFO is on or off. (As measured under QEMU 11 with edk2, it is on — and QEMU raises the receive
+interrupt on the first byte regardless of the trigger level.)
 
-Two guards stand behind the loop, each with a forbidden boot marker. A notification that drains
-nothing is legal — it is the price of acknowledging first — but `RX_EMPTY_STORM` (64) of them **in a
-row** is a device that is not dropping its line: TTY prints `[diag tty] rx FAIL storm` and does not
-re-arm. A refused `IRQ_ENABLE` prints `rx FAIL enable rc=…`; the bytes already drained are still
-delivered. The run of empty notifications is counted by a small pure type, `EmptyRun`, so the rule
-is pinned by host tests rather than by a boot that would need a misbehaving UART.
+Two guards stand behind the loop, each with a forbidden boot marker (the refused `NOTIFY` above is a
+third). A notification that drains nothing is legal — it is the price of acknowledging first — but
+`RX_EMPTY_STORM` (64) of them **in a row** is a device that is not dropping its line: TTY prints
+`[diag tty] rx FAIL storm` and does not re-arm. A refused `IRQ_ENABLE` prints `rx FAIL enable rc=…`;
+the bytes already drained are still delivered. The run of empty notifications is counted by a small
+pure type, `EmptyRun`, so the rule is pinned by host tests rather than by a boot that would need a
+misbehaving UART.
 
 ### The input ring
 
@@ -934,6 +964,23 @@ reply against the granted length, asks for `CDEV_MAX_IO + 8` bytes and requires 
 perfectly good grant (`ENXIO`, from TTY's own minor check) and a grant issued to PM instead of TTY
 (`EPERM`, from the kernel's grantee check, the property that makes a grant id safe to pass around at
 all).
+
+Two of VFS's lines in that exchange prove something about the kernel rather than about TTY:
+
+```text
+[diag vfs] cdev.short ok n=256
+[diag vfs] cons.notify ok
+```
+
+The banner write is the first request TTY ever receives, so it is the one TTY's
+[one-shot probe](#transmit) answers with a `NOTIFY` *before* the reply. The short write is VFS's
+second request, and it is therefore sent with a notification from TTY already latched at VFS.
+`cdev.short ok n=256` says the `SENDREC` came back with TTY's reply — 256, the clamp. Without the
+kernel's guard the notification comes back instead and the line reads `cdev.short FAIL rc=4096`,
+`0x1000` being `NOTIFY_MESSAGE`. `cons.notify ok` is the other half: once VFS's start-up is over and
+it is in its ordinary receive loop, the notification arrives there, where it belongs, and VFS prints
+the line for the first one of a boot. Nothing is parked yet, so the retry it triggers finds nothing
+to do. Both lines print on every boot.
 
 One honest caveat: under QEMU's TCG the Device *attribute* is not observably load-bearing. QEMU's
 PL011 works through a Normal write-back mapping — which is why the kernel's own HHDM alias has

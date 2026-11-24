@@ -85,6 +85,51 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
   `dispatch_caller_local`. Run-queue transitions on a target use the same `sched::rts_set` /
   `rts_unset` capture-then-borrow-end pattern the IPC primitives use
 
+### A pending notification is never the reply to a `SENDREC`
+
+A process with `MF_REPLY_PEND` set is in the receive half of a `SENDREC` and is owed one thing: its
+partner's reply. **No notification is delivered to it until that reply has arrived** — it is latched
+in `notify_pending` and handed over at the process's next plain `RECEIVE`. The rule has two halves,
+in two files, and it is only a rule when both hold:
+
+- **The immediate half, `ipc/notify.rs`.** `mini_notify` delivers at once only when
+  `will_receive(dst, src) && dst.misc_flags & MF_REPLY_PEND == 0`; otherwise it sets the bit. The
+  three kernel-originated notifications — `deliver_alarm`, `deliver_ksig`, `deliver_irq` — carry the
+  same test.
+- **The deferred half, `ipc/receive.rs`.** `mini_receive` skips its pending-notification check
+  (`take_pending_notification`) when the caller has `MF_REPLY_PEND` set, and goes on to the caller
+  queue and then to blocking.
+
+Both are MINIX 3's, in `kernel/proc.c`: `mini_notify` tests `MF_REPLY_PEND` beside `WILLRECEIVE`,
+and `mini_receive`'s check is commented "pending notifications, except for SENDREC". The translation
+kept the first and **dropped the second**, and nothing noticed from Phase 2 to Phase 6, because the
+defect needs a process that `SENDREC`s a partner which also notifies it. Slice 6.5 built the first
+such pair — VFS calls TTY, and TTY notifies VFS when input arrives.
+
+What breaks without the deferred half: the receive half of a `SENDREC` filters on its partner, a
+notification latched from that partner passes the filter, and the kernel delivers it **as the
+reply**. The caller reads `NOTIFY_MESSAGE` (`0x1000`, 4096) as its result; the notification is
+consumed, so whatever it was meant to wake stays asleep; and the partner's real reply arrives later,
+at the caller's receive loop, as a message nobody asked for. In 6.5 that was a console write cut
+short, a parked reader never woken, and two servers answering each other `ENOSYS` (the hazard is
+under [Always reply](./servers-and-drivers.md#always-reply)). It is a race, so it passes most boots.
+
+The flag's lifetime is part of the rule, since a flag left set withholds every notification from its
+process. `do_sendrec` sets it once the send half has succeeded; a delivered message clears it
+(`mini_send` to a waiting receiver, `walk_caller_q`, and the kernel-originated sends); and
+`do_sendrec` clears it itself when the receive half returns an error (a dead partner, `ELOCKED`),
+because that caller goes back to user space owed no reply. No boot provokes that last path — it is
+verified by reading.
+
+**The proof is a boot marker that does not depend on timing.** TTY notifies its first client before
+replying to that client's first request
+([the probe](./servers-and-drivers.md#writing-probes-and-denial-batteries)), so VFS's second request
+to TTY always meets a latched notification from TTY. `[diag vfs] cdev.short ok n=256` is that
+request getting its reply; remove the guard in `mini_receive` and `[diag vfs] cdev.short FAIL
+rc=4096` prints in its place. `[diag vfs] cons.notify ok` is the same notification then arriving at
+VFS's plain `RECEIVE`. Both are required of every full boot (slice 6.5, R9 — see
+[`2026-11-23-tty-rx-design.md`](../superpowers/specs/2026-11-23-tty-rx-design.md)).
+
 ## Scheduler delegation
 
 (slice 4.3 — see [phase-4-servers.md](../plans/phase-4-servers.md))

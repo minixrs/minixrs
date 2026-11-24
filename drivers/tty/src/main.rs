@@ -207,7 +207,8 @@ fn main() -> ! {
             // re-armed the line by now, and that order is the point (spec R4):
             // the line is live before the waiter can come back with a read.
             // `NOTIFY` never blocks; if the waiter is busy the kernel latches
-            // it until its next `RECEIVE`. With nobody waiting the bytes simply
+            // it until its next plain `RECEIVE` — never as the reply to a
+            // SENDREC (spec R9). With nobody waiting the bytes simply
             // stay in the ring for the next `CDEV_READ`.
             if arrived && let Some(who) = waiter.take() {
                 let rc = ipc_notify(who);

@@ -98,17 +98,22 @@ full boot and one for the reboot:
   consequences: `persist gen=0` is required of every full boot and forbidden on a reboot, so neither
   log can pass as the other; and the common forbidden list is not applied to a reboot, so a panic
   there is caught only by `persist gen=1` never appearing.
-- **The full boots are fed boots, and three required lines hold only for one.** Since slice 6.5 the
-  common expected file carries `[diag vfs] cons.park`, `[diag vfs] cons.beside ok` and `minix.rs
-  init: stdin ok n=15`, and the last can only print when `tools/feed-console.sh` supplied the boot's
-  stdin (the command form, and what the feeder waits for, are under
-  [Fed boots](./build-and-boot.md#fed-boots)). An **unfed** full boot prints the first two and fails
-  the third by design; that is a missing feeder, not a regression, and it is the first thing to rule
-  out when `stdin ok` is the only line missing. The same goes for the forbidden `stdin FAIL`: it
-  describes a fed boot, and a boot somebody typed at prints it correctly. The **reboot is not fed**
-  and loses nothing by it — it is checked against its own pair only, which holds none of the three.
-  `[diag tty] rx on` is different: it says the receive masks were set, depends on no input, and
-  every boot prints it, fed or not.
+- **The full boots are fed boots, and exactly one required line needs the feeding.** Slice 6.5 put
+  five console lines in the common expected file — `[diag tty] rx on`, `[diag vfs] cons.notify ok`,
+  `[diag vfs] cons.park`, `[diag vfs] cons.beside ok` and `minix.rs init: stdin ok n=15` — and only
+  the last can print solely when `tools/feed-console.sh` supplied the boot's stdin (the command
+  form, and what the feeder waits for, are under [Fed boots](./build-and-boot.md#fed-boots)). The
+  other four depend on no input and every boot prints them, fed or not: the receive masks were set,
+  TTY's notify probe arrived at VFS, a read was parked, a file read was served beside it. An
+  **unfed** full boot therefore fails on `stdin ok` alone, by design; that is a missing feeder, not
+  a regression, and it is the first thing to rule out when `stdin ok` is the only line missing. The
+  same goes for the forbidden `stdin FAIL`: it describes a fed boot, and a boot somebody typed at
+  prints it correctly. The **reboot is not fed** and loses nothing by it — it is checked against its
+  own pair only, which holds none of the five.
+- **`cdev.short ok n=256` has carried a second proof since slice 6.5**, and `cons.notify ok` exists
+  for the same one: a kernel rule about notifications and `SENDREC`, stated with its failure line in
+  [`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec). A `cdev.short
+  FAIL rc=4096` is that rule broken, not a console-write bug.
 - **A new marker goes in the common pair unless it exists because of one backend.** Everything the
   filesystem proves — mount, read, write, create/truncate, the hole probe, exec from the root — is
   common and therefore required of both drivers. A marker moved into a per-backend file stops being
@@ -141,8 +146,9 @@ A few properties of the checker matter when you're reading its output rather tha
 - **Its PASS total counts expected AND forbidden lines** (5.11: 86 + 20 = 106), so a slice that adds
   N expected and M forbidden lines moves the total by N + M — don't be surprised when the total
   moves by more than the expected-marker count alone. The total is per boot kind, because each adds
-  its own pair to the common one (6.4: 165 for each full boot, 7 for the reboot; 6.5 added five
-  expected and three forbidden lines to the common pair, so 173 and still 7); count the marker files
+  its own pair to the common one (6.4: 165 for each full boot, 7 for the reboot; 6.5 added six
+  expected and three forbidden lines to the common pair, so 174 and still 7 — counted from the files
+  as committed: 113 + 48 common, 8 + 5 per backend, 3 + 4 for the reboot); count the marker files
   rather than quoting a number from a plan.
 - **Never copy a count into a marker from a plan** — recompute it from the constant. 5.8's plan said
   `n=30` for what was actually a 31-byte `ROOTFS_MOTD`.

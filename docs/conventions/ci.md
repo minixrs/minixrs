@@ -100,15 +100,18 @@ whole-project picture.
   boot's stdin is `< <(FEED_CONSOLE_CEILING=1300 tools/feed-console.sh <its own log>)` — the form,
   the feeder and the measurements behind it are under [Fed boots](./build-and-boot.md#fed-boots),
   and which marker lines depend on it under [Markers](./testing-and-markers.md#markers). Two things
-  are CI's own. The ceiling is **1300 s**, the boot's 1200 s timeout plus slack for the build in
-  front of it, so a boot that never parks a read does not leave a poller behind for long: whoever
-  changes a full boot's timeout changes its ceiling in the same edit. And the redirection reads and
-  writes one log file on one command line, which `actionlint`'s shellcheck reports as an
-  informational SC2094 — that is the design, not a finding. **None of this has run on CI**: the
-  feeder was exercised only on a dev machine (macOS, QEMU 11, Homebrew's edk2), so whether the
-  runner's bash, QEMU and firmware carry the bytes the same way is unmeasured until the branch's
-  first CI run — a `stdin ok` missing there with `cons.beside ok` present is the feeder path, not
-  the driver, until shown otherwise
+  are CI's own. The ceiling is **1300 s** against the boot's 1200 s timeout, and the only thing it
+  has to do is exceed that timeout: the build runs *inside* `timeout 1200 cargo run`, so nothing is
+  in front of the boot for the ceiling to allow for, and the feeder's clock starts with the boot's.
+  The margin is so that the feeder never gives up on a boot that is still running; the cap is so
+  that a boot that never parks a read does not leave a poller behind for long. Whoever changes a
+  full boot's timeout changes its ceiling in the same edit. And the redirection reads and writes one
+  log file on one command line, which `actionlint`'s shellcheck reports as an informational SC2094 —
+  that is the design, not a finding. **None of this has run on CI**: the feeder was exercised only
+  on a dev machine (macOS, QEMU 11, Homebrew's edk2), so whether the runner's bash, QEMU and
+  firmware carry the bytes the same way is unmeasured until the branch's first CI run — a `stdin ok`
+  missing there with `cons.beside ok` present is the feeder path, not the driver, until shown
+  otherwise
 - **The boots run in sequence in one job, not as a matrix.** A matrix would rename the required
   "QEMU boot smoke" check, which needs a branch-protection edit, and two QEMUs on one runner would
   starve each other. The price is the job's `timeout-minutes`, **90** since slice 6.4 (50 before

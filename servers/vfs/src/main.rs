@@ -222,6 +222,7 @@ struct Parking {
     table: ParkTable,
     /// `[diag vfs] cons.park` has been printed.
     said_park: bool,
+    /// `[diag vfs] cons.notify ok` has been printed.
     said_notify: bool,
     /// `[diag vfs] cons.beside ok` has been printed.
     said_beside: bool,
@@ -254,9 +255,6 @@ impl Parking {
         true
     }
 
-    /// A file read just completed. If a read is parked at this moment, that is
-    /// the proof VFS did not block on the console — printed once, when it first
-    /// becomes true, because VFS is the only process that can know it.
     /// A notification from the console driver reached the receive loop. The
     /// first of a boot prints `cons.notify ok`.
     fn console_notified(&mut self) {
@@ -266,6 +264,9 @@ impl Parking {
         }
     }
 
+    /// A file read just completed. If a read is parked at this moment, that is
+    /// the proof VFS did not block on the console — printed once, when it first
+    /// becomes true, because VFS is the only process that can know it.
     fn file_read_completed(&mut self) {
         if !self.said_beside && self.table.any_parked() {
             self.said_beside = true;
@@ -992,7 +993,9 @@ fn do_read(
             // Nothing buffered, and the driver now owes VFS a `NOTIFY`. Park on
             // the answer, whoever gave it; VFS does not special-case the
             // console. The park happens before VFS's next `RECEIVE`, so the
-            // notification cannot be seen ahead of the entry it is for.
+            // notification cannot be seen ahead of the entry it is for — and
+            // the kernel never hands it over as the reply to a SENDREC VFS
+            // makes in between (spec R9).
             if parking.park(caller_e, req.fd, req.buf, len) {
                 ReadOutcome::Parked
             } else {

@@ -349,11 +349,16 @@ zero-length fast path — so a malformed read is refused and never parked. And V
 `EAGAIN` has promised to notify. The notifier it accepts today is the one TTY endpoint it resolved
 through DS at startup.
 
-VFS reports two moments that nothing outside it can observe: `[diag vfs] cons.park` the first time
-it parks a read, and `[diag vfs] cons.beside ok` the first time it completes a file read — one that
-made a real round trip to MFS — while a read is parked. The second is the proof of the whole
-arrangement, and [what the boot log shows](../drivers/overview.md#what-the-boot-log-proves) builds
-on it.
+VFS reports three moments that nothing outside it can observe: `[diag vfs] cons.notify ok` for the
+first notification of a boot that reaches its receive loop from the console driver, `[diag vfs]
+cons.park` the first time it parks a read, and `[diag vfs] cons.beside ok` the first time it
+completes a file read — one that made a real round trip to MFS — while a read is parked. The first
+arrives before anything is parked: it is a notification TTY sends on purpose at start-up, and it
+proves that the kernel delivers a notification at a plain `RECEIVE` and never as the reply to a
+`SENDREC` ([IPC](../ipc/overview.md#a-notification-is-never-the-reply-to-a-sendrec)) — the property
+the retry walk above cannot work without, since VFS is forever sending TTY requests while TTY may be
+about to notify it. The last is the proof of the parking arrangement itself, and
+[what the boot log shows](../drivers/overview.md#what-the-boot-log-proves) builds on both.
 
 ### Staging an executable
 

@@ -587,9 +587,11 @@ jobs:
           # ok` (a file read served while a console read is parked), writes the
           # probe string to QEMU's stdin, which `-serial stdio` makes the
           # PL011's receive side. It is a process substitution so the shell
-          # does not wait on it and `$?` is still timeout's. Its ceiling is the
-          # boot's timeout plus slack for the build in front of it, so a boot
-          # that never parks does not leave a poller behind for long. The
+          # does not wait on it and `$?` is still timeout's. Its ceiling only
+          # has to exceed the boot's timeout (the build runs inside `timeout
+          # 1200 cargo run`, so nothing is in front of the boot), and it is
+          # capped so a boot that never parks does not leave a poller behind
+          # for long. The
           # reboot is NOT fed: its reader stays parked for the whole boot.
           status=0
           MINIXRS_ROOT=disk timeout 1200 cargo run -p minixrs-kernel \
