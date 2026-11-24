@@ -125,6 +125,21 @@ minix.rs fileio: exit-reset FAIL
 # byte's interrupt can never arrive. Either way the console receives nothing
 # more. One substring covers both spellings.
 [diag tty] rx FAIL
+# Slice 6.5: init's console-read child got something other than the feeder's
+# probe (tools/feed-console.sh; tests/qemu-boot.expected has the whole path).
+# The child prints `minix.rs init: stdin FAIL n=<count> first=<hex|none>` --
+# how many bytes it read and the first of them -- followed by `rc=-<N>` when a
+# read answered an errno (rc=-11 is VFS relaying TTY's EAGAIN instead of
+# parking the read), `eof` when one answered 0 (a console has no EOF), or
+# `over` when one reported more than was asked for; with none of those the
+# count or the bytes were simply wrong (input lost, doubled, echoed back or
+# rewritten on the way). init prints two more spellings itself: `stdin FAIL
+# fork rc=-<N>`, the child could not be forked, and `stdin FAIL no-verdict`,
+# the child was reaped without having reported (killed before its verdict).
+# Like the three required lines this describes a FED boot: type at a hand-run
+# boot and the first line entered lands in that read and prints this, which is
+# correct and harmless there. Unprefixed, so every spelling is covered.
+stdin FAIL
 
 # Slice 6.2: the virtio boot probe refused a device whose register page is shared
 # with another transport (spec T4 rule 1), and TTY's GETINFO denial battery

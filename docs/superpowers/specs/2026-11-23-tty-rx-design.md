@@ -209,8 +209,8 @@ This is a ruling with a visible cost: typing into a hand-run boot shows nothing.
 
 `init`, early in its prologue, forks one child. The child calls `read(0, buf, 64)` and blocks. When
 the read returns it compares the bytes against the fixed string the feeder sends (`CONSOLE_PROBE =
-b"minix.rs stdin\n"`), writes one verdict line to fd 1 — `init: stdin ok n=15` or `init: stdin FAIL
-n=… first=…` — and exits with a positive sentinel status
+b"minix.rs stdin\n"`), writes one verdict line to fd 1 — `minix.rs init: stdin ok n=15` or `init:
+stdin FAIL n=… first=…` — and exits with a positive sentinel status
 ([`testing-and-markers.md`](../../conventions/testing-and-markers.md#exit-status-probes)). init
 reaps it in the normal course of its rotation, keyed on its pid.
 
@@ -229,9 +229,9 @@ probe's length or a non-positive answer, so the verdict does not depend on how Q
 ### R8 — the feeder, and CI
 
 `tools/feed-console.sh <log>` polls the log for `cons.beside ok`, writes `CONSOLE_PROBE` to its
-stdout once, then holds stdout open until the log stops growing or a ceiling passes. A boot is fed
-through a process substitution, so the shell does not wait on the feeder and the boot's exit status
-is still `timeout`'s:
+stdout once and exits (R11.2 measured that QEMU carries on past EOF on stdin); with no marker it
+gives up, silent, at a ceiling. A boot is fed through a process substitution, so the shell does not
+wait on the feeder and the boot's exit status is still `timeout`'s:
 
 ```bash
 MINIXRS_ROOT=disk timeout 1200 cargo run -p minixrs-kernel … \
@@ -250,9 +250,9 @@ feeder writes, and the feeder does not write until VFS has served a file read be
   the child's read (and almost certainly prints `stdin FAIL`, which is correct and harmless — the
   marker files apply to fed boots only).
 
-New required markers: `[diag vfs] cons.park`, `[diag vfs] cons.beside ok`, `init: stdin ok n=15`.
-New forbidden: `rx overflow`, `rx FAIL`, `stdin FAIL`. The existing forbidden `[diag tty] irq FAIL`
-is unchanged (R5).
+New required markers: `[diag vfs] cons.park`, `[diag vfs] cons.beside ok`, `minix.rs init: stdin ok
+n=15`. New forbidden: `rx overflow`, `rx FAIL`, `stdin FAIL`. The existing forbidden `[diag tty] irq
+FAIL` is unchanged (R5).
 
 ### R9 — no kernel change
 
@@ -305,7 +305,7 @@ Stated so the next two specs can cite it instead of re-deciding:
 | ring: push/peek/consume, wrap, full-drops-newest                           | host tests, `drivers/tty` `input.rs`                                                       |
 | `CDEV_READ` validation; `len == 0`; clamp to `CDEV_MAX_IO`                 | host tests, `drivers/tty` `cdev.rs`                                                        |
 | park table: one per slot, oldest-first, exit frees, stale endpoint refused | host tests, `servers/vfs` `park.rs`                                                        |
-| a byte on the wire reaches `read(0)`                                       | `init: stdin ok n=15` (fed boots)                                                          |
+| a byte on the wire reaches `read(0)`                                       | `minix.rs init: stdin ok n=15` (fed boots)                                                 |
 | VFS serves a file read while a console read is parked                      | `[diag vfs] cons.park` then `[diag vfs] cons.beside ok`; the feeder writes only after both |
 | the parked read is woken by TTY's notification                             | `stdin ok` appearing at all — nothing else can complete that read                          |
 | a parked reader does not hold the boot                                     | every existing marker still present in all three boots, the unfed reboot included          |

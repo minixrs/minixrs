@@ -41,6 +41,11 @@
 //! that edge: [`vm_deny_probes`] sends `VM_FORK` / `VM_EXEC` (PM-only) and an
 //! unknown request, and expects `EPERM` / `EPERM` / `ENOSYS`.
 //!
+//! Slice 6.5 gives the console a receive side, and init the proof of it: early
+//! in the prologue it forks one child that blocks in `read(0)` until
+//! `tools/feed-console.sh` types a fixed line at the boot, and says what it
+//! read. See [`fork_stdin_probe`].
+//!
 //! Built as a freestanding aarch64 ELF (`userland/init/user.ld`). It uses
 //! `minixrs-ipc` directly — no `server-rt`/SEF, because it is a plain user program,
 //! not a server. The `_start` shim and panic handler are gated to `not(test)`.
@@ -228,6 +233,14 @@ fn main() -> ! {
     let vfs = boot_endpoint(VFS_PROC_NR);
 
     announce(vfs);
+    // Slice 6.5: the console-read proof child. Forked **here** — after the
+    // console write path it reports over, and before init's first file
+    // read — so that everything below runs with a `read(0)` parked in
+    // VFS, or about to be. Nothing below waits for it: the child blocks until
+    // somebody feeds the console, which on an unfed boot is never. See
+    // [`fork_stdin_probe`].
+    #[cfg(not(feature = "idle-probe"))]
+    let mut stdin_pid = fork_stdin_probe(pm, vfs);
     // The read path runs after the console write path, and the order is
     // load-bearing in the usual direction: a hang inside it localizes to the
     // `fs.*` markers instead of taking 5.4's, 5.5's and 5.6's with it. Do not
@@ -349,6 +362,16 @@ fn main() -> ! {
                     reported = true;
                     report_exec_stack(vfs, rd_i32(&w, 0));
                 }
+                // The console-read child, reaped whenever it happens to come
+                // back — on a fed boot some cycle after the feeder wrote, on
+                // an unfed one never. Keyed on its pid like the two above, and
+                // it costs this cycle nothing: the reap it took is one a
+                // rotation child will get on a later turn.
+                #[cfg(not(feature = "idle-probe"))]
+                if rc == OK && stdin_pid != 0 && w.m_type == stdin_pid {
+                    stdin_pid = 0;
+                    report_stdin_reap(vfs, rd_i32(&w, 0));
+                }
                 #[cfg(feature = "idle-probe")]
                 {
                     forks += 1;
@@ -407,6 +430,194 @@ fn idle_park(pm: Endpoint, vfs: Endpoint) -> ! {
     loop {
         let mut m = pm_msg(NOTIFY_MESSAGE);
         let _ = ipc_sendrec(pm, &mut m);
+    }
+}
+
+// ----- Slice 6.5: the console read proof ------------------------------------
+
+/// Standard input, pre-opened by VFS to the console like fds 1 and 2
+/// (`servers/vfs/src/fd.rs`'s `DEFAULT_ROW`). A forked child does not inherit
+/// its parent's descriptors — it is born with the same default row — so fd 0
+/// is the console in the proof child for the same reason it is in init.
+#[cfg_attr(any(test, feature = "idle-probe"), allow(dead_code))]
+const STDIN: i32 = 0;
+
+/// The bytes `tools/feed-console.sh` writes to QEMU's stdin, which is the
+/// PL011's receive side (`-serial stdio`), and so the bytes the proof child
+/// must read back from fd 0: raw, unechoed, exactly as sent (spec R6).
+///
+/// The script holds its own copy, as shell. [`tests::the_feeder_sends_the_probe`]
+/// reads the script and compares the two, so neither can move alone.
+#[cfg_attr(feature = "idle-probe", allow(dead_code))]
+const CONSOLE_PROBE: &[u8] = b"minix.rs stdin\n";
+
+// The `n=15` in the `stdin ok` marker is a literal — the line is a `grep -aF`
+// marker and is written whole — so this is what pins it to the probe's length.
+const _: () = assert!(CONSOLE_PROBE.len() == 15);
+
+/// Bytes the proof child asks for. **More than the probe holds**, the
+/// [`BOOTS_BUF_LEN`] reasoning: input that runs past the probe in the same
+/// batch comes back as a longer count and is refused, instead of being left
+/// unread behind a verdict that says `ok`.
+#[cfg_attr(any(test, feature = "idle-probe"), allow(dead_code))]
+const STDIN_BUF_LEN: usize = 64;
+
+const _: () = assert!(STDIN_BUF_LEN > CONSOLE_PROBE.len());
+
+/// The proof child's exit status when what it read was the probe.
+///
+/// A **positive sentinel**, not 0, for [`report_exec_stack`]'s reason: 0 is
+/// what a child that never got as far as a verdict leaves behind. The child
+/// prints its own verdict, so the status carries only *that it gave one*.
+#[cfg_attr(any(test, feature = "idle-probe"), allow(dead_code))]
+const STDIN_PROBE_PASS: i32 = 0x53;
+/// ...and when it was not. Also positive: the child printed `stdin FAIL`
+/// itself, and init must not print a second line for the same failure.
+#[cfg_attr(any(test, feature = "idle-probe"), allow(dead_code))]
+const STDIN_PROBE_FAIL: i32 = 0x46;
+
+const _: () = assert!(STDIN_PROBE_PASS > 0 && STDIN_PROBE_PASS <= 0xff);
+const _: () = assert!(STDIN_PROBE_FAIL > 0 && STDIN_PROBE_FAIL <= 0xff);
+const _: () = assert!(STDIN_PROBE_PASS != STDIN_PROBE_FAIL);
+
+/// Fork the console-read proof child (slice 6.5, spec R7) and return its pid,
+/// or 0 if the fork was refused (reported as `stdin FAIL fork rc=-N`).
+///
+/// The child never returns from here: it runs [`stdin_probe_child`] and exits.
+/// The parent returns at once and waits for nothing — the child's `read(0)`
+/// is parked inside VFS until the console is fed, and the whole point of the
+/// slice is that this costs nobody else anything. [`main`]'s rotation reaps
+/// the child, keyed on the pid returned here, if and when it exits.
+///
+/// **Not under `idle-probe`.** That build ends by `wait()`ing until no child
+/// is left, and a child parked on an unfed console never exits, so the wait
+/// would never come back and `idle.park` would never print.
+///
+/// What the fork costs the rotation: one fork-pool slot for as long as the
+/// child lives (the whole boot when unfed), out of the pool's thirteen, of
+/// which the rotation uses about five with the boot stubs on and one without.
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn fork_stdin_probe(pm: Endpoint, vfs: Endpoint) -> i32 {
+    let mut m = pm_msg(PM_FORK);
+    let trap_rc = ipc_sendrec(pm, &mut m);
+    if trap_rc != OK {
+        report_rc(vfs, b"stdin", b"fork", trap_rc);
+        return 0;
+    }
+    match m.m_type {
+        0 => stdin_probe_child(pm, vfs),
+        n if n > 0 => n,
+        e => {
+            report_rc(vfs, b"stdin", b"fork", e);
+            0
+        }
+    }
+}
+
+/// The proof child: read the probe from fd 0, say what came back, exit.
+///
+/// The first `read` finds the console empty, so VFS parks it (`[diag vfs]
+/// cons.park`) and this process stays blocked in its `SENDREC` while VFS goes
+/// on serving everyone else (`[diag vfs] cons.beside ok`). Only then does the
+/// feeder write, TTY's receive interrupt fill the ring, and TTY's `NOTIFY`
+/// make VFS retry the read — so the `ok` line cannot print unless every one
+/// of those happened.
+///
+/// **It loops**, because the bytes are free to arrive across several
+/// interrupts and a `read` returns whatever is buffered: until it holds the
+/// probe's length, or an answer that is not a positive count that fits.
+///
+/// Exactly one line, on fd 1:
+///
+/// - `minix.rs init: stdin ok n=15` — the bytes read are [`CONSOLE_PROBE`],
+///   no more and no fewer;
+/// - `minix.rs init: stdin FAIL n=<count> first=<hex|none>`, then `rc=-N` if a
+///   read answered an errno (`rc=-11` is VFS relaying `EAGAIN` instead of
+///   parking), `eof` if one answered 0 (a console has no EOF), `over` if one
+///   reported more than it was asked for, and nothing more if the count or
+///   the bytes were simply wrong. `first` is the first byte received.
+///
+/// On a hand-run boot the first thing typed lands here and almost certainly
+/// prints `stdin FAIL`. That is correct: the marker files describe fed boots.
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn stdin_probe_child(pm: Endpoint, vfs: Endpoint) -> ! {
+    let mut buf = [0u8; STDIN_BUF_LEN];
+    let mut got = 0usize;
+    // The answer that ended the loop early, if one did.
+    let mut stop: Option<i32> = None;
+
+    while got < CONSOLE_PROBE.len() {
+        let room = &mut buf[got..];
+        let n = vfs_read(vfs, STDIN, room);
+        if n <= 0 || n as usize > room.len() {
+            stop = Some(n);
+            break;
+        }
+        // Cannot overflow: `n` fits the room left, so the sum fits the buffer.
+        got = got.saturating_add(n as usize);
+    }
+
+    if stop.is_none() && &buf[..got] == CONSOLE_PROBE {
+        let _ = vfs_write(vfs, STDOUT, b"minix.rs init: stdin ok n=15\n");
+        exit_request(pm, STDIN_PROBE_PASS)
+    }
+
+    let mut line = [0u8; 64];
+    let mut n = append(&mut line, 0, b"minix.rs init: stdin FAIL n=");
+    n = append_dec(&mut line, n, got as u64);
+    n = append(&mut line, n, b" first=");
+    n = match buf[..got].first() {
+        Some(&b) => append_hex2(&mut line, n, b),
+        None => append(&mut line, n, b"none"),
+    };
+    match stop {
+        Some(rc) if rc < 0 => {
+            n = append(&mut line, n, b" rc=-");
+            n = append_dec(&mut line, n, u64::from(rc.unsigned_abs()));
+        }
+        Some(0) => n = append(&mut line, n, b" eof"),
+        Some(_) => n = append(&mut line, n, b" over"),
+        None => {}
+    }
+    n = append(&mut line, n, b"\n");
+    let _ = vfs_write(vfs, STDOUT, &line[..n]);
+    exit_request(pm, STDIN_PROBE_FAIL)
+}
+
+/// The parent's half of the proof child's verdict: say something only when
+/// the child said nothing.
+///
+/// `status` is the `W_EXITCODE` PM encodes, as in [`report_exec_stack`]. Either
+/// sentinel means the child printed its own line. Anything else — 0 above
+/// all, which is what PM's kill path leaves — means it died before it could,
+/// and that gets a `no-verdict` spelling of the forbidden marker rather than
+/// silence: a missing `stdin ok` alone would not say whether the child was
+/// never fed or never survived.
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn report_stdin_reap(vfs: Endpoint, status: i32) {
+    let code = (status >> 8) & 0xff;
+    if code != STDIN_PROBE_PASS && code != STDIN_PROBE_FAIL {
+        report_step(vfs, b"stdin", b"no-verdict");
+    }
+}
+
+/// `exit(status)` through PM. Never returns: PM tears the caller down and
+/// sends no reply, so the `SENDREC` stays blocked until the process is gone.
+/// The loop is the defensive park [`main`]'s child arm uses, for a `SENDREC`
+/// that failed outright.
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn exit_request(pm: Endpoint, status: i32) -> ! {
+    use minixrs_kernel_shared::callnr::PM_EXIT;
+
+    let mut m = pm_msg(PM_EXIT);
+    m.payload[0..4].copy_from_slice(&status.to_ne_bytes());
+    let _ = ipc_sendrec(pm, &mut m);
+    loop {
+        core::hint::spin_loop()
     }
 }
 
@@ -1950,6 +2161,15 @@ fn append_dec(line: &mut [u8], n: usize, mut v: u64) -> usize {
     append(line, n, &digits[..d])
 }
 
+/// Append `b` as two lowercase hex digits to `line[..n]`, and return the new
+/// length. For a byte that may not be printable — what arrived on the console.
+#[cfg_attr(any(test, feature = "idle-probe"), allow(dead_code))]
+fn append_hex2(line: &mut [u8], n: usize, b: u8) -> usize {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let pair = [DIGITS[usize::from(b >> 4)], DIGITS[usize::from(b & 0xf)]];
+    append(line, n, &pair)
+}
+
 /// Read a native-endian `i32` out of a reply payload.
 #[cfg_attr(test, allow(dead_code))]
 fn rd_i32(m: &Message, off: usize) -> i32 {
@@ -1997,6 +2217,71 @@ fn vfs_request(vfs: Endpoint, m_type: i32, fd: i32, buf: u64, len: i32) -> i32 {
         return trap_rc;
     }
     m.m_type
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The feeder's source, read at compile time. A host test can do this; the
+    /// bare-metal build never sees the line.
+    const FEEDER: &str = include_str!("../../../tools/feed-console.sh");
+
+    /// The one assignment the feeder writes from, e.g. `PROBE='minix.rs stdin\n'`.
+    const FEEDER_PROBE_PREFIX: &str = "PROBE='";
+
+    /// What the feeder's `printf '%b'` makes of its `PROBE` value: `\n` is a
+    /// newline and any other backslash is refused, so an escape this decoder
+    /// does not know cannot pass as a match.
+    fn feeder_probe_bytes() -> Vec<u8> {
+        let mut lines = FEEDER
+            .lines()
+            .filter(|l| l.starts_with(FEEDER_PROBE_PREFIX));
+        let line = lines
+            .next()
+            .expect("feed-console.sh has no PROBE='...' line");
+        assert!(
+            lines.next().is_none(),
+            "feed-console.sh assigns PROBE more than once"
+        );
+        let value = line[FEEDER_PROBE_PREFIX.len()..]
+            .strip_suffix('\'')
+            .expect("the PROBE line does not end at its closing quote");
+
+        let mut out = Vec::new();
+        let mut bytes = value.bytes();
+        while let Some(b) = bytes.next() {
+            if b != b'\\' {
+                out.push(b);
+                continue;
+            }
+            assert_eq!(bytes.next(), Some(b'n'), "an escape other than \\n");
+            out.push(b'\n');
+        }
+        out
+    }
+
+    #[test]
+    fn the_feeder_sends_the_probe() {
+        assert_eq!(feeder_probe_bytes(), CONSOLE_PROBE);
+        // And it sends them through `%b`, the reading the decoder above models.
+        assert!(FEEDER.contains("printf '%b' \"$PROBE\""));
+    }
+
+    #[test]
+    fn hex2_is_two_lowercase_digits() {
+        let mut line = [0u8; 8];
+        let n = append_hex2(&mut line, 0, 0x0a);
+        let n = append_hex2(&mut line, n, 0xf5);
+        assert_eq!(&line[..n], b"0af5");
+    }
+
+    #[test]
+    fn hex2_drops_what_does_not_fit() {
+        let mut line = [0u8; 1];
+        assert_eq!(append_hex2(&mut line, 0, 0xab), 1);
+        assert_eq!(&line, b"a");
+    }
 }
 
 // The freestanding panic handler; under `cargo test` std supplies its own.

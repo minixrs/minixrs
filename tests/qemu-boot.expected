@@ -1001,6 +1001,56 @@ minix.rs fileio: malloc ok
 # line masked and receive off.
 [diag tty] rx on
 
+# Slice 6.5: a byte on the wire reaches read(0), and the process waiting for it
+# stops nobody else (spec R2, R7, R8). The three lines below hold for a FED boot
+# only: one whose stdin is tools/feed-console.sh, pointed at the log the boot is
+# writing --
+#
+#     ... cargo run ... < <(tools/feed-console.sh qemu.log) > qemu.log 2>&1
+#
+# The disk and ramdisk full boots are fed. An unfed boot (stdin at EOF, or a
+# terminal nobody types at) prints the first two and never the third, and the
+# reboot, which is not fed, is not checked against this file at all.
+#
+# init, after its console banner and before its first file read, forks one
+# child that calls read(0, buf, 64). fd 0 is the console in every process, the
+# console is empty, TTY answers CDEV_READ with EAGAIN and records VFS as the
+# endpoint it owes a NOTIFY -- and VFS, instead of relaying that or waiting,
+# PARKS the read: no reply to the child, no grant held, back to its receive
+# loop. It says so the first time it parks anything. Relay the EAGAIN instead
+# and this line is absent and the child prints `stdin FAIL n=0 first=none
+# rc=-11` (forbidden).
+[diag vfs] cons.park
+
+# VFS completed a file read -- a real FS_READ round trip to MFS, for some other
+# process -- while a console read was parked. Printed once, by VFS, at the
+# moment it is true, because nothing outside VFS can know it. This is the line
+# that says a reader waiting on the console costs the rest of the system
+# nothing; make TTY withhold its reply on an empty console instead of answering
+# EAGAIN and VFS wedges in its SENDREC to the driver: this line and everything
+# after it vanish. init's own prologue reads files straight after the fork, and
+# fileio reads /etc/motd on every turn of the rotation, so a file read after
+# the park is never long in coming.
+#
+# It is also THE GATE: the feeder writes nothing until it has seen this line in
+# the log, so the bytes cannot arrive before the read is parked and VFS has
+# been seen serving somebody beside it (and cannot be eaten by the firmware or
+# Limine, which consume whatever is on stdin before the kernel starts).
+[diag vfs] cons.beside ok
+
+# The feeder then writes `minix.rs stdin` and a newline to QEMU's stdin, once.
+# The PL011 raises its receive interrupt, TTY drains the FIFO into its ring and
+# notifies VFS, VFS retries the parked read with a fresh grant, and the child's
+# read returns. The child loops until it holds the probe's 15 bytes -- they may
+# arrive across several interrupts -- compares them with init's CONSOLE_PROBE,
+# and prints this itself, on fd 1. Raw bytes: nothing echoed them and nothing
+# rewrote the newline (spec R6). n=15 is CONSOLE_PROBE.len(), pinned by a const
+# assert, and a host test in init holds the constant to the bytes the feeder
+# carries. Nothing but TTY's NOTIFY can complete that read, so this line
+# appearing at all is the proof the parked read was woken: drop the NOTIFY and
+# it is absent with the rest of the boot unmoved.
+minix.rs init: stdin ok n=15
+
 # ---------------------------------------------------------------------------
 # Slice 6.2: the virtio driver contract -- GETINFO selectors gated to the drivers.
 # ---------------------------------------------------------------------------
