@@ -284,14 +284,28 @@ fn do_sendrec(
         return EBADCALL;
     };
     proc_table[caller_idx].misc_flags |= MF_REPLY_PEND;
-    receive::mini_receive(
+    let recv_result = receive::mini_receive(
         proc_table,
         priv_table,
         caller_nr,
         dst_e,
         user_msg_va,
         RecvFlags::Blocking,
-    )
+    );
+    if recv_result != OK {
+        // The receive half refused (a dead partner, `ELOCKED`): the caller
+        // returns to user space with an error and is owed no reply, so the
+        // flag must not outlive the call. Since slice 6.5 `MF_REPLY_PEND`
+        // also withholds pending notifications in `mini_receive` — and
+        // `mini_notify` already latches rather than delivers to a flagged
+        // target — so a stale flag would starve a process that waits only on
+        // notifications (a driver in a `HARDWARE`-filtered receive) until
+        // some ordinary message happened to clear it. `OK` covers both
+        // "delivered" (the delivery cleared it) and "blocked" (it must stay).
+        // No boot provokes this path; it is verified by reading.
+        proc_table[caller_idx].misc_flags &= !MF_REPLY_PEND;
+    }
+    recv_result
 }
 
 /// Copy a pending IPC message out to the user buffer recorded at
