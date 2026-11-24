@@ -181,6 +181,22 @@ minix.rs console: tty online (EL0)
 # allocator, and it is the difference between "write returns a count" and "write
 # returns success". Change the clamp and this number changes with it.
 [diag vfs] cdev.short ok n=256
+#
+# Since slice 6.5 this line is also the proof of a KERNEL rule (spec R9). This
+# write is VFS's second request to TTY, and TTY notified VFS before replying to
+# the first -- a one-shot probe in TTY's main loop -- so the SENDREC behind this
+# line meets a notification latched from the very process it is asking. The
+# kernel must deliver the REPLY and leave the notification for VFS's next plain
+# RECEIVE: MINIX 3's "pending notifications, except for SENDREC" guard in
+# mini_receive, on MF_REPLY_PEND. Remove that guard and the notification comes
+# back as the reply: this line is gone and `cdev.short FAIL rc=4096` prints in
+# its place (NOTIFY_MESSAGE is 0x1000). Observed both ways.
+
+# ...and the notification TTY's probe sent then arrives where it belongs, at
+# VFS's receive loop, once VFS's prologue is over. VFS prints this for the first
+# notification the console driver sends it in a boot; with nothing parked yet
+# the retry it triggers is an empty walk. It prints on every boot, fed or not.
+[diag vfs] cons.notify ok
 
 # ...and the two requests that must be REFUSED, each valid in every respect but
 # one: minor 7 with a perfectly good grant (ENXIO, from TTY's own minor check), and
@@ -1014,8 +1030,8 @@ minix.rs fileio: malloc ok
 [diag tty] rx on
 
 # Slice 6.5: a byte on the wire reaches read(0), and the process waiting for it
-# stops nobody else (spec R2, R7, R8). The three lines below hold for a FED boot
-# only: one whose stdin is tools/feed-console.sh, pointed at the log the boot is
+# stops nobody else (spec R2, R7, R8). Of the three lines below the LAST holds
+# for a FED boot only: one whose stdin is tools/feed-console.sh, pointed at the log the boot is
 # writing --
 #
 #     ... cargo run ... < <(tools/feed-console.sh qemu.log) > qemu.log 2>&1

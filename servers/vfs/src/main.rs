@@ -222,6 +222,7 @@ struct Parking {
     table: ParkTable,
     /// `[diag vfs] cons.park` has been printed.
     said_park: bool,
+    said_notify: bool,
     /// `[diag vfs] cons.beside ok` has been printed.
     said_beside: bool,
 }
@@ -232,6 +233,7 @@ impl Parking {
         Self {
             table: ParkTable::new(),
             said_park: false,
+            said_notify: false,
             said_beside: false,
         }
     }
@@ -255,6 +257,15 @@ impl Parking {
     /// A file read just completed. If a read is parked at this moment, that is
     /// the proof VFS did not block on the console — printed once, when it first
     /// becomes true, because VFS is the only process that can know it.
+    /// A notification from the console driver reached the receive loop. The
+    /// first of a boot prints `cons.notify ok`.
+    fn console_notified(&mut self) {
+        if !self.said_notify {
+            self.said_notify = true;
+            diag_fmt(format_args!("cons.notify ok"));
+        }
+    }
+
     fn file_read_completed(&mut self) {
         if !self.said_beside && self.table.any_parked() {
             self.said_beside = true;
@@ -471,6 +482,11 @@ fn main() -> ! {
         // never the payload. Anybody else's is dropped.
         if msg.m_type == NOTIFY_MESSAGE {
             if caller_e == tty {
+                // The first one of a boot is TTY's probe (see its main loop):
+                // sent while VFS was inside a SENDREC to TTY, and required to
+                // arrive *here*, through the plain `RECEIVE`, not as the reply
+                // to VFS's next SENDREC to TTY.
+                parking.console_notified();
                 retry_parked(&mut parking, &mut grants, tty, mem);
             }
             continue;

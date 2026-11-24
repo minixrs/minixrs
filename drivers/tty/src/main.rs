@@ -177,6 +177,10 @@ fn main() -> ! {
     // the staging buffer: plain data, no static, no `unsafe`.
     let mut ring = input::Ring::new();
     let mut waiter = cdev::Waiter::new();
+    // Whether the one-shot notification probe below has run.
+    let mut notify_probed = false;
+    // Whether a failed wake-up `NOTIFY` has already been reported.
+    let mut notify_failed = false;
 
     let mut msg = Message {
         m_source: 0,
@@ -206,7 +210,18 @@ fn main() -> ! {
             // it until its next `RECEIVE`. With nobody waiting the bytes simply
             // stay in the ring for the next `CDEV_READ`.
             if arrived && let Some(who) = waiter.take() {
-                let _ = ipc_notify(who);
+                let rc = ipc_notify(who);
+                if rc != OK {
+                    // The only wake-up a parked reader gets did not go out.
+                    // Keep the waiter, so the next byte tries again, and say
+                    // so once: a reader left parked with no line in the log
+                    // would be indistinguishable from one nobody typed at.
+                    waiter.record(who);
+                    if !notify_failed {
+                        notify_failed = true;
+                        diag_fmt(format_args!("rx FAIL notify rc={rc}"));
+                    }
+                }
             }
             continue;
         }
@@ -221,6 +236,22 @@ fn main() -> ! {
         // Capture the caller *first*: it is both the reply target and the granter,
         // and the dispatch below overwrites `msg.m_source` on the way out.
         let caller_e = msg.m_source;
+        // The SENDREC-versus-notification probe (slice 6.5, spec R9): notify
+        // the first client **before** replying to its first request. That
+        // client is inside a SENDREC to TTY, so the kernel may not deliver the
+        // notification now and latches it; the client's *next* SENDREC to TTY
+        // then meets a latched notification from the very process it is asking.
+        // The kernel must hand it the reply and keep the notification for its
+        // next plain `RECEIVE` — MINIX 3's "pending notifications, except for
+        // SENDREC" rule in `mini_receive`. Without that rule the notification
+        // comes back *as* the reply: VFS, whose prologue is the first client,
+        // prints `cdev.short FAIL rc=4096` instead of `cdev.short ok n=256`.
+        // To the client it is one spurious "ask again", which the `CDEV_READ`
+        // contract already allows.
+        if !notify_probed {
+            notify_probed = true;
+            let _ = ipc_notify(caller_e);
+        }
         match msg.m_type {
             CDEV_WRITE => {
                 let rc = do_write(caller_e, &msg, &mut staging);

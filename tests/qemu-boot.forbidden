@@ -136,7 +136,7 @@ minix.rs fileio: exit-reset FAIL
 # rewritten on the way). init prints two more spellings itself: `stdin FAIL
 # fork rc=-<N>`, the child could not be forked, and `stdin FAIL no-verdict`,
 # the child was reaped without having reported (killed before its verdict).
-# Like the three required lines this describes a FED boot: type at a hand-run
+# Like the required `stdin ok` line this describes a FED boot: type at a hand-run
 # boot and the first line entered lands in that read and prints this, which is
 # correct and harmless there. Unprefixed, so every spelling is covered.
 stdin FAIL

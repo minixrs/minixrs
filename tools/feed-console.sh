@@ -85,6 +85,9 @@ if [[ ! "$CEILING" =~ ^[0-9]+$ ]]; then
     echo "feed-console: FEED_CONSOLE_CEILING must be a whole number of seconds, got '$CEILING'" >&2
     exit 64
 fi
+# Base 10 whatever the digits: `08` passes the test above and is invalid octal
+# in an arithmetic context.
+CEILING=$((10#$CEILING))
 
 # grep needs -a (the log interleaves raw tick bytes and reads as binary) and -F
 # (the marker is a literal, brackets and all). A log that does not exist yet is
