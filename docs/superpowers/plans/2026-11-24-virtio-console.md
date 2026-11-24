@@ -230,3 +230,31 @@ One entry per task: its commit, what was verified, and every ruling made in it.
   `Rx::advance` by more than is available is a fault that changes nothing, not "drained". (c) `Rx`'s
   fields are public and its methods total for any values. **Carried to Task 4:** the two
   `cfg_attr(not(test), allow(dead_code))` lines (`bringup.rs`, `port.rs`) to delete.
+
+- **Task 4.** The driver (`main.rs`: bring-up, one interrupt handler for both queues, `CDEV_READ`
+  from the held buffer, `CDEV_WRITE` waited for), the archive row for proc 12 after `vblk`,
+  `qemu-run.sh`'s device on bus 8 over a FIFO pair, six expected and five forbidden lines; the
+  common pair now holds 185 checks for a full boot. `port.rs` gained `Irq`, `absent_reply` and
+  `wake_due` with 5 host tests (39 in the crate); `driver-rt`'s `DmaBuf` gained `prefix` with 2 (146
+  in the crate, Miri clean). Nothing under `kernel/src` changed. Verified, and re-run by the
+  coordinator: tests, workspace clippy `-D warnings`, fmt, an unfed stub-free boot with `[diag vcon]
+  virtio ok features=0x100000000 rxq=8 txq=8 slot=8` and `[diag vfs] vcon.ds ok ep=12`, the eleven
+  stub lines and the unfed `stdin ok` its only misses, nothing forbidden. **The rest of Task 0,
+  measured with a self-test since removed** (QEMU 11.0.3): the firmware leaves the device **reset**
+  (`Status` 0 at kernel entry); `QueueNumMax` is 1024 for both queues, clamped to 8; queue 0
+  receives and queue 1 transmits; a transmit completes with one interrupt **with or without** a
+  reader on the host side; the guest's line lands at offset 808 of the host capture, straight after
+  the firmware's text; host bytes reach the guest, a 600-byte write arriving as used elements of
+  256, 256 and 88 — one per re-post; and **bytes written while the buffer is held are kept**, and
+  delivered at the re-post (4.6 s later in the measurement). Nothing contradicts C5–C7, and C2's
+  four conditions hold on this machine. Not measured: whether the firmware consumes bytes written
+  before the kernel starts (the feeder never writes that early). **Rulings:** (a) `DmaBuf::prefix` —
+  a safe, narrowing-only handle — is how a write chains exactly its bytes; the alternative was
+  carrying the remainder region in the layout. (b) every break wakes the waiter, wherever it is
+  found, through one pure `wake_due`. (c) **a read whose copy succeeded and whose re-post then
+  failed replies the count**, not `EIO`: the caller has the bytes; the next request hears `EIO`. (d)
+  the `ENXIO` gate (`absent_reply`) is consulted before the request is parsed. (e) a zero-length
+  write to a broken device is `0`. (f) two expected lines beyond the spec's table — `[as] vcon
+  nr=12` and `[devmap] vcon … intid=56` — and `[diag vcon] ds FAIL` forbidden. (g) `[diag vcon] no
+  device` is forbidden in the common file: unlike `vblk`'s, no boot attaches no console. *If wrong:*
+  each is a few lines in the driver or a marker line.

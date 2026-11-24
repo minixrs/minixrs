@@ -193,3 +193,25 @@ stdin FAIL
 # was printed is the case this line exists for: the expected marker is already
 # satisfied by then, and the next boot of the image would not count.
 minix.rs init: persist FAIL
+# Slice 6.6: virtio-console. `virtio FAIL step=<step>`: its bring-up failed at
+# the named step, or (`step=io`) the device broke while serving -- a queue
+# fault, a used element nobody was waiting for, a refused re-arm, a failed
+# receive while a write was in flight -- and the driver answers EIO from then
+# on. `no device`: the kernel's probe assigned it no console. Unlike vblk's,
+# that line is forbidden HERE, in the common set: tools/qemu-run.sh attaches the
+# console to every boot, the hand-run MINIXRS_ROOT=nodisk one included, so no
+# boot this set is applied to has a healthy reason to print it. After either,
+# every read and write of /dev/hvc0 hears ENXIO.
+[diag vcon] virtio FAIL
+[diag vcon] no device
+# `rx FAIL notify rc=<rc>`: the wake-up NOTIFY to the endpoint that was refused
+# with EAGAIN did not go out, so a reader parked on /dev/hvc0 was not told to
+# ask again. TTY's line, for the same reason; this driver has no other spelling
+# (no input ring to overflow and no storm guard).
+[diag vcon] rx FAIL
+# vcon could not publish itself to DS. VFS still reaches it through the
+# boot-endpoint fallback, and says so with the line after this one: `vcon.ds
+# FAIL rc=<rc> fallback=<ep>`, which is also what a `vcon` row packed after
+# `vfs` in kernel/build.rs prints. Unprefixed, like `stdin FAIL`.
+[diag vcon] ds FAIL
+vcon.ds FAIL

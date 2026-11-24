@@ -8,8 +8,6 @@
 // Only `main.rs`'s `not(test)`-gated paths reach most of this, so under
 // `cargo test` (which drops `_start` and `main`) it would read as dead code.
 #![cfg_attr(test, allow(dead_code))]
-// Until the next commit wires the driver in: `main.rs` uses none of this yet.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use minixrs_driver_rt::{DmaBuf, DmaRegion, QueueLayout, QueueMem};
 use minixrs_kernel_shared::callnr::CDEV_MAX_IO;

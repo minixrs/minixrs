@@ -13,14 +13,15 @@
 # Kernel banner (kernel/src/main.rs)
 minix.rs booting on aarch64
 
-# Address-space bring-up: 10 servers + init (arch/aarch64/userland.rs). The tty
-# line is new in slice 5.3, the memory line in 5.7, the mfs line in 5.8, and the
-# vblk line (the virtio-blk driver, proc slot 11) in 6.2.
+# Address-space bring-up: 11 servers + init (arch/aarch64/userland.rs). The tty
+# line is new in slice 5.3, the memory line in 5.7, the mfs line in 5.8, the
+# vblk line (the virtio-blk driver, proc slot 11) in 6.2, and the vcon line (the
+# virtio-console driver, proc slot 12) in 6.6.
 #
 # The order below is `kernel/build.rs`'s `servers` array, and it is load-bearing
 # rather than cosmetic: DS first so every later DS_PUBLISH lands, then each
 # server before its first client's DS_RETRIEVE -- ds < tty < memory < vblk < mfs
-# < vfs < pm.
+# < vfs < pm, and vcon < vfs.
 # MEM precedes MFS (MFS's `bdev.ds` lookup) and MFS precedes VFS (VFS's `fs.ds`
 # lookup). Both lookups fall back to boot_endpoint and say so, so a reordering
 # turns those two markers red rather than hanging the boot. vblk sits between
@@ -28,11 +29,15 @@ minix.rs booting on aarch64
 # no FAIL line and is caught by the per-backend files instead, both of which
 # need MFS to have found `vblk` (tests/qemu-boot.disk.expected requires
 # `name=vblk`, tests/qemu-boot.ramdisk.expected the `bdev.root vblk` fallback).
+# vcon sits directly after vblk; all its place has to satisfy is vcon < vfs
+# (VFS's `vcon.ds` lookup, which falls back and says so like the others -- the
+# marker is in the slice 6.6 block at the end of this file).
 [as] vm nr=7 ttbr0_pa=
 [as] ds nr=5 ttbr0_pa=
 [as] tty nr=4 ttbr0_pa=
 [as] memory nr=3 ttbr0_pa=
 [as] vblk nr=11 ttbr0_pa=
+[as] vcon nr=12 ttbr0_pa=
 [as] mfs nr=6 ttbr0_pa=
 [as] vfs nr=1 ttbr0_pa=
 [as] sched nr=9 ttbr0_pa=
@@ -40,7 +45,7 @@ minix.rs booting on aarch64
 [as] pm nr=0 ttbr0_pa=
 [as] init nr=10 ttbr0_pa=
 
-# ...plus the 4 boot stubs (15 [as] lines total)
+# ...plus the 4 boot stubs (16 [as] lines total)
 [as] stub A nr=15 ttbr0_pa=
 [as] stub B nr=16 ttbr0_pa=
 [as] stub C nr=17 ttbr0_pa=
@@ -1130,3 +1135,53 @@ minix.rs init: stdin ok n=15
 # Mutation 9 (init skips the rewrite) was run and moves nothing in this file:
 # the first boot still prints gen=0. It is the reboot that prints gen=0 again.
 minix.rs init: persist gen=0
+
+# ---------------------------------------------------------------------------
+# Slice 6.6: virtio-console -- the second console's driver, packed and attached.
+# ---------------------------------------------------------------------------
+
+# tools/qemu-run.sh attaches a virtio console to EVERY boot, whatever the root
+# backend (spec C1) -- the hand-run MINIXRS_ROOT=nodisk boot included -- so,
+# unlike virtio-blk's, this driver's bring-up lines are common.
+#
+# The kernel's boot probe finds the console the script pins to bus 8 --
+# transport slot 8, the first slot of the second register page, PA 0xa001000
+# (measured, 6.2 and again here) -- and assigns it to vcon: DeviceID 3, `ver=2`
+# the modern transport. Until this slice packed an ELF for proc slot 12 the same
+# device printed `skip=no-module for=vcon`.
+[virtio] slot=8 pa=0xa001000 id=3 ver=2 drv=vcon
+
+# The register page, asserted whole: BUS_VCON=8 -> slot 8 -> PA 0xa001000,
+# in-page offset 0, INTID 48 + 8 = 56. The VA is VIRTIO_MMIO_PAGE_VA, the same
+# number as vblk's line because each driver has its own address space; pa= and
+# intid= are what tell the two apart, and a console mapped onto the disk's page
+# would print pa=0xa000000 here.
+[devmap] vcon va=0x40001000 pa=0xa001000 intid=56
+
+# The 16-page DMA run at DMA_VA. As for vblk, va= and pages= are asserted and
+# pa= (0x40010000 locally: the second reservation, straight after vblk's) is
+# not, since it follows the firmware's memory map. The driver uses four of the
+# sixteen pages and `vcon_layout` refuses a run shorter than that (`virtio FAIL
+# step=queue`, forbidden).
+[dma] vcon va=0xc0000000 pages=16
+
+# The driver's verdict on its bring-up (spec C3-C5): the mapping, the DMA
+# cookie, magic/version/DeviceID 3, the negotiation, BOTH queues sized, laid out
+# on their own pages and enabled with DRIVER_OK read back, the interrupt claim
+# plus the INTID+1 refusal, and the one receive buffer posted. features= is
+# exactly VIRTIO_F_VERSION_1 (bit 32): the driver asks for no optional bit, so
+# 0x...1, ...2 or ...4 here would be F_SIZE, F_MULTIPORT or F_EMERG_WRITE taken
+# by a negotiation that was not asked for them -- and with any of those the
+# device's configuration and queue set would no longer be the ones this driver
+# is written for. rxq= and txq= are the two queue sizes, driver-rt's QUEUE_SIZE
+# (8) under the device's QueueNumMax (1024 for each, measured on QEMU 11.0.3).
+# slot= is asserted too: it is BUS_VCON, not a firmware fact. A failing step
+# prints `virtio FAIL step=<step>` instead (forbidden).
+[diag vcon] virtio ok features=0x100000000 rxq=8 txq=8 slot=8
+
+# VFS resolves the console driver through DS in its prologue, beside TTY and the
+# memory driver. `vcon` publishes unconditionally (spec C4), so this is the
+# packing order's marker and nothing else: `vcon < vfs` in kernel/build.rs. A
+# failed lookup falls back to the boot endpoint and prints `vcon.ds FAIL ...
+# fallback=` (forbidden), so /dev/hvc0 stays served and only this line goes.
+[diag vfs] vcon.ds ok ep=

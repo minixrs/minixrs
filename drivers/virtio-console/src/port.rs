@@ -32,14 +32,21 @@
 //! Every refusal is a [`Fault`] and leaves the state exactly as it was. The
 //! caller ends the device on one (spec C8/C9) and prints it in the
 //! `virtio FAIL step=io …` line.
+//!
+//! ## Two decisions `main.rs` only carries out
+//!
+//! [`absent_reply`] is the gate in front of every CDEV request: with no working
+//! device the answer is `ENXIO`, whatever the request holds (spec C4).
+//! [`wake_due`] says when the recorded waiter is owed its one `NOTIFY`: input
+//! arrived, or the device has just stopped for good (spec C6, C9). Both are
+//! here, and not in the loop that acts on them, so that a host test holds them.
 
 // Only `main.rs`'s `not(test)`-gated paths reach this, so under `cargo test`
 // (which drops `_start` and `main`) it would read as dead code.
 #![cfg_attr(test, allow(dead_code))]
-// Until the next commit wires the driver in: `main.rs` uses none of this yet.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use minixrs_kernel_shared::callnr::CDEV_MAX_IO;
+use minixrs_kernel_shared::error::ENXIO;
 
 /// Bytes in the receive buffer, and so the most one completion can deliver. The
 /// same number as `bringup::VCON_BUF_LEN`; a test holds the two together.
@@ -108,6 +115,38 @@ pub enum Rx {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tx {
     in_flight: Option<u16>,
+}
+
+/// What one interrupt did, as `main.rs`'s handler reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Irq {
+    /// A used element in `receiveq` left bytes held ([`RxUsed::Input`]).
+    pub input: bool,
+    /// The transmit chain in flight came back ([`Tx::complete`] said `Ok`).
+    pub tx_done: bool,
+}
+
+/// The reply to a `CDEV_READ` or `CDEV_WRITE` that finds no working device, or
+/// `None` when the device came `up` and the request is to be served (spec C4).
+///
+/// `up` is whether bring-up succeeded: `false` covers a machine with no console
+/// attached and a bring-up step that failed. The answer is then `ENXIO` — the
+/// device does not exist — and it is decided before the request is parsed, so a
+/// malformed request and a zero-length one hear it too. A device that came up
+/// and broke later is not this case: it exists, and says `EIO`.
+pub const fn absent_reply(up: bool) -> Option<i32> {
+    if up { None } else { Some(ENXIO) }
+}
+
+/// Whether the recorded waiter is owed its `NOTIFY` now (spec C6, C9).
+///
+/// `input` is [`Irq::input`] for the event just handled. `was_broken` and
+/// `broken` are the device's state before and after it: the transition is what
+/// counts, so a reader parked on a device that stops is woken once — its retry
+/// then hears `EIO` instead of waiting for an interrupt that cannot come — and
+/// nothing is sent for a device that was already broken.
+pub const fn wake_due(input: bool, was_broken: bool, broken: bool) -> bool {
+    input || (broken && !was_broken)
 }
 
 /// Bytes one `CDEV_WRITE` moves: `want`, capped at the transmit buffer. A longer
@@ -233,7 +272,9 @@ impl Tx {
         }
     }
 
-    /// The head of the chain in flight, if any.
+    /// The head of the chain in flight, if any. The tests' view of the state:
+    /// the driver needs only what [`Self::complete`] answers.
+    #[cfg(test)]
     pub const fn in_flight(&self) -> Option<u16> {
         self.in_flight
     }
@@ -543,6 +584,47 @@ mod tests {
         assert_eq!(tx_len(usize::MAX - 1), 256);
         assert_eq!(tx_len(usize::MAX), 256);
         assert_eq!(tx_len(CDEV_MAX_IO), CDEV_MAX_IO);
+    }
+
+    #[test]
+    fn with_no_working_device_every_request_is_enxio() {
+        // Spec C4: no device, or a failed bring-up. The gate takes nothing of
+        // the request, so there is no request it could let through.
+        assert_eq!(absent_reply(false), Some(ENXIO));
+        assert_eq!(ENXIO, -6);
+        // A device that came up is served; what it answers is not decided here.
+        assert_eq!(absent_reply(true), None);
+    }
+
+    #[test]
+    fn input_wakes_the_waiter() {
+        assert!(wake_due(true, false, false));
+    }
+
+    #[test]
+    fn a_device_that_just_broke_wakes_the_waiter_with_or_without_input() {
+        // Spec C9: the parked reader must hear `EIO`, not wait for good.
+        assert!(wake_due(false, false, true));
+        assert!(wake_due(true, false, true));
+    }
+
+    #[test]
+    fn nothing_arriving_on_a_healthy_or_long_broken_device_wakes_nobody() {
+        // A configuration change, or a transmit completion alone.
+        assert!(!wake_due(false, false, false));
+        // Already broken before this event: the one wake-up went out then.
+        assert!(!wake_due(false, true, true));
+    }
+
+    #[test]
+    fn an_interrupt_reports_nothing_until_something_happened() {
+        assert_eq!(
+            Irq::default(),
+            Irq {
+                input: false,
+                tx_done: false
+            }
+        );
     }
 
     #[test]
