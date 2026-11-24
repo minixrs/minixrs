@@ -582,9 +582,19 @@ jobs:
             fi
           }
 
+          # The two full boots are FED (slice 6.5): tools/feed-console.sh
+          # watches the boot's own log and, once VFS has printed `cons.beside
+          # ok` (a file read served while a console read is parked), writes the
+          # probe string to QEMU's stdin, which `-serial stdio` makes the
+          # PL011's receive side. It is a process substitution so the shell
+          # does not wait on it and `$?` is still timeout's. Its ceiling is the
+          # boot's timeout plus slack for the build in front of it, so a boot
+          # that never parks does not leave a poller behind for long. The
+          # reboot is NOT fed: its reader stays parked for the whole boot.
           status=0
           MINIXRS_ROOT=disk timeout 1200 cargo run -p minixrs-kernel \
             --target aarch64-unknown-none --release \
+            < <(FEED_CONSOLE_CEILING=1300 tools/feed-console.sh qemu-disk.log) \
             > qemu-disk.log 2>&1 || status=$?
           expect_timeout disk "$status"
 
@@ -602,6 +612,7 @@ jobs:
           status=0
           MINIXRS_ROOT=ramdisk timeout 1200 cargo run -p minixrs-kernel \
             --target aarch64-unknown-none --release \
+            < <(FEED_CONSOLE_CEILING=1300 tools/feed-console.sh qemu-ramdisk.log) \
             > qemu-ramdisk.log 2>&1 || status=$?
           expect_timeout ramdisk "$status"
       # All three logs are checked even if an earlier one fails, so one run
