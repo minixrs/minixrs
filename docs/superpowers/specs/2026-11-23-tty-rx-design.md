@@ -118,6 +118,10 @@ waiter, so the next byte brings the next notification.
 - **The table is indexed by proc slot**, one entry per process: a process blocked in `SENDREC` can
   have only one request outstanding, so the table cannot overflow and there is no "too many readers"
   errno. Each entry carries a sequence number for the oldest-first walk.
+- **A request arriving from a slot evicts a parked read stored under a different endpoint for that
+  slot** (`evict_stale`). VFS keeps no process table, so the kernel-stamped `m_source` of ordinary
+  traffic is the only view it has of who occupies a slot; this is the second guard behind the next
+  one, not the first.
 - **`VFS_PM_EXIT` frees the exiting process's entry** before resetting its descriptors, so VFS never
   replies to a dead endpoint. The entry stores the full endpoint (generation included) and the retry
   compares it, so a recycled slot cannot inherit a parked read.
@@ -133,8 +137,8 @@ in the `rw.rs`/`fd.rs` shape, with host tests; the IPC stays in `main.rs`.
 
 Only a **console** descriptor can park: the memory driver never answers `EAGAIN`. VFS does not
 special-case the driver, though — it parks on the answer, whoever gave it — so 6.6's `/dev/hvc0`
-needs no VFS change beyond a second notifier endpoint, which R2's source check takes from the device
-table rather than from a constant.
+needs no VFS change beyond a second notifier endpoint. In 6.5 the source check compares against the
+one DS-resolved `tty` endpoint VFS already holds; 6.6 widens it to the set of character drivers.
 
 *Rejected:* a VFS worker-thread pool (MINIX 3's answer; minix.rs servers are single-threaded by
 construction and this slice is not where that changes); keeping the grant across the park.
