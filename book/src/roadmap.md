@@ -3,8 +3,9 @@
 > **Mostly planned — parts of Phase 5 now boot.** This chapter is design intent for phases beyond
 > Phase 4, but Phase 5 has begun landing and the sections below are no longer uniformly future
 > tense: grants and the fault-safe copy engine are live (slices 5.1–5.2), and so is the first
-> user-space driver — TTY, which owns the PL011 and serves `CDEV_WRITE` (slice 5.3, see
-> [Drivers](drivers/overview.md)). The musl fork and the MFS file-system server have landed too (see
+> user-space driver — TTY, which owns the PL011 and serves `CDEV_WRITE` (slice 5.3) and, since slice
+> 6.5, `CDEV_READ` from the UART's receive interrupt (see [Drivers](drivers/overview.md)). The musl
+> fork and the MFS file-system server have landed too (see
 > [The C toolchain and the musl port](libc/overview.md) and [Servers](servers/overview.md)), and so
 > has virtio-blk, which serves the root filesystem's blocks from a disk since slice 6.3 — since
 > slice 6.4 the one GPT disk the machine also boots from. Still absent: the other VirtIO drivers,
@@ -87,8 +88,8 @@ restarts it. They talk to the kernel (interrupts, I/O) and to VFS (device protoc
 - The hardware-free `memory` driver already shipped in Phase 5 — the ramdisk in slice 5.7,
   `/dev/null` and `/dev/zero` in slice 5.11 — so Phase 6's new driver processes are all VirtIO:
   `virtio-blk`, `virtio-console`, `virtio-input` (the keyboard) and `virtio-net`. The existing TTY
-  driver also grows in Phase 6: PL011 receive, and a text console on the bootloader-provided
-  framebuffer.
+  driver also grows in Phase 6: PL011 receive (landed in slice 6.5), and a text console on the
+  bootloader-provided framebuffer.
 - The `driver-rt` crate already provides the interrupt-line helper, the VirtIO transport (a trait
   with the MMIO implementation) and the split virtqueue (slice 6.2), typed DMA handles (slice 6.3)
   and a GPT parser for block drivers (slice 6.4); the reusable `BlockDriver` / `CharDriver` request

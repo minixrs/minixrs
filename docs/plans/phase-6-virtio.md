@@ -27,7 +27,7 @@ milestone bar rather than after it.
 - [x] **6.2** — `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 - [x] **6.3** — `virtio-blk` behind BDEV + root backend selection
 - [x] **6.4** — `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
-- [ ] **6.5** — TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
+- [x] **6.5** — TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
 - [ ] **6.6** — `virtio-console` as a second CDEV backend
 - [ ] **6.7** — framebuffer console: Limine framebuffer → TTY
 - [ ] **6.8** — `virtio-input` keyboard driver — **sub-milestone: non-headless boot**
@@ -356,12 +356,14 @@ for both before relying on it.
 
 - **No polling driver** (I12). Every driver blocks in `receive` between requests; a driver that
   spins on a used ring passes under TCG and proves nothing.
-- **Mask before EOI; quiesce the device, then `IRQ_ENABLE`** (I7, I12). I12's order — drain,
-  acknowledge at the device, `IRQ_ENABLE` — fits a device whose acknowledgement *is* the drain, as
-  the PL011's is. A virtio-mmio line is level-triggered on `InterruptStatus`, so for virtio the
-  acknowledgement precedes the used-ring walk: a completion landing between the last pop and a late
-  acknowledgement would be acked away and the re-arm would find the line low. `driver-rt`'s crate
-  documentation is the one place the virtio order is written.
+- **Mask before EOI; quiesce the device, then `IRQ_ENABLE`** (I7, I12). I12 was first written as
+  drain, acknowledge at the device, `IRQ_ENABLE`. A virtio-mmio line is level-triggered on
+  `InterruptStatus`, so for virtio the acknowledgement precedes the used-ring walk: a completion
+  landing between the last pop and a late acknowledgement would be acked away and the re-arm would
+  find the line low. `driver-rt`'s crate documentation is the one place the virtio order is written.
+  This rule used to say the drain-first order still fitted the PL011; 6.5 found the same race there
+  — a byte landing between the last `RXFE` test and a later `UARTICR` write — and TTY's receive loop
+  acknowledges first as well (6.5's R4). I12's text now states the one order.
 - **A block driver does not depend on the filesystem format**
   ([`servers-and-drivers.md`](../conventions/servers-and-drivers.md#block-drivers)). virtio-blk's
   "is this a minix.rs root" check in H5 is the device-level image header `memory` already verifies,
@@ -417,8 +419,13 @@ does not build. Correct it when the default boot first idles, at the latest Phas
   disk boot at the root check while the ramdisk boot and TTY's `irq ok` are unmoved. A completion
   landing between `notify` and the driver's receive takes the deferred arm instead, which is equally
   correct.
-- 6.5 must retire or rescope TTY's post-proof `irq FAIL extra` guard, since RX interrupts will
-  legitimately arrive after the TX proof.
+- ~~6.5 must retire or rescope TTY's post-proof `irq FAIL extra` guard, since RX interrupts will
+  legitimately arrive after the TX proof.~~ **Paid by 6.5:** the guard and its `extra_reported`
+  field are deleted. The proof's last round now sets the receive masks and the same object
+  (`IrqService`) services the line from then on; what the guard caught — a line that keeps firing
+  with nothing to service — is rescoped to 64 **consecutive** notifications that drain no byte,
+  which print the forbidden `[diag tty] rx FAIL storm` and leave the line masked. The threshold is a
+  guess (6.5's ruling R5), held by host tests on the counter, not by a boot.
 - `Priv::irqs` is never cleared on exit or exec, contradicting I4 ("the allow-list follows the
   mapping"). Unreachable today: only `USER_PRIV_ID` is assigned at runtime and no device owner
   execs. The slice that reuses dedicated slots must clear `irqs` on exit and at exec's point of no
@@ -831,6 +838,82 @@ nothing else"). Each is replaced, not appended to.
 
 **Proof:** bytes piped to QEMU's stdin come back from `read(0)`; a second process's file read
 completes **while** a console read is parked.
+
+**Design:** [`2026-11-23-tty-rx-design.md`](../superpowers/specs/2026-11-23-tty-rx-design.md),
+decisions `R1…R12`. **Plan:** [`2026-11-23-tty-rx.md`](../superpowers/plans/2026-11-23-tty-rx.md),
+whose ledger records every ruling made during the run. **Status: done** (checked in the Status list
+above). Both prose edits owed above are made: each paragraph was replaced.
+
+**What it settled.** A character driver never withholds a `CDEV_READ` reply: with nothing buffered
+it answers `EAGAIN`, records the caller, and sends it one `NOTIFY` when input arrives (R1). VFS
+neither relays that answer nor waits on it: it parks the raw request — no reply, no grant held — and
+on the driver's notification retries its parked reads oldest first with a fresh grant each, stopping
+at the first `EAGAIN` (R2). No `Message` layout, call number, endpoint or errno value moved (R10),
+and the kernel did not change (R9). The working rules are in
+[`servers-and-drivers.md`](../conventions/servers-and-drivers.md#a-character-driver-never-withholds-a-cdev_read-reply).
+
+**What 6.6 and 6.8 inherit (R12).** 6.6 implements the driver side of R1 in `virtio-console`, adds
+`/dev/hvc0` to VFS's device table, and widens VFS's notifier check from the one `tty` endpoint to
+the set of character drivers; `park.rs` does not change. 6.8 makes TTY a *client* of the same
+contract against `virtio-input` — on that driver's `NOTIFY`, TTY sends `CDEV_READ` until it hears
+`EAGAIN`, pushes through the keymap into the ring its own interrupt already fills, and notifies its
+waiter as it does today. That is H8's notify-then-pull, and it is the same three lines in both
+directions. Echo arrives with 6.8 and canonical mode with Phase 7, both in `drivers/tty`'s
+`input.rs`.
+
+**Measured (2026-11-23, QEMU 11, Homebrew's edk2, macOS on Apple Silicon).**
+
+- *The UART as the firmware leaves it.* `UARTLCR_H = 0x70` — the FIFO is **enabled** — and
+  `UARTIFLS = 0x12`, receive trigger at half. One byte fed on its own still raised the line: one
+  notification, one byte, `UARTRIS = 0x30` with the receive-timeout bit clear, so QEMU raises RX on
+  the first byte whatever the trigger level says. Three bytes written together arrived in one
+  notification, and 36 written together were drained in one — more than the 16-deep FIFO, because
+  QEMU refills it as the loop empties it. `IRQ_ENABLE` answered `OK` each time with the `UARTICR`
+  write placed before the drain.
+- *EOF on stdin.* With `< /dev/null` QEMU carries on and the boot is unchanged, so the feeder exits
+  after its one write instead of holding its stdout open.
+- *Bytes on stdin from time zero.* Five of them never reached TTY: the firmware or Limine consumes
+  what is on stdin before the kernel starts. The feeder's gate on a log line is therefore
+  load-bearing, not only what makes the proof causal.
+- *The path, once.* With two throwaway probes in place the first boot to exercise the park and the
+  retry printed `cons.park`, then `rx got n=5`, then `stdin got=hello`.
+- *The fed boots.* Four fed stub-free boots each printed `cons.park` (log line 622), `cons.beside
+  ok` (625) and `stdin ok n=15` (between lines 925 and 984), with no `FAIL`; an unfed one printed
+  the first two and no `stdin ok`. One fed full disk boot in the musl flavour passed
+  `check-boot-log.sh disk` on all 172 marker checks, with `cons.park`, `cons.beside ok` and `stdin
+  ok` at 36011, 38259 and 39705 in the log by the ledger's figures, fed 25 s in.
+- *No kernel change was needed*: INTID 33 was already on TTY's allow-list, TTY could already notify
+  VFS, and VFS could already withhold a reply.
+
+**Debt carried from 6.5.**
+
+1. **`EIO` covers only a refused claim** (owner: 6.6, which writes the second driver against this
+   contract, or the first slice that sees a reader hang). A failed TX proof, `rx FAIL storm` and `rx
+   FAIL enable` also end reception, and a read of the empty ring still answers `EAGAIN`, so a reader
+   stays parked for good — each behind a forbidden marker that already fails the boot. The fix is
+   about five lines: answer `EIO` from the stopped phase and send the waiter one wake-up `NOTIFY`.
+2. **No proof child under `idle-probe`** (owner: whoever pays 6.1's idle debt and deletes the
+   feature). `idle_park` waits until no child is left and a parked child never exits, so the fork is
+   `cfg`'d out and that hand-run configuration does not exercise receive.
+3. **`cons.beside ok` is ordered, not synchronised** (owner: none unless it flakes). init forks the
+   reader before its first file read and `fileio` reads `/etc/motd` every fourth rotation turn for
+   ever, but nothing makes init wait for the child to park. A sync point would have to be visible to
+   VFS, which this slice deliberately did not add.
+4. **CI's fed boots are unmeasured** (owner: this branch's first CI run, which is the measurement).
+   `ci.yml` feeds the disk and ramdisk boots with `FEED_CONSOLE_CEILING=1300`; none of it has run on
+   the runner's bash, QEMU or firmware. `actionlint` reports shellcheck's informational SC2094 on
+   the read-and-write of one log file, which is the design.
+5. **No echo and no line discipline** (owner: 6.8 for echo, Phase 7 for canonical mode). A `read()`
+   returns raw bytes as received; typing at a hand-run boot shows nothing.
+6. **One waiter, last asker wins** (owner: the slice that gives TTY a second CDEV client). A second
+   endpoint asking while a waiter is recorded replaces it, and the first is never notified.
+   Unreachable while VFS is TTY's only CDEV client; pinned by a host test. The fix is a two-slot set
+   in TTY's `main.rs`, no protocol change.
+7. **The storm threshold is a guess** (owner: whoever first sees a false `rx FAIL storm`). 64
+   consecutive empty notifications; too low gives a false failure on a noisy line.
+8. **The feeder has a ceiling and no stall detection** (owner: none unless a hung boot is seen to
+   leave one behind). It polls until `FEED_CONSOLE_CEILING`, 1800 s by default, whatever the boot is
+   doing.
 
 ### Slice 6.6: `virtio-console` as a second CDEV backend
 

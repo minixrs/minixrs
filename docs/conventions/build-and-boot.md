@@ -61,7 +61,14 @@ cargo kernel-aarch64
 # `timeout N` run reaches far fewer than N x 100 ticks. For time-based features
 # (alarms, quantum/scheduling) read uptime-stamped traces (e.g. `[alarm ... at=N]`)
 # as the real clock, and run long enough to observe several periods.
-MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+#
+# A boot checked against the marker files is a FED boot (slice 6.5): its stdin
+# is tools/feed-console.sh, pointed at the log the same boot is writing, in
+# exactly this form -- `< <(tools/feed-console.sh <log>) > <log> 2>&1`. What the
+# feeder does, why it is a process substitution, and what an unfed boot prints
+# are under "Fed boots" below.
+MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+  < <(tools/feed-console.sh disk.log) > disk.log 2>&1
 
 # ONE DISK, THREE ROOT BACKENDS (slice 6.4; two backends since 6.3). The machine
 # boots from ONE disk: a GPT image holding a FAT32 ESP (Limine, limine.conf, the
@@ -90,7 +97,8 @@ MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch6
 # step 4, is the rule) -- the ramdisk backend stays green for the whole phase
 # (H7). Keep the logs apart; the checker and tools/diff-backends.sh each want to
 # be told which is which.
-MINIXRS_SDK=/nonexistent MINIXRS_ROOT=ramdisk timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+MINIXRS_SDK=/nonexistent MINIXRS_ROOT=ramdisk timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+  < <(tools/feed-console.sh ramdisk.log) > ramdisk.log 2>&1
 
 # The image is BUILT ON EVERY RUN by the host tool tools/mkimage, which the
 # runner starts through a nested `cargo run -q --release -p minixrs-mkimage`
@@ -127,6 +135,7 @@ MINIXRS_SDK=/nonexistent MINIXRS_ROOT=ramdisk timeout 600 cargo run -p minixrs-k
 # BOOT: each boot of the image stores the next digit, so a second reboot of the
 # same image prints gen=2 and fails the reboot set by design; take a fresh disk
 # boot first. It needs only that one line (~34 s in locally); CI gives it 180 s.
+# The reboot is NOT fed: nothing in its marker pair depends on console input.
 MINIXRS_VBLK_IMAGE=target/disk.img timeout 60 cargo run -p minixrs-kernel \
   --target aarch64-unknown-none --release > reboot.log 2>&1
 tools/check-boot-log.sh reboot reboot.log
@@ -165,7 +174,9 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release -
 # its rotation ends and it parks, letting the run queue empty. Only meaningful stub-free --
 # `build.rs` refuses it together with the default-on `boot-stubs` (the stubs spin forever, so the
 # queue could never empty) with a message naming `--no-default-features`. Expect `[idle] wake ok`
-# and `[diag tty] irq ok` in the log. CI does not build this configuration.
+# and `[diag tty] irq ok` in the log. CI does not build this configuration. It does not exercise
+# console input either: init forks no console-read child under this feature (the rule is under
+# "init: PID 1" in ./servers-and-drivers.md), so feeding it proves nothing.
 timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
   --no-default-features --features idle-probe
 
@@ -278,6 +289,66 @@ cross-compile it instead of failing. No `--exclude` or per-developer editor sett
 (Separately and pre-existing: bare `cargo build` fails on the *server*/userland crates — they are
 `#![no_main]` ELFs that can't link against the host libc. `check`/`clippy`/`test` are the host
 gates, not `build`.)
+
+## Fed boots
+
+QEMU's serial is `-serial stdio` (`tools/qemu-run.sh`), so a boot's stdin **is** the PL011's receive
+side. Since slice 6.5 the console can be read, and a boot that is to be checked against the marker
+files has to be given its input — by `tools/feed-console.sh`, never by hand:
+
+```sh
+MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+  < <(tools/feed-console.sh <log>) > <log> 2>&1
+```
+
+- **The form is exact: `< <(tools/feed-console.sh <log>) > <log> 2>&1`**, with the same log path
+  twice. The feeder reads the log the boot is writing. It is a **process substitution**, not a pipe,
+  so the shell does not wait on the feeder and the command's exit status is still `timeout`'s (124
+  for a healthy boot). Process substitution is bash and zsh, not POSIX `sh`.
+- **What the feeder does.** It polls the log for `[diag vfs] cons.beside ok`, writes the probe —
+  `minix.rs stdin` and a newline, 15 bytes — to its stdout **once**, and exits 0. init's proof child
+  is blocked in `read(0)` for exactly those bytes and prints `minix.rs init: stdin ok n=15`. The
+  script's `PROBE` and init's `CONSOLE_PROBE` are two copies; a host test in `userland/init` reads
+  the script and fails if they differ, so keep the `PROBE='…'` assignment on one single-quoted line.
+- **It waits for a marker, not for a delay, and that is load-bearing twice over.** VFS prints
+  `cons.beside ok` the first time it completes a file read while a console read is parked, so the
+  child's read cannot return before VFS has been seen serving somebody beside it — the proof is
+  causal. And bytes written earlier do not arrive at all (the third measurement below).
+- **The marker must be seen on two consecutive polls** (0.2 s apart). The log path is usually one a
+  previous boot wrote, and the shell starts the feeder an instant before `> <log>` truncates it; one
+  look could find the old boot's line and write into the firmware.
+- **`FEED_CONSOLE_CEILING=<seconds>`** (default 1800) is how long the feeder polls before it gives
+  up, exits 1 and writes nothing, so a boot that never parks a read cannot leave a poller behind for
+  good. There is no stall detection — it is a ceiling and nothing else. Set it a little over the
+  boot's `timeout`; CI uses 1300 against 1200 (see [`ci.md`](./ci.md)).
+- **The gate is ordered, not synchronised.** init forks the reading child before its first file
+  read, and `fileio` reads `/etc/motd` again on every fourth turn of the rotation for as long as the
+  boot runs, so a file read after the park is never long in coming — but nothing makes init wait for
+  the child to park first. A `cons.beside ok` that came late would only delay the feeder.
+- **The reboot is not fed**, and neither is a boot nobody is going to check. An unfed boot — stdin
+  at EOF, or a terminal nobody types at — prints `cons.park` and `cons.beside ok`, never `stdin ok`,
+  and so **fails `check-boot-log.sh` on that one line by design**; the reading child stays parked
+  for the whole boot, which costs the boot nothing. Type at a hand-run boot and the first input
+  lands in that child's read and prints `stdin FAIL`, which is correct there. Which marker lines
+  hold for which boot is in [`testing-and-markers.md`](./testing-and-markers.md#markers).
+- **Nothing is echoed.** The console delivers raw bytes with no line discipline, so typing into a
+  hand-run boot shows nothing on screen.
+
+Three facts about QEMU's serial input were measured before the design was fixed (2026-11-23, QEMU
+11, Homebrew's edk2, stub-free boots), and the rules above lean on them:
+
+1. **The firmware leaves the PL011's FIFO enabled, and one byte still interrupts.** `UARTLCR_H`
+   reads `0x70` (`FEN` set) and `UARTIFLS` `0x12` (receive trigger at half), yet a single byte
+   raised the line at once — one notification, `UARTRIS = 0x30`, the receive-timeout bit clear — so
+   QEMU raises RX on the first byte whatever the trigger level says. Three bytes written together
+   arrived in one notification; 36 written together were drained in one, more than the 16-deep FIFO
+   holds, because QEMU refills it as the driver empties it. TTY's loop does not depend on any of
+   this.
+2. **EOF on stdin is harmless.** With `< /dev/null` QEMU carries on and the boot is unchanged, which
+   is why the feeder may exit after its one write instead of holding its stdout open.
+3. **Bytes on stdin before the kernel starts never reach TTY.** Five bytes present from time zero
+   were consumed by the firmware or Limine. A feeder that wrote at once, or after a short fixed
+   delay, would feed the boot loader — so input for a test is always gated on a line from the log.
 
 ## Feature toggles and dependency claims
 

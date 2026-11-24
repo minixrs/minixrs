@@ -179,7 +179,7 @@ one payload:
 | length   | `8..12` (i32)  | bytes requested                                                            |
 | offset   | `16..24` (u64) | where in the granted range to start                                        |
 
-Five properties of that table are load-bearing.
+Six properties of that table and its replies are load-bearing.
 
 **There is no granter field.** The driver takes the granter from the kernel-stamped `m_source`. TTY
 holds `SYS_SAFECOPY` and its clients do not, so a caller-supplied granter endpoint would let any
@@ -202,15 +202,64 @@ never clamp — a `CDEV_WRITE` longer than `CDEV_MAX_IO` still comes back report
 `0` is EOF, and a short read is legal — POSIX `read()`'s contract and the one VFS already assumes
 for `FS_READ`, so VFS sends one request and reports what came back. It existed only as a plan note
 until `/dev/zero` needed it: the 5.3 text said the two devices would be "new minors, not new
-requests", which is true of `/dev/null` and of writing `/dev/zero` and false of reading it. TTY does
-not serve it until Phase 6 gives it RX (slice 6.5; `SYS_IRQCTL` itself is live as of 6.1, see
-[Interrupts reach a driver](#interrupts-reach-a-driver-as-a-hardware-notification)), and answers it
-`ENOSYS` from its unknown-request arm until then — VFS routes a console `read()` there anyway, so
-Phase 6 changes TTY and nothing else.
+requests", which is true of `/dev/null` and of writing `/dev/zero` and false of reading it. TTY has
+served it since slice 6.5, when the PL011's receive interrupt gave it something to answer with (see
+[TTY](#tty)).
+
+**A read is answered at once, even when there is nothing to give** (slice 6.5). The memory driver's
+minors always have an answer. The console does not — its input arrives when somebody types — and it
+may not simply hold the request until then, because its client is VFS: a VFS blocked in a `SENDREC`
+to a driver serves nobody else, so one process waiting on a keyboard would stop every file operation
+in the system. The next section is what a driver does instead.
 
 **Minors are a per-driver namespace.** TTY's console is 0; the memory driver's `/dev/null` and
 `/dev/zero` are CDEV minors 3 and 5 (MINIX 3's `NULL_DEV` and `ZERO_DEV`), on the same driver as
 BDEV minor 0's ramdisk. The request band, not the minor value, tells them apart.
+
+### Notify-then-pull: a read with nothing to give
+
+```text
+caller ──CDEV_READ──► driver      nothing buffered
+caller ◄──EAGAIN───── driver      …and the driver records the caller as its waiter
+
+                      (input arrives at the driver)
+
+caller ◄──NOTIFY───── driver      once; the waiter is then forgotten
+caller ──CDEV_READ──► driver
+caller ◄──── n ────── driver      n bytes, copied through the caller's grant
+```
+
+A character driver whose input arrives later answers an empty `CDEV_READ` with **`EAGAIN`**, and
+with that answer takes on a debt: it records the caller's endpoint, and when input next arrives it
+sends that endpoint one `NOTIFY` and forgets it. The caller then asks again with an ordinary
+`CDEV_READ`. The notification means *ask again*, not *this read is ready* — it carries no data and
+names no request — so the second ask may hear `EAGAIN` too, and a driver needs to remember exactly
+one thing: who to notify.
+
+Nothing can be lost between the refusal and the notification. The driver records the waiter before
+it replies, and it is single-threaded, so no interrupt is serviced between the two. The caller
+receives the `EAGAIN` before it can receive anything else, and a `NOTIFY` sent while the caller is
+busy is latched by the kernel and delivered at its next `RECEIVE`.
+
+The details that make the contract usable:
+
+- **`0` keeps meaning EOF**, so a driver that can say `EAGAIN` never sends `0` for a non-zero
+  request. A *zero-length* read answers `0` before the buffer is even looked at, and records no
+  waiter.
+- **A driver that cannot deliver the notification must not promise it.** TTY answers `EIO`, not
+  `EAGAIN`, if it failed to claim its interrupt line at boot: no byte can ever arrive, and a reader
+  left waiting for one would hang with nothing in the log to say why.
+- **One waiter, the last to ask.** A second endpoint asking while one is recorded replaces it. Every
+  console reader goes through VFS today, so there is only ever one.
+- **No value moved for this.** `EAGAIN` (11) was already an errno, and the CDEV band's only clients
+  are VFS and — when the keyboard driver lands — TTY. A C program never sees it from a console
+  `read()`: VFS [parks the read](../servers/overview.md#parking-a-console-read) instead of relaying
+  the errno.
+
+The contract runs in whichever direction a driver's input flows. Here VFS pulls from TTY. A
+`virtio-console` driver will implement the same driver side; and the keyboard driver will too, with
+TTY as the *caller* — on the keyboard's `NOTIFY`, TTY will read until it hears `EAGAIN` and push
+what it got into the same input buffer its own interrupt fills.
 
 ## Interrupts reach a driver as a `HARDWARE` notification
 
@@ -246,8 +295,8 @@ the receive loop is load-bearing:
 m = receive(ANY)
 if m.m_source == boot_endpoint(HARDWARE) && m.m_type == NOTIFY_MESSAGE:
     for each set bit in payload[0..4]:
+        acknowledge at the device  (PL011 UARTICR / virtio InterruptACK)
         drain the device           (RX FIFO until empty / walk the used ring)
-        acknowledge at the device  (whatever makes it drop its line)
         irqctl(IRQ_ENABLE, hook)   (only now unmask)
 ```
 
@@ -255,9 +304,22 @@ A driver identifies the interrupt by the kernel-stamped `m_source`, never by pay
 cannot forge `HARDWARE`, but it could set a payload bit. Re-enabling before the device is quiet
 would re-enter at once.
 
-That order fits a device whose acknowledgement *is* the drain, as the PL011's is. A virtio-mmio
-device's line is level-triggered on its `InterruptStatus` register, so a virtio driver acknowledges
-first and walks afterwards (see [the virtio loop](#the-driver-loop)).
+**Acknowledge first, then drain.** Both steps come before the re-arm, and their order matters for
+any source that is an *event*. If the driver drained to empty and acknowledged afterwards, an event
+landing in between — a byte arriving after the last "is the FIFO empty?" test, a completion after
+the last empty pop — would have its interrupt acknowledged away with the work still sitting in the
+device, and the re-arm would find the line low: one keystroke stuck until the next. Acknowledged
+first, a late event raises a fresh interrupt that the re-arm takes. The price is at most one
+notification that finds nothing to drain, which a driver handles by re-arming and doing nothing
+else. TTY's receive loop ([below](#tty)) and [the virtio loop](#the-driver-loop) both take this
+order. (Slice 6.1's design wrote the drain first; the virtio drivers reversed it, and slice 6.5 did
+the same for the PL011.)
+
+The exception is a source that is a *condition* rather than an event, and TTY has one: the PL011's
+transmit interrupt, which TTY raises twice at boot purely to prove that delivery and `IRQ_ENABLE`
+work. There is nothing to drain, and "acknowledge" means whatever makes the device drop its line —
+for that interrupt, clearing its mask bit `UARTIMSC.TXIM`, since under QEMU the raw interrupt is
+re-raised by every byte anyone transmits.
 
 **The kernel idles.** With the run queue empty, `schedule_next` no longer returns towards `eret`: it
 sets an idling flag, executes `wfi`, polls the GIC through `irq_dispatch` on the kernel stack with
@@ -736,31 +798,121 @@ guard firing.
 
 ## TTY
 
-`drivers/tty/` is three files:
+`drivers/tty/` is five files:
 
-- **`cdev.rs`** — the pure, host-tested half: `validate_write` applies the checks in order (unknown
-  minor → `ENXIO`, negative length → `EINVAL`, invalid grant id → `EINVAL`, then clamp to
-  `CDEV_MAX_IO`) (the four-field parse moved to `server-rt::cdev` in 5.11, when the memory driver
-  became its second user). It is a total function, so a malformed request becomes an invalid *value*
-  the validator rejects, never a panic.
-- **`pl011.rs`** — the crate's only `unsafe`: volatile accesses to `FR` and `DR` at `TTY_UART_VA`,
-  polling `FR.TXFF` before each store, translating LF to CRLF. The register offsets are deliberately
-  duplicated from the kernel's own PL011 writer; they cannot be shared, because the kernel crate is
-  bare-metal-only and pinned by `forced-target`, so it can never be a user-space dependency — and a
-  register layout is a hardware fact, not a shared ABI.
-- **`main.rs`** — the SEF loop and the handler.
+- **`cdev.rs`** — the pure, host-tested half of both requests. One private `validate` serves
+  `validate_write` and `validate_read`, so the two directions cannot drift: unknown minor → `ENXIO`,
+  negative length → `EINVAL`, invalid grant id → `EINVAL`, then clamp to `CDEV_MAX_IO` (the
+  four-field parse moved to `server-rt::cdev` in 5.11, when the memory driver became its second
+  user). It is a total function, so a malformed request becomes an invalid *value* the validator
+  rejects, never a panic. `read_plan` decides how a validated read is answered, and `Waiter` is the
+  one endpoint owed a `NOTIFY`.
+- **`input.rs`** — the input ring, also pure and host-tested: received bytes waiting to be read.
+- **`irq.rs`** — the interrupt line: the claim, its denial battery, the delivery proof, and the
+  receive service.
+- **`pl011.rs`** — the crate's only `unsafe`: volatile accesses to the UART's registers at
+  `TTY_UART_VA`. Transmit polls `FR.TXFF` before each `DR` store and translates LF to CRLF; receive
+  is `getc` (one byte out of the FIFO, or "empty" when `FR.RXFE` is set), `set_rx_masks` and
+  `ack_rx`. The register offsets are deliberately duplicated from the kernel's own PL011 writer;
+  they cannot be shared, because the kernel crate is bare-metal-only and pinned by `forced-target`,
+  so it can never be a user-space dependency — and a register layout is a hardware fact, not a
+  shared ABI.
+- **`main.rs`** — the SEF loop and the two handlers.
 
-The handler captures `m_source` **first** (it is both the reply target and the granter), validates,
-pulls the bytes across with `SYS_SAFECOPY(SAFECOPY_FROM, caller, gid, offset, staging, n)`,
-transmits, and replies `n`. A negative `SYS_SAFECOPY` result is relayed **verbatim**: `EPERM` ("your
-grant does not authorize this") and `EFAULT` ("your buffer is not mapped") are different bugs on the
-client's side.
+### Transmit
+
+The write handler captures `m_source` **first** (it is both the reply target and the granter),
+validates, pulls the bytes across with `SYS_SAFECOPY(SAFECOPY_FROM, caller, gid, offset, staging,
+n)`, transmits, and replies `n`. A negative `SYS_SAFECOPY` result is relayed **verbatim**: `EPERM`
+("your grant does not authorize this") and `EFAULT` ("your buffer is not mapped") are different bugs
+on the client's side. Transmission is polled; no interrupt is involved in it.
 
 Two departures from the server template are worth naming. The staging buffer lives in `main`'s
-frame, never in the init callback's — the kernel writes into it while TTY is blocked inside the
+frame, never in the init callback's — the kernel reads and writes it while TTY is blocked inside the
 `SYS_SAFECOPY` SENDREC, so the frame must outlive every call that names it (the same rule
-`GrantPool` follows). And an **unknown `m_type` gets a reply**, where DS harmlessly drops one: a
+`GrantPool` follows). One 256-byte buffer serves both directions, since a request is finished before
+the next is received. And an **unknown `m_type` gets a reply**, where DS harmlessly drops one: a
 driver's clients all SENDREC, so a dropped request blocks the caller forever.
+
+### The interrupt line: a proof, then receive
+
+TTY claims INTID 33 at startup and runs a battery of claims that must each be refused. One object,
+`IrqService`, then owns the line for the rest of the boot, in three phases:
+
+- **`Proof`.** TTY sets `UARTIMSC.TXIM`; the PL011 raises its transmit interrupt, the kernel masks
+  the line and notifies TTY, and TTY clears `TXIM` and re-arms with `IRQ_ENABLE`. It does this
+  twice, because the second notification can only arrive if the first re-arm really unmasked the
+  line, and then prints `[diag tty] irq ok rounds=2`. `TXIM` stays clear from then on: the kernel's
+  own polled console writes the same UART, and every byte it sends would raise the line again.
+- **`Rx`.** In the same step TTY sets `UARTIMSC.RXIM | RTIM` — the receive interrupt, and the
+  receive *timeout*, which covers a FIFO holding fewer bytes than its trigger level — and prints
+  `[diag tty] rx on`. From here every notification on the line is receive service.
+- **`Stopped`.** A failure that has been reported; the line is left masked and nothing more is
+  serviced.
+
+Receive service is the pattern from [above](#interrupts-reach-a-driver-as-a-hardware-notification),
+in its acknowledge-first order:
+
+```text
+write UARTICR = RXIC | RTIC            acknowledge both sources
+while FR.RXFE == 0: ring.push(DR)      drain until the FIFO reports empty
+IRQ_ENABLE                             re-arm the line at the GIC
+NOTIFY the waiter, if any              only if a byte was stored; then forget the waiter
+```
+
+The last line is `main`'s, not `irq.rs`'s: `IrqService::on_notify` re-arms and only *reports* that
+bytes arrived, so the waiter is notified **after** the line is live again and cannot come back with
+a read while it is still masked. `DR`'s error flags (framing, parity, break, overrun) are discarded
+and the byte kept. TTY writes neither `UARTLCR_H` nor `UARTIFLS`: the kernel's console shares the
+UART, the firmware configured it, and the loop is correct whether the FIFO is on or off. (As
+measured under QEMU 11 with edk2, it is on — and QEMU raises the receive interrupt on the first byte
+regardless of the trigger level.)
+
+Two guards stand behind the loop, each with a forbidden boot marker. A notification that drains
+nothing is legal — it is the price of acknowledging first — but `RX_EMPTY_STORM` (64) of them **in a
+row** is a device that is not dropping its line: TTY prints `[diag tty] rx FAIL storm` and does not
+re-arm. A refused `IRQ_ENABLE` prints `rx FAIL enable rc=…`; the bytes already drained are still
+delivered. The run of empty notifications is counted by a small pure type, `EmptyRun`, so the rule
+is pinned by host tests rather than by a boot that would need a misbehaving UART.
+
+### The input ring
+
+`input.rs`'s `Ring` is a fixed 256-byte FIFO (`TTY_INPUT_MAX`) with four operations: `push`, `peek`
+into a slice, `consume(n)` and `len`. It lives in `main`'s frame beside the staging buffer — plain
+data, no static, no `unsafe`.
+
+- **`peek` and `consume` are separate on purpose.** A read copies the oldest bytes out, hands them
+  to the client with `SYS_SAFECOPY`, and only then removes them. The copy can fail, and a failed
+  read must consume nothing: the bytes are still owed to whoever asks next. A single
+  pop-into-a-slice could not express that.
+- **A full ring drops the newest byte.** Overwriting the oldest would tear a hole in the front of
+  what the reader has not yet seen; refusing the new byte keeps everything already buffered, in
+  order. The drop is counted, and the first of a boot prints `[diag tty] rx overflow`.
+- **The index arithmetic cannot overflow.** Advancing an index is written as a subtraction from the
+  capacity, because drivers ship with overflow checks off.
+
+The bytes in the ring are exactly the bytes on the wire: no echo, no CR→LF, no erase, no line
+buffering. Typing into a hand-run boot therefore shows nothing. A line discipline belongs with the
+keyboard and the shell, and it will live in this module.
+
+### Receive: answering `CDEV_READ`
+
+The read handler validates as a write does and then follows `read_plan`, whose order is the
+contract:
+
+1. **A zero-length read answers `0`** — before the ring is looked at, and without recording a
+   waiter.
+2. **No interrupt line answers `EIO`.** If the claim was refused at boot, no byte can ever arrive.
+3. **An empty ring answers `EAGAIN`**, and the caller is recorded as the waiter — see
+   [notify-then-pull](#notify-then-pull-a-read-with-nothing-to-give).
+4. **Otherwise copy** `min(asked, buffered, CDEV_MAX_IO)` bytes: `peek` into the staging buffer,
+   `SYS_SAFECOPY(SAFECOPY_TO, …)` into the caller's grant, and `consume` only if the copy succeeded.
+   The reply is the count, always at least one.
+
+`EIO` covers the refused claim and nothing else. If the delivery proof fails, or the line storms or
+cannot be re-armed, receive has stopped but a read of an empty ring still answers `EAGAIN`, and its
+reader waits for a notification that will not come. Each of those has already printed a forbidden
+`FAIL` line, so the boot is reported broken; the reader is simply not told.
 
 ## What the boot log proves
 
@@ -789,6 +941,28 @@ always been one — so substituting the Normal attribute index changes no marker
 attribute is proved by construction and assertion, not empirically. The same is true of the
 `FR.TXFF` poll (TCG's FIFO never fills) and of the LF→CRLF translation (the log checker matches
 literal substrings and cannot express a carriage return).
+
+Receive is proved end to end, by a byte that really travels the wire. QEMU's serial port is its
+standard input, so the two full boots CI checks are *fed*: a small script
+([`tools/feed-console.sh`](../build.md#feeding-the-console)) watches the boot's own log and, at the
+right moment, writes `minix.rs stdin` and a newline to QEMU. Four lines tell the story in order:
+
+```text
+[diag tty] rx on
+[diag vfs] cons.park
+[diag vfs] cons.beside ok
+minix.rs init: stdin ok n=15
+```
+
+`rx on` is TTY's, printed when the receive masks are set; it needs no input and every boot prints
+it. `cons.park` is VFS saying it has parked its first console read — a child of `init` blocked in
+`read(0)`. `cons.beside ok` is VFS saying it has just completed a file read for somebody else *while
+that read was parked*, which is the line that shows a process waiting on the console costs the rest
+of the system nothing. Only then does the script write, and `stdin ok n=15` is the child reporting
+that the fifteen bytes it read are the fifteen that were sent, unechoed and unrewritten. Nothing but
+TTY's `NOTIFY` can complete that read, so the last line appearing at all is the proof that the
+interrupt, the ring, the notification and VFS's retry each did their part. A boot nobody feeds
+prints the first three and never the fourth.
 
 ## The BDEV protocol and the `memory` ramdisk
 

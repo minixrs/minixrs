@@ -327,18 +327,29 @@ init:    hook = irqctl(IRQ_SETPOLICY, vector, policy = 0, notify_id)
 loop:    m = receive(ANY)
          if m.m_source == boot_endpoint(HARDWARE) && m.m_type == NOTIFY_MESSAGE:
              for each set bit in payload[0..4]:
-                 drain the device          (RX FIFO until empty / walk the used ring)
                  acknowledge at the device (PL011 UARTICR / virtio InterruptACK)
+                 drain the device          (RX FIFO until empty / walk the used ring)
                  irqctl(IRQ_ENABLE, hook)
          else: ordinary request
 ```
 
-The order inside the loop is load-bearing: acknowledging at the device **before** `IRQ_ENABLE` is
-what makes the unmask safe, and draining before acknowledging is what makes the acknowledgement
-true. "Acknowledge" means *whatever makes this device drop its line*, and that differs by source:
-`UARTICR` is right for a drained RX FIFO and `InterruptACK` for a walked used ring — the
-steady-state pattern above — but it is **not** right for I13's proof, whose source is a condition,
-not an event.
+The order inside the loop is load-bearing. Acknowledging and draining both come **before**
+`IRQ_ENABLE`, which is what makes the unmask safe. And for a source that is an *event* — a received
+byte, a completed request — **the acknowledgement precedes the drain**: an event landing between a
+drain-to-empty and a later acknowledgement would have its interrupt acknowledged away with the work
+still in the device, and the re-arm would find the line low. Acknowledged first, a late event raises
+a fresh interrupt that the re-arm takes, at the cost of at most one notification that finds nothing
+to drain. This spec first had the two steps the other way round ("draining before acknowledging is
+what makes the acknowledgement true"); the virtio drivers reversed it for the used ring (the
+standing rule in
+[`phase-6-virtio.md`](../../plans/phase-6-virtio.md#standing-rules-carried-in-not-re-decided),
+written once in `driver-rt`'s crate documentation), and slice 6.5 reversed it for the PL011's
+receive FIFO — `UARTICR = RXIC | RTIC`, then read `DR` until `FR.RXFE`, then `IRQ_ENABLE`
+([R4](./2026-11-23-tty-rx-design.md#r4--the-steady-state-loop-acknowledge-drain-to-empty-re-arm)).
+
+"Acknowledge" means *whatever makes this device drop its line*, and that differs by source:
+`UARTICR` is right for the RX FIFO and `InterruptACK` for the used ring — the steady-state pattern
+above — but it is **not** right for I13's proof, whose source is a condition, not an event.
 
 **Where the pattern lives.** 6.1 keeps it **local to `drivers/tty`**. `drivers/tty` deliberately
 does not depend on `minixrs-driver-rt` today
@@ -356,11 +367,18 @@ already gates on `m_source` alone, so a `HARDWARE` notification with a non-zero 
 application traffic; 6.1 keeps it that way and corrects `classify.rs`'s "NOTIFY carries no payload"
 comment, which this design falsifies.
 
-**TTY RX** needs no VFS and no ABI change. 5.11 already defined `CDEV_READ` and TTY refuses it from
-its unknown-request arm; RX is one new arm in TTY plus the loop above feeding a small input buffer.
-**virtio-console** is the same loop with a used ring in place of a FIFO. What TTY does with a
-`CDEV_READ` that arrives when no input is buffered — VFS is blocked in `SENDREC` for as long as TTY
-withholds the reply — is a VFS-concurrency question that belongs to slice 6.5, not here.
+**TTY RX** is the loop above feeding an input ring, plus a `CDEV_READ` arm in TTY — and a change to
+VFS, which this spec originally said it would not need. A `CDEV_READ` that arrives when no input is
+buffered cannot be held: VFS would be blocked in `SENDREC` for as long as TTY withheld the reply,
+and every other file operation in the system with it. Slice 6.5 decided what happens instead
+([`2026-11-23-tty-rx-design.md`](./2026-11-23-tty-rx-design.md), R1 and R2): TTY answers at once
+with `EAGAIN`, records the caller and sends it one `NOTIFY` when input arrives; VFS parks the read
+without replying, holds no grant meanwhile, and retries its parked reads oldest-first on that
+notification. There is still no ABI change — `CDEV_READ` and `EAGAIN` both existed, and no value
+moved (6.5's R10) — and no kernel change. The post-proof guard I13's execution added to TTY (any
+notification after the proof is `irq FAIL extra`) was retired by the same slice, since the line now
+keeps firing by design. **virtio-console** is the same loop with a used ring in place of a FIFO, and
+the same `EAGAIN`-and-`NOTIFY` contract on its `CDEV_READ`.
 
 **No polling.** A blk driver that spins on the used ring passes under TCG, where the device
 completes inside the `QueueNotify` write, and proves nothing about a disk root under real completion
