@@ -17,18 +17,19 @@ The phase file locks exactly two things for this slice: **VFS does not block on 
 
 Verified against `main` at `15e13e5`.
 
-| Where                       | Today                                                                                            | After 6.5                                                                                      |
-| --------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `drivers/tty/src/main.rs`   | `CDEV_WRITE` only; `CDEV_READ` answers `ENOSYS` from the unknown-request arm                     | `+` a `CDEV_READ` arm that never withholds its reply (R1)                                      |
-| `drivers/tty/src/irq.rs`    | one-shot TX proof; any later notification is `irq FAIL extra` and the line stays masked          | the proof hands the line to a steady-state RX loop (R4); the `extra` guard is retired (R5)     |
-| `drivers/tty/src/pl011.rs`  | `DR` store, `FR.TXFF`, `IMSC.TXIM`                                                               | `+` `DR` load, `FR.RXFE`, `IMSC.RXIM`/`RTIM`, `ICR`                                            |
-| `drivers/tty/src/input.rs`  | —                                                                                                | new: the input ring, host-tested (R3)                                                          |
-| `servers/vfs/src/main.rs`   | `do_read` SENDRECs the driver and relays the answer; every request is replied to before the next | a console read that finds nothing is **parked**; a `NOTIFY` from TTY retries the parked (R2)   |
-| `servers/vfs/src/park.rs`   | —                                                                                                | new: the park table, host-tested (R2)                                                          |
-| `kernel-shared` `callnr.rs` | `CDEV_READ`: "`0` is EOF, a short read is legal"                                                 | `+` "`EAGAIN` means nothing is buffered and the driver will `NOTIFY` the caller" (R1, R10)     |
-| `userland/init`             | `read-console` probe expects `ENOSYS` from `read()` on fd 1                                      | probe removed; a forked child reads fd 0 and reports what it got (R7)                          |
-| `tools/`                    | boots take no input                                                                              | `+` `feed-console.sh`: writes bytes to QEMU's stdin once the log shows the read is parked (R8) |
-| kernel `ipc/receive.rs`     | `mini_receive` hands a pending notification to a caller in the receive half of a `SENDREC`       | it does not: MINIX 3's `MF_REPLY_PEND` guard, dropped in translation, is restored (R9)         |
+| Where                                    | Today                                                                                               | After 6.5                                                                                             |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `drivers/tty/src/main.rs`                | `CDEV_WRITE` only; `CDEV_READ` answers `ENOSYS` from the unknown-request arm                        | `+` a `CDEV_READ` arm that never withholds its reply (R1)                                             |
+| `drivers/tty/src/irq.rs`                 | one-shot TX proof; any later notification is `irq FAIL extra` and the line stays masked             | the proof hands the line to a steady-state RX loop (R4); the `extra` guard is retired (R5)            |
+| `drivers/tty/src/pl011.rs`               | `DR` store, `FR.TXFF`, `IMSC.TXIM`                                                                  | `+` `DR` load, `FR.RXFE`, `IMSC.RXIM`/`RTIM`, `ICR`                                                   |
+| `drivers/tty/src/input.rs`               | —                                                                                                   | new: the input ring, host-tested (R3)                                                                 |
+| `servers/vfs/src/main.rs`                | `do_read` SENDRECs the driver and relays the answer; every request is replied to before the next    | a console read that finds nothing is **parked**; a `NOTIFY` from TTY retries the parked (R2)          |
+| `servers/vfs/src/park.rs`                | —                                                                                                   | new: the park table, host-tested (R2)                                                                 |
+| `kernel-shared` `callnr.rs`              | `CDEV_READ`: "`0` is EOF, a short read is legal"                                                    | `+` "`EAGAIN` means nothing is buffered and the driver will `NOTIFY` the caller" (R1, R10)            |
+| `userland/init`                          | `read-console` probe expects `ENOSYS` from `read()` on fd 1                                         | probe removed; a forked child reads fd 0 and reports what it got (R7)                                 |
+| `tools/`                                 | boots take no input                                                                                 | `+` `feed-console.sh`: writes bytes to QEMU's stdin once the log shows the read is parked (R8)        |
+| kernel `ipc/receive.rs`                  | `mini_receive` hands a pending notification to a caller in the receive half of a `SENDREC`          | it does not: MINIX 3's `MF_REPLY_PEND` guard, dropped in translation, is restored (R9)                |
+| kernel `ipc/mod.rs`, `system/do_exec.rs` | `MF_REPLY_PEND` is cleared only by a delivery, so an `exec` or a refused receive half leaves it set | a plain `RECEIVE` clears it at entry, as MINIX 3 does; so do `do_exec` and a failed receive half (R9) |
 
 Facts the design rests on:
 
@@ -190,6 +191,13 @@ Acknowledge-then-drain cannot lose one: a byte that lands after the final `RXFE`
 fresh, unacknowledged interrupt, which the re-arm takes. The cost is at worst one notification that
 finds the FIFO empty, which the loop handles by doing nothing.
 
+**This order rests on the argument above and on nothing else.** Under QEMU the two orders cannot be
+told apart: with the drain placed before the acknowledgement no marker moves (mutation 6b, §3), so
+no boot proves the order and a reviewer has to check it by reading `irq.rs`. The **re-arm**, by
+contrast, is proved by a boot — but only since the feeder sends its probe in two chunks (R8): the
+second chunk needs a second interrupt, which arrives only if the line was re-armed after the first
+drain (mutation 5).
+
 `DR`'s error bits (framing, parity, break, overrun — bits 8–11) are discarded with the byte kept;
 QEMU never sets them and a console has no use for a dropped character.
 
@@ -213,6 +221,11 @@ differently: a notification that drains zero bytes is counted, and a run of `RX_
 consecutive empty ones prints `[diag tty] rx FAIL storm` once (forbidden) and leaves the line
 masked. One empty notification is legal (R4); sixty-four in a row is a device that is not dropping
 its line.
+
+The storm guard is proved by host tests only (`irq::tests`, on the pure `EmptyRun` count). No boot
+reaches it, and the obvious way to provoke it under QEMU does not: skipping the drain leaves bytes
+stuck in the FIFO in silence, because QEMU drops the line's level on the `UARTICR` write that
+precedes the drain (mutation 6, §3). `rx FAIL storm` has therefore never been seen to print.
 
 ### R6 — raw bytes, no echo, no line discipline
 
@@ -245,13 +258,25 @@ Neither is something init could know.
 
 If the child reads a short count — the bytes arrive in two interrupts — it loops until it has the
 probe's length or a non-positive answer, so the verdict does not depend on how QEMU batches stdin.
+That loop was written as a precaution and now runs on **every fed boot**: the feeder sends the probe
+in two chunks on purpose (R8), so the child's first read returns only the first chunk and it has to
+ask again for the rest.
 
 ### R8 — the feeder, and CI
 
 `tools/feed-console.sh <log>` polls the log for `cons.beside ok`, writes `CONSOLE_PROBE` to its
-stdout once and exits (R11.2 measured that QEMU carries on past EOF on stdin); with no marker it
-gives up, silent, at a ceiling. A boot is fed through a process substitution, so the shell does not
-wait on the feeder and the boot's exit status is still `timeout`'s:
+stdout and exits (R11.2 measured that QEMU carries on past EOF on stdin); with no marker it gives
+up, silent, at a ceiling.
+
+**The probe goes out in two chunks**: the first `SPLIT = 9` bytes (`minix.rs` and a space), a `GAP`
+of 3 s, then the remaining six (`stdin` and the newline). As first built the feeder wrote all
+fifteen bytes at once, and the mutation run showed what that proved: one write is one interrupt, so
+a TTY that never re-armed its line after the drain still delivered the whole probe and the boot
+passed (mutation 5, §3). With two chunks the second needs a second interrupt, which arrives only if
+`IRQ_ENABLE` followed the first drain — so `stdin ok` now also proves the re-arm, and the same
+mutation loses it. The gap is a guess, not a measurement (§5). A boot is fed through a process
+substitution, so the shell does not wait on the feeder and the boot's exit status is still
+`timeout`'s:
 
 ```bash
 MINIXRS_ROOT=disk timeout 1200 cargo run -p minixrs-kernel … \
@@ -319,10 +344,31 @@ notification happens to be latched at VFS when it next calls TTY.
 
 **The fix** is the one guard: `mini_receive` skips the pending-notification check when the caller
 has `MF_REPLY_PEND` set, and the notification stays latched for the caller's next plain `RECEIVE`.
-Because the flag now withholds notifications in both halves, it must not outlive its `SENDREC`: a
-follow-up found in re-review has `do_sendrec` clear it when the receive half returns an error (a
-dead partner, `ELOCKED`), where it used to stay set until some later message happened to clear it.
-No boot provokes that path; it is verified by reading.
+
+**The flag's lifetime then became part of the rule.** It now withholds notifications in both halves,
+so a flag left set starves a process that receives only notifications — and it *can* be left set.
+`do_sendrec` sets it once the send half has returned `OK` and a delivered message clears it, so any
+path that unblocks the caller **without a delivery** leaves it stale. Before this slice that was
+harmless. Two such paths were found and closed, and a third change makes any other harmless:
+
+- **A refused receive half** (`fbca056`). `do_sendrec` clears the flag when `mini_receive` returns
+  an error. The one error reachable there is `ELOCKED`, and only when the send half *blocked*:
+  `mini_send` has just validated the endpoint, and a send that delivered leaves the partner
+  runnable, which ends any deadlock chain. (This paragraph first named "a dead partner" as a cause;
+  that one is not reachable.)
+- **A successful `exec`** (`efc8d22`, found in the re-review of the fix). The caller's `SENDREC` to
+  PM gets no reply on success — the new image starts at `_start` — so nothing was delivered and
+  nothing cleared the flag: it went stale on every `exec`. `do_exec`'s reset now clears it.
+  Unreachable as a failure today, because every exec'd process is `USR_T`, `SENDREC`-only and never
+  notified; live the first time a server or driver is started by fork and exec.
+- **The backstop: a plain `RECEIVE` clears the flag at entry** (`efc8d22`), which is what MINIX 3
+  does (`do_sync_ipc`, `case RECEIVE`) and what the translation had also dropped. A plain `RECEIVE`
+  is by definition not the receive half of a `SENDREC`, so whatever the flag says there is stale.
+  With it, a stale flag cannot withhold a notification past its process's next plain `RECEIVE`,
+  whichever path left it behind.
+
+No boot provokes any of the three; they are verified by reading, and removing the first moves
+nothing (mutation K2, §3).
 
 **The proof** is a probe that makes the losing interleaving happen on every boot, because a marker
 that depends on timing is what let the defect through. TTY notifies its **first client** before it
@@ -339,6 +385,19 @@ request then meets a notification latched from the very process it is asking. Tw
   fed or not.
 
 To VFS the probe is one spurious "ask again", which R1 already allows.
+
+**What the probe removes, and what it still leans on.** The proof no longer depends on *input*
+timing — on whether a wake-up happens to be latched at VFS when it next calls TTY. It does rely on
+one fact of scheduling: TTY must be back in `RECEIVE` before VFS issues its second request, so that
+the request's send half delivers at once and its receive half is the one that meets the latched
+notification. (If TTY is not yet receiving, the send half blocks, and `mini_receive` skips both
+pending checks for a caller that is still `RTS_SENDING`, whatever the flag says — `cdev.short ok`
+then prints with the guard or without it.) That holds because VFS and TTY are in the same priority
+band (`SRV_Q`), and a band is FIFO: TTY's reply puts VFS at the tail, and TTY runs on to its
+`RECEIVE`. It fails only if a tick exhausts TTY's quantum in the few instructions between its reply
+and its receive, and then the boot still passes, having proved nothing that once. **If VFS ever
+outranks TTY the reply preempts TTY every time and the proof becomes vacuous on every boot, in
+silence** (§5).
 
 This is also the first boot in which a user process stays blocked indefinitely. It does not make the
 default boot idle (init's rotation never stops), so 6.1's `idle-probe` debt is unaffected.
@@ -358,7 +417,7 @@ Task 0 of the plan, before any design-dependent code:
    is written to be right either way; the measurement decides only what the documentation says.
 2. Close stdin under `-serial stdio` and observe QEMU. If it exits or spins, the feeder must keep
    its stdout open for as long as the boot runs; if it carries on, the feeder may simply exit after
-   its one write. (Measured: it carries on, and R8's feeder exits.)
+   it has written. (Measured: it carries on, and R8's feeder exits.)
 3. Pipe bytes at QEMU from time zero and see whether they survive to the kernel. R8 does not depend
    on the answer, but `build-and-boot.md` should state it.
 4. Boot-budget: the last required marker's position against the merge base, as
@@ -389,41 +448,77 @@ Stated so the next two specs can cite it instead of re-deciding:
 
 ## 3. Verification
 
-| Behaviour                                                                  | Proved by                                                                                  |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| ring: push/peek/consume, wrap, full-drops-newest                           | host tests, `drivers/tty` `input.rs`                                                       |
-| `CDEV_READ` validation; `len == 0`; clamp to `CDEV_MAX_IO`                 | host tests, `drivers/tty` `cdev.rs`                                                        |
-| park table: one per slot, oldest-first, exit frees, stale endpoint refused | host tests, `servers/vfs` `park.rs`                                                        |
-| a byte on the wire reaches `read(0)`                                       | `minix.rs init: stdin ok n=15` (fed boots)                                                 |
-| VFS serves a file read while a console read is parked                      | `[diag vfs] cons.park` then `[diag vfs] cons.beside ok`; the feeder writes only after both |
-| the parked read is woken by TTY's notification                             | `stdin ok` appearing at all — nothing else can complete that read                          |
-| a parked reader does not hold the boot                                     | every existing marker still present in all three boots, the unfed reboot included          |
-| a latched notification is not the reply to a `SENDREC` (R9)                | `[diag vfs] cdev.short ok n=256`, behind TTY's notify probe; mutation 9                    |
-| …and is delivered at the next plain `RECEIVE` instead                      | `[diag vfs] cons.notify ok`                                                                |
-| a wake-up `NOTIFY` that fails is not silent                                | forbidden `[diag tty] rx FAIL` (`rx FAIL notify rc=…`); nothing provokes it at boot        |
-| the TX proof still runs                                                    | `[diag tty] irq ok rounds=2`, unchanged                                                    |
-| no interrupt storm, no dropped input                                       | forbidden `rx FAIL`, `rx overflow`                                                         |
-| headers unchanged                                                          | `gen-c-headers` output diffed against `main`                                               |
+What proves each behaviour, **as the mutation run left it** — several rows are weaker than this
+table first claimed, and say so.
+
+| Behaviour                                                                                      | Proved by                                                                                                                                                                                         |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ring: push/peek/consume, wrap, full-drops-newest                                               | host tests, `drivers/tty` `input.rs`                                                                                                                                                              |
+| a failed copy consumes nothing (peek, copy, *then* consume)                                    | the ring's two operations are host-tested; **the order in TTY's `do_read` has no proof** — no host test calls it and no boot gives a refused copy with bytes buffered (mutation 7: nothing moves) |
+| `CDEV_READ` validation; `len == 0`; clamp to `CDEV_MAX_IO`                                     | host tests, `drivers/tty` `cdev.rs`                                                                                                                                                               |
+| park table: one per slot, oldest-first, `free`, stale endpoint evicted                         | host tests, `servers/vfs` `park.rs`                                                                                                                                                               |
+| `VFS_PM_EXIT` frees the exiting process's parked read                                          | the table operation (`ParkTable::free`) is host-tested; **the call in `do_pm_exit` has no proof** — nothing kills a parked reader at boot (mutation 8: nothing moves)                             |
+| a byte on the wire reaches `read(0)`                                                           | `minix.rs init: stdin ok n=15` (fed boots)                                                                                                                                                        |
+| VFS serves a file read while a console read is parked                                          | `[diag vfs] cons.park` then `[diag vfs] cons.beside ok`; the feeder writes only after both                                                                                                        |
+| the parked read is woken by TTY's notification                                                 | `stdin ok` appearing at all — nothing else can complete that read (mutations 3 and 4b)                                                                                                            |
+| TTY re-arms its line after a drain                                                             | `stdin ok`, through the feeder's **second chunk**, which needs a second interrupt (mutation 5). A probe fed in one write did not prove it                                                         |
+| R4's order — acknowledge, then drain                                                           | **by reasoning only**: under QEMU drain-then-acknowledge moves nothing (mutation 6b)                                                                                                              |
+| a parked reader does not hold the boot                                                         | every existing marker still present in all three boots, the unfed reboot included                                                                                                                 |
+| the rotation is not left one child deeper by reaping the console-read child (init waits again) | **nothing but the hand-measured budget**: without the second `wait()` the disk boot still passes every check (mutation W)                                                                         |
+| a latched notification is not the reply to a `SENDREC` (R9)                                    | `[diag vfs] cdev.short ok n=256`, behind TTY's notify probe; mutation 9, on the unfixed kernel and again on the final code. Relies on TTY and VFS sharing a priority band (R9)                    |
+| …and is delivered at the next plain `RECEIVE` instead                                          | `[diag vfs] cons.notify ok`, on every boot because of the probe (mutation P)                                                                                                                      |
+| `MF_REPLY_PEND` does not stay set past its `SENDREC` (R9's three clears)                       | **by reading only**; no boot provokes a refused receive half or a notified process that has exec'd (mutation K2: nothing moves)                                                                   |
+| a wake-up `NOTIFY` that fails is not silent                                                    | forbidden `[diag tty] rx FAIL` (`rx FAIL notify rc=…`); nothing provokes it at boot, and a forced failure prints it once (mutation 11)                                                            |
+| the TX proof still runs                                                                        | `[diag tty] irq ok rounds=2`, unchanged                                                                                                                                                           |
+| no interrupt storm                                                                             | **host tests only** (`irq::tests`, mutation 10). The forbidden `rx FAIL storm` cannot be reached under QEMU by skipping the drain (mutation 6) and has never been seen to print                   |
+| no dropped input                                                                               | forbidden `rx overflow`; the ring's full-drops-newest host tests                                                                                                                                  |
+| headers unchanged                                                                              | `gen-c-headers` output diffed against `main`                                                                                                                                                      |
 
 Mutations, each applied, observed and reverted
-([discipline](../../conventions/testing-and-markers.md#mutation-testing)):
+([discipline](../../conventions/testing-and-markers.md#mutation-testing)). The **Seen** column is
+the second run, on `89a9968` — the fixed kernel, before `efc8d22`'s follow-ups (the plain-`RECEIVE`
+and `exec` clears, and the feeder's two chunks) — after eight unmutated fed boots that each printed
+`stdin ok` and no `FAIL`. Row 5's last observation is with `efc8d22`'s feeder.
 
-| # | Mutation                                                        | Expected to move                                                                                             | Seen                                                                    |
-| - | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| 1 | TTY withholds the reply on empty instead of `EAGAIN`            | VFS wedges inside `do_read`, before it can park: `cons.park`, `cons.beside ok` and everything after vanish   | observed, `cons.park` included (the spec first predicted it would stay) |
-| 2 | VFS relays `EAGAIN` instead of parking                          | `stdin FAIL` (the child sees `-11`); `cons.park` absent                                                      | TODO(coordinator): mutation 2's result                                  |
-| 3 | TTY does not `NOTIFY` its waiter                                | `stdin ok` absent; the rest of the boot unmoved                                                              | TODO(coordinator): mutation 3's result, re-run on the final code        |
-| 4 | VFS replies `ENOSYS` to TTY's notification (the status quo arm) | observe and record — may be absorbed; an honest "nothing moves" if so                                        | TODO(coordinator): mutation 4's result, re-run on the final code        |
-| 5 | TTY drops the `IRQ_ENABLE` after the drain                      | first chunk only: `stdin` verdict depends on batching — observe, record                                      | TODO(coordinator): mutation 5's result, re-run on the final code        |
-| 6 | TTY skips the drain                                             | revised in Task 3: perhaps a silent stuck byte, not `rx FAIL storm` — the `UARTICR` write precedes the drain | TODO(coordinator): mutation 6's result, re-run on the final code        |
-| 7 | `consume` before the copy succeeds                              | host test for peek-then-consume fails                                                                        | TODO(coordinator): mutation 7's result, re-run on the final code        |
-| 8 | `VFS_PM_EXIT` does not free the park entry                      | host test fails; no boot marker (nothing kills a parked reader at boot)                                      | TODO(coordinator): mutation 8's result, re-run on the final code        |
-| 9 | `mini_receive` loses the `MF_REPLY_PEND` guard (R9)             | `cdev.short FAIL rc=4096` in place of `cdev.short ok n=256`                                                  | observed, before the guard was restored                                 |
+| #  | Mutation                                                                                                | Predicted                                                                                                    | Seen                                                                                                                                                                                                                                                              |
+| -- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1  | TTY withholds the reply on empty instead of `EAGAIN`                                                    | VFS wedges inside `do_read`, before it can park: `cons.park`, `cons.beside ok` and everything after vanish   | the whole system freezes at about 637 log lines, `cons.park` gone too (the spec first predicted it would stay)                                                                                                                                                    |
+| 2  | VFS relays `EAGAIN` instead of parking                                                                  | `stdin FAIL` (the child sees `-11`); `cons.park` absent                                                      | `stdin FAIL n=0 first=none rc=-11`                                                                                                                                                                                                                                |
+| 3  | TTY does not `NOTIFY` its waiter                                                                        | `stdin ok` absent; the rest of the boot unmoved                                                              | as predicted, in two boots: `stdin ok` absent, the rest unmoved                                                                                                                                                                                                   |
+| 4  | VFS lets TTY's notification fall into the request dispatch, which replies `ENOSYS` (the status quo arm) | observe and record — perhaps nothing                                                                         | **not absorbed.** A sustained `ENOSYS` ping-pong between VFS and TTY from the probe's notification onward; VFS's console `SENDREC`s answer `ELOCKED`; userland output collapses from 8,489 lines to 54; **no `FAIL` line** — only the missing `stdin ok` flags it |
+| 4b | VFS drops TTY's notification without running the retry                                                  | — (added in the run)                                                                                         | `stdin ok` absent                                                                                                                                                                                                                                                 |
+| 5  | TTY drops the `IRQ_ENABLE` after the drain                                                              | first chunk only: the `stdin` verdict depends on batching — observe, record                                  | **passed** with the probe fed in one piece; lost `stdin ok` only with a two-chunk feed. The feeder was changed for it (R8), and with the standard feeder `stdin ok` is now absent                                                                                 |
+| 6  | TTY skips the drain                                                                                     | revised in Task 3: perhaps a silent stuck byte, not `rx FAIL storm` — the `UARTICR` write precedes the drain | silent stuck bytes and no storm: QEMU drops the line on the `UARTICR` write, so `rx FAIL storm` is unreachable this way                                                                                                                                           |
+| 6b | TTY drains, then acknowledges (R4's order reversed)                                                     | — (added in the run)                                                                                         | **nothing moves**                                                                                                                                                                                                                                                 |
+| 7  | TTY's `do_read` consumes before the copy's result is known                                              | a host test for peek-then-consume fails                                                                      | **nothing: no host test fails and no marker moves**                                                                                                                                                                                                               |
+| 8  | `do_pm_exit` does not free the park entry                                                               | a host test fails; no boot marker (nothing kills a parked reader at boot)                                    | **nothing: no host test fails and no marker moves**                                                                                                                                                                                                               |
+| 9  | `mini_receive` loses the `MF_REPLY_PEND` guard (R9)                                                     | `cdev.short FAIL rc=4096` in place of `cdev.short ok n=256`                                                  | as predicted, twice: on the unfixed kernel before the guard was restored, and again on the final code with the guard taken back out — `cdev.short FAIL rc=4096`, and `cons.notify ok` moves from log line 612 to the real wake-up                                 |
+| K2 | `do_sendrec` does not clear the flag when its receive half fails                                        | — (added in the run)                                                                                         | **nothing moves** — no coverage of any kind                                                                                                                                                                                                                       |
+| P  | TTY's notify probe removed                                                                              | — (added in the run)                                                                                         | `cons.notify ok` moves to the real input and is absent on an unfed boot: the probe is what makes the kernel rule's proof happen on every boot                                                                                                                     |
+| W  | init does not wait again after reaping the console-read child                                           | — (added in the run)                                                                                         | the disk boot **passes all 174 checks**; the budget reads 73.30% against 62.72% — only the hand-measured fraction sees it                                                                                                                                         |
+| 10 | the storm guard never trips                                                                             | — (added in the run)                                                                                         | three `irq::tests` fail                                                                                                                                                                                                                                           |
+| 11 | the wake-up `NOTIFY` is forced to fail                                                                  | — (added in the run)                                                                                         | `rx FAIL notify rc=-1` once; the reader is still served                                                                                                                                                                                                           |
 
-Row 6's first prediction was `rx FAIL storm`; QEMU drops the line's level on the `UARTICR` write, so
-a skipped drain may leave nothing firing. Row 9 was observed in the test-first direction: the probe
-was written against the unfixed kernel and seen to fail there. Every `TODO(coordinator)` cell is a
-result this document does not yet have; the plan's ledger records what was seen.
+**Numbering.** Rows 1–9 keep the numbers this spec gave them. The plan's ledger names the same run
+differently in three places: this table's row 9 is its **K**, row 4 is its **4a**, and row W is its
+**9**. K2, P, 4b, 6b, 10 and 11 carry the ledger's names.
+
+**Two predictions were wrong, in the same way.** Rows 7 and 8 each said "a host test fails". None
+does, because in both the host test pins the *operation* and the mutation removes the *call*. The
+peek-then-consume order is a step in `drivers/tty/src/main.rs`'s `do_read`, and the free on exit is
+a line in `servers/vfs/src/main.rs`'s `do_pm_exit`; no host test calls either function. `input.rs`'s
+tests pin `peek` and `consume` as ring operations, and `park.rs`'s pins `ParkTable::free`, so each
+would still pass with its caller deleted. And no boot can stand in: none gives a refused copy with
+bytes buffered, and none kills a parked reader. This is the lesson
+[`testing-and-markers.md`](../../conventions/testing-and-markers.md#mutation-testing) already
+records from 6.3 — a prediction of "a host test" must name the test.
+
+**Rows where nothing moves** — 6b, 7, 8, K2, and W for everything but a hand measurement — stay in
+the table as what they are: correct code, as far as reading can tell, with no proof. §5 lists them
+as accepted gaps.
+
+**Row 5 changed the slice.** A probe fed in one write proves one interrupt. The feeder now sends two
+chunks (R8) so that `stdin ok` needs the re-arm.
 
 ---
 
@@ -457,26 +552,30 @@ result this document does not yet have; the plan's ledger records what was seen.
 
 ## 5. Rulings to check
 
-| #   | Ruling                                                                     | If wrong                                                                                                                               |
-| --- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| R1  | `EAGAIN` + `NOTIFY` + retry, not an asynchronous reply                     | Moving to `SENDA`/`CDEV_REPLY` later rewrites the read arm of each character driver and VFS's retry; `park.rs` and the ring survive.   |
-| R1  | One waiter endpoint, last asker wins                                       | A second concurrent CDEV client of TTY could starve the first of its `NOTIFY`. Fix is a two-slot set in `main.rs`; no protocol change. |
-| R1  | `EIO` when TTY has no interrupt line                                       | One constant; no marker depends on it.                                                                                                 |
-| R2  | No grant held across a park; a fresh one per retry                         | None foreseen — it is strictly cheaper. Listed because classic MINIX does the opposite.                                                |
-| R2  | VFS parks on the *answer*, not on the device                               | If a driver ever answers `EAGAIN` without owing a `NOTIFY`, its reader hangs. The convention rule added in §4 is the guard.            |
-| R4  | Acknowledge before draining, against I12's wording                         | Swap two statements; mutation 5/6 show which order loses a byte, if either does under QEMU.                                            |
-| R5  | A 64-empty-notification storm guard replaces `irq FAIL extra`              | The threshold is a guess. Too low: a false `rx FAIL` on a noisy line — raise it. Deleting the guard costs one marker.                  |
-| R6  | Raw, no echo, no line discipline in 6.5                                    | Echo and CR→LF are a few lines in `input.rs`; adding them here would move `stdin ok`'s expected bytes and the feeder string.           |
-| R7  | The proof child is forked by init and lives in init's source               | A separate `userland/` binary is a new crate and rootfs entry; move it if init's prologue is judged too crowded.                       |
-| R7  | The `read-console` denial probe is deleted, not replaced by another errno  | `open.deny`'s count drops by one. Nothing replaces "read on a write-only console" because the console is not write-only any more.      |
-| R8  | Input is fed by a script gated on a log marker                             | If log polling proves flaky in CI, the fallback is a fixed delay — weaker (not causal) but one line.                                   |
-| R8  | The reboot boot is not fed                                                 | Feeding it is one process substitution and three markers in the reboot pair.                                                           |
-| R9  | "No kernel change" — **this ruling was wrong**                             | It cost a fix round, a kernel change, and the standing of every earlier marker pass (they had passed by timing). §1 and R1 corrected.  |
-| R9  | The kernel rule's proof is a probe in TTY's **production** loop            | One spurious notification per boot, a shape R1 already tolerates. Removing it is a flag and six lines — and leaves the rule unproved.  |
-| R9  | The `ENOSYS` ping-pong between two "always reply" servers is not hardened  | Reachable only through the fixed defect. If another path reaches it, the two spin silently; a phase-file debt records it.              |
-| R7  | The fork-cycle markers are re-aimed at slot 20, with `child_nr=20` added   | The alternative is slot-agnostic markers (`name=worker src=name entry=`), which give up the slot number.                               |
-| R7  | init waits once more when a rotation `wait()` reaps the console-read child | Without it the rotation runs one child deeper for the whole boot (budget 64.71% → 76.62%). One `wait()`; removing it moves the budget. |
-| R10 | `EAGAIN` on `CDEV_READ` is not an ABI bump                                 | If C in the musl fork ever speaks CDEV directly, a coordinated note in both repos; no value moves either way.                          |
+| #   | Ruling                                                                                                                                                                                                                                    | If wrong                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | `EAGAIN` + `NOTIFY` + retry, not an asynchronous reply                                                                                                                                                                                    | Moving to `SENDA`/`CDEV_REPLY` later rewrites the read arm of each character driver and VFS's retry; `park.rs` and the ring survive.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| R1  | One waiter endpoint, last asker wins                                                                                                                                                                                                      | A second concurrent CDEV client of TTY could starve the first of its `NOTIFY`. Fix is a two-slot set in `main.rs`; no protocol change.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| R1  | `EIO` when TTY has no interrupt line                                                                                                                                                                                                      | One constant; no marker depends on it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| R2  | No grant held across a park; a fresh one per retry                                                                                                                                                                                        | None foreseen — it is strictly cheaper. Listed because classic MINIX does the opposite.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| R2  | VFS parks on the *answer*, not on the device                                                                                                                                                                                              | If a driver ever answers `EAGAIN` without owing a `NOTIFY`, its reader hangs. The convention rule added in §4 is the guard.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| R4  | Acknowledge before draining, against I12's wording                                                                                                                                                                                        | Swap two statements. No boot would say which order is right: under QEMU the reversed order moves nothing (mutation 6b), so the order rests on R4's argument alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| R5  | A 64-empty-notification storm guard replaces `irq FAIL extra`                                                                                                                                                                             | The threshold is a guess. Too low: a false `rx FAIL` on a noisy line — raise it. Deleting the guard costs one marker. It is host-tested only; no boot has made it trip (mutation 6).                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| R6  | Raw, no echo, no line discipline in 6.5                                                                                                                                                                                                   | Echo and CR→LF are a few lines in `input.rs`; adding them here would move `stdin ok`'s expected bytes and the feeder string.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| R7  | The proof child is forked by init and lives in init's source                                                                                                                                                                              | A separate `userland/` binary is a new crate and rootfs entry; move it if init's prologue is judged too crowded.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| R7  | The `read-console` denial probe is deleted, not replaced by another errno                                                                                                                                                                 | `open.deny`'s count drops by one. Nothing replaces "read on a write-only console" because the console is not write-only any more.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| R8  | Input is fed by a script gated on a log marker                                                                                                                                                                                            | If log polling proves flaky in CI, the fallback is a fixed delay — weaker (not causal) but one line.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| R8  | The reboot boot is not fed                                                                                                                                                                                                                | Feeding it is one process substitution and three markers in the reboot pair.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| R8  | The feeder sends the probe in two chunks, 3 s apart, so `stdin ok` needs the re-arm                                                                                                                                                       | The gap is a guess. If both chunks ever land in one drain the re-arm's proof **weakens silently — the boot passes, as it did with a one-piece feed; it does not fail**. Lengthen `GAP`; nothing reports that it was too short.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| R9  | "No kernel change" — **this ruling was wrong**                                                                                                                                                                                            | It cost a fix round, a kernel change, and the standing of every earlier marker pass (they had passed by timing). §1 and R1 corrected.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| R9  | The kernel rule's proof is a probe in TTY's **production** loop                                                                                                                                                                           | One spurious notification per boot, a shape R1 already tolerates. Removing it is a flag and six lines — and leaves the rule unproved.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| R9  | The `ENOSYS` ping-pong between two "always reply" servers is not hardened                                                                                                                                                                 | It is **one slip in VFS's notification arm away**, not only behind the fixed defect: mutation 4 reached it by letting a notification fall into the dispatch (and the re-review found one further theoretical path, through `ELOCKED`, that no current process pair reaches). Still unhardened, by ruling — the fix, never answering a reply-shaped message, changes every server's unknown-message arm and is its own change. The cost if the slip is made: a boot that **degrades silently** (console calls answering `ELOCKED`, userland output collapsing, no `FAIL` line) instead of failing loudly. A phase-file debt records it. |
+| R9  | `MF_REPLY_PEND`'s three clears (a failed receive half, `exec`, every plain `RECEIVE`) are verified by reading                                                                                                                             | No boot provokes a stale flag, and removing the first clear moves nothing (mutation K2). If one is wrong or missing, a process that receives only notifications starves — the first candidate is a server or driver started by fork and exec.                                                                                                                                                                                                                                                                                                                                                                                          |
+| R9  | The probe's proof relies on TTY and VFS sharing a priority band                                                                                                                                                                           | If VFS is ever ranked above TTY, or a tick lands between TTY's reply and its `RECEIVE`, `cdev.short ok` prints with the guard or without it: the kernel rule is then unproved **and nothing says so**. Whoever changes a boot server's priority re-runs mutation 9.                                                                                                                                                                                                                                                                                                                                                                    |
+| §3  | Rows 7, 8, W, K2 and 6b are accepted as "nothing moves" — the consume-after-copy order in TTY's `do_read`, `do_pm_exit`'s free, init's second `wait()`, `do_sendrec`'s clear, and R4's order have no proof a boot or host test would miss | Each is one line that could be deleted or reordered with every gate still green (W shows only in a hand-measured budget). Proving them needs a boot that refuses a copy with bytes buffered, kills a parked reader, or fails a receive half; none exists. Debts in the phase file.                                                                                                                                                                                                                                                                                                                                                     |
+| R7  | The fork-cycle markers are re-aimed at slot 20, with `child_nr=20` added                                                                                                                                                                  | The alternative is slot-agnostic markers (`name=worker src=name entry=`), which give up the slot number.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| R7  | init waits once more when a rotation `wait()` reaps the console-read child                                                                                                                                                                | Without it the rotation runs one child deeper for the whole boot (budget 64.71% → 76.62%). One `wait()`; removing it moves the budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| R10 | `EAGAIN` on `CDEV_READ` is not an ABI bump                                                                                                                                                                                                | If C in the musl fork ever speaks CDEV directly, a coordinated note in both repos; no value moves either way.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 ---
 
@@ -490,7 +589,9 @@ result this document does not yet have; the plan's ledger records what was seen.
 - `SENDA`. Unblocking it is its own slice if R1 is ever judged wrong.
 - Hardening the unknown-message reply. A server that answers every unknown `m_type` with `ENOSYS`
   will trade those answers for ever with a peer that does the same, once either is sent a message
-  nobody asked for. R9's fix removed the only known way to send one; the rule itself is unchanged
+  nobody asked for. R9's fix removed the way this slice *met* it, not the only way to get there:
+  mutation 4 reached it with one changed arm in VFS's loop (§3, §5). The rule itself is unchanged
   and is a carried debt.
-- Killing a parked reader with a signal: `VFS_PM_EXIT` frees the entry (host-tested), but no boot
-  path sends a signal to a process blocked in VFS, and this slice adds none.
+- Killing a parked reader with a signal: `VFS_PM_EXIT` frees the entry — `ParkTable::free` is
+  host-tested, the call that reaches it is not (§3, row 8) — but no boot path sends a signal to a
+  process blocked in VFS, and this slice adds none.

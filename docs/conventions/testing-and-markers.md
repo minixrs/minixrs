@@ -110,6 +110,11 @@ full boot and one for the reboot:
   same goes for the forbidden `stdin FAIL`: it describes a fed boot, and a boot somebody typed at
   prints it correctly. The **reboot is not fed** and loses nothing by it — it is checked against its
   own pair only, which holds none of the five.
+- **`stdin ok` proves two interrupts, not one, and only because of how the boot is fed.** The feeder
+  sends the probe in two chunks a few seconds apart ([Fed boots](./build-and-boot.md#fed-boots) has
+  the why), so the line needs the receive interrupt, the drain, the notification, VFS's retry — and
+  then TTY's **re-arm** of its line, without which the second chunk never interrupts. Fed in one
+  write, the same line proves everything but the re-arm.
 - **`cdev.short ok n=256` has carried a second proof since slice 6.5**, and `cons.notify ok` exists
   for the same one: a kernel rule about notifications and `SENDREC`, stated with its failure line in
   [`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec). A `cdev.short
@@ -223,6 +228,17 @@ This runs against an **uncommitted** working tree, so the restore step has real 
   since `check-boot-log.sh` FAILs the stub A–D markers there by design. A mutation whose marker
   depends on console input needs the boot [fed](./build-and-boot.md#fed-boots) like any other; an
   unfed one never prints `stdin ok` whatever the code does.
+- **Feed a receive-path mutation with the standard feeder, never with a `printf` of your own.**
+  `tools/feed-console.sh` sends the probe in two chunks; a hand-rolled feed that writes it at once
+  delivers one interrupt, and every mutation of what TTY does *after* its first drain then passes.
+  6.5's feeder itself first wrote the probe in one piece, and "drop the `IRQ_ENABLE` after the
+  drain" passed under it, which is why it now has two chunks. If a mutation needs different input,
+  keep it in at least two writes with a gap between them.
+- **A probe proves as many events as it causes.** One write was one interrupt, so it proved one
+  interrupt's worth of the receive path and nothing about the steady state. Before trusting a probe
+  for a loop — re-arm, re-queue, retry — count how many times the probe makes the loop go round; if
+  the answer is once, the code that sets up the *second* turn is unproved, and the mutation that
+  deletes it is the way to find out.
 - **Not every mutation moves its predicted marker.** Reordering the MXBI packing does not reliably
   break a DS lookup, because publish-before-retrieve is scheduler-dependent and often still resolves
   — to exercise a DS *fallback* branch, remove the peer entirely or break the key (slice 5.7 got

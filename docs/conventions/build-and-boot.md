@@ -306,10 +306,22 @@ MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch6
   so the shell does not wait on the feeder and the command's exit status is still `timeout`'s (124
   for a healthy boot). Process substitution is bash and zsh, not POSIX `sh`.
 - **What the feeder does.** It polls the log for `[diag vfs] cons.beside ok`, writes the probe —
-  `minix.rs stdin` and a newline, 15 bytes — to its stdout **once**, and exits 0. init's proof child
-  is blocked in `read(0)` for exactly those bytes and prints `minix.rs init: stdin ok n=15`. The
-  script's `PROBE` and init's `CONSOLE_PROBE` are two copies; a host test in `userland/init` reads
-  the script and fails if they differ, so keep the `PROBE='…'` assignment on one single-quoted line.
+  `minix.rs stdin` and a newline, 15 bytes, sent one time only — to its stdout, and exits 0. init's
+  proof child is blocked in `read(0)` for exactly those bytes and prints `minix.rs init: stdin ok
+  n=15`. The script's `PROBE` and init's `CONSOLE_PROBE` are two copies; a host test in
+  `userland/init` reads the script and fails if they differ, so keep the `PROBE='…'` assignment on
+  one single-quoted line.
+- **The probe is written in two chunks, and the gap between them is load-bearing.** The feeder
+  writes the first `SPLIT` (9) bytes, sleeps `GAP` (3) seconds, and writes the rest. One write
+  reaches TTY as one interrupt, and a probe that arrives in one interrupt says nothing about what
+  TTY does *after* it: with the probe fed in one piece, a TTY that never re-armed its line after the
+  drain still passed the boot (slice 6.5, mutation 5). The second chunk needs a second interrupt,
+  which arrives only if `IRQ_ENABLE` followed the first drain, so `stdin ok` now proves the re-arm
+  too — and the reading child's loop over short counts runs on every fed boot. **Do not merge the
+  two writes or shorten the gap to tidy the script.** `GAP` is a guess, not a measurement: if both
+  chunks ever land in one drain the boot still passes and the re-arm simply goes unproved, with
+  nothing to say so. The same holds for a hand-rolled feed — a `printf` of the whole string into
+  QEMU proves one interrupt.
 - **It waits for a marker, not for a delay, and that is load-bearing twice over.** VFS prints
   `cons.beside ok` the first time it completes a file read while a console read is parked, so the
   child's read cannot return before VFS has been seen serving somebody beside it — the proof is
@@ -345,7 +357,7 @@ Three facts about QEMU's serial input were measured before the design was fixed 
    holds, because QEMU refills it as the driver empties it. TTY's loop does not depend on any of
    this.
 2. **EOF on stdin is harmless.** With `< /dev/null` QEMU carries on and the boot is unchanged, which
-   is why the feeder may exit after its one write instead of holding its stdout open.
+   is why the feeder may exit once it has written instead of holding its stdout open.
 3. **Bytes on stdin before the kernel starts never reach TTY.** Five bytes present from time zero
    were consumed by the firmware or Limine. A feeder that wrote at once, or after a short fixed
    delay, would feed the boot loader — so input for a test is always gated on a line from the log.

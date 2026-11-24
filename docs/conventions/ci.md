@@ -109,9 +109,9 @@ whole-project picture.
   log file on one command line, which `actionlint`'s shellcheck reports as an informational SC2094 —
   that is the design, not a finding. **None of this has run on CI**: the feeder was exercised only
   on a dev machine (macOS, QEMU 11, Homebrew's edk2), so whether the runner's bash, QEMU and
-  firmware carry the bytes the same way is unmeasured until the branch's first CI run — a `stdin ok`
-  missing there with `cons.beside ok` present is the feeder path, not the driver, until shown
-  otherwise
+  firmware carry the bytes the same way — and deliver the feeder's two chunks as two interrupts — is
+  unmeasured until the branch's first CI run. A `stdin ok` missing there with `cons.beside ok`
+  present is the feeder path, not the driver, until shown otherwise
 - **The boots run in sequence in one job, not as a matrix.** A matrix would rename the required
   "QEMU boot smoke" check, which needs a branch-protection edit, and two QEMUs on one runner would
   starve each other. The price is the job's `timeout-minutes`, **90** since slice 6.4 (50 before

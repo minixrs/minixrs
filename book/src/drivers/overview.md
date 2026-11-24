@@ -888,14 +888,16 @@ NOTIFY the waiter, if any              only if a byte was stored; then forget th
 
 The last line is `main`'s, not `irq.rs`'s: `IrqService::on_notify` re-arms and only *reports* that
 bytes arrived, so the waiter is notified **after** the line is live again and cannot come back with
-a read while it is still masked. If that `NOTIFY` is refused, TTY does not forget the waiter after
-all — it records it again, so the next byte tries again — and prints `[diag tty] rx FAIL notify
+a read while it is still masked. If that `NOTIFY` is refused, TTY prints `[diag tty] rx FAIL notify
 rc=…` once: it is the only wake-up a parked reader gets, and a reader left waiting with nothing in
-the log would look exactly like one nobody typed at. `DR`'s error flags (framing, parity, break,
-overrun) are discarded and the byte kept. TTY writes neither `UARTLCR_H` nor `UARTIFLS`: the
-kernel's console shares the UART, the firmware configured it, and the loop is correct whether the
-FIFO is on or off. (As measured under QEMU 11 with edk2, it is on — and QEMU raises the receive
-interrupt on the first byte regardless of the trigger level.)
+the log would look exactly like one nobody typed at. It also records the waiter again rather than
+forgetting it, but that retry is nominal — every reason the kernel has to refuse the `NOTIFY` (a
+dead or unknown endpoint, no permission to reach it) is permanent for that endpoint, so the next
+byte's attempt fails the same way until another reader's `EAGAIN` takes the slot. `DR`'s error flags
+(framing, parity, break, overrun) are discarded and the byte kept. TTY writes neither `UARTLCR_H`
+nor `UARTIFLS`: the kernel's console shares the UART, the firmware configured it, and the loop is
+correct whether the FIFO is on or off. (As measured under QEMU 11 with edk2, it is on — and QEMU
+raises the receive interrupt on the first byte regardless of the trigger level.)
 
 Two guards stand behind the loop, each with a forbidden boot marker (the refused `NOTIFY` above is a
 third). A notification that drains nothing is legal — it is the price of acknowledging first — but
@@ -903,7 +905,8 @@ third). A notification that drains nothing is legal — it is the price of ackno
 `[diag tty] rx FAIL storm` and does not re-arm. A refused `IRQ_ENABLE` prints `rx FAIL enable rc=…`;
 the bytes already drained are still delivered. The run of empty notifications is counted by a small
 pure type, `EmptyRun`, so the rule is pinned by host tests rather than by a boot that would need a
-misbehaving UART.
+misbehaving UART. (QEMU's cannot be made to misbehave this way from the driver's side: skip the
+drain and the bytes sit in the FIFO in silence, because the acknowledgement alone drops the line.)
 
 ### The input ring
 
@@ -992,7 +995,8 @@ literal substrings and cannot express a carriage return).
 Receive is proved end to end, by a byte that really travels the wire. QEMU's serial port is its
 standard input, so the two full boots CI checks are *fed*: a small script
 ([`tools/feed-console.sh`](../build.md#feeding-the-console)) watches the boot's own log and, at the
-right moment, writes `minix.rs stdin` and a newline to QEMU. Four lines tell the story in order:
+right moment, writes `minix.rs stdin` and a newline to QEMU — in two pieces, a few seconds apart,
+for a reason that comes at the end. Four lines tell the story in order:
 
 ```text
 [diag tty] rx on
@@ -1010,6 +1014,20 @@ that the fifteen bytes it read are the fifteen that were sent, unechoed and unre
 TTY's `NOTIFY` can complete that read, so the last line appearing at all is the proof that the
 interrupt, the ring, the notification and VFS's retry each did their part. A boot nobody feeds
 prints the first three and never the fourth.
+
+The two pieces are what make that last line prove the *loop* and not just its first turn. Bytes
+written together reach TTY as one interrupt, so a probe written in one go would be delivered whole
+by a driver that serviced exactly one interrupt and never re-armed its line — and when the feeder
+did write it in one go, deleting the `IRQ_ENABLE` after the drain changed nothing in the log. Split
+in two, the second piece needs a second interrupt, which only a re-armed line can raise. The child
+reads the first piece, asks again, and reports only when it holds all fifteen bytes.
+
+What the log does *not* prove is worth stating, because the code looks more tested than it is.
+Nothing shows that acknowledging before draining is the right order — under QEMU the reverse order
+behaves identically, so that rests on the argument
+[above](#the-interrupt-line-a-proof-then-receive). And nothing exercises the step that keeps a
+failed copy from consuming bytes: `peek` and `consume` are each tested, but no boot refuses a copy
+with bytes waiting, so their order in the read handler is checked by reading it.
 
 ## The BDEV protocol and the `memory` ramdisk
 

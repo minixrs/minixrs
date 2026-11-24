@@ -347,14 +347,21 @@ other for ever.** The rule assumes every message a server receives is a request 
 blocked in `SENDREC`. A message that is *not* one — a reply that arrives at the receive loop instead
 of at the `SENDREC` it belonged to — is unknown to the receiver, gets `ENOSYS` **sent** back, is
 unknown to *that* receiver, and so on. Slice 6.5 saw VFS and TTY trade 32,525 of them, silently:
-nothing fails, nothing prints, and both servers keep serving in between. The one known way to
-deliver such a message was a kernel defect, since fixed
-([`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec)), so the rule
-stands unhardened and the exposure is a carried debt
+nothing fails, nothing prints, and both servers keep serving in between. That time the stray message
+came from a kernel defect, since fixed
+([`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec)) — but the defect
+was only one way in. **A notification that reaches a server's request dispatch starts the same
+exchange**: 6.5's mutation run let TTY's notification fall into VFS's dispatch, VFS answered TTY's
+notification with `ENOSYS`, and from that first notification onward the two traded replies, VFS's
+console `SENDREC`s answered `ELOCKED`, userland output collapsed from 8,489 lines to 54, and **no
+`FAIL` line printed**. So the hazard is one misplaced arm away in any server that is both called and
+notified by the same peer, and a boot that falls into it degrades silently rather than failing. The
+rule stands unhardened all the same — the fix, never answering a reply-shaped message, changes what
+every server's unknown-message arm does — and the exposure is a carried debt
 ([`phase-6-virtio.md`](../plans/phase-6-virtio.md#slice-65-tty-rx--pl011-receive-interrupt--cdev_read)).
-Until it is paid: a server pair in which each side both calls and answers the other must never be
-sent a message outside a `SENDREC`, and a stray `ENOSYS` exchange in a trace means exactly that
-happened.
+Until it is paid: handle `NOTIFY_MESSAGE` **before** the request dispatch in every receive loop,
+never send a server a message outside a `SENDREC`, and read a stray `ENOSYS` exchange in a trace —
+or a boot whose output thins out with nothing reported — as exactly this.
 
 ### Define and refuse, never fold into `ENOSYS`
 
@@ -514,7 +521,10 @@ Beyond the shared contracts above, the driver-specific rules:
   overflow`. All of these are forbidden markers. 6.1's post-proof `irq FAIL extra` guard — every
   notification after the proof was a failure — is gone: it could not survive a line that is meant to
   keep firing. The storm guard is what would now report a line that keeps firing with nothing to
-  receive; the count is a pure `EmptyRun`, host-tested, because no healthy boot reaches it.
+  receive; the count is a pure `EmptyRun`, host-tested, because no healthy boot reaches it — and no
+  unhealthy one that QEMU can be made to produce: skipping the drain leaves bytes stuck in silence
+  rather than a storm, since QEMU drops the line on the `UARTICR` write. `rx FAIL storm` has host
+  coverage only.
 - **A driver that owns an interrupt line claims and re-arms it through `minixrs-driver-rt`'s
   `IrqLine`** (`drivers/tty` does since slice 6.2). The crate's `src` is on the shared
   `rerun-if-changed` list in `kernel/build.rs`, so an edit re-embeds every driver ELF.
@@ -542,7 +552,10 @@ Beyond the shared contracts above, the driver-specific rules:
   re-arm), because its source is a condition, not an event. TTY writes neither `UARTLCR_H` nor
   `UARTIFLS` — the kernel's console shares the UART and the loop is right with the FIFO on or off —
   and it sets `RTIM` beside `RXIM` so a FIFO holding fewer bytes than its trigger level still
-  interrupts
+  interrupts. **The order is held by this argument and by no test**: under QEMU, draining first
+  moves no marker. The re-arm is a different matter — a dropped `IRQ_ENABLE` loses `stdin ok`, but
+  only because the feeder sends its probe in two chunks (see
+  [Fed boots](./build-and-boot.md#fed-boots))
 - **A driver that wakes a waiter does it after the re-arm**, so its line is live again before the
   waiter can come back with a request. In TTY that is why `IrqService::on_notify` only *reports*
   that bytes arrived and `main` sends the `NOTIFY`
@@ -784,7 +797,9 @@ process waiting on a keyboard would stop every file operation in the system. So 
   zero-length read with a bad minor or grant id is still the error it is.
 - **Peek, copy, then consume.** A copy the kernel refuses (`EPERM`, `EFAULT`, relayed verbatim)
   consumes nothing: the bytes are still owed to whoever asks next. TTY's ring has `peek` and
-  `consume` as two calls for exactly this.
+  `consume` as two calls for exactly this. The two calls are host-tested; **their order in TTY's
+  `do_read` is not proved by anything** — no host test calls it and no boot refuses a copy with
+  bytes buffered — so it is a line to check by reading whenever that function changes.
 - **One waiter, not a queue; the last asker wins.** Every reader goes through VFS, so one endpoint
   to notify is the whole state. A second, different endpoint asking while one is recorded replaces
   it, and the first would never be notified — unreachable while VFS is the only CDEV client of TTY,
@@ -846,13 +861,15 @@ waited on:
   never spins on `EAGAIN`, and a spurious notification costs one round.
 - **Never reply to a notification** — the console driver's or anyone else's. The check sits before
   the request dispatch, so a `NOTIFY_MESSAGE` cannot fall into the `_ => ENOSYS` arm and have an
-  unasked-for message sent at a driver. A notification from any other source is dropped. (RS's
-  heartbeat never gets that far: `sef.receive` answers it.)
+  unasked-for message sent at a driver — which does not fail the boot, it quietly ruins it (the
+  hazard under [Always reply](#always-reply)). A notification from any other source is dropped.
+  (RS's heartbeat never gets that far: `sef.receive` answers it.)
 - **One entry per proc slot, so the table cannot fill.** A process blocked in `SENDREC` has one
   request outstanding; the table is sized from `NR_SERVED_PROCS` and there is no "too many readers"
   errno. Re-parking replaces the slot's entry and goes to the back of the order.
 - **Two things free an entry besides an answer.** `VFS_PM_EXIT` frees the exiting process's entry
-  *before* its descriptor row is reset, so VFS never replies to a dead endpoint. And
+  *before* its descriptor row is reset, so VFS never replies to a dead endpoint (`ParkTable::free`
+  is host-tested; the call in `do_pm_exit` is not, and no boot kills a parked reader). And
   `evict_stale(m_source)` runs on every ordinary request: VFS keeps no process table, so a request
   from a slot is its only evidence of who holds it, and an entry stored there under a different
   endpoint is a previous occupant's whose exit never arrived. The entry stores the whole endpoint,
@@ -1128,8 +1145,9 @@ A server's probe battery is how these rules stay proved. The rules for writing o
   it lives in **TTY's production loop**: TTY notifies its *first client* before replying to that
   client's first request — one `ipc_notify`, behind a one-shot flag. The client is VFS,
   mid-`SENDREC` in its prologue, so the notification is latched, and VFS's second prologue request
-  always meets it. The verdict is two VFS lines, `cdev.short ok n=256` and `cons.notify ok`; what
-  they prove, and what prints instead, is in
+  meets it on every boot, whenever input arrives. The verdict is two VFS lines, `cdev.short ok
+  n=256` and `cons.notify ok`; what they prove, what prints instead, and the one scheduling fact the
+  arrangement still leans on — TTY and VFS sharing a priority band — are in
   [`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec). Three things
   make a probe in a production path tolerable here and are the test for the next one: it uses a
   shape the contract already allows (to VFS it is one spurious "ask again"); it runs once; and it

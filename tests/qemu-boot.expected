@@ -1066,11 +1066,14 @@ minix.rs fileio: malloc ok
 # Limine, which consume whatever is on stdin before the kernel starts).
 [diag vfs] cons.beside ok
 
-# The feeder then writes `minix.rs stdin` and a newline to QEMU's stdin, once.
+# The feeder then writes `minix.rs stdin` and a newline to QEMU's stdin, in two chunks a
+# few seconds apart. The second chunk's interrupt arrives only if TTY re-armed
+# its line (IRQ_ENABLE) after draining the first, so this line also proves the
+# re-arm: drop the IRQ_ENABLE and it is absent (observed).
 # The PL011 raises its receive interrupt, TTY drains the FIFO into its ring and
 # notifies VFS, VFS retries the parked read with a fresh grant, and the child's
-# read returns. The child loops until it holds the probe's 15 bytes -- they may
-# arrive across several interrupts -- compares them with init's CONSOLE_PROBE,
+# read returns. The child loops until it holds the probe's 15 bytes -- they
+# arrive across at least two interrupts -- compares them with init's CONSOLE_PROBE,
 # and prints this itself, on fd 1. Raw bytes: nothing echoed them and nothing
 # rewrote the newline (spec R6). n=15 is CONSOLE_PROBE.len(), pinned by a const
 # assert, and a host test in init holds the constant to the bytes the feeder

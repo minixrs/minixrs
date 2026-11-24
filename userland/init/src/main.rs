@@ -532,8 +532,10 @@ fn fork_stdin_probe(pm: Endpoint, vfs: Endpoint) -> i32 {
 /// make VFS retry the read — so the `ok` line cannot print unless every one
 /// of those happened.
 ///
-/// **It loops**, because the bytes are free to arrive across several
-/// interrupts and a `read` returns whatever is buffered: until it holds the
+/// **It loops**, because the bytes arrive across several interrupts — on a
+/// fed boot always at least two, since the feeder sends the probe in two
+/// chunks so that the second needs TTY's re-arm — and a `read` returns
+/// whatever is buffered: until it holds the
 /// probe's length, or an answer that is not a positive count that fits.
 ///
 /// Exactly one line, on fd 1:

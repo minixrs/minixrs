@@ -878,7 +878,7 @@ dispatch and its `ENOSYS` arm. Echo arrives with 6.8 and canonical mode with Pha
   QEMU refills it as the loop empties it. `IRQ_ENABLE` answered `OK` each time with the `UARTICR`
   write placed before the drain.
 - *EOF on stdin.* With `< /dev/null` QEMU carries on and the boot is unchanged, so the feeder exits
-  after its one write instead of holding its stdout open.
+  once it has written instead of holding its stdout open.
 - *Bytes on stdin from time zero.* Five of them never reached TTY: the firmware or Limine consumes
   what is on stdin before the kernel starts. The feeder's gate on a log line is therefore
   load-bearing, not only what makes the proof causal.
@@ -890,12 +890,13 @@ dispatch and its `ENOSYS` arm. Echo arrives with 6.8 and canonical mode with Pha
   were passes by timing; after it, four more fed stub-free boots each printed `cdev.short ok n=256`,
   `cons.notify ok`, `cons.park`, `cons.beside ok` and `stdin ok n=15`, with no `FAIL`. The marker
   files as committed hold 174 checks for each full boot (113 + 48 common, 8 + 5 per backend) and 7
-  for the reboot. The recorded musl-flavour set on the final code:
+  for the reboot. The recorded musl-flavour set on the final code (`efc8d22`):
   - the fed disk boot passes `check-boot-log.sh disk` on all 174 checks;
   - the fed ramdisk boot passes `check-boot-log.sh ramdisk` on all 174;
   - the unfed reboot of the disk boot's image passes its 7, and its log shows `cons.notify ok`,
     `cons.park` and `cons.beside ok` with no `stdin ok` — the reader parked for the whole boot;
-  - `diff-backends.sh` is clean across the pair; the feeder wrote about 20 s into the ramdisk boot.
+  - `diff-backends.sh` is clean across the pair; the feeder started writing 27 s into the disk boot
+    and 23 s into the ramdisk one.
 - *The budget, and the defect it found.* A boot of the merge base on this machine put the last
   required marker (`[diag vfs] pm-exit reset closed=1`) at 64.71% of a 600 s disk log. As first
   built the slice moved it: 76.62% of the fed disk log and 50.59% of the ramdisk one, a whole
@@ -903,9 +904,9 @@ dispatch and its `ENOSYS` arm. Echo arrives with 6.8 and canonical mode with Pha
   child of its own reaped and the rotation ran one child deeper for the rest of the boot. init now
   waits once more in that turn, and the boots recorded with that fix read **64.94%** (about 390 s)
   and **42.73%** (about 256 s) — back at the baseline, no timeout moved. Those two figures predate
-  the kernel fix and the notify probe; on the final code:
-  - **62.72%** of the fed disk log, about 376 s;
-  - **42.91%** of the fed ramdisk log, about 257 s.
+  the kernel fix and the notify probe; on the final code (`efc8d22`):
+  - **63.20%** of the fed disk log, about 379 s;
+  - **41.41%** of the fed ramdisk log, about 248 s.
 
   So the slice does not move the budget and no timeout changes.
 - *The fork-cycle markers moved a slot.* init's first fork is now the console-read child, so the
@@ -924,20 +925,51 @@ dispatch and its `ENOSYS` arm. Echo arrives with 6.8 and canonical mode with Pha
   whole-branch review found it by reading the kernel; the mutation run hit it independently at row 4
   and reproduced it on the unmutated tree, where 2 of 4 fed stub-free boots printed no `stdin ok`
   and no `FAIL` anywhere. So every pass recorded before the fix was a pass by timing.
-- *The fix and its proof.* The guard is restored in `kernel/src/ipc/receive.rs`, and `do_sendrec`
-  clears `MF_REPLY_PEND` when its receive half fails, so the guard cannot outlive the call (that
-  path is verified by reading; no boot provokes it). The proof was written first: TTY notifies its
-  first client — VFS — before replying to that client's first request, so VFS's second prologue
-  request always meets a latched notification. Without the guard `[diag vfs] cdev.short FAIL
-  rc=4096` printed in place of `cdev.short ok n=256` (observed); with it `cdev.short ok n=256`
-  prints, and so does a new required line, `[diag vfs] cons.notify ok` — VFS's first notification
-  from the console driver, received by its ordinary `RECEIVE` loop, on every boot, fed or not.
+- *The fix and its proof.* The guard is restored in `kernel/src/ipc/receive.rs`. The proof was
+  written first: TTY notifies its first client — VFS — before replying to that client's first
+  request, so VFS's second prologue request meets a latched notification on every boot. Without the
+  guard `[diag vfs] cdev.short FAIL rc=4096` printed in place of `cdev.short ok n=256` (observed);
+  with it `cdev.short ok n=256` prints, and so does a new required line, `[diag vfs] cons.notify ok`
+  — VFS's first notification from the console driver, received by its ordinary `RECEIVE` loop, on
+  every boot, fed or not. The proof is free of *input* timing and not of scheduling: it works
+  because TTY and VFS share a priority band (debt 17, and
+  [`kernel.md`](../conventions/kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec)).
+- *The flag behind the guard could go stale, in two ways, and now cannot matter.* Once
+  `MF_REPLY_PEND` withheld notifications at receive time, a flag left set became a starved process.
+  The commit review found the first way: a `SENDREC` whose receive half is refused left it set, and
+  `do_sendrec` now clears it (the one reachable refusal is `ELOCKED`, after a send half that
+  blocked). The re-review of the fix found the second and larger one: **every successful `exec` left
+  it set**, because the caller is restarted with no reply ever delivered. Nothing broke — an exec'd
+  process is `USR_T`, `SENDREC`-only and never notified — but the first server or driver started by
+  fork and exec would have stopped receiving notifications. `do_exec` now clears the flag, and a
+  plain `RECEIVE` clears it at entry, which is MINIX 3's own backstop (`do_sync_ipc`, `case
+  RECEIVE`) and had been dropped in translation with the guard. With that last clear a stale flag
+  from any path lasts no longer than its process's next plain `RECEIVE`. None of the three clears
+  has a boot or a mutation that proves it; they are verified by reading (debt 14).
 - *From the same review.* A wake-up `ipc_notify` that fails now keeps the waiter and prints `[diag
   tty] rx FAIL notify rc=…` once (forbidden) — it used to be discarded with the waiter already
   forgotten. `tools/feed-console.sh` parses `FEED_CONSOLE_CEILING` base 10 (`08` was an arithmetic
   error). TTY drops any `NOTIFY_MESSAGE` that is not from `HARDWARE` instead of answering it.
-- *Mutations.* TODO(coordinator): the mutation rows' results on the final code (the spec's §3 table
-  holds a `Seen` column with one placeholder per pending row).
+- *Mutations.* Sixteen rows, run on the fixed kernel after eight clean fed boots; the spec's §3
+  table has each one, and this is what the classes showed.
+  - *Confirmed, as predicted.* Remove the kernel guard: `cdev.short FAIL rc=4096`, and `cons.notify
+    ok` moves to the real wake-up. Remove TTY's probe: `cons.notify ok` moves to real input and is
+    absent unfed. TTY withholds its reply: the whole system freezes about 637 lines in. VFS relays
+    `EAGAIN`: `stdin FAIL n=0 first=none rc=-11`. No wake-up `NOTIFY`, or the notification dropped
+    without a retry: `stdin ok` absent, the rest unmoved. The storm guard disabled: three
+    `irq::tests` fail. A forced `NOTIFY` failure: `rx FAIL notify rc=-1` once, reader still served.
+  - *Four that behaved differently.* **4a**, a notification reaching VFS's dispatch, was not
+    absorbed: a sustained `ENOSYS` ping-pong with TTY, VFS's console `SENDREC`s answering `ELOCKED`,
+    userland output down from 8,489 lines to 54, and no `FAIL` line (debt 9). **5**, no `IRQ_ENABLE`
+    after the drain, **passed** — the feeder wrote the probe in one piece, which is one interrupt —
+    so the feeder now writes two chunks 3 s apart, and with it the mutation loses `stdin ok`. **7**
+    (consume before the copy's result) and **8** (`do_pm_exit` does not free) were each predicted to
+    fail a host test and failed none, with no marker moved: the tests pin the ring's and the table's
+    operations, not the calls in the two `main.rs` files (debts 11 and 12).
+  - *Nothing moves.* Skipping the drain leaves bytes stuck in silence, not a storm, so `rx FAIL
+    storm` has host coverage only. Draining before acknowledging moves nothing. Removing
+    `do_sendrec`'s clear-on-error moves nothing. Removing init's second `wait()` passes all 174
+    checks and shows only as a budget of 73.30% against 62.72% (debts 13 to 16).
 
 **Debt carried from 6.5.**
 
@@ -972,11 +1004,42 @@ dispatch and its `ENOSYS` arm. Echo arrives with 6.8 and canonical mode with Pha
    them** (owner: 6.8, which builds the second `SENDREC`-and-notify pair, or the first slice that
    sees a stray `ENOSYS` exchange in a trace). The hazard is stated once, under
    [Always reply](../conventions/servers-and-drivers.md#always-reply). Deliberately not hardened in
-   6.5: the only known way to deliver a message outside a `SENDREC` was the kernel defect above, now
-   fixed. If that judgement is wrong the cost is a silent spin between two servers.
+   6.5, and on a weaker footing than first recorded: the kernel defect above was thought the only
+   way in, and mutation 4a showed it is **one slip in VFS's notification arm away** (the re-review
+   found one further theoretical path, through `ELOCKED`, that no current process pair reaches). The
+   fix — a reply-shaped message is never answered — changes every server's unknown-message arm and
+   is its own change. Until then the cost of that slip is a boot that degrades silently: console
+   calls answering `ELOCKED`, userland output collapsing, and no `FAIL` line.
 10. **The kernel rule's only proof is a probe in TTY's production loop** (owner: whoever gives the
     kernel a test that can provoke the interleaving some other way). One spurious notification per
     boot; removing it is a flag and six lines and leaves `mini_receive`'s guard with no boot proof.
+11. **The consume-after-copy order in TTY's `do_read` is unproved** (owner: the first slice that can
+    make `SYS_SAFECOPY` refuse a console read with bytes buffered, or 6.6, which writes the same
+    step in a second driver). `peek` and `consume` are host-tested as ring operations; consuming
+    before the copy's result is known fails no test and moves no marker.
+12. **`do_pm_exit`'s free of a parked read is unproved** (owner: the slice that first kills a
+    process blocked in VFS). `ParkTable::free` is host-tested; deleting the call fails no test and
+    moves no marker, because no boot kills a parked reader. `evict_stale` stands behind it.
+13. **init's wait-again is guarded only by a hand-measured budget** (owner: whoever next re-measures
+    the boot budget, or gives the rotation a depth marker). Without the second `wait()` every check
+    passes and the last required marker moves from 62.72% to 73.30% of the disk log — a regression
+    only [`ci.md`](../conventions/ci.md)'s boot-timing reading would catch.
+14. **`MF_REPLY_PEND`'s clears off the delivery path are verified by reading only** (owner: the
+    slice that first starts a server or driver by fork and exec, or whoever gives the kernel a test
+    that can fail a receive half). `do_sendrec`'s clear-on-error moves nothing when removed; the
+    `exec` and plain-`RECEIVE` clears have no boot that would miss them.
+15. **R4's acknowledge-before-drain order rests on reasoning under QEMU** (owner: the first run on
+    hardware, or on a UART model that holds its level). Reversing the order moves nothing.
+16. **`rx FAIL storm` is host-tested only** (owner: none unless a storm is seen). QEMU drops the
+    line on the `UARTICR` write, so skipping the drain produces stuck bytes, not a storm, and no
+    boot has seen the marker print.
+17. **The kernel rule's probe depends on TTY and VFS sharing a priority band** (owner: whoever
+    changes a boot server's priority or quantum). The guard is exercised only if TTY reaches
+    `RECEIVE` before VFS's next `SENDREC`; rank VFS above TTY and `cdev.short ok` prints with the
+    guard or without it, on every boot, with nothing to say the proof has gone. Re-run "remove the
+    guard" after any such change and expect `cdev.short FAIL rc=4096`.
+18. **The feeder's 3 s gap is a guess** (owner: this branch's first CI run, with debt 4). If both
+    chunks of the probe land in one drain the re-arm goes unproved and the boot still passes.
 
 ### Slice 6.6: `virtio-console` as a second CDEV backend
 

@@ -20,7 +20,12 @@
 #     [diag vfs] cons.beside ok
 #
 # and, once it is there, writes the probe -- `minix.rs stdin` and a newline, 15
-# bytes -- to stdout EXACTLY ONCE, and exits. init's proof child is blocked in
+# bytes -- to stdout one time, in TWO CHUNKS (the first SPLIT bytes, GAP
+# seconds, the rest), and exits. Two chunks so that the second needs a second
+# interrupt: it arrives only if TTY re-armed its line after draining the first
+# (written in one piece, a dropped IRQ_ENABLE passed the boot -- slice 6.5,
+# mutation 5). GAP is a guess: if both chunks land in one drain the boot still
+# passes and the re-arm goes unproved. init's proof child is blocked in
 # `read(0)` for those bytes and prints `minix.rs init: stdin ok n=15` when they
 # arrive (userland/init/src/main.rs, CONSOLE_PROBE; a host test there reads the
 # PROBE line below and fails if the two differ).
