@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! Driver runtime library: IRQ line, virtio transport and negotiation, typed DMA
-//! handles, split virtqueue, and a GPT parser. (The BDEV request parse and
-//! validation a block driver needs live in `server-rt::bdev`, not here.)
+//! handles, split virtqueue, a GPT parser, and the character-driver read
+//! contract. (The BDEV request parse and validation a block driver needs live in
+//! `server-rt::bdev`, not here.)
 //!
 //! Every virtio driver's loop follows the same order (I12): wait for
 //! [`IrqLine::fired`]; read [`Transport::interrupt_status`] and
@@ -31,11 +32,17 @@
 //! [`gpt`] is apart from all of that: a pure parser for a GUID Partition Table
 //! over byte slices a block driver has already read. It does no I/O, touches no
 //! device memory and has no `unsafe`.
+//!
+//! So is [`cdev`]: the pure half of the character-driver read contract — the
+//! request validator, the order a `CDEV_READ` is answered in and the one waiter
+//! owed a `NOTIFY` — shared by TTY and `virtio-console` (slice 6.6). It does no
+//! IPC and has no `unsafe`; each driver's `main` does what it decides.
 
 // `no_std` for the real (freestanding) build, but a normal host crate under
 // `cargo test` so the pure logic gets host-runnable unit tests (as `server-rt`).
 #![cfg_attr(not(test), no_std)]
 
+pub mod cdev;
 pub mod dma;
 pub mod gpt;
 pub mod irq;

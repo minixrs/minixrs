@@ -10,7 +10,8 @@ name = "minixrs-tty"
 path = "src/main.rs"
 
 # `minixrs-driver-rt` supplies `IrqLine`, the claim / re-arm helper shared with the virtio
-# drivers; its `src` is on the shared `rerun-if-changed` list in `kernel/build.rs`.
+# drivers, and `cdev`, the pure half of the `CDEV_READ` contract shared with `virtio-console`;
+# its `src` is on the shared `rerun-if-changed` list in `kernel/build.rs`.
 [dependencies]
 minixrs-kernel-shared = { path = "../../kernel-shared" }
 minixrs-ipc = { path = "../../minixrs-ipc" }

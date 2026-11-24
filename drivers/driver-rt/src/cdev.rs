@@ -1,11 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `CDEV_WRITE` and `CDEV_READ` validation — the driver's pure logic.
+//! The driver side of the `CDEV_READ` / `CDEV_WRITE` contract — its pure half
+//! (slice 6.5, spec R1; moved here from `drivers/tty` in slice 6.6, spec C6).
 //!
-//! The four-field parse moved to `server-rt::cdev` in slice 5.11, when the
-//! memory driver became the second decoder of this payload. What stays here is
-//! everything TTY-specific: which minor exists (only the console), and the
-//! clamp to [`CDEV_MAX_IO`] that a stack staging buffer forces.
+//! A character driver that can run out of input answers every `CDEV_READ` at
+//! once: the count copied, or `EAGAIN` with the caller recorded as its
+//! [`Waiter`] and owed one `NOTIFY`. TTY was the first to implement that,
+//! `virtio-console` is the second and slice 6.8 adds a third; three copies of
+//! "record the waiter before answering `EAGAIN`" would drift, so the decisions
+//! live here and each driver's `main` does what they say. The memory driver
+//! stays off this module: it never says `EAGAIN`.
+//!
+//! What is here is plain data and arithmetic: the request validator
+//! ([`validate_write`], [`validate_read`]), the byte count of one read
+//! ([`read_len`]), the order a read is answered in ([`read_plan`]) and the one
+//! endpoint owed a notification ([`Waiter`]). No IPC, no device, no `unsafe`.
+//! The four-field parse is `server-rt::cdev`'s (slice 5.11); what a driver adds
+//! to it is which minor exists — one per driver, passed in — and the clamp to
+//! [`CDEV_MAX_IO`].
 //!
 //! ## Two things this module is careful about
 //!
@@ -19,15 +31,16 @@
 //! **An over-long request is a short write, not an error.** [`validate_write`]
 //! clamps to [`CDEV_MAX_IO`] and reports the clamped count; the client re-sends
 //! with `offset` advanced. That is POSIX `write()`'s contract, and it is what lets
-//! the driver stage through a fixed buffer in its `main` frame with no allocator.
+//! a driver stage through a fixed buffer with no allocator.
 
-use minixrs_kernel_shared::callnr::{CDEV_MAX_IO, CDEV_MINOR_CONSOLE};
+use minixrs_kernel_shared::callnr::CDEV_MAX_IO;
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{EINVAL, ENXIO};
 use minixrs_kernel_shared::grant::grant_valid;
 use minixrs_server_rt::cdev::Request;
 
-/// Decide how many bytes a `CDEV_WRITE` moves for `req`, or which errno to reply.
+/// Decide how many bytes a `CDEV_WRITE` moves for `req` on a driver whose one
+/// device is `minor`, or which errno to reply.
 ///
 /// `Ok(n)` means "copy `n` bytes and reply `n`" — including `Ok(0)`, which is a
 /// legal zero-length write that needs no copy at all. `Err(e)` is a negative errno
@@ -35,8 +48,10 @@ use minixrs_server_rt::cdev::Request;
 ///
 /// The checks, in the order a driver should apply them:
 ///
-/// 1. `minor != CDEV_MINOR_CONSOLE` → `ENXIO`. `/dev/null` and `/dev/zero` are
-///    minors of the *memory* driver, not of TTY, so this check stays an equality.
+/// 1. `req.minor != minor` → `ENXIO`. Minors are a per-driver namespace and each
+///    driver here serves exactly one (TTY passes `CDEV_MINOR_CONSOLE`), so this
+///    check is an equality: `/dev/null` and `/dev/zero` are minors of the
+///    *memory* driver, not of TTY.
 /// 2. `len < 0` → `EINVAL`. A negative length would otherwise widen into a huge
 ///    `u64` byte count for the kernel copy.
 /// 3. An invalid grant id → `EINVAL`. Cheap local reject of the one value that can
@@ -45,12 +60,12 @@ use minixrs_server_rt::cdev::Request;
 /// 4. `len == 0` → `Ok(0)`, checked *after* the gid so a zero-length write with a
 ///    garbage grant is still reported as the error it is.
 /// 5. Otherwise clamp to [`CDEV_MAX_IO`].
-pub fn validate_write(req: Request) -> Result<usize, i32> {
-    validate(req)
+pub fn validate_write(req: Request, minor: i32) -> Result<usize, i32> {
+    validate(req, minor)
 }
 
-/// Decide the most a `CDEV_READ` may move for `req`, or which errno to reply
-/// (slice 6.5, spec R1).
+/// Decide the most a `CDEV_READ` may move for `req` on a driver whose one
+/// device is `minor`, or which errno to reply (slice 6.5, spec R1).
 ///
 /// The rules and their order are [`validate_write`]'s, and both call the same
 /// function, so the two directions cannot drift. Nothing in them depends on the
@@ -58,17 +73,17 @@ pub fn validate_write(req: Request) -> Result<usize, i32> {
 /// kernel's check, never re-derived here.
 ///
 /// `Ok(n)` is an upper bound, not the reply. The count actually moved is
-/// [`read_len`] of it and what the input ring holds. `Ok(0)` is the exception:
-/// the driver answers `0` for it *before* it looks at the ring, so a zero-length
-/// read of an empty console is `0` and not `EAGAIN`.
-pub fn validate_read(req: Request) -> Result<usize, i32> {
-    validate(req)
+/// [`read_len`] of it and what the driver has buffered. `Ok(0)` is the
+/// exception: the driver answers `0` for it *before* it looks at its buffer, so a
+/// zero-length read of an empty console is `0` and not `EAGAIN`.
+pub fn validate_read(req: Request, minor: i32) -> Result<usize, i32> {
+    validate(req, minor)
 }
 
 /// The rule set `CDEV_WRITE` and `CDEV_READ` share; see [`validate_write`] for
 /// the checks and why they come in this order.
-fn validate(req: Request) -> Result<usize, i32> {
-    if req.minor != CDEV_MINOR_CONSOLE {
+fn validate(req: Request, minor: i32) -> Result<usize, i32> {
+    if req.minor != minor {
         return Err(ENXIO);
     }
     if req.len < 0 {
@@ -101,8 +116,10 @@ pub fn read_len(want: usize, buffered: usize) -> usize {
 pub enum ReadPlan {
     /// A zero-length read: reply `0` and touch nothing.
     Zero,
-    /// TTY holds no interrupt line, so no byte can ever arrive: reply `EIO`.
-    NoLine,
+    /// The device has stopped — its interrupt line was never claimed, or it
+    /// failed since — so no input can ever arrive: reply `EIO` (slice 6.6,
+    /// spec C9).
+    Stopped,
     /// Nothing is buffered: record the caller as the waiter and reply `EAGAIN`.
     Empty,
     /// Copy this many of the oldest bytes to the caller, then consume them.
@@ -111,25 +128,35 @@ pub enum ReadPlan {
 }
 
 /// Decide how a `CDEV_READ` that passed [`validate_read`] with `want` is
-/// answered, given how many bytes are `buffered` and whether TTY claimed its
-/// interrupt line at boot.
+/// answered, given how many bytes are `buffered` and whether the driver
+/// `can_receive` — whether input can still arrive.
 ///
-/// The order is the contract (spec R1, Review Focus 3):
+/// `can_receive` is `false` for a device that will never deliver another
+/// byte: TTY when its interrupt claim was refused or its line has stopped, a
+/// virtio driver once it has marked its device `FAILED`. It is `true` for one
+/// that is merely not receiving *yet* (TTY during its delivery proof): input
+/// will come, so `EAGAIN` and its notification are still a promise the driver
+/// can keep.
 ///
-/// 1. `want == 0` is [`ReadPlan::Zero`] **before the ring is looked at**, so a
-///    zero-length read of an empty console is `0` and never `EAGAIN` — and it
+/// The order is the contract (spec R1, Review Focus 3; slice 6.6, Review
+/// Focus 4):
+///
+/// 1. `want == 0` is [`ReadPlan::Zero`] **before the buffer is looked at**, so
+///    a zero-length read of an empty console is `0` and never `EAGAIN` — and it
 ///    records no waiter, so it cannot be used to steal the one `NOTIFY`.
-/// 2. No line is [`ReadPlan::NoLine`]: `EAGAIN` promises a notification, and
-///    without the line there is no interrupt to send one from. Parking a reader
-///    behind it would be a hang with no marker.
+/// 2. A driver that cannot receive is [`ReadPlan::Stopped`]: `EAGAIN` promises
+///    a notification, and with no interrupt to come there is nothing to send
+///    one from. Parking a reader behind it would be a hang with no marker.
+///    This comes before the buffer too, so bytes a device delivered before it
+///    stopped are not handed out afterwards.
 /// 3. Nothing buffered is [`ReadPlan::Empty`].
 /// 4. Otherwise [`ReadPlan::Copy`] of [`read_len`].
-pub fn read_plan(want: usize, buffered: usize, line_claimed: bool) -> ReadPlan {
+pub fn read_plan(want: usize, buffered: usize, can_receive: bool) -> ReadPlan {
     if want == 0 {
         return ReadPlan::Zero;
     }
-    if !line_claimed {
-        return ReadPlan::NoLine;
+    if !can_receive {
+        return ReadPlan::Stopped;
     }
     match read_len(want, buffered) {
         0 => ReadPlan::Empty,
@@ -137,11 +164,12 @@ pub fn read_plan(want: usize, buffered: usize, line_claimed: bool) -> ReadPlan {
     }
 }
 
-/// The one endpoint TTY owes a `NOTIFY` (spec R1).
+/// The one endpoint a driver owes a `NOTIFY` (spec R1).
 ///
 /// A `CDEV_READ` that finds nothing buffered is answered `EAGAIN` and its
-/// caller recorded here; when input next arrives that endpoint is notified
-/// once and forgotten, and it asks again. One slot, not a queue: every reader
+/// caller recorded here; when input next arrives — or the device stops, so
+/// that none ever will (slice 6.6, spec C9) — that endpoint is notified once
+/// and forgotten, and it asks again. One slot, not a queue: every reader
 /// goes through VFS, and the notification means "ask again", not "this read is
 /// ready". A second asker replaces the first — the last asker wins.
 pub struct Waiter(Option<Endpoint>);
@@ -164,12 +192,18 @@ impl Waiter {
     }
 }
 
+impl Default for Waiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use minixrs_kernel_shared::Message;
     use minixrs_kernel_shared::callnr::{
-        CDEV_GRANT_OFF, CDEV_LEN_OFF, CDEV_MINOR_OFF, CDEV_OFFSET_OFF,
+        CDEV_GRANT_OFF, CDEV_LEN_OFF, CDEV_MINOR_CONSOLE, CDEV_MINOR_OFF, CDEV_OFFSET_OFF,
     };
     use minixrs_kernel_shared::grant::{GRANT_INVALID, grant_id};
     use minixrs_server_rt::cdev::parse;
@@ -192,6 +226,10 @@ mod tests {
 
     const GOOD_GID: i32 = grant_id(3, 1);
 
+    /// The minor the moved tests run the validator for: TTY's, as before the
+    /// move. `the_one_minor_is_the_drivers_not_a_constant` covers another.
+    const MINOR: i32 = CDEV_MINOR_CONSOLE;
+
     #[test]
     fn parse_of_a_zeroed_payload_yields_a_rejectable_request() {
         // A client that sent nothing at all: minor 0 happens to be the console,
@@ -204,14 +242,14 @@ mod tests {
         };
         let req = parse(&m);
         assert_eq!(req.len, 0);
-        assert_eq!(validate_write(req), Ok(0));
+        assert_eq!(validate_write(req, MINOR), Ok(0));
     }
 
     #[test]
     fn a_normal_write_passes_its_length_through() {
         for len in [1i32, 12, 64, CDEV_MAX_IO as i32 - 1, CDEV_MAX_IO as i32] {
-            let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0));
-            assert_eq!(validate_write(req), Ok(len as usize), "len {len}");
+            let req = parse(&request(MINOR, GOOD_GID, len, 0));
+            assert_eq!(validate_write(req, MINOR), Ok(len as usize), "len {len}");
         }
     }
 
@@ -227,7 +265,7 @@ mod tests {
             i32::MAX,
         ] {
             assert_eq!(
-                validate_write(parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0))),
+                validate_write(parse(&request(MINOR, GOOD_GID, len, 0)), MINOR),
                 Ok(CDEV_MAX_IO),
                 "len {len}"
             );
@@ -236,15 +274,15 @@ mod tests {
 
     #[test]
     fn a_zero_length_write_is_ok_not_an_error() {
-        let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, 0, 0));
-        assert_eq!(validate_write(req), Ok(0));
+        let req = parse(&request(MINOR, GOOD_GID, 0, 0));
+        assert_eq!(validate_write(req, MINOR), Ok(0));
     }
 
     #[test]
     fn an_unknown_minor_is_enxio() {
         for minor in [1i32, 7, -1, i32::MAX] {
             let req = parse(&request(minor, GOOD_GID, 16, 0));
-            assert_eq!(validate_write(req), Err(ENXIO), "minor {minor}");
+            assert_eq!(validate_write(req, MINOR), Err(ENXIO), "minor {minor}");
         }
     }
 
@@ -253,16 +291,16 @@ mod tests {
         // Left unchecked this would widen into a ~16 EiB `u64` byte count for the
         // kernel copy call.
         for len in [-1i32, -256, i32::MIN] {
-            let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0));
-            assert_eq!(validate_write(req), Err(EINVAL), "len {len}");
+            let req = parse(&request(MINOR, GOOD_GID, len, 0));
+            assert_eq!(validate_write(req, MINOR), Err(EINVAL), "len {len}");
         }
     }
 
     #[test]
     fn an_invalid_grant_id_is_einval() {
         for gid in [GRANT_INVALID, -2, i32::MIN] {
-            let req = parse(&request(CDEV_MINOR_CONSOLE, gid, 16, 0));
-            assert_eq!(validate_write(req), Err(EINVAL), "gid {gid}");
+            let req = parse(&request(MINOR, gid, 16, 0));
+            assert_eq!(validate_write(req, MINOR), Err(EINVAL), "gid {gid}");
         }
     }
 
@@ -271,12 +309,28 @@ mod tests {
     #[test]
     fn the_minor_check_precedes_the_length_and_grant_checks() {
         let req = parse(&request(9, GRANT_INVALID, -5, 0));
-        assert_eq!(validate_write(req), Err(ENXIO));
+        assert_eq!(validate_write(req, MINOR), Err(ENXIO));
 
         // ...and a bad grant is reported even on a zero-length write, rather than
         // being masked by the `Ok(0)` fast path.
-        let req = parse(&request(CDEV_MINOR_CONSOLE, GRANT_INVALID, 0, 0));
-        assert_eq!(validate_write(req), Err(EINVAL));
+        let req = parse(&request(MINOR, GRANT_INVALID, 0, 0));
+        assert_eq!(validate_write(req, MINOR), Err(EINVAL));
+    }
+
+    /// Slice 6.6, spec C6: which minor exists is the driver's fact, passed in.
+    /// A driver whose device is not minor 0 accepts its own and refuses the
+    /// console's, in both directions.
+    #[test]
+    fn the_one_minor_is_the_drivers_not_a_constant() {
+        for minor in [1i32, 7, i32::MAX] {
+            let own = parse(&request(minor, GOOD_GID, 16, 0));
+            assert_eq!(validate_write(own, minor), Ok(16), "minor {minor}");
+            assert_eq!(validate_read(own, minor), Ok(16), "minor {minor}");
+
+            let other = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, 16, 0));
+            assert_eq!(validate_write(other, minor), Err(ENXIO), "minor {minor}");
+            assert_eq!(validate_read(other, minor), Err(ENXIO), "minor {minor}");
+        }
     }
 
     // ---- CDEV_READ (slice 6.5, spec R1) ----
@@ -284,8 +338,8 @@ mod tests {
     #[test]
     fn a_normal_read_passes_its_length_through() {
         for len in [1i32, 15, 64, CDEV_MAX_IO as i32 - 1, CDEV_MAX_IO as i32] {
-            let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0));
-            assert_eq!(validate_read(req), Ok(len as usize), "len {len}");
+            let req = parse(&request(MINOR, GOOD_GID, len, 0));
+            assert_eq!(validate_read(req, MINOR), Ok(len as usize), "len {len}");
         }
     }
 
@@ -294,15 +348,15 @@ mod tests {
     /// and never `EAGAIN`.
     #[test]
     fn a_zero_length_read_is_ok_zero() {
-        let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, 0, 0));
-        assert_eq!(validate_read(req), Ok(0));
+        let req = parse(&request(MINOR, GOOD_GID, 0, 0));
+        assert_eq!(validate_read(req, MINOR), Ok(0));
     }
 
     #[test]
     fn a_negative_read_length_is_einval() {
         for len in [-1i32, -256, i32::MIN] {
-            let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0));
-            assert_eq!(validate_read(req), Err(EINVAL), "len {len}");
+            let req = parse(&request(MINOR, GOOD_GID, len, 0));
+            assert_eq!(validate_read(req, MINOR), Err(EINVAL), "len {len}");
         }
     }
 
@@ -310,7 +364,7 @@ mod tests {
     fn a_read_of_an_unknown_minor_is_enxio() {
         for minor in [1i32, 7, -1, i32::MAX] {
             let req = parse(&request(minor, GOOD_GID, 16, 0));
-            assert_eq!(validate_read(req), Err(ENXIO), "minor {minor}");
+            assert_eq!(validate_read(req, MINOR), Err(ENXIO), "minor {minor}");
         }
     }
 
@@ -323,7 +377,7 @@ mod tests {
             i32::MAX,
         ] {
             assert_eq!(
-                validate_read(parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0))),
+                validate_read(parse(&request(MINOR, GOOD_GID, len, 0)), MINOR),
                 Ok(CDEV_MAX_IO),
                 "len {len}"
             );
@@ -333,31 +387,31 @@ mod tests {
     #[test]
     fn a_read_with_an_invalid_grant_id_is_einval() {
         for gid in [GRANT_INVALID, -2, i32::MIN] {
-            let req = parse(&request(CDEV_MINOR_CONSOLE, gid, 16, 0));
-            assert_eq!(validate_read(req), Err(EINVAL), "gid {gid}");
+            let req = parse(&request(MINOR, gid, 16, 0));
+            assert_eq!(validate_read(req, MINOR), Err(EINVAL), "gid {gid}");
         }
     }
 
     #[test]
     fn a_read_reports_the_first_problem_in_the_same_order_a_write_does() {
         let req = parse(&request(9, GRANT_INVALID, -5, 0));
-        assert_eq!(validate_read(req), Err(ENXIO));
+        assert_eq!(validate_read(req, MINOR), Err(ENXIO));
 
         // A bad grant is an error even at length zero, exactly as for a write.
-        let req = parse(&request(CDEV_MINOR_CONSOLE, GRANT_INVALID, 0, 0));
-        assert_eq!(validate_read(req), Err(EINVAL));
+        let req = parse(&request(MINOR, GRANT_INVALID, 0, 0));
+        assert_eq!(validate_read(req, MINOR), Err(EINVAL));
     }
 
     /// The two directions share one rule set; nothing may drift between them.
     #[test]
     fn validate_read_agrees_with_validate_write_on_every_case() {
-        for minor in [CDEV_MINOR_CONSOLE, 1, -1] {
+        for minor in [MINOR, 1, -1] {
             for gid in [GOOD_GID, 0, GRANT_INVALID, i32::MIN] {
                 for len in [i32::MIN, -1, 0, 1, 256, 257, i32::MAX] {
                     let req = parse(&request(minor, gid, len, 0));
                     assert_eq!(
-                        validate_read(req),
-                        validate_write(req),
+                        validate_read(req, MINOR),
+                        validate_write(req, MINOR),
                         "minor {minor} gid {gid} len {len}"
                     );
                 }
@@ -400,15 +454,15 @@ mod tests {
     // ---- the read plan and the waiter (slice 6.5, spec R1) ----
 
     /// Review Focus 3: the zero-length answer comes before the empty check
-    /// and before the no-line check, whatever the ring holds.
+    /// and before the cannot-receive check, whatever the ring holds.
     #[test]
     fn a_zero_length_read_is_planned_before_anything_else() {
         for buffered in [0usize, 1, CDEV_MAX_IO] {
-            for line_claimed in [true, false] {
+            for can_receive in [true, false] {
                 assert_eq!(
-                    read_plan(0, buffered, line_claimed),
+                    read_plan(0, buffered, can_receive),
                     ReadPlan::Zero,
-                    "buffered {buffered} line {line_claimed}"
+                    "buffered {buffered} can_receive {can_receive}"
                 );
             }
         }
@@ -421,14 +475,16 @@ mod tests {
         }
     }
 
-    /// `EAGAIN` owes a `NOTIFY`; with no interrupt line none can be sent.
+    /// `EAGAIN` owes a `NOTIFY`; with no interrupt line none can be sent. (The
+    /// name is from before the move: "no line" was then the only way a driver
+    /// could be unable to receive.)
     #[test]
     fn a_read_with_no_line_is_refused_rather_than_parked() {
         for want in [1usize, 64, CDEV_MAX_IO] {
             for buffered in [0usize, 5] {
                 assert_eq!(
                     read_plan(want, buffered, false),
-                    ReadPlan::NoLine,
+                    ReadPlan::Stopped,
                     "want {want} buffered {buffered}"
                 );
             }
@@ -449,6 +505,37 @@ mod tests {
             read_plan(usize::MAX, usize::MAX, true),
             ReadPlan::Copy(CDEV_MAX_IO)
         );
+    }
+
+    // ---- a device that has stopped (slice 6.6, spec C9) ----
+
+    /// Once input can no longer arrive, a non-zero read is `Stopped` — the
+    /// driver's `EIO` — and never `Empty`: an `EAGAIN` there would park the
+    /// reader behind a notification nothing is left to send.
+    #[test]
+    fn a_non_zero_read_of_a_stopped_device_is_stopped_never_empty() {
+        for want in [1usize, 15, CDEV_MAX_IO, usize::MAX] {
+            for buffered in [0usize, 1, CDEV_MAX_IO, usize::MAX] {
+                assert_eq!(
+                    read_plan(want, buffered, false),
+                    ReadPlan::Stopped,
+                    "want {want} buffered {buffered}"
+                );
+            }
+        }
+    }
+
+    /// The zero-length answer still comes first: a stopped device answers `0`
+    /// to a zero-length read, not `EIO`.
+    #[test]
+    fn a_zero_length_read_of_a_stopped_device_is_still_zero() {
+        for buffered in [0usize, 1, CDEV_MAX_IO, usize::MAX] {
+            assert_eq!(
+                read_plan(0, buffered, false),
+                ReadPlan::Zero,
+                "buffered {buffered}"
+            );
+        }
     }
 
     #[test]

@@ -31,8 +31,8 @@
 //!
 //! **The granter comes from `m_source`.** TTY holds `SYS_SAFECOPY`; its clients do
 //! not. A granter field in the payload would let any client aim a privileged
-//! cross-address-space copy at a third party's memory through TTY. `cdev.rs` has no
-//! way to express one.
+//! cross-address-space copy at a third party's memory through TTY. The CDEV
+//! request (`server-rt::cdev`) has no way to express one.
 //!
 //! **A negative `SYS_SAFECOPY` result is relayed verbatim.** `EPERM` ("your grant
 //! does not authorize this") and `EFAULT` ("your buffer is not mapped") are
@@ -55,15 +55,24 @@
 //!   refuses (`EPERM`, `EFAULT`, relayed verbatim) loses no input.
 //! - `0` stays EOF and is never sent for a non-zero request: the bytes are raw,
 //!   with no echo and no line discipline (spec R6), so a console has no EOF yet.
-//! - Had TTY failed to claim its interrupt line, no byte could ever arrive, and
-//!   the answer is `EIO`, not an `EAGAIN` whose notification cannot come.
+//! - Once no byte can ever arrive — TTY failed to claim its interrupt line, or
+//!   the line has stopped since (a proof round gone wrong, `rx FAIL storm`,
+//!   `rx FAIL enable`) — the answer is `EIO`, not an `EAGAIN` whose
+//!   notification cannot come. A reader already parked when the line stops is
+//!   sent its one `NOTIFY` then, so that its retry hears the `EIO` (slice 6.6,
+//!   spec C9).
+//!
+//! The decisions in that list — the validator, the answer order, the waiter —
+//! are `driver-rt::cdev`'s, shared with `virtio-console` since slice 6.6; this
+//! file does what they say.
 //!
 //! The waiter is notified **after** the interrupt line is re-armed, so the line
 //! is live again before VFS can come back with a read. The order is `main`'s:
 //! `irq.rs` re-arms and reports, and the loop below sends the `NOTIFY`.
 
 // Freestanding for the real (bare-metal) build, but a normal host binary under
-// `cargo test` so `cdev`'s logic gets host-runnable unit tests. The test harness
+// `cargo test` so the pure logic (`input`, `irq`'s phases) gets host-runnable
+// unit tests. The test harness
 // needs `std` and its own entry point, so `no_std`/`no_main` and the `_start` shim
 // below are all gated to `not(test)`.
 #![cfg_attr(not(test), no_std)]
@@ -71,16 +80,16 @@
 
 minixrs_abi_note::brand!();
 
-mod cdev;
 mod input;
 mod irq;
 mod pl011;
 
+use minixrs_driver_rt::cdev;
 use minixrs_ipc::{ipc_notify, ipc_send};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    CDEV_MAX_IO, CDEV_READ, CDEV_WRITE, GET_DMA, GET_VIRTIO_MMIO, NOTIFY_IRQ_PENDING_OFF,
-    SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    CDEV_MAX_IO, CDEV_MINOR_CONSOLE, CDEV_READ, CDEV_WRITE, GET_DMA, GET_VIRTIO_MMIO,
+    NOTIFY_IRQ_PENDING_OFF, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{HARDWARE, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
@@ -159,10 +168,10 @@ fn main() -> ! {
     // receive on and services it (slice 6.5). A failure prints its own
     // `[diag tty] irq…FAIL` line and TTY carries on serving TX, which never
     // needed the line.
-    let mut irq_service = irq::IrqService::start(irq::claim_and_probe());
     // `None` is a refused claim: no interrupt can ever arrive, so a read is
-    // answered `EIO` instead of being left to wait for one (spec R1).
-    let line_claimed = irq_service.is_some();
+    // answered `EIO` instead of being left to wait for one (spec R1) — as it
+    // is once a line that was claimed has stopped (slice 6.6, spec C9).
+    let mut irq_service = irq::IrqService::start(irq::claim_and_probe());
 
     // The staging buffer lives in `main`'s frame, not in a static and not in
     // `tty_init`'s frame — the same rule `GrantPool` follows, and for the same
@@ -198,19 +207,31 @@ fn main() -> ! {
             // The kernel writes the word little-endian; `rd_i32` reads native,
             // which on aarch64 is the same thing.
             let bits = rd_i32(&msg, NOTIFY_IRQ_PENDING_OFF) as u32;
-            let arrived = match irq_service.as_mut() {
-                Some(service) => service.on_notify(bits, &mut ring),
-                None => false,
+            // `stopped` is this notification ending reception: the service
+            // could receive before handling it and cannot after. That happens
+            // at most once a boot, since a stopped line never restarts.
+            let (arrived, stopped) = match irq_service.as_mut() {
+                Some(service) => {
+                    let could_receive = service.can_receive();
+                    let arrived = service.on_notify(bits, &mut ring);
+                    (arrived, could_receive && !service.can_receive())
+                }
+                None => (false, false),
             };
             // Input arrived: tell whoever was refused with `EAGAIN` to ask
-            // again — once, then forget them (spec R1). `on_notify` has already
+            // again — once, then forget them (spec R1). The line stopping is
+            // the other reason to: no input will ever arrive now, and the
+            // retry hears `EIO` instead of staying parked (spec C9). Both at
+            // once is still one `NOTIFY`. `on_notify` has already
             // re-armed the line by now, and that order is the point (spec R4):
             // the line is live before the waiter can come back with a read.
             // `NOTIFY` never blocks; if the waiter is busy the kernel latches
             // it until its next plain `RECEIVE` — never as the reply to a
             // SENDREC (spec R9). With nobody waiting the bytes simply
             // stay in the ring for the next `CDEV_READ`.
-            if arrived && let Some(who) = waiter.take() {
+            if (arrived || stopped)
+                && let Some(who) = waiter.take()
+            {
                 let rc = ipc_notify(who);
                 if rc != OK {
                     // The only wake-up a parked reader gets did not go out.
@@ -271,7 +292,9 @@ fn main() -> ! {
                     &mut staging,
                     &mut ring,
                     &mut waiter,
-                    line_claimed,
+                    irq_service
+                        .as_ref()
+                        .is_some_and(irq::IrqService::can_receive),
                 );
                 reply(caller_e, &mut msg, rc);
             }
@@ -311,7 +334,7 @@ fn tty_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
 #[cfg_attr(test, allow(dead_code))]
 fn do_write(caller_e: Endpoint, msg: &Message, staging: &mut [u8; CDEV_MAX_IO]) -> i32 {
     let req = minixrs_server_rt::cdev::parse(msg);
-    let n = match cdev::validate_write(req) {
+    let n = match cdev::validate_write(req, CDEV_MINOR_CONSOLE) {
         Ok(n) => n,
         Err(e) => return e,
     };
@@ -345,7 +368,8 @@ fn do_write(caller_e: Endpoint, msg: &Message, staging: &mut [u8; CDEV_MAX_IO]) 
 /// Serve one `CDEV_READ` (slice 6.5, spec R1). Returns the reply `m_type`: the
 /// byte count delivered (`>= 0`), or a negative errno — `EAGAIN` when nothing is
 /// buffered, in which case `caller_e` has been recorded in `waiter` and is owed
-/// one `NOTIFY`.
+/// one `NOTIFY`; `EIO` when `can_receive` is `false`, which is `main` saying no
+/// input can arrive any more (no line, or a stopped one).
 ///
 /// The decision is `cdev::read_plan`'s; this function does what it says. The
 /// waiter is recorded before `EAGAIN` is returned, and so before it is sent:
@@ -360,17 +384,18 @@ fn do_read(
     staging: &mut [u8; CDEV_MAX_IO],
     ring: &mut input::Ring,
     waiter: &mut cdev::Waiter,
-    line_claimed: bool,
+    can_receive: bool,
 ) -> i32 {
     let req = minixrs_server_rt::cdev::parse(msg);
-    let want = match cdev::validate_read(req) {
+    let want = match cdev::validate_read(req, CDEV_MINOR_CONSOLE) {
         Ok(n) => n,
         Err(e) => return e,
     };
-    let n = match cdev::read_plan(want, ring.len(), line_claimed) {
+    let n = match cdev::read_plan(want, ring.len(), can_receive) {
         // A legal zero-length read: no grant is written, no waiter recorded.
         cdev::ReadPlan::Zero => return 0,
-        cdev::ReadPlan::NoLine => return EIO,
+        // No byte can ever arrive: refuse, rather than park the caller.
+        cdev::ReadPlan::Stopped => return EIO,
         cdev::ReadPlan::Empty => {
             waiter.record(caller_e);
             return EAGAIN;
