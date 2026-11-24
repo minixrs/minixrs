@@ -172,3 +172,61 @@ grep, then the fresh whole-branch review of the diff.
 ## Ledger
 
 One entry per task: its commit, what was verified, and every ruling made in it.
+
+- **Task 0 (2026-11-24; no commit of its own — the device was attached through `qemu-run.sh`'s
+  pass-through arguments, so nothing was edited).** Two unfed stub-free boots, QEMU 11.0.3,
+  Homebrew's edk2, macOS on Apple Silicon. **C14.2 (the pipe):** with `-chardev pipe` over two FIFOs
+  and **nobody on either**, QEMU starts and the boot is unchanged — the first of C2's four
+  conditions holds here; the other three need a guest driver and are Task 4's first boot. **C14.4
+  (the kernel's line):** `[virtio] slot=8 pa=0xa001000 id=3 ver=2 skip=no-module for=vcon` while
+  slot 12 has no ELF, and no `[dma] vcon` line; the lines with a module are read at Task 4. **C14.1
+  (the firmware):** edk2 **binds the console and writes to it** — 808 bytes reached the host side
+  before the kernel banner, `BdsDxe: loading Boot0001 …` and Limine's menu text, one cursor escape
+  per character. So the feeder must match `HVC0_OUT` as a line among other output, never "the first
+  bytes", and an unfed boot leaves under a kilobyte in the pipe. `Status` at kernel entry is read by
+  the driver at Task 4. **Rulings:** (a) **C14.3 is measured on the real driver's first boot, not
+  with a throwaway probe** — a probe that enables two queues, transmits and receives is most of the
+  driver. *If wrong:* a QEMU behaviour that contradicts C5–C7 is found at Task 4 instead of before
+  Task 1, and costs a rewrite of `port.rs`. (b) **C14.5's baseline is taken at Task 7**, from a
+  worktree of the merge base, back to back with the slice's own boots, instead of now: the two
+  readings are then taken under the same machine load. 6.5 recorded 63.20% (disk) and 41.41%
+  (ramdisk) for this merge base. *If wrong:* nothing is lost; the baseline is one boot pair either
+  way.
+
+- **Task 1 (`85bf7b8`).** `driver-rt::cdev` holds `Waiter`, `ReadPlan` / `read_plan`, `read_len` and
+  `validate_read` / `validate_write(req, minor)`; `drivers/tty/src/cdev.rs` is deleted. All 28 of
+  TTY's `cdev::tests` names are present in `driver-rt` unrenamed, plus 3 new; TTY gained 8 `irq`
+  tests. Verified: `cargo test` (144 in `driver-rt`, 29 in TTY), clippy `-D warnings`, fmt, `cargo
+  miri test -p minixrs-driver-rt` (144 passed), the bare-metal build. **Rulings:** (a) **a stopped
+  device answers `EIO` before its buffer is looked at**, so after TTY's line stops, bytes still in
+  the ring are unreadable — the order the spec's Review Focus 4 and the moved 6.5 test already
+  fixed, now reachable in TTY. *If wrong:* swap two arms of `read_plan`, and `vcon` then has to
+  serve a held buffer from a broken device. (b) **a failed proof round now moves TTY to `Stopped`**
+  — the spec assumed it already did; it printed its `FAIL` and stayed in `Proof`, and could even
+  print `irq ok` after an `irq FAIL bits`. Without this C9 does not cover the failed proof. *If
+  wrong:* one line in `proof_round`. (c) the phase transition is a pure `Phase::after(rearm)`,
+  host-tested per cause; its four call sites in `irq.rs` are checked by reading. (d) during the
+  proof `can_receive` is true: a read parks and is woken by the first byte or by the proof failing.
+  (e) `ReadPlan::NoLine` is `Stopped`; the validators take `server_rt::cdev::Request`.
+
+- **Task 2 (`fcd6c98`).** `DEV_HVC0_PATH`, `CDEV_MINOR_HVC0`; `CharDriver::Vcon` and the fourth row;
+  `park.rs`'s `oldest_after(Option<seq>)`; a new pure `retry.rs` (`CharPeers`, `step`, `Walk`);
+  `main.rs`'s `vcon_endpoint`, notifier arm and per-driver `retry_parked`; `cons.other ok`. 22 new
+  host tests, 113 in VFS, 16 seen failing against stubs first. Verified: tests, clippy, fmt, the
+  generated headers `diff -r`-identical before and after, the bare-metal build. **Rulings:** (a) the
+  step function lives in a new `retry.rs`, not `park.rs`, which stays "the record and the order".
+  (b) **`cdev_endpoint` left `main.rs`**: it is `CharPeers::endpoint`, beside `CharPeers::notifier`,
+  so the driver-to-endpoint match and the notifier check are host-tested — the spec said the
+  function "grows an arm". (c) `CharDriver::ALL`, with an exhaustive-match tripwire, is what the
+  "uses every driver" test and the notifier check iterate. (d) **`cons.other ok` needs a real
+  `CDEV_READ` answer** behind the pass-over; an `EBADF` step or a grant errno does not count. (e)
+  `ParkTable::oldest` is test-only now. *If wrong:* each is local to VFS; (d) is one line.
+
+- **Task 3 (`35cb157`).** The crate in `virtio-blk`'s shape with `bringup.rs` (`vcon_layout`, the
+  queue and page constants) and `port.rs` (`Rx`, `Tx`, `Fault`, `tx_len`); `main.rs` is a branded
+  skeleton that spins and is not packed. 34 host tests, 17 seen failing against stubs. Verified:
+  tests, clippy, fmt, host `cargo check --workspace`, the nested bare-metal build by hand with the
+  brand note present. **Rulings:** (a) the layout refuses a run shorter than four whole pages. (b)
+  `Rx::advance` by more than is available is a fault that changes nothing, not "drained". (c) `Rx`'s
+  fields are public and its methods total for any values. **Carried to Task 4:** the two
+  `cfg_attr(not(test), allow(dead_code))` lines (`bringup.rs`, `port.rs`) to delete.
