@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! `CDEV_WRITE` validation — the driver's pure logic.
+//! `CDEV_WRITE` and `CDEV_READ` validation — the driver's pure logic.
 //!
 //! The four-field parse moved to `server-rt::cdev` in slice 5.11, when the
 //! memory driver became the second decoder of this payload. What stays here is
@@ -26,7 +26,7 @@ use minixrs_kernel_shared::error::{EINVAL, ENXIO};
 use minixrs_kernel_shared::grant::grant_valid;
 use minixrs_server_rt::cdev::Request;
 
-/// Decide how many bytes to move for `req`, or which errno to reply.
+/// Decide how many bytes a `CDEV_WRITE` moves for `req`, or which errno to reply.
 ///
 /// `Ok(n)` means "copy `n` bytes and reply `n`" — including `Ok(0)`, which is a
 /// legal zero-length write that needs no copy at all. `Err(e)` is a negative errno
@@ -45,6 +45,30 @@ use minixrs_server_rt::cdev::Request;
 ///    garbage grant is still reported as the error it is.
 /// 5. Otherwise clamp to [`CDEV_MAX_IO`].
 pub fn validate_write(req: Request) -> Result<usize, i32> {
+    validate(req)
+}
+
+/// Decide the most a `CDEV_READ` may move for `req`, or which errno to reply
+/// (slice 6.5, spec R1).
+///
+/// The rules and their order are [`validate_write`]'s, and both call the same
+/// function, so the two directions cannot drift. Nothing in them depends on the
+/// direction: the access bit a grant must carry (`CPF_WRITE` for a read) is the
+/// kernel's check, never re-derived here.
+///
+/// `Ok(n)` is an upper bound, not the reply. The count actually moved is
+/// [`read_len`] of it and what the input ring holds. `Ok(0)` is the exception:
+/// the driver answers `0` for it *before* it looks at the ring, so a zero-length
+/// read of an empty console is `0` and not `EAGAIN`.
+// Until Task 3 wires RX in: nothing in `main.rs` serves `CDEV_READ` yet.
+#[allow(dead_code)]
+pub fn validate_read(req: Request) -> Result<usize, i32> {
+    validate(req)
+}
+
+/// The rule set `CDEV_WRITE` and `CDEV_READ` share; see [`validate_write`] for
+/// the checks and why they come in this order.
+fn validate(req: Request) -> Result<usize, i32> {
     if req.minor != CDEV_MINOR_CONSOLE {
         return Err(ENXIO);
     }
@@ -59,6 +83,20 @@ pub fn validate_write(req: Request) -> Result<usize, i32> {
         return Ok(CDEV_MAX_IO);
     }
     Ok(len)
+}
+
+/// How many bytes one `CDEV_READ` moves: the least of what the client asked for
+/// (`want`), what is `buffered`, and [`CDEV_MAX_IO`] (spec R1).
+///
+/// `want` normally comes from [`validate_read`] and is already clamped; the
+/// clamp is repeated here so the result fits the staging buffer whatever the
+/// caller passes. A result of `0` with a non-zero `want` means nothing is
+/// buffered, which the driver answers with `EAGAIN`, never with a `0` reply
+/// (that would be EOF).
+// Until Task 3 wires RX in.
+#[allow(dead_code)]
+pub fn read_len(want: usize, buffered: usize) -> usize {
+    want.min(buffered).min(CDEV_MAX_IO)
 }
 
 #[cfg(test)]
@@ -174,5 +212,123 @@ mod tests {
         // being masked by the `Ok(0)` fast path.
         let req = parse(&request(CDEV_MINOR_CONSOLE, GRANT_INVALID, 0, 0));
         assert_eq!(validate_write(req), Err(EINVAL));
+    }
+
+    // ---- CDEV_READ (slice 6.5, spec R1) ----
+
+    #[test]
+    fn a_normal_read_passes_its_length_through() {
+        for len in [1i32, 15, 64, CDEV_MAX_IO as i32 - 1, CDEV_MAX_IO as i32] {
+            let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0));
+            assert_eq!(validate_read(req), Ok(len as usize), "len {len}");
+        }
+    }
+
+    /// Review Focus 3: `Ok(0)` is what lets the driver answer `0` *before* it
+    /// looks at the ring, so a zero-length read of an empty console is `0`
+    /// and never `EAGAIN`.
+    #[test]
+    fn a_zero_length_read_is_ok_zero() {
+        let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, 0, 0));
+        assert_eq!(validate_read(req), Ok(0));
+    }
+
+    #[test]
+    fn a_negative_read_length_is_einval() {
+        for len in [-1i32, -256, i32::MIN] {
+            let req = parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0));
+            assert_eq!(validate_read(req), Err(EINVAL), "len {len}");
+        }
+    }
+
+    #[test]
+    fn a_read_of_an_unknown_minor_is_enxio() {
+        for minor in [1i32, 7, -1, i32::MAX] {
+            let req = parse(&request(minor, GOOD_GID, 16, 0));
+            assert_eq!(validate_read(req), Err(ENXIO), "minor {minor}");
+        }
+    }
+
+    #[test]
+    fn an_over_long_read_is_clamped_not_refused() {
+        for len in [
+            CDEV_MAX_IO as i32 + 1,
+            CDEV_MAX_IO as i32 * 2,
+            4096,
+            i32::MAX,
+        ] {
+            assert_eq!(
+                validate_read(parse(&request(CDEV_MINOR_CONSOLE, GOOD_GID, len, 0))),
+                Ok(CDEV_MAX_IO),
+                "len {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_with_an_invalid_grant_id_is_einval() {
+        for gid in [GRANT_INVALID, -2, i32::MIN] {
+            let req = parse(&request(CDEV_MINOR_CONSOLE, gid, 16, 0));
+            assert_eq!(validate_read(req), Err(EINVAL), "gid {gid}");
+        }
+    }
+
+    #[test]
+    fn a_read_reports_the_first_problem_in_the_same_order_a_write_does() {
+        let req = parse(&request(9, GRANT_INVALID, -5, 0));
+        assert_eq!(validate_read(req), Err(ENXIO));
+
+        // A bad grant is an error even at length zero, exactly as for a write.
+        let req = parse(&request(CDEV_MINOR_CONSOLE, GRANT_INVALID, 0, 0));
+        assert_eq!(validate_read(req), Err(EINVAL));
+    }
+
+    /// The two directions share one rule set; nothing may drift between them.
+    #[test]
+    fn validate_read_agrees_with_validate_write_on_every_case() {
+        for minor in [CDEV_MINOR_CONSOLE, 1, -1] {
+            for gid in [GOOD_GID, 0, GRANT_INVALID, i32::MIN] {
+                for len in [i32::MIN, -1, 0, 1, 256, 257, i32::MAX] {
+                    let req = parse(&request(minor, gid, len, 0));
+                    assert_eq!(
+                        validate_read(req),
+                        validate_write(req),
+                        "minor {minor} gid {gid} len {len}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_len_is_the_least_of_want_buffered_and_the_staging_size() {
+        // Limited by what was asked for.
+        assert_eq!(read_len(1, 15), 1);
+        assert_eq!(read_len(64, 200), 64);
+        // Limited by what is buffered: a short read.
+        assert_eq!(read_len(64, 15), 15);
+        assert_eq!(read_len(CDEV_MAX_IO, 1), 1);
+        // Equal on both sides.
+        assert_eq!(read_len(15, 15), 15);
+        assert_eq!(read_len(CDEV_MAX_IO, CDEV_MAX_IO), CDEV_MAX_IO);
+    }
+
+    #[test]
+    fn read_len_is_zero_when_either_side_is_zero() {
+        assert_eq!(read_len(0, 0), 0);
+        assert_eq!(read_len(0, 100), 0);
+        assert_eq!(read_len(100, 0), 0);
+        assert_eq!(read_len(usize::MAX, 0), 0);
+        assert_eq!(read_len(0, usize::MAX), 0);
+    }
+
+    /// The staging buffer is `CDEV_MAX_IO` bytes whatever the ring holds and
+    /// whatever a caller that skipped `validate_read` passes.
+    #[test]
+    fn read_len_never_exceeds_cdev_max_io() {
+        assert_eq!(read_len(CDEV_MAX_IO + 1, CDEV_MAX_IO + 1), CDEV_MAX_IO);
+        assert_eq!(read_len(usize::MAX, usize::MAX), CDEV_MAX_IO);
+        assert_eq!(read_len(usize::MAX, CDEV_MAX_IO + 44), CDEV_MAX_IO);
+        assert_eq!(read_len(CDEV_MAX_IO + 44, usize::MAX), CDEV_MAX_IO);
     }
 }

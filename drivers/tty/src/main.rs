@@ -51,6 +51,7 @@
 minixrs_abi_note::brand!();
 
 mod cdev;
+mod input;
 mod irq;
 mod pl011;
 

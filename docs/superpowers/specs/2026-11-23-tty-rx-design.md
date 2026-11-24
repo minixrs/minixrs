@@ -81,7 +81,9 @@ state. A second, different endpoint asking while a waiter is recorded is answere
 replaces it — the last asker wins. Nothing but VFS sends TTY a `CDEV_READ` today, so the case is
 unreachable at boot; it is pinned by a host test and listed in §5.
 
-- `len == 0` answers `0` before anything else, as `CDEV_WRITE` does.
+- The request is validated by `CDEV_WRITE`'s rules in `CDEV_WRITE`'s order (minor, negative length,
+  grant id), and `len == 0` then answers `0` **before the ring is looked at** — so a zero-length
+  read of an empty console is `0`, not `EAGAIN`.
 - A copy that fails (`EPERM`, `EFAULT` from `SYS_SAFECOPY`) is relayed verbatim and **consumes
   nothing**: the bytes are peeked, copied, and only then removed from the ring.
 - `0` keeps its meaning — EOF — and TTY never sends it for a non-zero request. A console has no EOF
