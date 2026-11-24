@@ -25,8 +25,8 @@
 //! straight-line receive loop, with no interrupt handlers of its own).
 //!
 //! **The rule that comes with it: never hold a borrow of the table across a
-//! SENDREC.** A handler resolves a descriptor, sends a request to MFS, TTY, or
-//! the memory driver — which blocks, and during which nothing else touches the
+//! SENDREC.** A handler resolves a descriptor, sends a request to MFS or to a
+//! character driver — which blocks, and during which nothing else touches the
 //! table, but the borrow would still be live across a call that can reach
 //! `alloc_in`/`close_in` in a later refactor — and then updates the position.
 //! [`Fd`] is `Copy` precisely so that is easy to obey: the borrow dies at the
@@ -81,17 +81,29 @@ use core::cell::UnsafeCell;
 /// arithmetic on a published constant.
 pub const NR_FDS: usize = 8;
 
-/// Which character driver a [`Fd::CharDev`] descriptor talks to (slice 5.11).
+/// Which character driver a [`Fd::CharDev`] descriptor talks to (slice 5.11;
+/// the virtio console joined in 6.6).
 ///
 /// An enum rather than an `Endpoint`, because [`DEFAULT_ROW`] is a `const` and a
-/// DS-resolved endpoint is a runtime value. `main.rs`'s `cdev_endpoint` is the
-/// one place this becomes an address.
+/// DS-resolved endpoint is a runtime value. `retry.rs`'s `CharPeers::endpoint`
+/// is the one place this becomes an address.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum CharDriver {
     /// TTY: the console, minor `CDEV_MINOR_CONSOLE`.
     Tty,
     /// The memory driver: `CDEV_MINOR_NULL` and `CDEV_MINOR_ZERO`.
     Memory,
+    /// The virtio console driver (`vcon`): `/dev/hvc0`, minor `CDEV_MINOR_HVC0`
+    /// (slice 6.6).
+    Vcon,
+}
+
+impl CharDriver {
+    /// Every driver, once each. What lets a table or a test say "for each
+    /// character driver" instead of naming them and going stale;
+    /// `tests::all_names_every_driver_exactly_once` is the tripwire that a new
+    /// variant is added here too.
+    pub const ALL: [CharDriver; 3] = [CharDriver::Tty, CharDriver::Memory, CharDriver::Vcon];
 }
 
 /// What a descriptor refers to.
@@ -99,8 +111,9 @@ pub enum CharDriver {
 pub enum Fd {
     /// Not open. Every operation on it is `EBADF`.
     Unused,
-    /// A character device: the console on TTY, or `/dev/null` / `/dev/zero` on
-    /// the memory driver, routed by `dev`.
+    /// A character device: the console on TTY, `/dev/null` / `/dev/zero` on the
+    /// memory driver, or `/dev/hvc0` on the virtio console driver, routed by
+    /// `dev`.
     CharDev {
         /// The driver that owns `minor`. Minors are a per-driver namespace, so
         /// this is half of the address, not decoration.
@@ -372,6 +385,23 @@ mod tests {
         minor: CDEV_MINOR_CONSOLE,
     };
     const FILE: Fd = Fd::File { ino: 5, pos: 0 };
+
+    #[test]
+    fn all_names_every_driver_exactly_once() {
+        // The `match` has no wildcard, so a new variant does not compile until
+        // it is given an index here — and the assertions then fail until `ALL`
+        // has grown to hold it.
+        let index = |d: CharDriver| match d {
+            CharDriver::Tty => 0,
+            CharDriver::Memory => 1,
+            CharDriver::Vcon => 2,
+        };
+        let mut seen = [0usize; CharDriver::ALL.len()];
+        for d in CharDriver::ALL {
+            seen[index(d)] += 1;
+        }
+        assert_eq!(seen, [1; CharDriver::ALL.len()]);
+    }
 
     /// A private table, built from the same expression as the live static, so no
     /// test has to name that static to say something about it.

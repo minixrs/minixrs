@@ -1364,6 +1364,17 @@ pub const CDEV_MINOR_NULL: i32 = 3;
 /// a read fills the whole request with zeroes, a write discards.
 pub const CDEV_MINOR_ZERO: i32 = 5;
 
+/// `/dev/hvc0`: the virtio console driver's one port, and its only minor — any
+/// other is `ENXIO` there (slice 6.6).
+///
+/// **Not the TTY console's minor, although both are 0.** Minors are a
+/// per-driver namespace (see [`CDEV_MINOR_CONSOLE`]): this is `vcon`'s 0, that
+/// is TTY's, and the driver a descriptor names — never the minor value — is
+/// what tells them apart. It has its own name so that no reader takes one for
+/// the other. **Not** emitted in the generated C headers: no C program opens
+/// the node.
+pub const CDEV_MINOR_HVC0: i32 = 0;
+
 /// The paths VFS's device-node table answers with these minors (slice 5.11).
 ///
 /// Here rather than in VFS so init's probes and VFS's table cannot drift: VFS
@@ -1376,6 +1387,10 @@ pub const DEV_CONSOLE_PATH: &str = "/dev/console";
 pub const DEV_NULL_PATH: &str = "/dev/null";
 /// See [`DEV_CONSOLE_PATH`].
 pub const DEV_ZERO_PATH: &str = "/dev/zero";
+/// The virtio console's port (slice 6.6), minor [`CDEV_MINOR_HVC0`] of the
+/// virtio console driver. See [`DEV_CONSOLE_PATH`]; like the others it is not
+/// emitted in the generated C headers.
+pub const DEV_HVC0_PATH: &str = "/dev/hvc0";
 
 /// The count TTY clamps a `CDEV_WRITE` to before staging it through its fixed
 /// buffer — the largest a *staging* driver moves in one request, sized for a
@@ -2882,6 +2897,9 @@ mod tests {
         assert_eq!(CDEV_MINOR_NULL, 3);
         assert_eq!(CDEV_MINOR_ZERO, 5);
         assert_ne!(CDEV_MINOR_NULL, CDEV_MINOR_ZERO);
+        // The virtio console driver's only minor (slice 6.6). Equal to the TTY
+        // console's and meant to be: a different driver, a different namespace.
+        assert_eq!(CDEV_MINOR_HVC0, 0);
     }
 
     #[test]
@@ -2889,13 +2907,20 @@ mod tests {
         // VFS's device-node table matches these byte-for-byte and init opens
         // them by the same constants, which is why they live here rather than
         // in either crate.
-        let paths = [DEV_CONSOLE_PATH, DEV_NULL_PATH, DEV_ZERO_PATH];
-        for p in paths {
+        let paths = [
+            DEV_CONSOLE_PATH,
+            DEV_NULL_PATH,
+            DEV_ZERO_PATH,
+            DEV_HVC0_PATH,
+        ];
+        for (i, p) in paths.iter().enumerate() {
             assert!(p.starts_with("/dev/"), "{p}");
             assert!(p.len() < FS_PATH_MAX, "{p} would be ENAMETOOLONG");
+            for q in &paths[i + 1..] {
+                assert_ne!(p, q);
+            }
         }
-        assert_ne!(DEV_NULL_PATH, DEV_ZERO_PATH);
-        assert_ne!(DEV_CONSOLE_PATH, DEV_NULL_PATH);
+        assert_eq!(DEV_HVC0_PATH, "/dev/hvc0");
     }
 
     #[test]
