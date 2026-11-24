@@ -47,10 +47,22 @@ minix.rs booting on aarch64
 [as] stub D nr=18 ttbr0_pa=
 
 # init's fork/exec/wait cycle (head-carved kernel traces; slot 19 is the
-# fork-pool base, recycled every cycle; exec renames the child to "worker")
+# fork-pool base; exec renames the child to "worker").
+#
+# Since slice 6.5 init's FIRST fork is the console-read child, not a rotation
+# child, so slot 19 is that child's and the rotation's first `worker` runs in
+# slot 20. That holds on a fed boot and an unfed one alike: an unfed child
+# stays parked in slot 19 for good, and a fed one that has already exited is
+# still a zombie holding the slot when the rotation forks for the first time,
+# because init's first wait() comes after that fork. Later turns recycle
+# whichever slots are free, 19 among them, so only the first worker's slot is
+# fixed -- which is all a first-occurrence check needs. (Under the hand-run
+# `idle-probe` feature there is no console-read child and worker is back in
+# slot 19; no marker file is checked against that boot.)
 [ksys SYS_FORK] parent=i nr=10 child_nr=19
-[ksys SYS_EXEC] target=19 name=worker src=name entry=
-[ksys SYS_EXIT] target=w nr=19 freed=
+[ksys SYS_FORK] parent=i nr=10 child_nr=20
+[ksys SYS_EXEC] target=20 name=worker src=name entry=
+[ksys SYS_EXIT] target=w nr=20 freed=
 
 # Stub D's designed SIGSEGV chain: page fault -> VM -> SYS_KILL sig=11 -> PM
 # tears the stub down with SYS_EXIT
@@ -1029,7 +1041,7 @@ minix.rs fileio: malloc ok
 # nothing; make TTY withhold its reply on an empty console instead of answering
 # EAGAIN and VFS wedges in its SENDREC to the driver: this line and everything
 # after it vanish. init's own prologue reads files straight after the fork, and
-# fileio reads /etc/motd on every turn of the rotation, so a file read after
+# fileio reads /etc/motd on every fourth turn of the rotation, so a file read after
 # the park is never long in coming.
 #
 # It is also THE GATE: the feeder writes nothing until it has seen this line in

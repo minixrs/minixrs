@@ -315,8 +315,9 @@ fn stage_addr() -> u64 {
 /// Bytes VFS grants PM in the slice-5.2 demo.
 const GRANT_TEST_LEN: usize = 64;
 
-/// Number of simultaneously outstanding grants VFS can hold. VFS's stack is one
-/// page, and the pool costs `N * 32` bytes; 8 is ample for the demo.
+/// Number of simultaneously outstanding grants VFS can hold. The pool costs
+/// `N * 32` bytes of `main`'s frame; 8 covers every path, since a parked
+/// console read holds no grant (slice 6.5).
 const GRANT_SLOTS: usize = 8;
 
 /// The granted buffer. A `static` (not `static mut`) so it lands in `.rodata`,

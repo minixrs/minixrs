@@ -351,8 +351,26 @@ fn main() -> ! {
                 // is reported only when the child that ran `worker` comes back —
                 // and only once, since the loop runs forever and a line per
                 // cycle would bury the console.
+                #[cfg_attr(feature = "idle-probe", allow(unused_mut))]
                 let mut w = pm_msg(PM_WAIT);
-                let rc = ipc_sendrec(pm, &mut w);
+                #[cfg_attr(feature = "idle-probe", allow(unused_mut))]
+                let mut rc = ipc_sendrec(pm, &mut w);
+                // The console-read child (slice 6.5) is not one of the
+                // rotation's, and it comes back whenever it happens to — on a
+                // fed boot some cycle after the feeder wrote, on an unfed one
+                // never. Keyed on its pid like the two below. If this `wait()`
+                // reaped it, the turn has not reaped a child of its own yet, so
+                // wait once more: without that the rotation runs one child
+                // deeper for the rest of the boot and every later exit lands a
+                // whole turn later — measured as `pm-exit reset closed=1`
+                // moving from 64.7% to 76.6% of a 600 s disk log.
+                #[cfg(not(feature = "idle-probe"))]
+                if rc == OK && stdin_pid != 0 && w.m_type == stdin_pid {
+                    stdin_pid = 0;
+                    report_stdin_reap(vfs, rd_i32(&w, 0));
+                    w = pm_msg(PM_WAIT);
+                    rc = ipc_sendrec(pm, &mut w);
+                }
                 // Reaping the live `fileio` — however it ended, since a killed
                 // child is reaped like an exited one — reopens its slot.
                 if rc == OK && fileio_pid != 0 && w.m_type == fileio_pid {
@@ -361,16 +379,6 @@ fn main() -> ! {
                 if !reported && rc == OK && w.m_type == probe_pid {
                     reported = true;
                     report_exec_stack(vfs, rd_i32(&w, 0));
-                }
-                // The console-read child, reaped whenever it happens to come
-                // back — on a fed boot some cycle after the feeder wrote, on
-                // an unfed one never. Keyed on its pid like the two above, and
-                // it costs this cycle nothing: the reap it took is one a
-                // rotation child will get on a later turn.
-                #[cfg(not(feature = "idle-probe"))]
-                if rc == OK && stdin_pid != 0 && w.m_type == stdin_pid {
-                    stdin_pid = 0;
-                    report_stdin_reap(vfs, rd_i32(&w, 0));
                 }
                 #[cfg(feature = "idle-probe")]
                 {

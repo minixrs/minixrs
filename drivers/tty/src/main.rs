@@ -210,6 +210,14 @@ fn main() -> ! {
             }
             continue;
         }
+        // Any other notification is dropped, never answered: nobody is inside
+        // a SENDREC waiting on one, and a reply would be a SEND to a process
+        // that is not receiving from TTY. Nothing sends TTY one today; slice
+        // 6.8's keyboard driver will (phase decision H8), and its arm goes
+        // here.
+        if msg.m_type == NOTIFY_MESSAGE {
+            continue;
+        }
         // Capture the caller *first*: it is both the reply target and the granter,
         // and the dispatch below overwrites `msg.m_source` on the way out.
         let caller_e = msg.m_source;

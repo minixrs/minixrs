@@ -879,9 +879,20 @@ directions. Echo arrives with 6.8 and canonical mode with Phase 7, both in `driv
   retry printed `cons.park`, then `rx got n=5`, then `stdin got=hello`.
 - *The fed boots.* Four fed stub-free boots each printed `cons.park` (log line 622), `cons.beside
   ok` (625) and `stdin ok n=15` (between lines 925 and 984), with no `FAIL`; an unfed one printed
-  the first two and no `stdin ok`. One fed full disk boot in the musl flavour passed
-  `check-boot-log.sh disk` on all 172 marker checks, with `cons.park`, `cons.beside ok` and `stdin
-  ok` at 36011, 38259 and 39705 in the log by the ledger's figures, fed 25 s in.
+  the first two and no `stdin ok`. The recorded musl-flavour set on the final code: the fed disk
+  boot and the fed ramdisk boot each pass all 173 marker checks, the unfed reboot of the disk boot's
+  image passes its 7 (and shows `cons.park` and `cons.beside ok` with its reader parked throughout),
+  and `diff-backends.sh` is clean across the pair. The feeder wrote 20–25 s in.
+- *The budget, and the defect it found.* The last required marker (`[diag vfs] pm-exit reset
+  closed=1`) sits at **64.94%** of a 600 s fed disk log (about 390 s) and **42.73%** of the ramdisk
+  one (about 256 s). A boot of the merge base on the same machine put it at 64.71%, so the slice
+  does not move the budget and no timeout changes. As first built it did: 76.62% and 50.59%, a whole
+  rotation turn later, because the `wait()` that reaped the console-read child left its turn with no
+  child of its own reaped and the rotation ran one child deeper for the rest of the boot. init now
+  waits once more in that turn.
+- *The fork-cycle markers moved a slot.* init's first fork is now the console-read child, so the
+  rotation's first `worker` runs in slot 20, not 19; `tests/qemu-boot.expected` says why that is
+  fixed on a fed and an unfed boot alike.
 - *No kernel change was needed*: INTID 33 was already on TTY's allow-list, TTY could already notify
   VFS, and VFS could already withhold a reply.
 

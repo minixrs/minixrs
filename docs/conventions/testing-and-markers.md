@@ -141,8 +141,8 @@ A few properties of the checker matter when you're reading its output rather tha
 - **Its PASS total counts expected AND forbidden lines** (5.11: 86 + 20 = 106), so a slice that adds
   N expected and M forbidden lines moves the total by N + M — don't be surprised when the total
   moves by more than the expected-marker count alone. The total is per boot kind, because each adds
-  its own pair to the common one (6.4: 165 for each full boot, 7 for the reboot; 6.5 added four
-  expected and three forbidden lines to the common pair, so 172 and still 7); count the marker files
+  its own pair to the common one (6.4: 165 for each full boot, 7 for the reboot; 6.5 added five
+  expected and three forbidden lines to the common pair, so 173 and still 7); count the marker files
   rather than quoting a number from a plan.
 - **Never copy a count into a marker from a plan** — recompute it from the constant. 5.8's plan said
   `n=30` for what was actually a 31-byte `ROOTFS_MOTD`.
