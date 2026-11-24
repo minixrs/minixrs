@@ -385,7 +385,8 @@ fn main() -> ! {
 /// `SENDREC` alone, so `RECEIVE(ANY)` fails at once with `ETRAPDENIED` and the
 /// park would spin. Nor is there a user call that legitimately suspends with
 /// nothing to wait on: `wait()` with no children answers `ECHILD`, and a
-/// console `read` answers `ENOSYS` until TTY has RX. So the message is
+/// console `read` — which does suspend since slice 6.5 — completes as soon as
+/// anyone types, so it is not a park. So the message is
 /// `NOTIFY_MESSAGE`-typed, which PM's receive loop drops without a reply when
 /// it does not come from SYSTEM — a notification is never answered — leaving
 /// init blocked in the `SENDREC`'s receive half for good. It stays in a loop
@@ -683,10 +684,6 @@ fn fd_demo(vfs: Endpoint) {
 ///   - `bad-buf` — an unmapped path buffer ([`UNMAPPED_VA`]). `EFAULT` from the
 ///     kernel's page-table walk in the middle of VFS's `SYS_COPY`, relayed back
 ///     unflattened — the read-path twin of the write path's `bad-buf`.
-///   - `read-console` — `read()` on fd 1. `ENOSYS`, not `EBADF`: the descriptor is
-///     good, and TTY does not serve `CDEV_READ` until Phase 6, answering it from
-///     its unknown-request arm (slice 5.11 made VFS send the request instead of
-///     guessing).
 ///   - `dev-no-such` — `/dev/nope`. `ENOENT` from MFS's walk: the device table
 ///     does not claim the `/dev` prefix, only three exact paths.
 ///   - `close-twice` — closing an already-closed descriptor. `EBADF`, which is
@@ -706,6 +703,13 @@ fn fd_demo(vfs: Endpoint) {
 /// on a file descriptor. Slice 5.10a made that write succeed, so the probe went
 /// from asserting a refusal to silently corrupting `/etc/motd` — see the comment
 /// at its old site. [`write_demo`] replaces it with a positive proof.
+///
+/// There used to be a console-read probe too: `read()` on fd 1, expecting
+/// `ENOSYS` because TTY had no receive side. Slice 6.5 gave it one, and that read
+/// would now park init until somebody typed — the same growing-capability
+/// lesson, with a hang instead of a corruption. It is deleted rather than
+/// re-aimed at another errno: the console is not write-only any more, so there
+/// is no refusal left to assert, and the count moved with it.
 ///
 /// Reported as a count on fd 2, so that descriptor stays exercised on the path
 /// that matters.
@@ -745,16 +749,10 @@ fn open_denials(vfs: Endpoint) {
         }
     }
 
-    // A console descriptor cannot be read from *yet*: since slice 5.11 VFS routes
-    // the read to TTY as a real `CDEV_READ`, and TTY answers `ENOSYS` from its
-    // unknown-request arm until Phase 6 gives it RX. Same errno as before the
-    // slice, now the driver's answer rather than VFS's guess about it.
-    let mut buf = [0u8; 8];
-    if vfs_read(vfs, STDOUT, &mut buf) == ENOSYS {
-        denied += 1;
-    } else {
-        return report_open_fail(vfs, "read-console");
-    }
+    // Slice 6.5 retired the probe that used to sit here: `read()` on fd 1,
+    // expecting `ENOSYS`. TTY serves `CDEV_READ` now, so that read would be
+    // parked by VFS until input arrived and init would never get past this
+    // line. The count moved with it, as it did for `write-file` below.
 
     // Slice 5.10b: the flag-shaped refusals.
     for (name, path, flags, want) in [
@@ -809,7 +807,7 @@ fn open_denials(vfs: Endpoint) {
     }
 
     if denied == OPEN_DENIAL_PROBES {
-        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=12\n");
+        let _ = vfs_write(vfs, STDERR, b"minix.rs init: open.deny ok n=11\n");
     }
 }
 
@@ -1772,11 +1770,11 @@ fn report_exec_fail(vfs: Endpoint, name: &str) {
 /// The `n=` in the marker line is this number spelled out as a literal, because
 /// init has no formatting machinery and the line is a `grep -aF` marker. The two
 /// move together; the const below is what makes forgetting the second half loud.
-const OPEN_DENIAL_PROBES: usize = 12;
-// The `n=12` literal in `open_denials`' marker line, pinned the same way
+const OPEN_DENIAL_PROBES: usize = 11;
+// The `n=11` literal in `open_denials`' marker line, pinned the same way
 // `fs.create`'s `n=25` is pinned against `ROOTFS_CREATE_TEXT.len()`: init cannot
 // format an integer, so nothing else ties the printed digit to this constant.
-const _: () = assert!(OPEN_DENIAL_PROBES == 12);
+const _: () = assert!(OPEN_DENIAL_PROBES == 11);
 
 /// Report a failing `open` probe by name, on fd 2.
 #[cfg_attr(test, allow(dead_code))]

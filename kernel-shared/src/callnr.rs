@@ -1304,11 +1304,26 @@ pub const CDEV_WRITE: i32 = CDEV_RQ_BASE;
 /// reports the count, with no retry loop. `/dev/null` answers `0` on every read;
 /// `/dev/zero` never answers `0` for a positive count.
 ///
+/// **A driver never withholds the reply** (slice 6.5). Its client is VFS, and a
+/// VFS left blocked in the `SENDREC` serves nobody else. A driver whose input
+/// arrives later — the console — therefore answers at once even with nothing to
+/// give, and the answer is **`EAGAIN`: nothing is buffered, and the driver will
+/// `NOTIFY` the caller's endpoint once when input arrives.** The caller then asks
+/// again with an ordinary `CDEV_READ`; the notification means "ask again", not
+/// "this read is ready", so the retry may itself be answered `EAGAIN`. The driver
+/// remembers one endpoint to notify, the last to be refused. `0` is still EOF,
+/// and such a driver never sends it for a non-zero count; a zero-length read
+/// answers `0` whether or not anything is buffered. A driver that can never
+/// answer `EAGAIN` (the memory driver) owes nobody a notification.
+///
+/// No value moved for this: `EAGAIN` was already in `error.rs`, and the band's
+/// only clients are in this repository. VFS parks the read instead of relaying
+/// the errno, so a `read()` on a console descriptor never returns it.
+///
 /// This request existed only as a plan note until 5.11 — the 5.3 text said
 /// `/dev/null` and `/dev/zero` would be "new minors, not new requests", which is
-/// true of null and of *writing* zero and false of *reading* it. TTY does not
-/// serve it until Phase 6 gives it RX (`SYS_IRQCTL`), and answers it `ENOSYS`
-/// from its unknown-request arm until then.
+/// true of null and of *writing* zero and false of *reading* it. TTY has served
+/// it since slice 6.5, when the PL011's receive interrupt gave it input.
 pub const CDEV_READ: i32 = CDEV_RQ_BASE + 1;
 
 /// Number of character-device requests defined so far. Locks a driver's

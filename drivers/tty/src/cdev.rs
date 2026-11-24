@@ -22,6 +22,7 @@
 //! the driver stage through a fixed buffer in its `main` frame with no allocator.
 
 use minixrs_kernel_shared::callnr::{CDEV_MAX_IO, CDEV_MINOR_CONSOLE};
+use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{EINVAL, ENXIO};
 use minixrs_kernel_shared::grant::grant_valid;
 use minixrs_server_rt::cdev::Request;
@@ -60,8 +61,6 @@ pub fn validate_write(req: Request) -> Result<usize, i32> {
 /// [`read_len`] of it and what the input ring holds. `Ok(0)` is the exception:
 /// the driver answers `0` for it *before* it looks at the ring, so a zero-length
 /// read of an empty console is `0` and not `EAGAIN`.
-// Until Task 3 wires RX in: nothing in `main.rs` serves `CDEV_READ` yet.
-#[allow(dead_code)]
 pub fn validate_read(req: Request) -> Result<usize, i32> {
     validate(req)
 }
@@ -93,10 +92,76 @@ fn validate(req: Request) -> Result<usize, i32> {
 /// caller passes. A result of `0` with a non-zero `want` means nothing is
 /// buffered, which the driver answers with `EAGAIN`, never with a `0` reply
 /// (that would be EOF).
-// Until Task 3 wires RX in.
-#[allow(dead_code)]
 pub fn read_len(want: usize, buffered: usize) -> usize {
     want.min(buffered).min(CDEV_MAX_IO)
+}
+
+/// What the driver does with one validated `CDEV_READ` (slice 6.5, spec R1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadPlan {
+    /// A zero-length read: reply `0` and touch nothing.
+    Zero,
+    /// TTY holds no interrupt line, so no byte can ever arrive: reply `EIO`.
+    NoLine,
+    /// Nothing is buffered: record the caller as the waiter and reply `EAGAIN`.
+    Empty,
+    /// Copy this many of the oldest bytes to the caller, then consume them.
+    /// Never `0`.
+    Copy(usize),
+}
+
+/// Decide how a `CDEV_READ` that passed [`validate_read`] with `want` is
+/// answered, given how many bytes are `buffered` and whether TTY claimed its
+/// interrupt line at boot.
+///
+/// The order is the contract (spec R1, Review Focus 3):
+///
+/// 1. `want == 0` is [`ReadPlan::Zero`] **before the ring is looked at**, so a
+///    zero-length read of an empty console is `0` and never `EAGAIN` — and it
+///    records no waiter, so it cannot be used to steal the one `NOTIFY`.
+/// 2. No line is [`ReadPlan::NoLine`]: `EAGAIN` promises a notification, and
+///    without the line there is no interrupt to send one from. Parking a reader
+///    behind it would be a hang with no marker.
+/// 3. Nothing buffered is [`ReadPlan::Empty`].
+/// 4. Otherwise [`ReadPlan::Copy`] of [`read_len`].
+pub fn read_plan(want: usize, buffered: usize, line_claimed: bool) -> ReadPlan {
+    if want == 0 {
+        return ReadPlan::Zero;
+    }
+    if !line_claimed {
+        return ReadPlan::NoLine;
+    }
+    match read_len(want, buffered) {
+        0 => ReadPlan::Empty,
+        n => ReadPlan::Copy(n),
+    }
+}
+
+/// The one endpoint TTY owes a `NOTIFY` (spec R1).
+///
+/// A `CDEV_READ` that finds nothing buffered is answered `EAGAIN` and its
+/// caller recorded here; when input next arrives that endpoint is notified
+/// once and forgotten, and it asks again. One slot, not a queue: every reader
+/// goes through VFS, and the notification means "ask again", not "this read is
+/// ready". A second asker replaces the first — the last asker wins.
+pub struct Waiter(Option<Endpoint>);
+
+impl Waiter {
+    /// Nobody is waiting.
+    pub const fn new() -> Self {
+        Self(None)
+    }
+
+    /// Record `who` as the endpoint to notify, replacing any earlier one.
+    pub fn record(&mut self, who: Endpoint) {
+        self.0 = Some(who);
+    }
+
+    /// The endpoint to notify, if any — and forget it, so one arrival of
+    /// input sends one notification.
+    pub fn take(&mut self) -> Option<Endpoint> {
+        self.0.take()
+    }
 }
 
 #[cfg(test)]
@@ -330,5 +395,104 @@ mod tests {
         assert_eq!(read_len(usize::MAX, usize::MAX), CDEV_MAX_IO);
         assert_eq!(read_len(usize::MAX, CDEV_MAX_IO + 44), CDEV_MAX_IO);
         assert_eq!(read_len(CDEV_MAX_IO + 44, usize::MAX), CDEV_MAX_IO);
+    }
+
+    // ---- the read plan and the waiter (slice 6.5, spec R1) ----
+
+    /// Review Focus 3: the zero-length answer comes before the empty check
+    /// and before the no-line check, whatever the ring holds.
+    #[test]
+    fn a_zero_length_read_is_planned_before_anything_else() {
+        for buffered in [0usize, 1, CDEV_MAX_IO] {
+            for line_claimed in [true, false] {
+                assert_eq!(
+                    read_plan(0, buffered, line_claimed),
+                    ReadPlan::Zero,
+                    "buffered {buffered} line {line_claimed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_ring_is_empty_not_a_zero_byte_copy() {
+        for want in [1usize, 15, CDEV_MAX_IO] {
+            assert_eq!(read_plan(want, 0, true), ReadPlan::Empty, "want {want}");
+        }
+    }
+
+    /// `EAGAIN` owes a `NOTIFY`; with no interrupt line none can be sent.
+    #[test]
+    fn a_read_with_no_line_is_refused_rather_than_parked() {
+        for want in [1usize, 64, CDEV_MAX_IO] {
+            for buffered in [0usize, 5] {
+                assert_eq!(
+                    read_plan(want, buffered, false),
+                    ReadPlan::NoLine,
+                    "want {want} buffered {buffered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn buffered_input_is_copied_up_to_what_was_asked_for() {
+        assert_eq!(read_plan(64, 15, true), ReadPlan::Copy(15));
+        assert_eq!(read_plan(4, 15, true), ReadPlan::Copy(4));
+        assert_eq!(read_plan(1, 1, true), ReadPlan::Copy(1));
+        assert_eq!(
+            read_plan(CDEV_MAX_IO, CDEV_MAX_IO, true),
+            ReadPlan::Copy(CDEV_MAX_IO)
+        );
+        // Whatever the caller passes, the copy fits the staging buffer.
+        assert_eq!(
+            read_plan(usize::MAX, usize::MAX, true),
+            ReadPlan::Copy(CDEV_MAX_IO)
+        );
+    }
+
+    #[test]
+    fn a_new_waiter_holds_nobody() {
+        let mut w = Waiter::new();
+        assert_eq!(w.take(), None);
+    }
+
+    #[test]
+    fn a_recorded_waiter_is_taken_once_and_then_forgotten() {
+        let mut w = Waiter::new();
+        w.record(0x1234);
+        assert_eq!(w.take(), Some(0x1234));
+        // One arrival of input, one notification.
+        assert_eq!(w.take(), None);
+    }
+
+    /// Spec R1: a second, different endpoint asking while a waiter is recorded
+    /// replaces it. Unreachable at boot (only VFS sends TTY a `CDEV_READ`), so
+    /// this test is what pins it.
+    #[test]
+    fn the_last_asker_wins() {
+        let mut w = Waiter::new();
+        w.record(0x1111);
+        w.record(0x2222);
+        assert_eq!(w.take(), Some(0x2222));
+        assert_eq!(w.take(), None);
+    }
+
+    #[test]
+    fn the_same_asker_twice_is_one_waiter() {
+        let mut w = Waiter::new();
+        w.record(0x1111);
+        w.record(0x1111);
+        assert_eq!(w.take(), Some(0x1111));
+        assert_eq!(w.take(), None);
+    }
+
+    #[test]
+    fn a_waiter_can_be_recorded_again_after_it_was_taken() {
+        let mut w = Waiter::new();
+        w.record(0x1111);
+        assert_eq!(w.take(), Some(0x1111));
+        w.record(0x1111);
+        assert_eq!(w.take(), Some(0x1111));
     }
 }

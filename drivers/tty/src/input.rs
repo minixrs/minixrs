@@ -27,10 +27,6 @@
 //! buffered, in the order it arrived, and loses only the tail of a burst
 //! nobody was reading fast enough to keep.
 
-// Until Task 3 wires RX in: nothing in `main.rs` constructs a `Ring` yet, so
-// the bare-metal build would read this whole module as dead code.
-#![allow(dead_code)]
-
 /// Capacity of the input ring in bytes.
 ///
 /// Equal to `CDEV_MAX_IO` today, so one read can empty a full ring, but the two
@@ -123,6 +119,9 @@ impl Ring {
     }
 
     /// Whether nothing is buffered.
+    // Only the host tests ask today: the driver decides on `len` (see
+    // `cdev::read_plan`). Kept as `len`'s companion rather than deleted.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

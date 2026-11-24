@@ -628,17 +628,15 @@ minix.rs init: dev.null ok n=35
 # the proof that the row points at TTY.
 minix.rs init: dev.console ok
 
-# Twelve refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
+# Eleven refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
 # a path with no such file (-> ENOENT), `/etc` (-> EISDIR from open::classify --
 # delete that arm and open succeeds, handing back a descriptor every later read
 # would have to refuse), a path filling the FS band's inline field
 # (-> ENAMETOOLONG, refused before the wire), a negative path length (-> EINVAL,
 # which unchecked would widen into a ~16 EiB u64 on the SYS_COPY), an unmapped
 # path buffer (-> EFAULT from the kernel's page-table walk inside VFS's SYS_COPY),
-# read() on fd 1 (-> ENOSYS, not EBADF: the descriptor is fine, TTY does not
-# *serve* CDEV_READ until Phase 6, and ENOSYS is now the driver's answer over a
-# real CDEV_READ), and closing an already-closed descriptor (-> EBADF, which is
-# what makes the re-open above mean something).
+# and closing an already-closed descriptor (-> EBADF, which is what makes the
+# re-open above mean something).
 #
 # It was eight until slice 5.10a, and the count moved on purpose. The retired
 # probe was write() on a file descriptor, asserting `EROFS` -- which the write
@@ -657,10 +655,17 @@ minix.rs init: dev.console ok
 #
 # Slice 5.11 adds `dev-no-such`: open("/dev/nope") must fall through the device
 # table to MFS and answer ENOENT from the walk of a /dev that does not exist --
-# a table that claimed the whole prefix, or matched by prefix, fails this. The
-# read-console probe keeps ENOSYS, but the answer now comes from TTY's
-# unknown-request arm over a real CDEV_READ rather than from VFS short-circuiting.
-minix.rs init: open.deny ok n=12
+# a table that claimed the whole prefix, or matched by prefix, fails this.
+#
+# Slice 6.5 retires one, and the count moves again (12 -> 11) for the 5.10a
+# reason. The retired probe was read() on fd 1, asserting ENOSYS because TTY had
+# no receive side. TTY serves CDEV_READ now: with nothing typed it answers
+# EAGAIN, VFS parks the read, and init would sit in that read() for the rest of
+# the boot -- every marker after this one gone. It is deleted rather than
+# re-aimed at another errno, because the console is no longer write-only and
+# there is no refusal left to assert. n=11 is init's OPEN_DENIAL_PROBES, pinned
+# to the literal in the line by a const assertion.
+minix.rs init: open.deny ok n=11
 
 # ---------------------------------------------------------------------------
 # Slice 5.9: exec-from-FS -- /bin/hello, out of the filesystem (milestone B).
@@ -976,10 +981,25 @@ minix.rs fileio: malloc ok
 # and round 2 never arrives; zero the bitmap mini_receive hands over and TTY
 # prints `irq FAIL bits=0x0` (forbidden in qemu-boot.forbidden, as `[diag tty] irq FAIL`). Writing
 # UARTICR.TXIC in place of clearing TXIM does NOT move this line -- it still
-# prints -- but the interrupt that follows the proof does: a healthy boot sees
-# exactly IRQ_PROOF_ROUNDS notifications, so TTY reports any extra one as
-# `[diag tty] irq FAIL extra bits=` (forbidden in qemu-boot.forbidden) and leaves the line masked.
+# prints -- and since slice 6.5 no marker of TTY's reports the interrupts that
+# then follow the proof: the guard that did (a notification past the proof was
+# a failure) was retired when the line became the receive line, which is meant
+# to keep firing. Its replacement is `[diag tty] rx FAIL storm`
+# (qemu-boot.forbidden), which counts only notifications that find the receive
+# FIFO empty.
 [diag tty] irq ok rounds=2
+
+# Slice 6.5: the proof hands the line to receive (spec R4, R5). Straight after
+# the line above TTY sets UARTIMSC.RXIM | RTIM -- the receive interrupt, and the
+# receive timeout that covers a FIFO holding fewer bytes than its trigger level
+# -- and prints this. From here every notification on the line is serviced as
+# acknowledge (UARTICR = RXIC | RTIC), drain the FIFO into the input ring until
+# FR.RXFE, re-arm with IRQ_ENABLE; a read that was refused with EAGAIN is
+# notified after the re-arm. The line says the masks were set, not that a byte
+# arrived: nothing in it depends on input, so an unfed boot prints it too. It
+# cannot print unless `irq ok rounds=2` did -- a proof that fails leaves the
+# line masked and receive off.
+[diag tty] rx on
 
 # ---------------------------------------------------------------------------
 # Slice 6.2: the virtio driver contract -- GETINFO selectors gated to the drivers.

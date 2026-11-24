@@ -215,7 +215,8 @@ n=… first=…` — and exits with a positive sentinel status
 reaps it in the normal course of its rotation, keyed on its pid.
 
 The old `read-console` denial probe (`read()` on fd 1 expecting `ENOSYS`) is deleted, not re-aimed:
-after this slice that read parks forever. `fs.deny`'s count drops by one, recomputed from its table.
+after this slice that read parks forever. `open.deny`'s count drops by one, recomputed from its
+table.
 
 The proof that VFS did not block is **VFS's own**, printed at the moment it is true: the first time
 VFS completes a file-descriptor `VFS_READ` while at least one read is parked, it prints `[diag vfs]
@@ -368,7 +369,7 @@ Rows 4, 5 and 8 are stated as predictions, not results; the plan records what wa
 | R5  | A 64-empty-notification storm guard replaces `irq FAIL extra`             | The threshold is a guess. Too low: a false `rx FAIL` on a noisy line — raise it. Deleting the guard costs one marker.                  |
 | R6  | Raw, no echo, no line discipline in 6.5                                   | Echo and CR→LF are a few lines in `input.rs`; adding them here would move `stdin ok`'s expected bytes and the feeder string.           |
 | R7  | The proof child is forked by init and lives in init's source              | A separate `userland/` binary is a new crate and rootfs entry; move it if init's prologue is judged too crowded.                       |
-| R7  | The `read-console` denial probe is deleted, not replaced by another errno | `fs.deny`'s count drops by one. Nothing replaces "read on a write-only console" because the console is not write-only any more.        |
+| R7  | The `read-console` denial probe is deleted, not replaced by another errno | `open.deny`'s count drops by one. Nothing replaces "read on a write-only console" because the console is not write-only any more.      |
 | R8  | Input is fed by a script gated on a log marker                            | If log polling proves flaky in CI, the fallback is a fixed delay — weaker (not causal) but one line.                                   |
 | R8  | The reboot boot is not fed                                                | Feeding it is one process substitution and three markers in the reboot pair.                                                           |
 | R9  | No kernel change                                                          | A finding becomes a kernel task in this slice; the spec's table in §1 is corrected in the same branch.                                 |
