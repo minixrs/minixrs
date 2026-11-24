@@ -191,6 +191,17 @@ fn dispatch(
             )
         }),
         RECEIVE => trap_gate(trap_mask, RECEIVE, || {
+            // A plain RECEIVE is by definition not the receive half of a
+            // SENDREC, so whatever `MF_REPLY_PEND` says is stale — clear it
+            // (MINIX 3 proc.c, `do_sync_ipc`'s `case RECEIVE`). This is the
+            // backstop for every way the flag can outlive its SENDREC: a
+            // successful `exec` restarts the caller at `_start` with no reply
+            // ever delivered, for one. Since slice 6.5 the flag withholds
+            // pending notifications in `mini_receive`, so a stale one would
+            // starve a process that receives only notifications.
+            if let Some(caller_idx) = proc_index(caller_nr) {
+                proc_table[caller_idx].misc_flags &= !MF_REPLY_PEND;
+            }
             receive::mini_receive(
                 proc_table,
                 priv_table,
@@ -284,14 +295,29 @@ fn do_sendrec(
         return EBADCALL;
     };
     proc_table[caller_idx].misc_flags |= MF_REPLY_PEND;
-    receive::mini_receive(
+    let recv_result = receive::mini_receive(
         proc_table,
         priv_table,
         caller_nr,
         dst_e,
         user_msg_va,
         RecvFlags::Blocking,
-    )
+    );
+    if recv_result != OK {
+        // The receive half refused, so the caller never entered RECEIVING
+        // and is owed no reply: the flag must not outlive the call. The one
+        // error reachable from here is `ELOCKED`, and only when the send half
+        // *blocked* (`mini_send` has just validated the endpoint, and a send
+        // that delivered leaves the partner runnable, which ends any deadlock
+        // chain). `OK` covers both "delivered" (the delivery cleared the
+        // flag) and "blocked receiving" (it must stay). Since slice 6.5 the
+        // flag withholds pending notifications in `mini_receive`, so a stale
+        // one matters; the plain-RECEIVE clear in `dispatch` is the general
+        // backstop and this is the specific one. No boot provokes this path;
+        // it is verified by reading.
+        proc_table[caller_idx].misc_flags &= !MF_REPLY_PEND;
+    }
+    recv_result
 }
 
 /// Copy a pending IPC message out to the user buffer recorded at

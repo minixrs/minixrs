@@ -3,9 +3,11 @@
 IPC is the foundation of MINIX. Every interaction between a user program and the OS, and between OS
 components themselves, happens through message passing. Understanding IPC is understanding minix.rs.
 
-This chapter describes IPC as it stands at the end of Phase 4: a fixed-size message, five live
+This chapter describes IPC as the kernel implements it today: a fixed-size message, five live
 primitives (with `SENDA` stubbed), generation-aware endpoints, deadlock detection, and the
-per-process privilege bitmaps that gate it all. The kernel side lives in `kernel/src/ipc/`; the
+per-process privilege bitmaps that gate it all. Most of it dates from Phase 2; the rule that keeps a
+notification from standing in for a reply, and the payload a hardware notification carries, arrived
+with the Phase 6 drivers that first needed them. The kernel side lives in `kernel/src/ipc/`; the
 shared wire types in `kernel-shared`; the user-space trap stubs in `minixrs-ipc`.
 
 ## Message structure
@@ -30,7 +32,7 @@ union fields, so the protocol is self-documenting.
 
 The fixed size is deliberate: the kernel copies the whole message on delivery, so a fixed size keeps
 the copy fast and allocation-free, and forces protocol designers to keep messages compact. Transfers
-larger than the payload are the job of grant-based safe copy (planned; see
+larger than the payload are the job of grant-based safe copy (see
 [Privilege model](#privilege-model)).
 
 > **Note on the "64-bit MINIX 3" reference.** MINIX 3 only ever shipped as a 32-bit operating system
@@ -60,19 +62,24 @@ stub:
 delivered immediately and the destination is unblocked; otherwise the caller blocks and is queued on
 the destination's `caller_q`.
 
-**RECEIVE** — the kernel checks, in order: pending notifications (`notify_pending`), pending async
-messages (`asyn_pending`), then the caller queue (`caller_q`). If nothing is ready, the caller
-blocks with `RTS_RECEIVING` set.
+**RECEIVE** — the kernel checks, in order: pending notifications (`notify_pending`), then the caller
+queue (`caller_q`). (MINIX 3 checks pending async messages between the two; `SENDA` is a stub here,
+so there are none.) If nothing is ready, the caller blocks with `RTS_RECEIVING` set. The first check
+is skipped for the receive half of a `SENDREC` —
+[see below](#a-notification-is-never-the-reply-to-a-sendrec).
 
 **SENDREC** — a `SEND` immediately followed by a `RECEIVE`, but atomic: the caller transitions
 straight from sending to receiving without returning to user space. This is what a POSIX wrapper
 uses — send a request to a server and block for the reply.
 
-**NOTIFY** — if the target is waiting, a synthetic notification message (`m_type == NOTIFY_MESSAGE`,
-`0x1000`) is delivered immediately; otherwise a bit is set in the target's `notify_pending` bitmap.
-`NOTIFY` never blocks, and repeated notifications from the same source coalesce into one bit. Used
-for timer expiry (`CLOCK` → server), kernel-raised signals (`SYSTEM` → PM), and hardware-interrupt
-delivery (`HARDWARE` → driver).
+**NOTIFY** — if the target is waiting in a plain `RECEIVE` that would accept the sender, a synthetic
+notification message (`m_type == NOTIFY_MESSAGE`, `0x1000`) is delivered immediately; otherwise a
+bit is set in the target's `notify_pending` bitmap and the message is built at the target's next
+plain `RECEIVE`. `NOTIFY` never blocks, and repeated notifications from the same source coalesce
+into one bit. Used for timer expiry (`CLOCK` → server), kernel-raised signals (`SYSTEM` → PM),
+hardware-interrupt delivery (`HARDWARE` → driver), and — since slice 6.5 — one server telling
+another to ask again (TTY → VFS, see
+[Drivers](../drivers/overview.md#notify-then-pull-a-read-with-nothing-to-give)).
 
 A `NOTIFY` from `HARDWARE` is the one notification with a payload: the owner's `int_pending` bitmap
 sits at payload `0..4`, one bit per `notify_id` that fired, taken (read and zeroed) when the message
@@ -84,6 +91,84 @@ ready to receive.
 **SENDA** is defined for ABI completeness but is not implemented: it returns `ENOSYS`, and it cannot
 be reached anyway because the `trap_mask` gate is a `u16` and `SENDA`'s bit is 16 — outside the
 mask. Making it real is deferred (see [Roadmap](../roadmap.md)).
+
+### A notification is never the reply to a `SENDREC`
+
+A `SENDREC` is two steps inside one trap. `do_sendrec` runs the send half, and once that has
+succeeded it sets the caller's `MF_REPLY_PEND` flag and runs the receive half against the same
+partner. From that moment until a message is delivered to it, the caller is owed exactly one thing —
+its partner's reply — and the kernel delivers it **no notification, from anyone**:
+
+- **`NOTIFY` does not deliver at once to a flagged target.** `mini_notify` (and the three
+  kernel-originated forms, for `CLOCK`, `SYSTEM` and `HARDWARE`) tests two things before building
+  the message: that the target is blocked in a receive that would accept the sender, and that
+  `MF_REPLY_PEND` is clear. Otherwise it sets the bit in `notify_pending`.
+- **`RECEIVE` does not collect a pending bit for a flagged caller.** `mini_receive` skips the
+  pending-notification check when the caller has `MF_REPLY_PEND` set, and goes straight to the
+  caller queue. The bit stays set, and the notification is built at the caller's next *plain*
+  `RECEIVE`.
+
+The second half is the subtle one. The receive half of a `SENDREC` filters on the partner's
+endpoint, and a notification from *that same partner* passes the filter. Deliver it, and the caller
+returns from its `SENDREC` holding a message of type `NOTIFY_MESSAGE` where a reply should be; the
+real reply turns up later, at the caller's ordinary receive loop, looking like a request nobody
+sent. MINIX 3 guards exactly this in `mini_receive` ("pending notifications, except for SENDREC").
+The Rust translation carried the first half from the start and lacked the second until slice 6.5 —
+the first slice with a pair of processes where one both calls the other and is notified by it.
+
+#### How long the flag lives
+
+Because the flag withholds notifications, how long it stays set matters as much as the guard does: a
+flag left behind would starve its process of every later notification. The natural end of its life
+is a delivery. Whichever path hands the caller a message clears it — `mini_send` finding the caller
+waiting, the two sends the kernel originates itself (a page fault to VM, an expired quantum to
+SCHED), and `mini_receive` finding the partner already queued.
+
+But a `SENDREC` does not always end in a delivery, and each way it can end otherwise needs its own
+clear:
+
+- **The partner dies.** `do_exit` wakes every process blocked on the dead endpoint with
+  `EDEADSRCDST` and clears the flag on each. (The dying process's own flags are zeroed with the rest
+  of its slot.)
+- **The receive half is refused.** If `mini_receive` returns an error, `do_sendrec` clears the flag
+  before returning it. The one error that can reach this point is `ELOCKED` from the
+  [deadlock check](#deadlock-detection), and only when the send half blocked rather than delivered.
+- **The caller execs.** A successful `exec` never replies: the caller restarts at its new image's
+  entry point. `do_exec` clears the flag along with the rest of the old image's IPC state.
+
+And one clear stands behind all of them: **a plain `RECEIVE` clears the flag on entry**, before
+`mini_receive` looks at anything. A process calling `RECEIVE` is by definition not waiting for a
+`SENDREC`'s reply, so a flag still set at that point is stale whatever left it there. MINIX 3 does
+the same in `do_sync_ipc`. It means the worst a missed case can do is delay a notification until the
+process next receives — which is when it would have been delivered anyway.
+
+One path deliberately *keeps* the flag: `fork`. The child is a copy of a parent that is blocked in
+its `SENDREC` to PM, and PM replies to both, so the child inherits the flag with the rest of that
+state.
+
+The slice that restored the guard found the missing clears the hard way round. Nothing read the flag
+at receive time before, so a stale one was harmless — and every `exec` left one. No process that
+execs is ever notified today, so nothing broke; a driver started by fork and exec would have gone
+deaf to its interrupts.
+
+#### The proof
+
+Two lines in every boot log prove the rule — `[diag vfs] cdev.short ok n=256` and `[diag vfs]
+cons.notify ok` — and they do not depend on when input happens to arrive, because TTY
+[arranges the collision deliberately](../drivers/overview.md#what-the-boot-log-proves) on every
+boot.
+
+They do depend on one thing, and it is worth knowing because nothing reports it. The guard is only
+exercised if TTY is already back in `RECEIVE` when VFS sends its next request: the send half then
+delivers at once, and the receive half is the one that finds the latched notification. If TTY has
+not got there, the send half blocks instead, and `mini_receive` skips its pending checks altogether
+for a caller that is still sending — so the reply arrives correctly with or without the guard, and
+the lines prove nothing. TTY does get there first, because VFS and TTY sit in the same scheduling
+band and a band is first-in, first-out: TTY's reply makes VFS runnable *behind* TTY, which runs on
+until it blocks. Only a timer tick that used up TTY's quantum in the handful of instructions between
+its reply and its receive would break that, and that boot would still pass. Give VFS a higher
+priority than TTY, though, and every reply would preempt TTY: the proof would be empty on every
+boot, silently.
 
 ### The user-space trap (aarch64)
 
@@ -170,10 +255,19 @@ Because `SEND` blocks, circular send dependencies could deadlock the system:
 A sends to B (blocks) ; B sends to A (blocks) → neither can proceed
 ```
 
-Before blocking a sender, the kernel (`kernel/src/ipc/deadlock.rs`) traces the chain of send
-dependencies starting at the destination: if the destination is itself sending, it follows
-`sendto_e`, and so on. If the chain loops back to the original caller, the `SEND` fails with
-`ELOCKED` instead of blocking. A two-party pair (A→B, B→A) is allowed; larger cycles are rejected.
+Receiving blocks too, so the same is true of two processes each waiting to receive from the other.
+The kernel therefore runs one check (`kernel/src/ipc/deadlock.rs`) before it blocks a caller in
+**either** direction — `mini_send` before queueing a sender, `mini_receive` before parking a
+receiver. Starting at the process the caller is about to wait for, it follows what each process in
+turn is blocked on — `sendto_e` if it is sending, `getfrom_e` if it is receiving from a specific
+endpoint — until the chain ends at a process that is not blocked (no deadlock) or arrives back at
+the caller. A chain that closes fails the call with `ELOCKED` instead of blocking.
+
+One two-party loop is not a deadlock but the ordinary rendezvous, and the check lets it through: the
+caller wants to send to a process that is waiting to receive, or to receive from a process that is
+waiting to send. The two are blocked in *opposite* directions and the message can move. A pair
+blocked in the *same* direction — both sending, as in the example above, or both receiving — is
+refused, as is any longer cycle. `NOTIFY` and `SENDNB` never block, so they are never checked.
 
 ## Privilege model
 
@@ -191,7 +285,9 @@ IPC and kernel operations it may perform. User processes share one user-class sl
 - **`k_call_mask`** — bitmap of permitted kernel calls (empty for user processes). See
   [System Calls & ABI](../reference/syscalls.md).
 - **`notify_pending` / `asyn_pending`** — per-source bitmaps of deferred notifications and async
-  messages, consumed by `RECEIVE`.
+  messages. A plain `RECEIVE` consumes `notify_pending`; the receive half of a `SENDREC` leaves it
+  alone ([why](#a-notification-is-never-the-reply-to-a-sendrec)). Nothing sets `asyn_pending` while
+  `SENDA` is a stub.
 - **`sig_mgr`** — the endpoint that manages signals raised against this process.
 
 The entry also carries a `grant_table` pointer and `irqs`, both in use, and reserves `io_ranges` and
@@ -208,12 +304,25 @@ The entry also carries a `grant_table` pointer and `irqs`, both in use, and rese
 - **I/O ports and memory ranges** — `io_ranges` / `mem_ranges` are reserved for gating a driver's
   access to ports and physical ranges; no call consults them today.
 
-## IPC status
+## Telling a notification from a request
 
-When it delivers a message, the kernel also provides an **IPC status** word encoding which primitive
-delivered it (bits 0–5) and whether it originated in the kernel (a "from kernel" flag). This lets a
-receiver distinguish a plain message from a notification and handle kernel-originated messages
-specially — for instance, never replying to them.
+A receiver gets exactly two things back from the trap: a result code in `x0`, and the 104-byte
+message. There is no separate status word saying which primitive delivered it. (MINIX 3 returns one
+from `receive`, its IPC status; minix.rs does not implement it.) Everything a receiver needs to know
+about what it has just been handed is in the message's first two fields, both of which the kernel
+can vouch for:
+
+- **`m_type == NOTIFY_MESSAGE`** (`0x1000`) marks a notification. The kernel builds that message
+  itself, and no request band reaches the value — each band's last number is `const`-asserted to lie
+  below it — so a notification cannot be mistaken for a request. (Nothing stops a process *sending*
+  a message of that type; who sent it is the next field's business.)
+- **`m_source`** says who it is from, and is stamped by the kernel on every delivery, never taken
+  from the sender. A notification from `HARDWARE` is an interrupt, from `CLOCK` an alarm, from
+  `SYSTEM` a kernel signal; from another server it means whatever those two have agreed.
+
+That is why a server's receive loop tests for `NOTIFY_MESSAGE` *before* it dispatches on `m_type` as
+a request number, and never replies to one: the sender of a notification is not waiting for an
+answer, and a reply sent to it would arrive as a message it never asked for.
 
 ## Kernel IPC state
 
@@ -224,6 +333,9 @@ The relevant per-process fields (`kernel/src/proc/`):
 - `getfrom_e` / `sendto_e` — the endpoint this process is receiving from / sending to while blocked.
 - run-time-state flags (`rts_flags`) — `RTS_SENDING`, `RTS_RECEIVING`, and the others. **A process
   is runnable iff its RTS flags are all clear.**
+- `misc_flags` — `MF_REPLY_PEND` (the process is owed a `SENDREC` reply;
+  [above](#a-notification-is-never-the-reply-to-a-sendrec)) and `MF_DELIVERMSG` (a message is
+  waiting in the kernel to be copied into the process's buffer when it next returns to user space).
 
 IPC and scheduling are therefore coupled: unblocking a receiver (clearing its last RTS bit via
 `rts_unset`) enqueues it on the run queue; blocking a sender (`rts_set`) removes it. See

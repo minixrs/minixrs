@@ -102,8 +102,46 @@ minix.rs fileio: exit-reset FAIL
 # `irq.deny ok` simply going missing (TTY never got there): `irq FAIL claim` means
 # the kernel refused TTY its own allow-listed line, and `irq.deny FAIL case=<i>`
 # names the first battery row whose result code was wrong, with rc= as returned.
+#
+# `irq FAIL` is also the delivery proof going wrong: `irq FAIL bits=<w>` is a
+# notification without TTY's bit in its pending word, `irq FAIL enable rc=<rc>`
+# a refused IRQ_ENABLE. Either leaves the line masked and receive never turned
+# on. (Until slice 6.5 it had a third spelling, for any notification after the
+# proof; that guard was retired when the line became the receive line, and the
+# storm line below replaced it.)
 [diag tty] irq.deny FAIL
 [diag tty] irq FAIL
+# Slice 6.5: the console's receive side. `rx overflow`: a byte arrived with the
+# 256-byte input ring full and was dropped -- the newest is the one lost, so what
+# was already buffered stays in order. Printed for the first drop of a boot only.
+# No checked boot feeds the console more than a ring's worth before reading it,
+# so this appearing means input was lost that a test was counting on.
+[diag tty] rx overflow
+# `rx FAIL storm`: RX_EMPTY_STORM (64) consecutive notifications found the
+# receive FIFO empty -- the line keeps firing with nothing to service. One empty
+# notification is legal (the acknowledgement precedes the drain); sixty-four in
+# a row is a device not dropping its line, and TTY leaves it masked. `rx FAIL
+# enable rc=<rc>`: the kernel refused the IRQ_ENABLE after a drain, so the next
+# byte's interrupt can never arrive. After either of those the console receives
+# nothing more. `rx FAIL notify rc=<rc>`: the wake-up NOTIFY to the endpoint
+# that was refused with EAGAIN did not go out, so a parked reader was not told
+# to ask again (reception itself carries on). One substring covers all three.
+[diag tty] rx FAIL
+# Slice 6.5: init's console-read child got something other than the feeder's
+# probe (tools/feed-console.sh; tests/qemu-boot.expected has the whole path).
+# The child prints `minix.rs init: stdin FAIL n=<count> first=<hex|none>` --
+# how many bytes it read and the first of them -- followed by `rc=-<N>` when a
+# read answered an errno (rc=-11 is VFS relaying TTY's EAGAIN instead of
+# parking the read), `eof` when one answered 0 (a console has no EOF), or
+# `over` when one reported more than was asked for; with none of those the
+# count or the bytes were simply wrong (input lost, doubled, echoed back or
+# rewritten on the way). init prints two more spellings itself: `stdin FAIL
+# fork rc=-<N>`, the child could not be forked, and `stdin FAIL no-verdict`,
+# the child was reaped without having reported (killed before its verdict).
+# Like the required `stdin ok` line this describes a FED boot: type at a hand-run
+# boot and the first line entered lands in that read and prints this, which is
+# correct and harmless there. Unprefixed, so every spelling is covered.
+stdin FAIL
 
 # Slice 6.2: the virtio boot probe refused a device whose register page is shared
 # with another transport (spec T4 rule 1), and TTY's GETINFO denial battery

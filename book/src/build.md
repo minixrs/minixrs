@@ -36,8 +36,11 @@ cargo kernel-aarch64
 # a boot uses depends on how the C programs were built: about 400 s for a disk
 # boot with the musl build, about 250 s when `hello` comes from an installed
 # SDK (slice 6.4's measurements) -- the SDK boot is fine for iterating, but it
-# is not the boot the marker files and the timeouts are sized for.
-MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+# is not the boot the marker files and the timeouts are sized for. A checked
+# boot is also FED its console input: stdin is tools/feed-console.sh, pointed
+# at the log the boot is writing (see "Feeding the console" below).
+MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+  < <(tools/feed-console.sh disk.log) > disk.log 2>&1
 
 # Clean, stub-free boot for debugging: --no-default-features disables the
 # `boot-stubs` feature, so only the servers + init/worker boot (no demo stubs
@@ -231,16 +234,17 @@ that compiles kernel code** (a local `cargo clippy --workspace` does lint it) �
 blocks and runs on a native `ubuntu-24.04-arm` runner. It passes no `--all-targets`: the kernel is
 `no_std`/`no_main`, so there is no test harness to build. `qemu-smoke` (also `ubuntu-24.04-arm`)
 boots three times: `MINIXRS_ROOT=disk` for 1200 s, then a 180 s reboot of the image that boot wrote
-(`MINIXRS_VBLK_IMAGE=target/disk.img`), then `MINIXRS_ROOT=ramdisk` for 1200 s. It requires exit
-status 124 of all three — the `timeout(1)` status a healthy, never-exiting kernel must produce. It
-then runs `tools/check-boot-log.sh <disk|reboot|ramdisk> <log>` on each log. The two full boots are
-checked against the common marker files `tests/qemu-boot.expected` / `.forbidden` plus their
-backend's own pair (`tests/qemu-boot.disk.*` or `tests/qemu-boot.ramdisk.*`); the reboot is checked
-against `tests/qemu-boot.reboot.*` alone. `tools/diff-backends.sh` then requires the filesystem's
-own output to be the same on both full boots. There is no separate `cargo test` job: the host tests
-run inside `coverage`. Keep the expectations timing-robust (first occurrences, never counts),
-because CI's TCG is slower than a local run. `Cargo.lock` is committed so `audit` / `deny` are
-reproducible, and third-party actions are pinned to commit SHAs.
+(`MINIXRS_VBLK_IMAGE=target/disk.img`), then `MINIXRS_ROOT=ramdisk` for 1200 s. The two full boots
+are [fed their console input](#feeding-the-console); the reboot is not. It requires exit status 124
+of all three — the `timeout(1)` status a healthy, never-exiting kernel must produce. It then runs
+`tools/check-boot-log.sh <disk|reboot|ramdisk> <log>` on each log. The two full boots are checked
+against the common marker files `tests/qemu-boot.expected` / `.forbidden` plus their backend's own
+pair (`tests/qemu-boot.disk.*` or `tests/qemu-boot.ramdisk.*`); the reboot is checked against
+`tests/qemu-boot.reboot.*` alone. `tools/diff-backends.sh` then requires the filesystem's own output
+to be the same on both full boots. There is no separate `cargo test` job: the host tests run inside
+`coverage`. Keep the expectations timing-robust (first occurrences, never counts), because CI's TCG
+is slower than a local run. `Cargo.lock` is committed so `audit` / `deny` are reproducible, and
+third-party actions are pinned to commit SHAs.
 
 ## Generated C headers
 
@@ -308,11 +312,59 @@ some sharp edges worth knowing:
   and the verdict of the `bdev.minor` probe (`ok minor=1 mbr=1` on the disk, `absent minor=1 rc=-6`
   on the ramdisk). Update the marker files in the same change when trace formats or the boot roster
   shift.
+- **Feeding the console.** See [the next section](#feeding-the-console): a full boot that was not
+  fed fails exactly one required line, `minix.rs init: stdin ok n=15`, and that is the feeder
+  missing, not a regression.
 - **Quiet the stubs.** Stub C's `SYS_GETINFO` loop dominates the `[ipc]`/`[ksys]` sample stream.
   When you're chasing a server or init/musl issue, boot `--no-default-features` to drop the demo
   stubs A–D entirely (see [Boot stubs](#boot-stubs-boot-stubs-feature)) — the trace then shows only
   the servers + init/worker. Note the `qemu-smoke` markers assume the default (stubs-on) boot, so
   don't run `check-boot-log.sh` against a stub-free log.
+
+## Feeding the console
+
+QEMU runs with `-serial stdio`, so the boot's standard input is the PL011's receive side, and since
+slice 6.5 something reads it: a child of `init` blocks in `read(0)` and reports what arrives
+([Drivers](drivers/overview.md#what-the-boot-log-proves) has the whole path). A boot that is to pass
+`tools/check-boot-log.sh` is therefore given its input by `tools/feed-console.sh`:
+
+```sh
+MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+  < <(tools/feed-console.sh disk.log) > disk.log 2>&1
+```
+
+The script is the boot's stdin and is pointed at the log the same boot is writing. It polls that log
+for `[diag vfs] cons.beside ok` — VFS's line saying it served a file read while a console read was
+parked — and then writes `minix.rs stdin` and a newline, and exits. It is a process substitution
+rather than a pipe so that the shell does not wait for it and the command's exit status is still
+`timeout`'s.
+
+The fifteen bytes go out in **two pieces**: the first nine, a three-second pause, then the rest
+(`SPLIT` and `GAP` in the script). Bytes written together arrive at TTY as a single interrupt, and a
+probe that needs only one interrupt cannot tell a driver that re-arms its interrupt line from one
+that does not. The second piece needs a second interrupt, so `stdin ok` appears only if the line was
+re-armed after the first. The pause is a guess rather than a measurement — if the two pieces ever
+arrived together the boot would still pass, with that one property unproved — so leave it generous,
+and feed a boot by hand the same way if what is being tested is the receive path.
+
+Waiting for a line in the log, rather than for a delay, does two jobs. It makes the proof causal:
+the reading process cannot be woken before VFS has been seen serving somebody else beside it. And it
+keeps the bytes away from the boot loader — anything on stdin before the kernel starts is consumed
+by the firmware or Limine and never reaches TTY. The script wants to see the line on two polls in a
+row, because the log path is usually one an earlier boot wrote and the shell starts the script an
+instant before truncating it.
+
+- If the line never appears the script gives up after `FEED_CONSOLE_CEILING` seconds (1800 by
+  default) having written nothing. CI sets 1300 for its 1200 s boots.
+- Closing QEMU's stdin is harmless — QEMU carries on at EOF — so the script does not linger once it
+  has written.
+- The string the script sends and the one `init` expects are two copies; a host test in
+  `userland/init` reads the script and fails if they differ.
+- An **unfed** boot is healthy and prints everything except `stdin ok`; the reader stays parked. The
+  reboot of a disk image is run unfed, since its marker set needs no input.
+- A boot run by hand with a terminal attached delivers whatever is typed to that same reader, which
+  will almost certainly print `stdin FAIL` — correct, and harmless outside a checked boot. Nothing
+  is echoed: the console has no line discipline yet.
 
 ## Debugging with GDB
 

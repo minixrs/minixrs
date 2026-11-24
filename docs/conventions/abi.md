@@ -136,6 +136,26 @@ Pre-Phase-6 chunk 5 added two more, in the one deliberate ABI bump that the free
 (pre-Phase-6 chunk 5 — see
 [the design](../superpowers/specs/2026-10-28-musl-syscall-surface-design.md))
 
+Slice 6.5 gave one reply value on the CDEV band a defined meaning, and moved nothing:
+
+- **`CDEV_READ` answering `EAGAIN` means "nothing is buffered, and the driver will `NOTIFY` the
+  caller's endpoint once when input arrives".** The caller asks again with an ordinary `CDEV_READ`.
+  `0` is still EOF, and a zero-length read still answers `0`. The contract's home is `CDEV_READ`'s
+  doc comment in `callnr.rs`; what it obliges a driver and VFS to do is in
+  [`servers-and-drivers.md`](./servers-and-drivers.md#a-character-driver-never-withholds-a-cdev_read-reply).
+- **The D8 ruling is "additive" (6.5's R10, under phase decision H12).** No `Message` layout, call
+  number, endpoint or errno *value* changed: `EAGAIN` (11) was already in `error.rs` and the
+  generated `errno.h`, no request was added (`NR_CDEV_MSGS` is unmoved), and the slice's whole
+  change to `kernel-shared` is that doc comment. So this was not an ABI-bump PR and the musl fork
+  did not move.
+- **Why a new meaning on a frozen band is not a bump here:** the CDEV band's only clients are VFS
+  and, from 6.8, TTY — both in this repository — and VFS parks the read instead of relaying the
+  errno, so a C `read()` on a console descriptor never returns `EAGAIN` because of it. If C in the
+  musl fork ever speaks CDEV directly, that is the day this needs a coordinated note in both
+  repositories; still no value would move.
+
+(slice 6.5 — see [the design](../superpowers/specs/2026-11-23-tty-rx-design.md))
+
 ## Grant ABI (D4)
 
 `kernel-shared/src/grant.rs` defines the cross-address-space copy ABI: a flat `#[repr(C)]`

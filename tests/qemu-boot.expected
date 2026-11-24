@@ -47,10 +47,22 @@ minix.rs booting on aarch64
 [as] stub D nr=18 ttbr0_pa=
 
 # init's fork/exec/wait cycle (head-carved kernel traces; slot 19 is the
-# fork-pool base, recycled every cycle; exec renames the child to "worker")
+# fork-pool base; exec renames the child to "worker").
+#
+# Since slice 6.5 init's FIRST fork is the console-read child, not a rotation
+# child, so slot 19 is that child's and the rotation's first `worker` runs in
+# slot 20. That holds on a fed boot and an unfed one alike: an unfed child
+# stays parked in slot 19 for good, and a fed one that has already exited is
+# still a zombie holding the slot when the rotation forks for the first time,
+# because init's first wait() comes after that fork. Later turns recycle
+# whichever slots are free, 19 among them, so only the first worker's slot is
+# fixed -- which is all a first-occurrence check needs. (Under the hand-run
+# `idle-probe` feature there is no console-read child and worker is back in
+# slot 19; no marker file is checked against that boot.)
 [ksys SYS_FORK] parent=i nr=10 child_nr=19
-[ksys SYS_EXEC] target=19 name=worker src=name entry=
-[ksys SYS_EXIT] target=w nr=19 freed=
+[ksys SYS_FORK] parent=i nr=10 child_nr=20
+[ksys SYS_EXEC] target=20 name=worker src=name entry=
+[ksys SYS_EXIT] target=w nr=20 freed=
 
 # Stub D's designed SIGSEGV chain: page fault -> VM -> SYS_KILL sig=11 -> PM
 # tears the stub down with SYS_EXIT
@@ -169,6 +181,22 @@ minix.rs console: tty online (EL0)
 # allocator, and it is the difference between "write returns a count" and "write
 # returns success". Change the clamp and this number changes with it.
 [diag vfs] cdev.short ok n=256
+#
+# Since slice 6.5 this line is also the proof of a KERNEL rule (spec R9). This
+# write is VFS's second request to TTY, and TTY notified VFS before replying to
+# the first -- a one-shot probe in TTY's main loop -- so the SENDREC behind this
+# line meets a notification latched from the very process it is asking. The
+# kernel must deliver the REPLY and leave the notification for VFS's next plain
+# RECEIVE: MINIX 3's "pending notifications, except for SENDREC" guard in
+# mini_receive, on MF_REPLY_PEND. Remove that guard and the notification comes
+# back as the reply: this line is gone and `cdev.short FAIL rc=4096` prints in
+# its place (NOTIFY_MESSAGE is 0x1000). Observed both ways.
+
+# ...and the notification TTY's probe sent then arrives where it belongs, at
+# VFS's receive loop, once VFS's prologue is over. VFS prints this for the first
+# notification the console driver sends it in a boot; with nothing parked yet
+# the retry it triggers is an empty walk. It prints on every boot, fed or not.
+[diag vfs] cons.notify ok
 
 # ...and the two requests that must be REFUSED, each valid in every respect but
 # one: minor 7 with a perfectly good grant (ENXIO, from TTY's own minor check), and
@@ -628,17 +656,15 @@ minix.rs init: dev.null ok n=35
 # the proof that the row points at TTY.
 minix.rs init: dev.console ok
 
-# Twelve refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
+# Eleven refusals from the POSIX side, on fd 2 so that descriptor stays exercised:
 # a path with no such file (-> ENOENT), `/etc` (-> EISDIR from open::classify --
 # delete that arm and open succeeds, handing back a descriptor every later read
 # would have to refuse), a path filling the FS band's inline field
 # (-> ENAMETOOLONG, refused before the wire), a negative path length (-> EINVAL,
 # which unchecked would widen into a ~16 EiB u64 on the SYS_COPY), an unmapped
 # path buffer (-> EFAULT from the kernel's page-table walk inside VFS's SYS_COPY),
-# read() on fd 1 (-> ENOSYS, not EBADF: the descriptor is fine, TTY does not
-# *serve* CDEV_READ until Phase 6, and ENOSYS is now the driver's answer over a
-# real CDEV_READ), and closing an already-closed descriptor (-> EBADF, which is
-# what makes the re-open above mean something).
+# and closing an already-closed descriptor (-> EBADF, which is what makes the
+# re-open above mean something).
 #
 # It was eight until slice 5.10a, and the count moved on purpose. The retired
 # probe was write() on a file descriptor, asserting `EROFS` -- which the write
@@ -657,10 +683,17 @@ minix.rs init: dev.console ok
 #
 # Slice 5.11 adds `dev-no-such`: open("/dev/nope") must fall through the device
 # table to MFS and answer ENOENT from the walk of a /dev that does not exist --
-# a table that claimed the whole prefix, or matched by prefix, fails this. The
-# read-console probe keeps ENOSYS, but the answer now comes from TTY's
-# unknown-request arm over a real CDEV_READ rather than from VFS short-circuiting.
-minix.rs init: open.deny ok n=12
+# a table that claimed the whole prefix, or matched by prefix, fails this.
+#
+# Slice 6.5 retires one, and the count moves again (12 -> 11) for the 5.10a
+# reason. The retired probe was read() on fd 1, asserting ENOSYS because TTY had
+# no receive side. TTY serves CDEV_READ now: with nothing typed it answers
+# EAGAIN, VFS parks the read, and init would sit in that read() for the rest of
+# the boot -- every marker after this one gone. It is deleted rather than
+# re-aimed at another errno, because the console is no longer write-only and
+# there is no refusal left to assert. n=11 is init's OPEN_DENIAL_PROBES, pinned
+# to the literal in the line by a const assertion.
+minix.rs init: open.deny ok n=11
 
 # ---------------------------------------------------------------------------
 # Slice 5.9: exec-from-FS -- /bin/hello, out of the filesystem (milestone B).
@@ -976,10 +1009,78 @@ minix.rs fileio: malloc ok
 # and round 2 never arrives; zero the bitmap mini_receive hands over and TTY
 # prints `irq FAIL bits=0x0` (forbidden in qemu-boot.forbidden, as `[diag tty] irq FAIL`). Writing
 # UARTICR.TXIC in place of clearing TXIM does NOT move this line -- it still
-# prints -- but the interrupt that follows the proof does: a healthy boot sees
-# exactly IRQ_PROOF_ROUNDS notifications, so TTY reports any extra one as
-# `[diag tty] irq FAIL extra bits=` (forbidden in qemu-boot.forbidden) and leaves the line masked.
+# prints -- and since slice 6.5 no marker of TTY's reports the interrupts that
+# then follow the proof: the guard that did (a notification past the proof was
+# a failure) was retired when the line became the receive line, which is meant
+# to keep firing. Its replacement is `[diag tty] rx FAIL storm`
+# (qemu-boot.forbidden), which counts only notifications that find the receive
+# FIFO empty.
 [diag tty] irq ok rounds=2
+
+# Slice 6.5: the proof hands the line to receive (spec R4, R5). Straight after
+# the line above TTY sets UARTIMSC.RXIM | RTIM -- the receive interrupt, and the
+# receive timeout that covers a FIFO holding fewer bytes than its trigger level
+# -- and prints this. From here every notification on the line is serviced as
+# acknowledge (UARTICR = RXIC | RTIC), drain the FIFO into the input ring until
+# FR.RXFE, re-arm with IRQ_ENABLE; a read that was refused with EAGAIN is
+# notified after the re-arm. The line says the masks were set, not that a byte
+# arrived: nothing in it depends on input, so an unfed boot prints it too. It
+# cannot print unless `irq ok rounds=2` did -- a proof that fails leaves the
+# line masked and receive off.
+[diag tty] rx on
+
+# Slice 6.5: a byte on the wire reaches read(0), and the process waiting for it
+# stops nobody else (spec R2, R7, R8). Of the three lines below the LAST holds
+# for a FED boot only: one whose stdin is tools/feed-console.sh, pointed at the
+# log the boot is writing --
+#
+#     ... cargo run ... < <(tools/feed-console.sh qemu.log) > qemu.log 2>&1
+#
+# The disk and ramdisk full boots are fed. An unfed boot (stdin at EOF, or a
+# terminal nobody types at) prints the first two and never the third, and the
+# reboot, which is not fed, is not checked against this file at all.
+#
+# init, after its console banner and before its first file read, forks one
+# child that calls read(0, buf, 64). fd 0 is the console in every process, the
+# console is empty, TTY answers CDEV_READ with EAGAIN and records VFS as the
+# endpoint it owes a NOTIFY -- and VFS, instead of relaying that or waiting,
+# PARKS the read: no reply to the child, no grant held, back to its receive
+# loop. It says so the first time it parks anything. Relay the EAGAIN instead
+# and this line is absent and the child prints `stdin FAIL n=0 first=none
+# rc=-11` (forbidden).
+[diag vfs] cons.park
+
+# VFS completed a file read -- a real FS_READ round trip to MFS, for some other
+# process -- while a console read was parked. Printed once, by VFS, at the
+# moment it is true, because nothing outside VFS can know it. This is the line
+# that says a reader waiting on the console costs the rest of the system
+# nothing; make TTY withhold its reply on an empty console instead of answering
+# EAGAIN and VFS wedges in its SENDREC to the driver: this line and everything
+# after it vanish. init's own prologue reads files straight after the fork, and
+# fileio reads /etc/motd on every fourth turn of the rotation, so a file read after
+# the park is never long in coming.
+#
+# It is also THE GATE: the feeder writes nothing until it has seen this line in
+# the log, so the bytes cannot arrive before the read is parked and VFS has
+# been seen serving somebody beside it (and cannot be eaten by the firmware or
+# Limine, which consume whatever is on stdin before the kernel starts).
+[diag vfs] cons.beside ok
+
+# The feeder then writes `minix.rs stdin` and a newline to QEMU's stdin, in two chunks a
+# few seconds apart. The second chunk's interrupt arrives only if TTY re-armed
+# its line (IRQ_ENABLE) after draining the first, so this line also proves the
+# re-arm: drop the IRQ_ENABLE and it is absent (observed).
+# The PL011 raises its receive interrupt, TTY drains the FIFO into its ring and
+# notifies VFS, VFS retries the parked read with a fresh grant, and the child's
+# read returns. The child loops until it holds the probe's 15 bytes -- they
+# arrive across at least two interrupts -- compares them with init's CONSOLE_PROBE,
+# and prints this itself, on fd 1. Raw bytes: nothing echoed them and nothing
+# rewrote the newline (spec R6). n=15 is CONSOLE_PROBE.len(), pinned by a const
+# assert, and a host test in init holds the constant to the bytes the feeder
+# carries. Nothing but TTY's NOTIFY can complete that read, so this line
+# appearing at all is the proof the parked read was woken: drop the NOTIFY and
+# it is absent with the rest of the boot unmoved.
+minix.rs init: stdin ok n=15
 
 # ---------------------------------------------------------------------------
 # Slice 6.2: the virtio driver contract -- GETINFO selectors gated to the drivers.

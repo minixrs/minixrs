@@ -301,6 +301,12 @@ usable proof of the user-facing paths. `USR_T` admits **SENDREC only**: a user-g
 fails `ETRAPDENIED`. To block a user-grade process, SENDREC to a server that never replies (6.1's
 `idle_park`).
 
+**init's console-read proof child is not forked under `idle-probe`** (slice 6.5). The child blocks
+in `read(0)` until the console is fed, which on an unfed boot is never, and `idle_park` waits for
+`ECHILD` — so the wait would never return and `idle.park` would never print. The fork and its reap
+are `cfg(not(feature = "idle-probe"))`, which means that hand-run configuration does not exercise
+receive at all. Drop the `cfg` when the idle debt is paid and `idle-probe` goes.
+
 `MF_PRIV_PROC` stays set on init's `mproc` seed (unkillable PID 1). That flag gates only the kill
 path — not fork, wait or getpid — so PM still serves init as an ordinary client.
 
@@ -330,6 +336,32 @@ These bind every band. The band bases and request numbers themselves are in [abi
 A server or driver **replies** to an unknown `m_type` — with `ENOSYS` — where DS may drop one. A
 driver's and a server's clients all SENDREC, and a dropped request blocks the caller forever (slices
 5.3 and 5.4 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+
+Two things are not exceptions to this, though they look like one. **A notification is not a
+request** — its sender is not in a SENDREC — so VFS replies to none, whoever sent it; and **a reply
+may be deferred**, as long as exactly one is eventually sent. Both arrived with slice 6.5 and both
+are stated under [Parking a console read](#parking-a-console-read).
+
+**The hazard this rule carries: two processes that each answer an unknown message can answer each
+other for ever.** The rule assumes every message a server receives is a request from a caller
+blocked in `SENDREC`. A message that is *not* one — a reply that arrives at the receive loop instead
+of at the `SENDREC` it belonged to — is unknown to the receiver, gets `ENOSYS` **sent** back, is
+unknown to *that* receiver, and so on. Slice 6.5 saw VFS and TTY trade 32,525 of them, silently:
+nothing fails, nothing prints, and both servers keep serving in between. That time the stray message
+came from a kernel defect, since fixed
+([`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec)) — but the defect
+was only one way in. **A notification that reaches a server's request dispatch starts the same
+exchange**: 6.5's mutation run let TTY's notification fall into VFS's dispatch, VFS answered TTY's
+notification with `ENOSYS`, and from that first notification onward the two traded replies, VFS's
+console `SENDREC`s answered `ELOCKED`, userland output collapsed from 8,489 lines to 54, and **no
+`FAIL` line printed**. So the hazard is one misplaced arm away in any server that is both called and
+notified by the same peer, and a boot that falls into it degrades silently rather than failing. The
+rule stands unhardened all the same — the fix, never answering a reply-shaped message, changes what
+every server's unknown-message arm does — and the exposure is a carried debt
+([`phase-6-virtio.md`](../plans/phase-6-virtio.md#slice-65-tty-rx--pl011-receive-interrupt--cdev_read)).
+Until it is paid: handle `NOTIFY_MESSAGE` **before** the request dispatch in every receive loop,
+never send a server a message outside a `SENDREC`, and read a stray `ENOSYS` exchange in a trace —
+or a boot whose output thins out with nothing reported — as exactly this.
 
 ### Define and refuse, never fold into `ENOSYS`
 
@@ -363,6 +395,9 @@ Reply `m_type` **is the byte count** (`>= 0`) on `CDEV_WRITE`, `CDEV_READ`, `BDE
   what lets a driver stage through a `main`-frame buffer with no allocator; the client re-sends with
   `offset` advanced.
 - **`CDEV_READ`: `0` is EOF and a short read is legal**, so VFS sends one request and never loops.
+  One negative answer is not a failure either: **`EAGAIN` means nothing is buffered and the driver
+  owes the caller one `NOTIFY`** — see
+  [A character driver never withholds a `CDEV_READ` reply](#a-character-driver-never-withholds-a-cdev_read-reply).
 - **`FS_READ` is clamped — a short read, not `EINVAL`** — and **a short `FS_WRITE` is normal**: the
   client is VFS, whose job is hiding staging from POSIX, and a read is short at EOF regardless.
 - **`BDEV` refuses an over-long or out-of-range request with `EINVAL`, not a short read.** Its
@@ -472,8 +507,24 @@ Beyond the shared contracts above, the driver-specific rules:
   fact, not a shared ABI.
 - **QEMU 11.0.3's PL011 has no TX FIFO:** `INT_TX` is set on every `DR` write and cleared by a
   `UARTICR` write. Acking with `UARTICR` instead of clearing `TXIM` re-fires on every byte printed
-  (83,741 interrupts in 60 s) while `irq ok` still prints; TTY's post-proof `irq FAIL extra` guard
-  is what catches it. Disarm it by clearing `TXIM`.
+  (6.1 measured 83,741 interrupts in 60 s) while `irq ok` still prints. Disarm the TX interrupt by
+  clearing `TXIM`, and leave it clear: the kernel's polled console writes the same UART.
+- **TTY's line has one owner with three phases, and a `FAIL` line for each way it can stop.**
+  `irq.rs`'s `IrqService` runs the two-round TX delivery proof (`Proof`), then sets `RXIM | RTIM`,
+  prints `rx on` and services receive for the rest of the boot (`Rx`); `Stopped` is a line left
+  masked after a failure that has already been printed. A proof round that goes wrong prints `irq
+  FAIL bits=…` or `irq FAIL enable rc=…` and receive is never turned on. In the `Rx` phase a
+  notification that drains nothing is legal once — it is the price of acknowledging before draining
+  — but `RX_EMPTY_STORM` (64) **consecutive** empty ones print `rx FAIL storm` and the line is not
+  re-armed, and a refused re-arm prints `rx FAIL enable rc=…`. A byte that finds the 256-byte input
+  ring full is dropped (the newest is the one lost) and the first drop of a boot prints `rx
+  overflow`. All of these are forbidden markers. 6.1's post-proof `irq FAIL extra` guard — every
+  notification after the proof was a failure — is gone: it could not survive a line that is meant to
+  keep firing. The storm guard is what would now report a line that keeps firing with nothing to
+  receive; the count is a pure `EmptyRun`, host-tested, because no healthy boot reaches it — and no
+  unhealthy one that QEMU can be made to produce: skipping the drain leaves bytes stuck in silence
+  rather than a storm, since QEMU drops the line on the `UARTICR` write. `rx FAIL storm` has host
+  coverage only.
 - **A driver that owns an interrupt line claims and re-arms it through `minixrs-driver-rt`'s
   `IrqLine`** (`drivers/tty` does since slice 6.2). The crate's `src` is on the shared
   `rerun-if-changed` list in `kernel/build.rs`, so an edit re-embeds every driver ELF.
@@ -491,6 +542,23 @@ Beyond the shared contracts above, the driver-specific rules:
   written once, in `driver-rt`'s crate documentation. Re-arm after **every** interrupt on a healthy
   device, including one whose walk completed nothing: 6.3's mutation that dropped the re-arm hung
   the disk boot before `root ok`
+- **PL011 receive takes the virtio order too: acknowledge, drain to empty, re-arm** (slice 6.5, R4).
+  TTY writes `UARTICR = RXIC | RTIC`, reads `DR` until `FR.RXFE`, then `IRQ_ENABLE`. I12's original
+  text had the drain first, and for an *event* source that loses a keystroke: a byte landing between
+  the last `RXFE` test and a later `UARTICR` write has its interrupt acknowledged away with the byte
+  still in the FIFO, and the re-arm finds the line low until the next byte arrives. Acknowledged
+  first, a late byte raises a fresh interrupt that the re-arm takes; the cost is at most one
+  notification that finds the FIFO empty. The TX *proof* keeps the other order (clear `TXIM`, then
+  re-arm), because its source is a condition, not an event. TTY writes neither `UARTLCR_H` nor
+  `UARTIFLS` — the kernel's console shares the UART and the loop is right with the FIFO on or off —
+  and it sets `RTIM` beside `RXIM` so a FIFO holding fewer bytes than its trigger level still
+  interrupts. **The order is held by this argument and by no test**: under QEMU, draining first
+  moves no marker. The re-arm is a different matter — a dropped `IRQ_ENABLE` loses `stdin ok`, but
+  only because the feeder sends its probe in two chunks (see
+  [Fed boots](./build-and-boot.md#fed-boots))
+- **A driver that wakes a waiter does it after the re-arm**, so its line is live again before the
+  waiter can come back with a request. In TTY that is why `IrqService::on_notify` only *reports*
+  that bytes arrived and `main` sends the `NOTIFY`
 - **`pop_used` returning `Err(QueueFault)` ends the device, it is not an element to skip.** A fault
   is sticky — nothing was consumed, so popping again reports it again — so stop the walk, write
   `FAILED`, print one `virtio FAIL step=io …` line, leave the line masked, and answer `EIO` from
@@ -681,10 +749,73 @@ steps, reporting partial progress on a mid-way failure (slice 5.11 — see
 
 ### Don't answer for a driver
 
-A console `read()` is a real `CDEV_READ` to TTY, which answers `ENOSYS` from its unknown-request arm
-until Phase 6 gives it RX — the same errno VFS used to guess, now the driver's own answer, so Phase
-6 adds one TTY arm and touches VFS not at all (slice 5.11 — see
-[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+A device `read()` is a real `CDEV_READ` to the descriptor's driver, the console's included, and the
+answer is the driver's: VFS does not guess what a driver would say. Slice 5.11 made that so while
+TTY still answered `ENOSYS` from its unknown-request arm (see
+[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)); since slice 6.5 TTY serves the request. The
+prediction that went with the rule — that receive would be one arm in TTY and nothing in VFS — was
+wrong, and the next rule is what it cost.
+
+VFS relays every driver answer but one. `EAGAIN` is a statement about *when*, not a result, and VFS
+[parks the read](#parking-a-console-read) instead of handing it to the caller.
+
+### A character driver never withholds a `CDEV_READ` reply
+
+A character driver answers **every** `CDEV_READ` at once, whether or not it has anything to give.
+Its client is VFS, and a VFS left blocked in a `SENDREC` to a driver serves nobody else — one
+process waiting on a keyboard would stop every file operation in the system. So (slice 6.5, R1):
+
+- **With input buffered**, copy `min(len, buffered, CDEV_MAX_IO)` bytes to the grant and reply the
+  count — at least one.
+- **With nothing buffered**, reply **`EAGAIN`**, record the caller's endpoint as the *waiter*, and
+  when input next arrives send that endpoint **one `NOTIFY`** and forget it. The caller asks again
+  with an ordinary `CDEV_READ`. The notification means "ask again", not "this read is ready", so the
+  retry may itself hear `EAGAIN`.
+- **Record the waiter before replying `EAGAIN`.** A single-threaded driver takes no interrupt
+  between the two, so the notification for the next byte cannot be decided before the waiter exists;
+  and the caller parks before its next plain `RECEIVE`, which is the only place a notification sent
+  early can be delivered. Those two are the servers' part of why there is no lost wakeup. The third
+  part is the kernel's, and the argument is false without it:
+  [a pending notification is never the reply to a `SENDREC`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec).
+- **A wake-up `NOTIFY` that fails keeps the waiter.** It is the only wake-up a parked reader gets,
+  so TTY checks `ipc_notify`'s result: on anything but `OK` it records the waiter again, so the next
+  byte tries again, and prints `[diag tty] rx FAIL notify rc=…` once per boot — forbidden, under the
+  `[diag tty] rx FAIL` line. A reader left parked with nothing in the log would look exactly like
+  one nobody typed at.
+- **A driver that answers `EAGAIN` without owing a `NOTIFY` hangs its reader**, silently: VFS parks
+  on the answer, whoever gave it, and nothing else will ever retry the read. So a driver that cannot
+  deliver the notification must not say `EAGAIN`. TTY answers **`EIO`** when it failed to claim its
+  interrupt line at boot, because no byte can ever arrive. That is as far as the `EIO` goes: a
+  failed TX proof, `rx FAIL storm` and `rx FAIL enable` also end reception, and a reader then stays
+  parked for good — each behind a forbidden marker that already fails the boot (6.5's carried debt
+  in
+  [`phase-6-virtio.md`](../plans/phase-6-virtio.md#slice-65-tty-rx--pl011-receive-interrupt--cdev_read)).
+- **`0` stays EOF** and is never sent for a non-zero request by a driver that can say `EAGAIN`. A
+  **zero-length** read answers `0` *before the buffer is looked at* — never `EAGAIN` — and records
+  no waiter, so it cannot be used to take the one notification. Validation runs before that, by
+  `CDEV_WRITE`'s rules in `CDEV_WRITE`'s order (TTY's two validators call one function), so a
+  zero-length read with a bad minor or grant id is still the error it is.
+- **Peek, copy, then consume.** A copy the kernel refuses (`EPERM`, `EFAULT`, relayed verbatim)
+  consumes nothing: the bytes are still owed to whoever asks next. TTY's ring has `peek` and
+  `consume` as two calls for exactly this. The two calls are host-tested; **their order in TTY's
+  `do_read` is not proved by anything** — no host test calls it and no boot refuses a copy with
+  bytes buffered — so it is a line to check by reading whenever that function changes.
+- **One waiter, not a queue; the last asker wins.** Every reader goes through VFS, so one endpoint
+  to notify is the whole state. A second, different endpoint asking while one is recorded replaces
+  it, and the first would never be notified — unreachable while VFS is the only CDEV client of TTY,
+  pinned by a host test, and a debt the day a second client appears.
+- **The bytes are raw.** No echo, no CR→LF, no erase, no line buffering: a line discipline without
+  `termios` to turn it off is a policy with no way out. Echo arrives with 6.8 and canonical mode
+  with Phase 7, both in `drivers/tty/src/input.rs`.
+
+The memory driver never answers `EAGAIN` — `/dev/null` and `/dev/zero` always have an answer — and
+so owes nobody a notification.
+
+**This is the contract 6.6 and 6.8 reuse** (R12, which turns phase decision H8's notify-then-pull to
+face both ways). `virtio-console` implements the driver side as written here; `virtio-input`
+implements it too, with TTY as the *caller* — on that driver's `NOTIFY`, TTY sends `CDEV_READ` until
+it hears `EAGAIN`. Design:
+[`2026-11-23-tty-rx-design.md`](../superpowers/specs/2026-11-23-tty-rx-design.md).
 
 ## VFS
 
@@ -707,6 +838,55 @@ driver reporting `0`, or more than it was asked for — are unreachable while th
 pure step function is the only way to test them. It also keeps them Sonar-measured, since `main.rs`
 is coverage-excluded and a sibling module is not (slices 5.4 and 5.8 — see
 [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+
+### Parking a console read
+
+VFS's half of the rule above (slice 6.5, R2). A `CDEV_READ` answered `EAGAIN` is neither relayed nor
+waited on:
+
+- **Park on the answer, not on the device.** `do_read` revokes the grant, records `{caller endpoint,
+  fd, buf, len}` in the park table (`servers/vfs/src/park.rs`), sends **no reply**, and returns to
+  `RECEIVE`. The caller stays blocked in its own `SENDREC`. VFS does not special-case the console:
+  whichever driver says `EAGAIN` has promised a `NOTIFY`.
+- **No grant is held while a read is parked.** The entry is the raw request; each attempt issues a
+  fresh magic grant and revokes it before the attempt ends, so a reader nobody types for costs no
+  slot of `GRANT_SLOTS`.
+- **`rw::validate` still runs first**, so a malformed read is refused and never parked.
+- **Retry on the driver's notification, oldest first.** A `NOTIFY_MESSAGE` whose kernel-stamped
+  `m_source` is the console driver runs `retry_parked`: for each entry in sequence order, re-resolve
+  the descriptor, grant afresh, send `CDEV_READ`. Any answer but `EAGAIN` — a count or an error — is
+  sent as the reply to that reader's original `VFS_READ` and the entry is freed (freed *before* the
+  reply goes out). **`EAGAIN` stops the walk**: the driver is empty again and that refusal re-armed
+  its waiter, so asking for the readers behind would only collect the same answer. VFS therefore
+  never spins on `EAGAIN`, and a spurious notification costs one round.
+- **Never reply to a notification** — the console driver's or anyone else's. The check sits before
+  the request dispatch, so a `NOTIFY_MESSAGE` cannot fall into the `_ => ENOSYS` arm and have an
+  unasked-for message sent at a driver — which does not fail the boot, it quietly ruins it (the
+  hazard under [Always reply](#always-reply)). A notification from any other source is dropped.
+  (RS's heartbeat never gets that far: `sef.receive` answers it.)
+- **One entry per proc slot, so the table cannot fill.** A process blocked in `SENDREC` has one
+  request outstanding; the table is sized from `NR_SERVED_PROCS` and there is no "too many readers"
+  errno. Re-parking replaces the slot's entry and goes to the back of the order.
+- **Two things free an entry besides an answer.** `VFS_PM_EXIT` frees the exiting process's entry
+  *before* its descriptor row is reset, so VFS never replies to a dead endpoint (`ParkTable::free`
+  is host-tested; the call in `do_pm_exit` is not, and no boot kills a parked reader). And
+  `evict_stale(m_source)` runs on every ordinary request: VFS keeps no process table, so a request
+  from a slot is its only evidence of who holds it, and an entry stored there under a different
+  endpoint is a previous occupant's whose exit never arrived. The entry stores the whole endpoint,
+  generation included, and the late reply and the retry's grant are addressed to *it*.
+- **The table is a `main`-frame value handed down by `&mut`**, the `GrantPool` arrangement, not an
+  `UnsafeCell` static like `fd.rs` — which is what keeps `park.rs` free of `unsafe` and its host
+  tests single-owner.
+- **The notifier check is one endpoint today**: `m_source == tty`, the DS-resolved endpoint VFS
+  already holds. 6.6 widens it to the set of character drivers; `park.rs` does not change.
+
+Three markers, all VFS's because nothing outside VFS can know any of them: `[diag vfs] cons.notify
+ok` for the first notification of a boot that reaches the receive loop from the console driver,
+`[diag vfs] cons.park` at the first park, and `[diag vfs] cons.beside ok` the first time a file read
+that made a real `FS_READ` round trip completes while a read is parked. The first is TTY's
+[notify probe](#writing-probes-and-denial-batteries) arriving, before anything is parked, and proves
+a kernel rule rather than anything about parking. The last is ordered, not synchronised — see
+[Fed boots](./build-and-boot.md#fed-boots).
 
 ### Grants on the write path
 
@@ -923,7 +1103,10 @@ A server's probe battery is how these rules stay proved. The rules for writing o
 - **Write every denial probe so that a growing capability makes it fail loudly, not pass
   vacuously.** A probe asserting `EROFS` from `write()` on a file descriptor stopped being a denial
   the moment the write path became real, and silently became a successful overwrite — with every
-  other marker still green.
+  other marker still green. A refusal asserted on a path that can **block** fails the other way:
+  init's `read-console` probe (`read()` on fd 1, expecting `ENOSYS`) would have parked init for the
+  rest of the boot once TTY could receive, taking every later marker with it. Slice 6.5 deleted it
+  in the commit that gave TTY its `CDEV_READ` arm, and `open.deny`'s count went 12 → 11.
 - **Spell an unknown-request probe band-relative** (`VFS_RQ_BASE + NR_VFS_MSGS as i32`), never as a
   literal neighbour of an existing request. `VFS_WRITE + 1` became a real `VFS_OPEN` the moment the
   band grew. Spell a flag probe relative to the known set the same way: `fcntl::O_UNKNOWN_BIT` is
@@ -955,6 +1138,22 @@ A server's probe battery is how these rules stay proved. The rules for writing o
   because a priming step that primes nothing makes the probe pass for the wrong reason. The general
   shape: name the state a wrong implementation would reuse (a bounce buffer, a cached block, a
   staging page), make it differ from the right answer, and prove that it does.
+- **When what is being proved is an interleaving, arrange it on every boot; a marker that passes by
+  timing has proved nothing.** Slice 6.5's markers all passed, repeatedly, over a kernel that
+  delivered a notification as the reply to a `SENDREC`, because the boot only fails when a
+  notification happens to be latched at VFS at the moment it next calls TTY. The probe that closed
+  it lives in **TTY's production loop**: TTY notifies its *first client* before replying to that
+  client's first request — one `ipc_notify`, behind a one-shot flag. The client is VFS,
+  mid-`SENDREC` in its prologue, so the notification is latched, and VFS's second prologue request
+  meets it on every boot, whenever input arrives. The verdict is two VFS lines, `cdev.short ok
+  n=256` and `cons.notify ok`; what they prove, what prints instead, and the one scheduling fact the
+  arrangement still leans on — TTY and VFS sharing a priority band — are in
+  [`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec). Three things
+  make a probe in a production path tolerable here and are the test for the next one: it uses a
+  shape the contract already allows (to VFS it is one spurious "ask again"); it runs once; and it
+  could not be placed anywhere else, since only the notifier can choose when to notify. **Do not
+  delete it as dead weight** — it is the kernel rule's only boot proof, and the kernel has no host
+  tests.
 
 Report through the path under test where that is what is being proved: a client's write proof must
 be written **through** the descriptor under test (e.g. `/dev/console`, never fd 1), because the

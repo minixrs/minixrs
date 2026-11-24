@@ -90,7 +90,7 @@ use crate::arch::aarch64::context::ArchRegisterFrame;
 use crate::arch::aarch64::userland;
 use crate::boot_image::elf::ElfSource;
 use crate::proc::bitmap::clear_sys_bit;
-use crate::proc::flags::{MF_DELIVERMSG, RTS_RECEIVING, RTS_SENDING};
+use crate::proc::flags::{MF_DELIVERMSG, MF_REPLY_PEND, RTS_RECEIVING, RTS_SENDING};
 use crate::proc::proc_struct::PROC_NAME_LEN;
 use crate::proc::table::{N_PROC_SLOTS, proc_index};
 use crate::proc::{Priv, Proc, sched};
@@ -288,7 +288,9 @@ pub(super) fn do_exec(
         // it is on no `caller_q`, but clear defensively.
         t.getfrom_e = NONE;
         t.sendto_e = NONE;
-        t.misc_flags &= !MF_DELIVERMSG;
+        // `MF_REPLY_PEND` goes with it: the SENDREC to PM that set it gets no
+        // reply on success, and the new image must not start owed one.
+        t.misc_flags &= !(MF_DELIVERMSG | MF_REPLY_PEND);
         t.caller_q = None;
         t.deliver_msg = Message {
             m_source: 0,

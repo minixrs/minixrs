@@ -46,8 +46,15 @@
 //! `write()` return value is not allowed to expose it. So [`write_all`] re-sends
 //! with `offset` advanced until the buffer is out and reports the total.
 //!
-//! **Every request gets a reply.** VFS's clients are all inside a SENDREC, so a
-//! dropped message blocks the caller forever — TTY's rule, and now VFS's.
+//! **Every request gets exactly one reply — but not always before the next
+//! request is served.** VFS's clients are all inside a SENDREC, so a dropped
+//! request blocks the caller forever — TTY's rule, and VFS's. Since slice 6.5
+//! there is one request whose reply is *deferred*: a console read that finds
+//! nothing buffered is **parked** (see "Parking a console read" below) and
+//! answered later, from the retry walk. And there is one kind of message that
+//! gets no reply at all: a **notification** is not a request, its sender is not
+//! in a SENDREC, and answering one would be a stray message to a process that
+//! never asked.
 //!
 //! ## The read path, and its two copies
 //!
@@ -80,6 +87,31 @@
 //!
 //! A device descriptor reads through `CDEV_READ` against its driver instead of
 //! `FS_READ` against MFS, one round, no position (slice 5.11).
+//!
+//! ## Parking a console read (slice 6.5, decision R2)
+//!
+//! ```text
+//! user ──VFS_READ{fd,buf,len}──► VFS ──CDEV_READ──► TTY   → EAGAIN (nothing buffered)
+//!   (stays blocked)               └── revoke the grant, park {caller,fd,buf,len}, no reply
+//!
+//!                                 VFS ◄──NOTIFY──── TTY   (input arrived)
+//!                                  └──CDEV_READ──► TTY    → n, through a fresh grant
+//! user ◄────────── n ──────────── VFS                     the reply to the original VFS_READ
+//! ```
+//!
+//! A character driver never withholds a `CDEV_READ` reply: empty is `EAGAIN`,
+//! and the driver then owes its caller one `NOTIFY`. VFS neither relays that
+//! `EAGAIN` nor waits on it — waiting would stop every file operation in the
+//! system behind a keyboard. It records the request in the park table
+//! ([`park`]), returns to `RECEIVE` **without replying**, and serves everybody
+//! else. The driver's notification runs [`retry_parked`], which asks again on
+//! behalf of each parked reader, oldest first, and sends each answer as the
+//! reply its reader has been blocked on all along.
+//!
+//! **No grant is held while a read is parked** — the entry is the raw request,
+//! and each attempt issues and revokes its own — so a reader nobody types for
+//! costs no slot of the grant pool. **VFS parks on the answer, not on the
+//! device**: whichever driver says `EAGAIN` has promised a `NOTIFY`.
 //!
 //! ## Staging an executable (slice 5.9)
 //!
@@ -123,6 +155,7 @@ minixrs_abi_note::brand!();
 mod dev;
 mod fd;
 mod open;
+mod park;
 mod rw;
 mod stage;
 
@@ -145,9 +178,11 @@ use minixrs_kernel_shared::com::{
 };
 use minixrs_kernel_shared::endpoint::{Endpoint, SELF, endpoint_proc};
 use minixrs_kernel_shared::error::{
-    EBADF, EEXIST, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO, EPERM, OK,
+    EAGAIN, EBADF, EEXIST, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ENXIO,
+    EPERM, OK,
 };
 use minixrs_kernel_shared::grant::{CPF_READ, CPF_WRITE, GRANT_INVALID};
+use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
 use minixrs_kernel_shared::rootfs::{
     ROOTFS_DENY_DIR, ROOTFS_DENY_PATH, ROOTFS_MOTD_PATH, ROOTFS_PATTERN_LEN, ROOTFS_PATTERN_PATH,
 };
@@ -157,6 +192,88 @@ use minixrs_server_rt::{
 };
 
 use fd::{CharDriver, Fd};
+use park::ParkTable;
+
+// ---------------------------------------------------------------------------
+// Slice 6.5: parked console reads.
+// ---------------------------------------------------------------------------
+
+/// What [`do_read`] tells the receive loop to do with the caller.
+///
+/// A type rather than a reserved errno, because every `i32` is already
+/// something a driver or MFS may legitimately answer: a sentinel value would be
+/// one relayed reply away from silently dropping a request.
+#[cfg_attr(test, allow(dead_code))]
+enum ReadOutcome {
+    /// Send this `m_type` back now: a byte count (`>= 0`) or a negative errno.
+    Reply(i32),
+    /// The read is in the park table. **Send nothing** — the caller stays
+    /// blocked in its SENDREC until [`retry_parked`] answers it.
+    Parked,
+}
+
+/// The park table and the two once-per-boot markers that describe it.
+///
+/// A `main`-frame value handed down by `&mut`, the [`GrantPool`] arrangement —
+/// see [`park`]'s module note for why not `fd.rs`'s static. The flags live here
+/// rather than in [`ParkTable`] because that module is pure and a marker is not.
+#[cfg_attr(test, allow(dead_code))]
+struct Parking {
+    table: ParkTable,
+    /// `[diag vfs] cons.park` has been printed.
+    said_park: bool,
+    /// `[diag vfs] cons.notify ok` has been printed.
+    said_notify: bool,
+    /// `[diag vfs] cons.beside ok` has been printed.
+    said_beside: bool,
+}
+
+#[cfg_attr(test, allow(dead_code))]
+impl Parking {
+    const fn new() -> Self {
+        Self {
+            table: ParkTable::new(),
+            said_park: false,
+            said_notify: false,
+            said_beside: false,
+        }
+    }
+
+    /// Park `caller_e`'s read. `false` only if the caller has no slot in the
+    /// table, in which case nothing was parked and the caller must be answered.
+    ///
+    /// The first park of the boot says so: it is the moment a fed boot's input
+    /// has somebody waiting for it, which nothing outside VFS can observe.
+    fn park(&mut self, caller_e: Endpoint, fd: i32, buf: u64, len: usize) -> bool {
+        if !self.table.park(caller_e, fd, buf, len) {
+            return false;
+        }
+        if !self.said_park {
+            self.said_park = true;
+            diag_fmt(format_args!("cons.park"));
+        }
+        true
+    }
+
+    /// A notification from the console driver reached the receive loop. The
+    /// first of a boot prints `cons.notify ok`.
+    fn console_notified(&mut self) {
+        if !self.said_notify {
+            self.said_notify = true;
+            diag_fmt(format_args!("cons.notify ok"));
+        }
+    }
+
+    /// A file read just completed. If a read is parked at this moment, that is
+    /// the proof VFS did not block on the console — printed once, when it first
+    /// becomes true, because VFS is the only process that can know it.
+    fn file_read_completed(&mut self) {
+        if !self.said_beside && self.table.any_parked() {
+            self.said_beside = true;
+            diag_fmt(format_args!("cons.beside ok"));
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Slice 5.9: the exec staging buffer.
@@ -210,8 +327,9 @@ fn stage_addr() -> u64 {
 /// Bytes VFS grants PM in the slice-5.2 demo.
 const GRANT_TEST_LEN: usize = 64;
 
-/// Number of simultaneously outstanding grants VFS can hold. VFS's stack is one
-/// page, and the pool costs `N * 32` bytes; 8 is ample for the demo.
+/// Number of simultaneously outstanding grants VFS can hold. The pool costs
+/// `N * 32` bytes of `main`'s frame; 8 covers every path, since a parked
+/// console read holds no grant (slice 6.5).
 const GRANT_SLOTS: usize = 8;
 
 /// The granted buffer. A `static` (not `static mut`) so it lands in `.rodata`,
@@ -321,6 +439,10 @@ fn main() -> ! {
     // like the pool itself, because it names a slot in that pool.
     let mut staged: i32 = GRANT_INVALID;
 
+    // Slice 6.5: console reads accepted and not yet answered. Empty until a
+    // driver first answers `CDEV_READ` with `EAGAIN`.
+    let mut parking = Parking::new();
+
     grant_test(&mut grants);
     tty_demo(&mut grants, tty);
     mount_root(&mut mount, mfs);
@@ -348,13 +470,47 @@ fn main() -> ! {
         // process whose fd table is consulted — and the dispatch below overwrites
         // `msg.m_source` on the way out.
         let caller_e = msg.m_source;
+
+        // A notification is not a request: its sender is not in a SENDREC, so
+        // **none is ever replied to**, whoever sent it. This sits before the
+        // dispatch precisely so that a `NOTIFY_MESSAGE` can never reach the
+        // `_ => ENOSYS` arm and `reply()` below — that would SEND an unasked-for
+        // message at a driver. (RS's heartbeat never gets this far:
+        // `sef.receive` answers it.)
+        //
+        // The console driver's is the R1 "ask again": input has arrived, so the
+        // parked reads are retried. The source is the kernel-stamped `m_source`,
+        // never the payload. Anybody else's is dropped.
+        if msg.m_type == NOTIFY_MESSAGE {
+            if caller_e == tty {
+                // The first one of a boot is TTY's probe (see its main loop):
+                // sent while VFS was inside a SENDREC to TTY, and required to
+                // arrive *here*, through the plain `RECEIVE`, not as the reply
+                // to VFS's next SENDREC to TTY.
+                parking.console_notified();
+                retry_parked(&mut parking, &mut grants, tty, mem);
+            }
+            continue;
+        }
+
+        // A request from `caller_e` proves who holds its proc slot now. A read
+        // parked there under another endpoint is a previous occupant's — its
+        // exit never reached VFS — and must not be retried against the new
+        // occupant's descriptors.
+        parking.table.evict_stale(caller_e);
+
         let rc = match msg.m_type {
             VFS_WRITE => do_write(caller_e, &msg, &mut grants, tty, mem, mfs),
             VFS_OPEN => do_open(caller_e, &msg, &mut mount, mfs),
-            VFS_READ => do_read(caller_e, &msg, &mut grants, tty, mem, mfs),
+            VFS_READ => match do_read(caller_e, &msg, &mut grants, &mut parking, tty, mem, mfs) {
+                ReadOutcome::Reply(rc) => rc,
+                // The one request whose reply is deferred: back to `RECEIVE`
+                // with the caller still blocked. `retry_parked` answers it.
+                ReadOutcome::Parked => continue,
+            },
             VFS_CLOSE => do_close(caller_e, &msg),
             VFS_LSEEK => do_lseek(caller_e, &mut msg),
-            VFS_PM_EXIT => do_pm_exit(caller_e, &msg),
+            VFS_PM_EXIT => do_pm_exit(caller_e, &msg, &mut parking),
             VFS_EXEC_STAGE => do_exec_stage(
                 caller_e,
                 &mut msg,
@@ -366,6 +522,7 @@ fn main() -> ! {
             // Reply rather than drop (TTY's rule): VFS's clients are all inside a
             // SENDREC, and a dropped request blocks the caller forever. DS can
             // afford to drop one only because nothing SENDRECs it in anger.
+            // Notifications never reach this arm — see above.
             _ => ENOSYS,
         };
         reply(caller_e, &mut msg, rc);
@@ -734,8 +891,9 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
     fd
 }
 
-/// Serve one `VFS_READ`. Returns the reply `m_type`: bytes read (`>= 0`, `0` is
-/// EOF), or a negative errno.
+/// Serve one `VFS_READ`. Returns [`ReadOutcome::Reply`] with the reply `m_type`
+/// — bytes read (`>= 0`, `0` is EOF), or a negative errno — or
+/// [`ReadOutcome::Parked`] when the caller must be left blocked.
 ///
 /// **VFS does not loop here, and that asymmetry with [`do_write`] is the design.**
 /// `write()` may not expose a driver's staging limit, so `write_all` re-sends
@@ -752,16 +910,22 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
 /// never be one.
 ///
 /// A device descriptor takes the same shape against its driver, with `CDEV_READ`
-/// in place of `FS_READ` and no position to advance.
+/// in place of `FS_READ` and no position to advance — and one more outcome. A
+/// driver with nothing buffered answers **`EAGAIN`** at once and owes a `NOTIFY`
+/// (slice 6.5, R1). That answer is never relayed: the grant is revoked, the raw
+/// request is parked, and the caller hears nothing until [`retry_parked`] has a
+/// real answer for it (R2). Every check above the driver call still runs first,
+/// so a malformed read is refused and never parked.
 #[cfg_attr(test, allow(dead_code))]
 fn do_read(
     caller_e: Endpoint,
     msg: &Message,
     grants: &mut GrantPool<GRANT_SLOTS>,
+    parking: &mut Parking,
     tty: Endpoint,
     mem: Endpoint,
     mfs: Endpoint,
-) -> i32 {
+) -> ReadOutcome {
     let req = rw::parse(msg);
     let proc_nr = endpoint_proc(caller_e).get();
 
@@ -771,31 +935,30 @@ fn do_read(
     // about.
     let target = match fd::resolve(proc_nr, req.fd) {
         Ok(Fd::File { ino, pos }) => Fd::File { ino, pos },
-        // Slice 5.11 (Z7): routed to its driver, TTY included. TTY does not serve
-        // `CDEV_READ` until Phase 6 gives it RX and answers `ENOSYS` from its
-        // unknown-request arm — the same errno this arm used to short-circuit
-        // locally, now the driver's answer rather than VFS's guess about it. So
-        // Phase 6 changes TTY and nothing here.
+        // Slice 5.11 (Z7): routed to its driver, TTY included — the answer is
+        // the driver's, never VFS's guess about it. Slice 6.5 gave TTY a
+        // `CDEV_READ` arm and, with it, the one driver answer VFS does not
+        // relay: `EAGAIN`, handled in the `CharDev` arm below.
         Ok(Fd::CharDev { dev, minor }) => Fd::CharDev { dev, minor },
-        Ok(Fd::Unused) => return EBADF,
-        Err(e) => return e,
+        Ok(Fd::Unused) => return ReadOutcome::Reply(EBADF),
+        Err(e) => return ReadOutcome::Reply(e),
     };
 
     let len = match rw::validate(req.len, req.buf) {
         Ok(len) => len,
-        Err(e) => return e,
+        Err(e) => return ReadOutcome::Reply(e),
     };
     if len == 0 {
         // A legal empty read. No grant is issued, so a client polling with
         // `len = 0` cannot use it to probe the granting path.
-        return 0;
+        return ReadOutcome::Reply(0);
     }
 
     match target {
         Fd::File { ino, pos } => {
             let gid = match grants.grant_magic(mfs, caller_e, req.buf, len as u64, CPF_WRITE) {
                 Ok(gid) => gid,
-                Err(e) => return e,
+                Err(e) => return ReadOutcome::Reply(e),
             };
             let n = fs_read(mfs, ino as i32, gid, len as i32, pos);
             let _ = grants.revoke(gid);
@@ -805,7 +968,12 @@ fn do_read(
                 // silently move the descriptor past bytes nobody read.
                 fd::advance(proc_nr, req.fd, n as u64);
             }
-            n
+            if n >= 0 {
+                // A file read MFS really served (EOF included), possibly beside
+                // a parked console read — which is the thing to say out loud.
+                parking.file_read_completed();
+            }
+            ReadOutcome::Reply(n)
         }
         Fd::CharDev { dev, minor } => {
             // One round, no loop (the `FS_READ` stance: a short read is legal),
@@ -813,17 +981,115 @@ fn do_read(
             let driver = cdev_endpoint(dev, tty, mem);
             let gid = match grants.grant_magic(driver, caller_e, req.buf, len as u64, CPF_WRITE) {
                 Ok(gid) => gid,
-                Err(e) => return e,
+                Err(e) => return ReadOutcome::Reply(e),
             };
             let n = cdev_read(driver, minor, gid, len as i32, 0);
+            // Revoked whatever the answer was: **no grant is held while a read
+            // is parked**. The retry issues its own.
             let _ = grants.revoke(gid);
-            n
+            if n != EAGAIN {
+                return ReadOutcome::Reply(n);
+            }
+            // Nothing buffered, and the driver now owes VFS a `NOTIFY`. Park on
+            // the answer, whoever gave it; VFS does not special-case the
+            // console. The park happens before VFS's next `RECEIVE`, so the
+            // notification cannot be seen ahead of the entry it is for — and
+            // the kernel never hands it over as the reply to a SENDREC VFS
+            // makes in between (spec R9).
+            if parking.park(caller_e, req.fd, req.buf, len) {
+                ReadOutcome::Parked
+            } else {
+                // Unreachable: `fd::resolve` already refused any caller without
+                // a row, and the two tables are sized alike. If it ever is
+                // reached, the caller gets the errno `fd.rs` gives a process it
+                // has no row for — an unparked read left unanswered would hang.
+                ReadOutcome::Reply(EBADF)
+            }
         }
         // `target` is only ever assigned from the `CharDev`/`File` arms of the
         // `resolve` match above — `Unused` already returned early there — so
         // this arm is unreachable too; kept so a future `Fd` variant is a
         // compile error here as well (the `do_write` shape).
-        Fd::Unused => EBADF,
+        Fd::Unused => ReadOutcome::Reply(EBADF),
+    }
+}
+
+/// Retry the parked reads, oldest first, on the console driver's notification
+/// (slice 6.5, R2).
+///
+/// For each entry: re-resolve the descriptor, issue a **fresh** magic grant
+/// naming the parked endpoint as owner, send `CDEV_READ`. Then one of two
+/// things happens.
+///
+/// - **Any answer but `EAGAIN`** — a count or an error — is the reply to that
+///   reader's original `VFS_READ`. It is sent, the entry is freed, and the walk
+///   moves to the next oldest.
+/// - **`EAGAIN` stops the walk.** The driver is empty again, and that refusal
+///   re-armed its waiter, so the next byte brings the next notification. Asking
+///   on behalf of the readers behind this one would only collect the same
+///   answer. A spurious notification therefore costs one round and nothing
+///   more, and VFS never spins on `EAGAIN`.
+///
+/// Two outcomes never reach the driver, and both reply and free: a descriptor
+/// that is no longer a character device (`EBADF` — it cannot be closed while its
+/// owner is blocked, but the check is free), and a grant that could not be
+/// issued (its own errno, verbatim). Neither can be mistaken for the driver's
+/// `EAGAIN`, whatever value it carries: only a `CDEV_READ` reply stops the walk.
+///
+/// The entry is freed **before** the reply goes out, so the table never holds
+/// an entry for a process that has been released to send its next request. The
+/// reply is addressed to the *stored* endpoint, generation included; if that
+/// process is gone the send fails and is ignored, like every other reply.
+///
+/// Every pass of the loop frees an entry or returns, so it terminates.
+#[cfg_attr(test, allow(dead_code))]
+fn retry_parked(
+    parking: &mut Parking,
+    grants: &mut GrantPool<GRANT_SLOTS>,
+    tty: Endpoint,
+    mem: Endpoint,
+) {
+    // `oldest` returns a copy, so no borrow of the table is live across the
+    // SENDREC below.
+    while let Some(parked) = parking.table.oldest() {
+        let proc_nr = endpoint_proc(parked.endpoint).get();
+        let rc = match fd::resolve(proc_nr, parked.fd) {
+            Ok(Fd::CharDev { dev, minor }) => {
+                let driver = cdev_endpoint(dev, tty, mem);
+                match grants.grant_magic(
+                    driver,
+                    parked.endpoint,
+                    parked.buf,
+                    parked.len as u64,
+                    CPF_WRITE,
+                ) {
+                    Ok(gid) => {
+                        let n = cdev_read(driver, minor, gid, parked.len as i32, 0);
+                        let _ = grants.revoke(gid);
+                        if n == EAGAIN {
+                            // Still parked, still grant-free; the driver will
+                            // notify again.
+                            return;
+                        }
+                        n
+                    }
+                    Err(e) => e,
+                }
+            }
+            Ok(Fd::File { .. }) | Ok(Fd::Unused) | Err(_) => EBADF,
+        };
+
+        if !parking.table.free(proc_nr) {
+            // Cannot happen — `oldest` just returned this slot's entry — but a
+            // walk that could not remove its head would never end.
+            return;
+        }
+        let mut m = Message {
+            m_source: 0,
+            m_type: 0,
+            payload: [0u8; 96],
+        };
+        reply(parked.endpoint, &mut m, rc);
     }
 }
 
@@ -1012,12 +1278,20 @@ fn do_lseek(caller_e: Endpoint, msg: &mut Message) -> i32 {
 /// reset its descriptor row. `EPERM` unless the kernel-stamped sender is PM (the
 /// [`do_exec_stage`] check). Emits a diag line only when a descriptor was actually
 /// left open, so a run where nothing leaks is silent.
+///
+/// **A parked read goes first** (slice 6.5): the process may have died blocked
+/// in a console `read()`, and an entry left behind would have VFS reply to a
+/// dead endpoint — or, once the slot is recycled, retry the read against the
+/// next occupant's descriptors. Freed before the row is reset, so there is no
+/// moment at which a parked entry points at a row that is already somebody
+/// else's.
 #[cfg_attr(test, allow(dead_code))]
-fn do_pm_exit(caller_e: Endpoint, msg: &Message) -> i32 {
+fn do_pm_exit(caller_e: Endpoint, msg: &Message, parking: &mut Parking) -> i32 {
     if caller_e != boot_endpoint(PM_PROC_NR) {
         return EPERM;
     }
     let target = rd_i32(msg, VFS_PM_EXIT_PROC_OFF);
+    parking.table.free(endpoint_proc(target).get());
     let closed = fd::reset(endpoint_proc(target).get());
     if closed > 0 {
         diag_fmt(format_args!("pm-exit reset closed={closed}"));

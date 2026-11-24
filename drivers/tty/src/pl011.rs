@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! PL011 UART transmit, from EL0 (slice 5.3, decision D1).
+//! PL011 UART register access, from EL0 (slice 5.3, decision D1; receive in
+//! slice 6.5).
 //!
 //! This is the whole reason minix.rs has a TTY *driver* rather than a TTY
 //! *server*: the register accesses below are the first hardware the kernel does
@@ -10,16 +11,28 @@
 //! VM-mediated `VMCTL_MAP_PHYS` to Phase 6 — a driver has no way to ask for a
 //! physical mapping yet.
 //!
-//! **TX only, polled.** RX needs an input path, which is Phase 6. Polling
-//! `FR.TXFF` before each `DR` store is the documented send sequence (ARM PL011
-//! TRM r1p5 §3.3). The one interrupt TTY touches is the TX interrupt, and only
+//! **TX is polled.** Polling `FR.TXFF` before each `DR` store is the documented
+//! send sequence (ARM PL011 TRM r1p5 §3.3). The TX interrupt is touched only
 //! for slice 6.1's delivery proof ([`set_txim`]; see `irq.rs`) — transmission
 //! itself never waits on it.
 //!
+//! **RX is interrupt-driven** (slice 6.5, spec R4). [`set_rx_masks`] lets the
+//! receive and receive-timeout interrupts reach the line, [`ack_rx`] clears
+//! both, and [`getc`] takes one byte out of the receive FIFO or reports it
+//! empty. The order they are called in — acknowledge, drain to empty, re-arm —
+//! is `irq.rs`'s, not this module's.
+//!
+//! **`UARTLCR_H` and `UARTIFLS` are never written.** The kernel's polled
+//! console shares this UART and the firmware configured it; the receive loop is
+//! correct whether the FIFO is enabled or not, so TTY has no reason to change
+//! either. (Measured in slice 6.5: edk2 leaves `LCR_H = 0x70`, FIFO enabled,
+//! and QEMU 11 raises the RX interrupt on the first byte whatever the trigger
+//! level in `IFLS` says.)
+//!
 //! ## Register offsets are deliberately re-declared
 //!
-//! `kernel/src/arch/aarch64/uart.rs` declares the same three constants, and as of
-//! slice 6.1 the same [`PL011_INTID`]. They are not shared, and cannot be: the
+//! `kernel/src/arch/aarch64/uart.rs` declares the `DR`, `FR` and `FR.TXFF`
+//! constants too, and as of slice 6.1 the same [`PL011_INTID`]. They are not shared, and cannot be: the
 //! kernel crate is bare-metal-only and pinned to `aarch64-unknown-none` by
 //! `forced-target`, so it can never be a dependency of a user-space crate. Moving them into
 //! `kernel-shared` was considered and rejected — a PL011 register layout is not a shared *ABI*, it is a hardware fact that two
@@ -39,17 +52,31 @@ use core::ptr::{read_volatile, write_volatile};
 
 use minixrs_kernel_shared::uspace::TTY_UART_VA;
 
-/// Data register — a byte written here is transmitted.
+/// Data register — a byte written here is transmitted; a read takes the oldest
+/// received byte, with its error flags in bits 8–11.
 const DR_OFFSET: u64 = 0x00;
 /// Flag register.
 const FR_OFFSET: u64 = 0x18;
+/// `FR` bit 4: receive FIFO empty. A `DR` read while it is set returns no byte.
+const FR_RXFE: u32 = 1 << 4;
 /// `FR` bit 5: transmit FIFO full. Poll until clear before storing to `DR`.
 const FR_TXFF: u32 = 1 << 5;
 /// Interrupt mask set/clear register (`UARTIMSC`): a set bit lets that
 /// interrupt reach the PL011's output line.
 const IMSC_OFFSET: u64 = 0x038;
+/// `UARTIMSC` bit 4: the receive interrupt mask (`RXIM`).
+const IMSC_RXIM: u32 = 1 << 4;
 /// `UARTIMSC` bit 5: the transmit interrupt mask (`TXIM`).
 const IMSC_TXIM: u32 = 1 << 5;
+/// `UARTIMSC` bit 6: the receive-timeout interrupt mask (`RTIM`).
+const IMSC_RTIM: u32 = 1 << 6;
+/// Interrupt clear register (`UARTICR`): write-only, and writing a 1 clears
+/// that raised interrupt.
+const ICR_OFFSET: u64 = 0x044;
+/// `UARTICR` bit 4: clear the receive interrupt (`RXIC`).
+const ICR_RXIC: u32 = 1 << 4;
+/// `UARTICR` bit 6: clear the receive-timeout interrupt (`RTIC`).
+const ICR_RTIC: u32 = 1 << 6;
 
 /// The PL011's GIC INTID on QEMU `virt` (SPI 1), which TTY claims with
 /// `SYS_IRQCTL` (slice 6.1). Duplicated, like the offsets above, in
@@ -76,6 +103,66 @@ pub fn set_txim(on: bool) {
     unsafe {
         let v = read_volatile(imsc);
         write_volatile(imsc, if on { v | IMSC_TXIM } else { v & !IMSC_TXIM });
+    }
+}
+
+/// Set (`on`) or clear `UARTIMSC.RXIM` and `RTIM` together, leaving the other
+/// mask bits — `TXIM` among them — as they are (a read-modify-write).
+///
+/// `RXIM` is the receive interrupt. `RTIM`, the receive timeout, covers a
+/// FIFO-enabled UART holding fewer bytes than its trigger level: without it
+/// those bytes would sit unannounced until more arrived (spec R4).
+pub fn set_rx_masks(on: bool) {
+    const RX_MASKS: u32 = IMSC_RXIM | IMSC_RTIM;
+    let imsc = (TTY_UART_VA + IMSC_OFFSET) as *mut u32;
+    // SAFETY: as in `putc` — `TTY_UART_VA` maps the PL011's whole register
+    // block (`UARTIMSC` at 0x038 is inside the page) into this single-threaded
+    // process only. Volatile because each access is a device register access
+    // the compiler must neither cache nor elide.
+    unsafe {
+        let v = read_volatile(imsc);
+        write_volatile(imsc, if on { v | RX_MASKS } else { v & !RX_MASKS });
+    }
+}
+
+/// Acknowledge the receive and receive-timeout interrupts: one store of
+/// `RXIC | RTIC` to `UARTICR`.
+///
+/// A plain store, not a read-modify-write: the register is write-only and a 0
+/// bit leaves that interrupt alone, so nothing else — the TX interrupt
+/// included — is disturbed. Called *before* the FIFO is drained; `irq.rs` says
+/// why.
+pub fn ack_rx() {
+    let icr = (TTY_UART_VA + ICR_OFFSET) as *mut u32;
+    // SAFETY: as in `putc` — `TTY_UART_VA` maps the PL011's whole register
+    // block (`UARTICR` at 0x044 is inside the page) into this single-threaded
+    // process only. Volatile because the store is the acknowledgement: the
+    // compiler must neither elide nor duplicate it.
+    unsafe {
+        write_volatile(icr, ICR_RXIC | ICR_RTIC);
+    }
+}
+
+/// Take the oldest received byte, or `None` when the receive FIFO is empty
+/// (`FR.RXFE` set).
+///
+/// `DR`'s error flags — framing, parity, break, overrun, bits 8–11 — are
+/// discarded and the byte kept (spec R4): QEMU never sets them, and a console
+/// has no use for a silently dropped character.
+pub fn getc() -> Option<u8> {
+    let fr = (TTY_UART_VA + FR_OFFSET) as *mut u32;
+    let dr = (TTY_UART_VA + DR_OFFSET) as *mut u32;
+    // SAFETY: as in `putc` — `TTY_UART_VA` maps the PL011's whole register
+    // block into this single-threaded process only. Volatile is required in
+    // both directions: `FR` must be re-read on every call (the caller loops
+    // until it reports empty), and each `DR` load removes one byte from the
+    // FIFO, so the compiler must neither elide nor duplicate it — which is also
+    // why `DR` is read only after `RXFE` is seen clear.
+    unsafe {
+        if read_volatile(fr) & FR_RXFE != 0 {
+            return None;
+        }
+        Some((read_volatile(dr) & 0xFF) as u8)
     }
 }
 

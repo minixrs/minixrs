@@ -39,17 +39,17 @@ ascending numeric order. VFS took `0x800` in slice 5.4, BDEV `0xA00` in 5.7, and
 `0x900` in 5.8 — which fills `0x700..0xC00` completely. A tenth band has no reserved slot left to
 take; it has to find a home outside that span.
 
-| Base            | Value   | Server / purpose                                                                                                       |
-| --------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC`                                                                    |
-| `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE`                                                            |
-| `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` (MFS)                                  |
-| `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`, `virtio-blk`)                                                     |
-| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` (TTY, memory driver) / `CDEV_READ` (memory driver; TTY answers `ENOSYS` until Phase 6) |
-| `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK`                                                                |
-| `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init)                                                                            |
-| `DS_RQ_BASE`    | `0xE00` | DS: `DS_PUBLISH` / `RETRIEVE` / `CHECK`                                                                                |
-| `SCHED_RQ_BASE` | `0xF00` | SCHED: `SCHEDULING_NO_QUANTUM` / `START` / `STOP` / `SET_NICE`                                                         |
+| Base            | Value   | Server / purpose                                                                      |
+| --------------- | ------- | ------------------------------------------------------------------------------------- |
+| `PM_RQ_BASE`    | `0x700` | PM: `PM_GETPID` / `FORK` / `EXIT` / `WAIT` / `EXEC`                                   |
+| `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE`                           |
+| `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` (MFS) |
+| `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`, `virtio-blk`)                    |
+| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` / `CDEV_READ` (TTY, memory driver)                    |
+| `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK`                               |
+| `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init)                                           |
+| `DS_RQ_BASE`    | `0xE00` | DS: `DS_PUBLISH` / `RETRIEVE` / `CHECK`                                               |
+| `SCHED_RQ_BASE` | `0xF00` | SCHED: `SCHEDULING_NO_QUANTUM` / `START` / `STOP` / `SET_NICE`                        |
 
 ## SEF: the server runtime
 
@@ -185,8 +185,11 @@ Three properties hold that path together:
   did go out. The file-backed route slice 5.10a added loops on the same rules but grants *afresh*
   each round, because the FS band deliberately has no grant-offset field: there, the grant is what
   moves.
-- **Every request gets a reply**, including an unknown one (`ENOSYS`). VFS's clients are all inside
-  a SENDREC, so a dropped message blocks the caller forever.
+- **Every request gets exactly one reply**, including an unknown one (`ENOSYS`). VFS's clients are
+  all inside a SENDREC, so a dropped message blocks the caller forever. Since slice 6.5 the reply is
+  not always sent before the next request is served — a console read that finds nothing is
+  [parked](#parking-a-console-read) and answered later — and a *notification*, which is not a
+  request, gets no reply at all.
 
 ### The descriptor table
 
@@ -204,8 +207,9 @@ DS-resolved endpoint is not) — minors are a per-driver namespace, so the drive
 mount, so a device open needs no filesystem; `O_CREAT` and `O_TRUNC` are ignored on a hit, Linux's
 behaviour for a device node. Everything else falls through to MFS, `/dev/other` included, and there
 is no `/dev` on the image at all. A device `read()` is one `CDEV_READ` against the descriptor's
-driver, no loop and no position; a console `read()` therefore reaches TTY and hears `ENOSYS` from
-its unknown-request arm until Phase 6.
+driver, no loop and no position; a console `read()` therefore reaches TTY, which since slice 6.5
+answers with the bytes it has buffered — or, with none, with an `EAGAIN` that VFS does not pass on
+([Parking a console read](#parking-a-console-read)).
 
 Slice 5.8's `open` is what makes rows diverge, and it moved the storage to the `UnsafeCell` newtype
 VM's region table already uses. That brings a rule with it: **never hold a borrow of the table
@@ -266,6 +270,95 @@ Two more properties, each with its own boot marker:
   `write()`'s return value; `read()` is explicitly allowed to return less than asked for, and a file
   read is short at EOF regardless. EOF is a read returning `0` — no file's size is cached anywhere
   along the path, so that is the single source of truth.
+
+### Parking a console read
+
+```text
+user ──VFS_READ{fd,buf,len}──► VFS ──CDEV_READ──► TTY   → EAGAIN (nothing buffered)
+  (stays blocked)               └── revoke the grant, park {caller,fd,buf,len}, no reply
+
+                                VFS ◄──NOTIFY──── TTY   (input arrived)
+                                 └──CDEV_READ──► TTY    → n, through a fresh grant
+user ◄────────── n ──────────── VFS                     the reply to the original VFS_READ
+```
+
+A file always has an answer. A console does not: its bytes arrive when somebody types. TTY never
+makes VFS wait for them — with nothing buffered it answers `EAGAIN` at once and promises one
+`NOTIFY` when input arrives
+([notify-then-pull](../drivers/overview.md#notify-then-pull-a-read-with-nothing-to-give)). VFS then
+has a caller it cannot answer yet, and two wrong things it could do. Relaying the `EAGAIN` would
+turn every `read()` of an idle console into an error. Waiting — asking again in a loop, or holding
+the request open — would stop every file operation in the system behind one keyboard, because VFS is
+a single-threaded server. So it does neither: it **parks** the read (slice 6.5).
+
+Parking costs the kernel nothing. The caller is blocked in its own `SENDREC`, and that is satisfied
+by any later `SEND` from VFS, so "park" means only: record the request, skip the reply, go back to
+`RECEIVE`. `do_read` returns a two-valued `ReadOutcome` — `Reply(n)` or `Parked` — rather than a
+reserved errno, because every `i32` is already something a driver may legitimately answer.
+
+**The park table** (`servers/vfs/src/park.rs`, pure and host-tested) holds one entry per kernel proc
+number, sized from `NR_SERVED_PROCS` like the descriptor table. A process blocked in `SENDREC` has
+exactly one request outstanding, so one entry per slot is every read that can be parked at once: the
+table cannot fill, and there is no "too many readers" errno. An entry is the request as it arrived,
+plus its place in the queue:
+
+| Field      | Holds                                                                      |
+| ---------- | -------------------------------------------------------------------------- |
+| `endpoint` | the caller's whole endpoint, generation included, as the kernel stamped it |
+| `fd`       | the descriptor the read was issued on, re-resolved at every retry          |
+| `buf`      | the buffer's address in the caller's address space                         |
+| `len`      | bytes asked for, already validated and non-zero                            |
+| `seq`      | a sequence number; smaller is older                                        |
+
+There is no grant in it. The magic grant issued for the first attempt is revoked before the read is
+parked, and every retry issues its own, so a reader nobody types for holds no slot of VFS's
+eight-entry grant pool for as long as it waits. The table itself is a value in `main`'s frame, like
+the grant pool, which is why the module needs no `unsafe`.
+
+**The retry walk** runs when TTY's notification arrives. VFS's receive loop checks for a
+`NOTIFY_MESSAGE` *before* the request dispatch; one whose kernel-stamped source is the console
+driver starts `retry_parked`, and one from anybody else is dropped. Neither is replied to — a
+notifier is not waiting for an answer, and the check sits where it does so that a notification can
+never fall into the unknown-request arm and be sent an `ENOSYS`. The walk takes the parked reads
+oldest first, and for each one:
+
+1. re-resolves the descriptor (`EBADF` if it is no longer a character device — it cannot have been
+   closed while its owner is blocked, but the check is free);
+2. issues a fresh magic grant naming the *stored* endpoint as owner, and sends `CDEV_READ` (a grant
+   that cannot be issued is answered with its own errno, like any other error);
+3. **any answer but `EAGAIN`** — a count or an error — frees the entry and is then sent as the reply
+   to that reader's original `VFS_READ`;
+4. **`EAGAIN` ends the walk.** The driver is empty again, and that refusal re-armed its waiter, so
+   the next byte will bring the next notification. Asking on behalf of the readers further back
+   would only collect the same answer.
+
+So a notification that turns out to be spurious costs one round trip, and VFS never spins. Every
+pass either frees an entry or returns, so the walk terminates.
+
+**Entries do not outlive their process.** Proc numbers are recycled, and a parked read retried
+against the *next* occupant of a slot would read into a stranger's buffer through a stranger's
+descriptors. Three things prevent it. The entry stores the full endpoint, and both the grant and the
+late reply are addressed to it. `VFS_PM_EXIT` — PM telling VFS a process is gone — frees the
+process's entry before its descriptor row is reset. And because VFS keeps no process table of its
+own, every ordinary request is also treated as evidence of who holds its slot now: an entry parked
+there under a different endpoint is evicted before the request is served.
+
+Everything above the driver call still runs first — the descriptor lookup, `rw::validate`, the
+zero-length fast path — so a malformed read is refused and never parked. And VFS parks on the
+*answer*, not on the device: it does not know which driver is a console, only that whoever said
+`EAGAIN` has promised to notify. The notifier it accepts today is the one TTY endpoint it resolved
+through DS at startup.
+
+VFS reports three moments that nothing outside it can observe: `[diag vfs] cons.notify ok` for the
+first notification of a boot that reaches its receive loop from the console driver, `[diag vfs]
+cons.park` the first time it parks a read, and `[diag vfs] cons.beside ok` the first time it
+completes a file read — one that made a real round trip to MFS — while a read is parked. The first
+arrives before anything is parked: it is a notification TTY sends on purpose at start-up, and it
+proves that the kernel delivers a notification at a plain `RECEIVE` and never as the reply to a
+`SENDREC` ([IPC](../ipc/overview.md#a-notification-is-never-the-reply-to-a-sendrec)) — the property
+the retry walk above cannot work without, since VFS is forever sending TTY requests while TTY may be
+about to notify it. The last is the proof of the parking arrangement itself, and
+[what the boot log shows](../drivers/overview.md#what-the-boot-log-proves) builds on both.
 
 ### Staging an executable
 
@@ -539,6 +632,24 @@ descriptor (`EBADF`), an unknown request number (`ENOSYS` — and the *reply* is
 a dropped request would hang init and the boot with it), an unmapped buffer (`EFAULT`, from the
 kernel's page-table walk, which costs init no page fault because the copy engine walks rather than
 dereferences), and a negative length (`EINVAL`).
+
+Since slice 6.5 init also proves the console can be *read*. Straight after its banner, and before
+its first file read, it forks one child that calls `read(0, buf, 64)` — fd 0 is the console in every
+process — and init carries on without waiting for it. The child's read finds the console empty and
+is [parked inside VFS](#parking-a-console-read); it stays there until
+[the boot is fed](../build.md#feeding-the-console) the fixed line `minix.rs stdin`, loops until it
+holds all fifteen bytes (they may arrive across several interrupts), compares them with the constant
+it expects, and prints its own verdict on fd 1: `minix.rs init: stdin ok n=15`, or a `stdin FAIL`
+line saying how many bytes came and what the first was. It asks for more than the probe holds, so
+trailing input in the same batch is a failure rather than something left unread behind an `ok`. It
+exits with a positive sentinel status either way, and init — which reaps it by pid whenever it
+happens to come back — prints `stdin FAIL no-verdict` if the child died without one. On a boot
+nobody feeds, the child simply stays parked for the whole run and costs one fork-pool slot.
+
+The probe it replaced asserted the opposite. Until 6.5 init called `read()` on fd 1 and expected
+`ENOSYS`, because TTY had no receive side; with one, that read would park init itself for the rest
+of the boot. It was deleted rather than re-aimed — the console is not write-only any more, so there
+is no refusal left to assert — and the count in `open.deny ok n=11` dropped by one with it.
 
 init is a plain `minixrs-ipc` program — no SEF, because it is not a server. The rest of its body is
 a respawn loop: `PM_FORK`; the child (`m_type == 0`) issues `PM_EXEC` naming the binary it wants to

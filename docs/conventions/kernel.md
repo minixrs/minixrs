@@ -85,6 +85,86 @@ the errno bands, the grant and `uspace` ABI shapes, and the D8 ABI freeze.
   `dispatch_caller_local`. Run-queue transitions on a target use the same `sched::rts_set` /
   `rts_unset` capture-then-borrow-end pattern the IPC primitives use
 
+### A pending notification is never the reply to a `SENDREC`
+
+A process with `MF_REPLY_PEND` set is in the receive half of a `SENDREC` and is owed one thing: its
+partner's reply. **No notification is delivered to it until that reply has arrived** — it is latched
+in `notify_pending` and handed over at the process's next plain `RECEIVE`. The rule has two halves,
+in two files, and it is only a rule when both hold:
+
+- **The immediate half, `ipc/notify.rs`.** `mini_notify` delivers at once only when
+  `will_receive(dst, src) && dst.misc_flags & MF_REPLY_PEND == 0`; otherwise it sets the bit. The
+  three kernel-originated notifications — `deliver_alarm`, `deliver_ksig`, `deliver_irq` — carry the
+  same test.
+- **The deferred half, `ipc/receive.rs`.** `mini_receive` skips its pending-notification check
+  (`take_pending_notification`) when the caller has `MF_REPLY_PEND` set, and goes on to the caller
+  queue and then to blocking.
+
+Both are MINIX 3's, in `kernel/proc.c`: `mini_notify` tests `MF_REPLY_PEND` beside `WILLRECEIVE`,
+and `mini_receive`'s check is commented "pending notifications, except for SENDREC". The translation
+kept the first and **dropped the second**, and nothing noticed from Phase 2 to Phase 6, because the
+defect needs a process that `SENDREC`s a partner which also notifies it. Slice 6.5 built the first
+such pair — VFS calls TTY, and TTY notifies VFS when input arrives.
+
+What breaks without the deferred half: the receive half of a `SENDREC` filters on its partner, a
+notification latched from that partner passes the filter, and the kernel delivers it **as the
+reply**. The caller reads `NOTIFY_MESSAGE` (`0x1000`, 4096) as its result; the notification is
+consumed, so whatever it was meant to wake stays asleep; and the partner's real reply arrives later,
+at the caller's receive loop, as a message nobody asked for. In 6.5 that was a console write cut
+short, a parked reader never woken, and two servers answering each other `ENOSYS` (the hazard is
+under [Always reply](./servers-and-drivers.md#always-reply)). It is a race, so it passes most boots.
+
+**The flag's lifetime is part of the rule**, since a flag left set withholds every notification from
+its process — and it can be left set, by any path that unblocks a `SENDREC` caller without
+delivering it a message. Every site, as the code stands:
+
+- **Set** in one place: `do_sendrec` (`ipc/mod.rs`), after the send half has returned `OK` and
+  before the receive half runs.
+- **Cleared by a delivery**: `mini_send` to a waiting receiver and the two kernel-originated sends
+  beside it (`ipc/send.rs`'s three sites), and `walk_caller_q` in `ipc/receive.rs` when the receive
+  half finds its partner already queued.
+- **Cleared by `do_exit`**, twice: on every process it unblocks with `EDEADSRCDST` because its
+  partner died, and by the dead process's own slot reset.
+- **Cleared by `do_sendrec` when the receive half returns an error.** The one error reachable there
+  is `ELOCKED`, and only when the send half *blocked*: `mini_send` has just validated the endpoint,
+  and a send that delivered leaves the partner runnable, which ends any deadlock chain.
+- **Cleared by `do_exec`.** A successful `exec` restarts its caller at `_start`; the `SENDREC` to PM
+  that set the flag is never replied to, so nothing else would clear it.
+- **Cleared at every plain `RECEIVE`**, in `dispatch`'s `RECEIVE` arm before `mini_receive` runs —
+  MINIX 3's `do_sync_ipc`, `case RECEIVE`. A plain `RECEIVE` is by definition not the receive half
+  of a `SENDREC`, so whatever the flag says there is stale. **This is the backstop**: whichever path
+  leaves the flag behind, it cannot withhold a notification past its process's next plain `RECEIVE`.
+  Do not remove it as redundant with the clears above; it is what covers the path nobody has found.
+- **Inherited across `fork`**: the child is a copy of a parent blocked in its `SENDREC` to PM, and
+  is owed that reply too.
+
+The last three clears arrived in fix rounds, not with the guard: the translation had dropped MINIX's
+plain-`RECEIVE` clear along with the guard, which was harmless only while nothing read the flag at
+receive time. `exec` left it stale on every call — unreachable as a failure today, since an exec'd
+process is `USR_T`, `SENDREC`-only and never notified, and live the first time a server or driver is
+started by fork and exec. **None of the clears on the error, `exec` and plain-`RECEIVE` paths is
+proved by a boot or a mutation**; they are verified by reading.
+
+**The proof is a boot marker that does not depend on when input arrives.** TTY notifies its first
+client before replying to that client's first request
+([the probe](./servers-and-drivers.md#writing-probes-and-denial-batteries)), so VFS's second request
+to TTY meets a latched notification from TTY on every boot. `[diag vfs] cdev.short ok n=256` is that
+request getting its reply; remove the guard in `mini_receive` and `[diag vfs] cdev.short FAIL
+rc=4096` prints in its place. `[diag vfs] cons.notify ok` is the same notification then arriving at
+VFS's plain `RECEIVE`. Both are required of every full boot (slice 6.5, R9 — see
+[`2026-11-23-tty-rx-design.md`](../superpowers/specs/2026-11-23-tty-rx-design.md)).
+
+**The proof does depend on scheduling, in one place, and it fails silently there.** The guard is
+exercised only if TTY is back in `RECEIVE` before VFS sends that second request: then the send half
+delivers at once and the receive half is the one that meets the latched bit. If TTY is not yet
+receiving, the send half blocks, `mini_receive` skips its pending checks for a caller still
+`RTS_SENDING` whatever the flag says, and `cdev.short ok` prints with the guard or without it. TTY
+gets there first because VFS and TTY share a priority band (`SRV_Q` in `proc/table.rs`) and a band
+is FIFO — the reply queues VFS behind TTY. It fails only if a tick exhausts TTY's quantum in the few
+instructions between its reply and its `RECEIVE`, and that boot still passes. **If VFS is ever
+ranked above TTY the proof is vacuous on every boot**: whoever changes a boot server's priority
+re-runs the mutation (remove the guard, expect `cdev.short FAIL rc=4096`).
+
 ## Scheduler delegation
 
 (slice 4.3 — see [phase-4-servers.md](../plans/phase-4-servers.md))

@@ -27,7 +27,7 @@ milestone bar rather than after it.
 - [x] **6.2** — `driver-rt`: virtio-mmio transport, virtqueues, DMA window, reserved driver slots
 - [x] **6.3** — `virtio-blk` behind BDEV + root backend selection
 - [x] **6.4** — `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
-- [ ] **6.5** — TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
+- [x] **6.5** — TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
 - [ ] **6.6** — `virtio-console` as a second CDEV backend
 - [ ] **6.7** — framebuffer console: Limine framebuffer → TTY
 - [ ] **6.8** — `virtio-input` keyboard driver — **sub-milestone: non-headless boot**
@@ -356,12 +356,14 @@ for both before relying on it.
 
 - **No polling driver** (I12). Every driver blocks in `receive` between requests; a driver that
   spins on a used ring passes under TCG and proves nothing.
-- **Mask before EOI; quiesce the device, then `IRQ_ENABLE`** (I7, I12). I12's order — drain,
-  acknowledge at the device, `IRQ_ENABLE` — fits a device whose acknowledgement *is* the drain, as
-  the PL011's is. A virtio-mmio line is level-triggered on `InterruptStatus`, so for virtio the
-  acknowledgement precedes the used-ring walk: a completion landing between the last pop and a late
-  acknowledgement would be acked away and the re-arm would find the line low. `driver-rt`'s crate
-  documentation is the one place the virtio order is written.
+- **Mask before EOI; quiesce the device, then `IRQ_ENABLE`** (I7, I12). I12 was first written as
+  drain, acknowledge at the device, `IRQ_ENABLE`. A virtio-mmio line is level-triggered on
+  `InterruptStatus`, so for virtio the acknowledgement precedes the used-ring walk: a completion
+  landing between the last pop and a late acknowledgement would be acked away and the re-arm would
+  find the line low. `driver-rt`'s crate documentation is the one place the virtio order is written.
+  This rule used to say the drain-first order still fitted the PL011; 6.5 found the same race there
+  — a byte landing between the last `RXFE` test and a later `UARTICR` write — and TTY's receive loop
+  acknowledges first as well (6.5's R4). I12's text now states the one order.
 - **A block driver does not depend on the filesystem format**
   ([`servers-and-drivers.md`](../conventions/servers-and-drivers.md#block-drivers)). virtio-blk's
   "is this a minix.rs root" check in H5 is the device-level image header `memory` already verifies,
@@ -417,8 +419,13 @@ does not build. Correct it when the default boot first idles, at the latest Phas
   disk boot at the root check while the ramdisk boot and TTY's `irq ok` are unmoved. A completion
   landing between `notify` and the driver's receive takes the deferred arm instead, which is equally
   correct.
-- 6.5 must retire or rescope TTY's post-proof `irq FAIL extra` guard, since RX interrupts will
-  legitimately arrive after the TX proof.
+- ~~6.5 must retire or rescope TTY's post-proof `irq FAIL extra` guard, since RX interrupts will
+  legitimately arrive after the TX proof.~~ **Paid by 6.5:** the guard and its `extra_reported`
+  field are deleted. The proof's last round now sets the receive masks and the same object
+  (`IrqService`) services the line from then on; what the guard caught — a line that keeps firing
+  with nothing to service — is rescoped to 64 **consecutive** notifications that drain no byte,
+  which print the forbidden `[diag tty] rx FAIL storm` and leave the line masked. The threshold is a
+  guess (6.5's ruling R5), held by host tests on the counter, not by a boot.
 - `Priv::irqs` is never cleared on exit or exec, contradicting I4 ("the allow-list follows the
   mapping"). Unreachable today: only `USER_PRIV_ID` is assigned at runtime and no device owner
   execs. The slice that reuses dedicated slots must clear `irqs` on exit and at exec's point of no
@@ -831,6 +838,208 @@ nothing else"). Each is replaced, not appended to.
 
 **Proof:** bytes piped to QEMU's stdin come back from `read(0)`; a second process's file read
 completes **while** a console read is parked.
+
+**Design:** [`2026-11-23-tty-rx-design.md`](../superpowers/specs/2026-11-23-tty-rx-design.md),
+decisions `R1…R12`. **Plan:** [`2026-11-23-tty-rx.md`](../superpowers/plans/2026-11-23-tty-rx.md),
+whose ledger records every ruling made during the run. **Status: done** (checked in the Status list
+above). Both prose edits owed above are made: each paragraph was replaced.
+
+**What it settled.** A character driver never withholds a `CDEV_READ` reply: with nothing buffered
+it answers `EAGAIN`, records the caller, and sends it one `NOTIFY` when input arrives (R1). VFS
+neither relays that answer nor waits on it: it parks the raw request — no reply, no grant held — and
+on the driver's notification retries its parked reads oldest first with a fresh grant each, stopping
+at the first `EAGAIN` (R2). No `Message` layout, call number, endpoint or errno value moved (R10);
+the generated C headers were diffed against `origin/main` and are byte-identical. **The kernel did
+change, by one guard** (R9): a pending notification is no longer delivered as the reply to a
+`SENDREC`, which the design assumed and the kernel did not do — see the finding under *Measured*.
+The working rules are in
+[`servers-and-drivers.md`](../conventions/servers-and-drivers.md#a-character-driver-never-withholds-a-cdev_read-reply)
+and [`kernel.md`](../conventions/kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec).
+
+**What 6.6 and 6.8 inherit (R12).** 6.6 implements the driver side of R1 in `virtio-console`, adds
+`/dev/hvc0` to VFS's device table, and widens VFS's notifier check from the one `tty` endpoint to
+the set of character drivers; `park.rs` does not change. 6.8 makes TTY a *client* of the same
+contract against `virtio-input` — on that driver's `NOTIFY`, TTY sends `CDEV_READ` until it hears
+`EAGAIN`, pushes through the keymap into the ring its own interrupt already fills, and notifies its
+waiter as it does today. That is H8's notify-then-pull, and it is the same three lines in both
+directions. 6.8 also inherits the shape that exposed 6.5's kernel defect — TTY will `SENDREC` a
+driver that notifies it — and relies on the kernel rule for it; its notification arm goes where
+TTY's loop today drops any `NOTIFY_MESSAGE` that is not from `HARDWARE`, ahead of the request
+dispatch and its `ENOSYS` arm. Echo arrives with 6.8 and canonical mode with Phase 7, both in
+`drivers/tty`'s `input.rs`.
+
+**Measured (2026-11-23, QEMU 11, Homebrew's edk2, macOS on Apple Silicon).**
+
+- *The UART as the firmware leaves it.* `UARTLCR_H = 0x70` — the FIFO is **enabled** — and
+  `UARTIFLS = 0x12`, receive trigger at half. One byte fed on its own still raised the line: one
+  notification, one byte, `UARTRIS = 0x30` with the receive-timeout bit clear, so QEMU raises RX on
+  the first byte whatever the trigger level says. Three bytes written together arrived in one
+  notification, and 36 written together were drained in one — more than the 16-deep FIFO, because
+  QEMU refills it as the loop empties it. `IRQ_ENABLE` answered `OK` each time with the `UARTICR`
+  write placed before the drain.
+- *EOF on stdin.* With `< /dev/null` QEMU carries on and the boot is unchanged, so the feeder exits
+  once it has written instead of holding its stdout open.
+- *Bytes on stdin from time zero.* Five of them never reached TTY: the firmware or Limine consumes
+  what is on stdin before the kernel starts. The feeder's gate on a log line is therefore
+  load-bearing, not only what makes the proof causal.
+- *The path, once.* With two throwaway probes in place the first boot to exercise the park and the
+  retry printed `cons.park`, then `rx got n=5`, then `stdin got=hello`.
+- *The fed boots.* Four fed stub-free boots each printed `cons.park` (log line 622), `cons.beside
+  ok` (625) and `stdin ok n=15` (between lines 925 and 984), with no `FAIL`; an unfed one printed
+  the first two and no `stdin ok`. Those were boots of the code before the kernel fix below, and so
+  were passes by timing; after it, four more fed stub-free boots each printed `cdev.short ok n=256`,
+  `cons.notify ok`, `cons.park`, `cons.beside ok` and `stdin ok n=15`, with no `FAIL`. The marker
+  files as committed hold 174 checks for each full boot (113 + 48 common, 8 + 5 per backend) and 7
+  for the reboot. The recorded musl-flavour set on the final code (`efc8d22`):
+  - the fed disk boot passes `check-boot-log.sh disk` on all 174 checks;
+  - the fed ramdisk boot passes `check-boot-log.sh ramdisk` on all 174;
+  - the unfed reboot of the disk boot's image passes its 7, and its log shows `cons.notify ok`,
+    `cons.park` and `cons.beside ok` with no `stdin ok` — the reader parked for the whole boot;
+  - `diff-backends.sh` is clean across the pair; the feeder started writing 27 s into the disk boot
+    and 23 s into the ramdisk one.
+- *The budget, and the defect it found.* A boot of the merge base on this machine put the last
+  required marker (`[diag vfs] pm-exit reset closed=1`) at 64.71% of a 600 s disk log. As first
+  built the slice moved it: 76.62% of the fed disk log and 50.59% of the ramdisk one, a whole
+  rotation turn later, because the `wait()` that reaped the console-read child left its turn with no
+  child of its own reaped and the rotation ran one child deeper for the rest of the boot. init now
+  waits once more in that turn, and the boots recorded with that fix read **64.94%** (about 390 s)
+  and **42.73%** (about 256 s) — back at the baseline, no timeout moved. Those two figures predate
+  the kernel fix and the notify probe; on the final code (`efc8d22`):
+  - **63.20%** of the fed disk log, about 379 s;
+  - **41.41%** of the fed ramdisk log, about 248 s.
+
+  So the slice does not move the budget and no timeout changes.
+- *The fork-cycle markers moved a slot.* init's first fork is now the console-read child, so the
+  rotation's first `worker` runs in slot 20, not 19; `tests/qemu-boot.expected` says why that is
+  fixed on a fed and an unfed boot alike.
+- *A kernel defect, found twice.* The privilege wiring needed nothing — INTID 33 was already on
+  TTY's allow-list, TTY could already notify VFS, VFS could already withhold a reply — and the spec
+  concluded from that that the kernel would not change. It was wrong. `mini_receive` handed a
+  pending notification to a caller in the receive half of a `SENDREC`; MINIX 3's `proc.c` guards
+  that check with `MF_REPLY_PEND` ("pending notifications, except for SENDREC") and the translation
+  had dropped the guard. It was latent until this slice, the first in which a server `SENDREC`s a
+  process that also notifies it. A notification latched at VFS from TTY came back as the "reply" to
+  VFS's next `CDEV_WRITE` or `CDEV_READ`: the write was cut short, the parked reader was never
+  woken, and TTY's real reply arrived later as a stray message that VFS and TTY answered `ENOSYS` to
+  each other — 32,525 rounds in one boot, counted with a diagnostic-only probe. The fresh
+  whole-branch review found it by reading the kernel; the mutation run hit it independently at row 4
+  and reproduced it on the unmutated tree, where 2 of 4 fed stub-free boots printed no `stdin ok`
+  and no `FAIL` anywhere. So every pass recorded before the fix was a pass by timing.
+- *The fix and its proof.* The guard is restored in `kernel/src/ipc/receive.rs`. The proof was
+  written first: TTY notifies its first client — VFS — before replying to that client's first
+  request, so VFS's second prologue request meets a latched notification on every boot. Without the
+  guard `[diag vfs] cdev.short FAIL rc=4096` printed in place of `cdev.short ok n=256` (observed);
+  with it `cdev.short ok n=256` prints, and so does a new required line, `[diag vfs] cons.notify ok`
+  — VFS's first notification from the console driver, received by its ordinary `RECEIVE` loop, on
+  every boot, fed or not. The proof is free of *input* timing and not of scheduling: it works
+  because TTY and VFS share a priority band (debt 17, and
+  [`kernel.md`](../conventions/kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec)).
+- *The flag behind the guard could go stale, in two ways, and now cannot matter.* Once
+  `MF_REPLY_PEND` withheld notifications at receive time, a flag left set became a starved process.
+  The commit review found the first way: a `SENDREC` whose receive half is refused left it set, and
+  `do_sendrec` now clears it (the one reachable refusal is `ELOCKED`, after a send half that
+  blocked). The re-review of the fix found the second and larger one: **every successful `exec` left
+  it set**, because the caller is restarted with no reply ever delivered. Nothing broke — an exec'd
+  process is `USR_T`, `SENDREC`-only and never notified — but the first server or driver started by
+  fork and exec would have stopped receiving notifications. `do_exec` now clears the flag, and a
+  plain `RECEIVE` clears it at entry, which is MINIX 3's own backstop (`do_sync_ipc`, `case
+  RECEIVE`) and had been dropped in translation with the guard. With that last clear a stale flag
+  from any path lasts no longer than its process's next plain `RECEIVE`. None of the three clears
+  has a boot or a mutation that proves it; they are verified by reading (debt 14).
+- *From the same review.* A wake-up `ipc_notify` that fails now keeps the waiter and prints `[diag
+  tty] rx FAIL notify rc=…` once (forbidden) — it used to be discarded with the waiter already
+  forgotten. `tools/feed-console.sh` parses `FEED_CONSOLE_CEILING` base 10 (`08` was an arithmetic
+  error). TTY drops any `NOTIFY_MESSAGE` that is not from `HARDWARE` instead of answering it.
+- *Mutations.* Sixteen rows, run on the fixed kernel after eight clean fed boots; the spec's §3
+  table has each one, and this is what the classes showed.
+  - *Confirmed, as predicted.* Remove the kernel guard: `cdev.short FAIL rc=4096`, and `cons.notify
+    ok` moves to the real wake-up. Remove TTY's probe: `cons.notify ok` moves to real input and is
+    absent unfed. TTY withholds its reply: the whole system freezes about 637 lines in. VFS relays
+    `EAGAIN`: `stdin FAIL n=0 first=none rc=-11`. No wake-up `NOTIFY`, or the notification dropped
+    without a retry: `stdin ok` absent, the rest unmoved. The storm guard disabled: three
+    `irq::tests` fail. A forced `NOTIFY` failure: `rx FAIL notify rc=-1` once, reader still served.
+  - *Four that behaved differently.* **4a**, a notification reaching VFS's dispatch, was not
+    absorbed: a sustained `ENOSYS` ping-pong with TTY, VFS's console `SENDREC`s answering `ELOCKED`,
+    userland output down from 8,489 lines to 54, and no `FAIL` line (debt 9). **5**, no `IRQ_ENABLE`
+    after the drain, **passed** — the feeder wrote the probe in one piece, which is one interrupt —
+    so the feeder now writes two chunks 3 s apart, and with it the mutation loses `stdin ok`. **7**
+    (consume before the copy's result) and **8** (`do_pm_exit` does not free) were each predicted to
+    fail a host test and failed none, with no marker moved: the tests pin the ring's and the table's
+    operations, not the calls in the two `main.rs` files (debts 11 and 12).
+  - *Nothing moves.* Skipping the drain leaves bytes stuck in silence, not a storm, so `rx FAIL
+    storm` has host coverage only. Draining before acknowledging moves nothing. Removing
+    `do_sendrec`'s clear-on-error moves nothing. Removing init's second `wait()` passes all 174
+    checks and shows only as a budget of 73.30% against 62.72% (debts 13 to 16).
+
+**Debt carried from 6.5.**
+
+1. **`EIO` covers only a refused claim** (owner: 6.6, which writes the second driver against this
+   contract, or the first slice that sees a reader hang). A failed TX proof, `rx FAIL storm` and `rx
+   FAIL enable` also end reception, and a read of the empty ring still answers `EAGAIN`, so a reader
+   stays parked for good — each behind a forbidden marker that already fails the boot. The fix is
+   about five lines: answer `EIO` from the stopped phase and send the waiter one wake-up `NOTIFY`.
+2. **No proof child under `idle-probe`** (owner: whoever pays 6.1's idle debt and deletes the
+   feature). `idle_park` waits until no child is left and a parked child never exits, so the fork is
+   `cfg`'d out and that hand-run configuration does not exercise receive.
+3. **`cons.beside ok` is ordered, not synchronised** (owner: none unless it flakes). init forks the
+   reader before its first file read and `fileio` reads `/etc/motd` every fourth rotation turn for
+   ever, but nothing makes init wait for the child to park. A sync point would have to be visible to
+   VFS, which this slice deliberately did not add.
+4. **CI's fed boots are unmeasured** (owner: this branch's first CI run, which is the measurement).
+   `ci.yml` feeds the disk and ramdisk boots with `FEED_CONSOLE_CEILING=1300`; none of it has run on
+   the runner's bash, QEMU or firmware. `actionlint` reports shellcheck's informational SC2094 on
+   the read-and-write of one log file, which is the design.
+5. **No echo and no line discipline** (owner: 6.8 for echo, Phase 7 for canonical mode). A `read()`
+   returns raw bytes as received; typing at a hand-run boot shows nothing.
+6. **One waiter, last asker wins** (owner: the slice that gives TTY a second CDEV client). A second
+   endpoint asking while a waiter is recorded replaces it, and the first is never notified.
+   Unreachable while VFS is TTY's only CDEV client; pinned by a host test. The fix is a two-slot set
+   in TTY's `main.rs`, no protocol change.
+7. **The storm threshold is a guess** (owner: whoever first sees a false `rx FAIL storm`). 64
+   consecutive empty notifications; too low gives a false failure on a noisy line.
+8. **The feeder has a ceiling and no stall detection** (owner: none unless a hung boot is seen to
+   leave one behind). It polls until `FEED_CONSOLE_CEILING`, 1800 s by default, whatever the boot is
+   doing.
+9. **Two servers that both answer unknown messages can answer each other for ever, and nothing stops
+   them** (owner: 6.8, which builds the second `SENDREC`-and-notify pair, or the first slice that
+   sees a stray `ENOSYS` exchange in a trace). The hazard is stated once, under
+   [Always reply](../conventions/servers-and-drivers.md#always-reply). Deliberately not hardened in
+   6.5, and on a weaker footing than first recorded: the kernel defect above was thought the only
+   way in, and mutation 4a showed it is **one slip in VFS's notification arm away** (the re-review
+   found one further theoretical path, through `ELOCKED`, that no current process pair reaches). The
+   fix — a reply-shaped message is never answered — changes every server's unknown-message arm and
+   is its own change. Until then the cost of that slip is a boot that degrades silently: console
+   calls answering `ELOCKED`, userland output collapsing, and no `FAIL` line.
+10. **The kernel rule's only proof is a probe in TTY's production loop** (owner: whoever gives the
+    kernel a test that can provoke the interleaving some other way). One spurious notification per
+    boot; removing it is a flag and six lines and leaves `mini_receive`'s guard with no boot proof.
+11. **The consume-after-copy order in TTY's `do_read` is unproved** (owner: the first slice that can
+    make `SYS_SAFECOPY` refuse a console read with bytes buffered, or 6.6, which writes the same
+    step in a second driver). `peek` and `consume` are host-tested as ring operations; consuming
+    before the copy's result is known fails no test and moves no marker.
+12. **`do_pm_exit`'s free of a parked read is unproved** (owner: the slice that first kills a
+    process blocked in VFS). `ParkTable::free` is host-tested; deleting the call fails no test and
+    moves no marker, because no boot kills a parked reader. `evict_stale` stands behind it.
+13. **init's wait-again is guarded only by a hand-measured budget** (owner: whoever next re-measures
+    the boot budget, or gives the rotation a depth marker). Without the second `wait()` every check
+    passes and the last required marker moves from 62.72% to 73.30% of the disk log — a regression
+    only [`ci.md`](../conventions/ci.md)'s boot-timing reading would catch.
+14. **`MF_REPLY_PEND`'s clears off the delivery path are verified by reading only** (owner: the
+    slice that first starts a server or driver by fork and exec, or whoever gives the kernel a test
+    that can fail a receive half). `do_sendrec`'s clear-on-error moves nothing when removed; the
+    `exec` and plain-`RECEIVE` clears have no boot that would miss them.
+15. **R4's acknowledge-before-drain order rests on reasoning under QEMU** (owner: the first run on
+    hardware, or on a UART model that holds its level). Reversing the order moves nothing.
+16. **`rx FAIL storm` is host-tested only** (owner: none unless a storm is seen). QEMU drops the
+    line on the `UARTICR` write, so skipping the drain produces stuck bytes, not a storm, and no
+    boot has seen the marker print.
+17. **The kernel rule's probe depends on TTY and VFS sharing a priority band** (owner: whoever
+    changes a boot server's priority or quantum). The guard is exercised only if TTY reaches
+    `RECEIVE` before VFS's next `SENDREC`; rank VFS above TTY and `cdev.short ok` prints with the
+    guard or without it, on every boot, with nothing to say the proof has gone. Re-run "remove the
+    guard" after any such change and expect `cdev.short FAIL rc=4096`.
+18. **The feeder's 3 s gap is a guess** (owner: this branch's first CI run, with debt 4). If both
+    chunks of the probe land in one drain the re-arm goes unproved and the boot still passes.
 
 ### Slice 6.6: `virtio-console` as a second CDEV backend
 

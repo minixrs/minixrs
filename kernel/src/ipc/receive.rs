@@ -4,7 +4,8 @@
 //!
 //! Translation of MINIX 3 `kernel/proc.c:977 mini_receive()`. Searches in
 //! order: pending notifications (synthesized on the fly from the caller's
-//! `priv.notify_pending` bitmap), then queued senders in `caller_q`. If
+//! `priv.notify_pending` bitmap — unless the caller is in the receive half
+//! of a SENDREC, which is owed a reply), then queued senders in `caller_q`. If
 //! nothing matches, the caller blocks with `RTS_RECEIVING` and records
 //! the source filter and user-buffer VA so a later [`mini_send`] can
 //! deposit the message and unblock us.
@@ -70,8 +71,22 @@ pub fn mini_receive(
     let in_mid_sendrec = caller_rts & RTS_SENDING != 0;
 
     if !in_mid_sendrec {
-        // 1. Pending notification?
-        if let Some(sender_e) = take_pending_notification(proc_table, priv_table, caller_idx, src_e)
+        // 1. Pending notification? — **except for SENDREC** (MINIX 3
+        // proc.c:1012). A caller with `MF_REPLY_PEND` set is in the receive
+        // half of a SENDREC and is owed its partner's *reply*; a notification
+        // latched from that same partner matches the source filter, and
+        // handing it over would make it the reply. The request's real answer
+        // would then arrive later as an unasked-for message. The notification
+        // stays latched for the caller's next plain `RECEIVE`. `mini_notify`'s
+        // immediate-delivery paths already refuse a `MF_REPLY_PEND` target;
+        // this is the deferred half of the same rule (slice 6.5, spec R9 —
+        // the first slice in which a server SENDRECs a process that also
+        // notifies it; proved by `[diag vfs] cdev.short ok` behind TTY's
+        // notification probe).
+        let reply_pending = proc_table[caller_idx].misc_flags & MF_REPLY_PEND != 0;
+        if !reply_pending
+            && let Some(sender_e) =
+                take_pending_notification(proc_table, priv_table, caller_idx, src_e)
         {
             // A `HARDWARE` notification carries the caller's pending-interrupt
             // bitmap, taken so it is zeroed (slice 6.1, spec I7): every line
