@@ -74,6 +74,11 @@ MARKER='[diag vfs] cons.beside ok'
 # budget, long enough that a stale log is truncated between two of them.
 POLL=0.2
 
+# Where the probe is cut, and how long the feeder waits between the halves.
+# The cut is inside the text, well clear of the `\n` escape at the end.
+SPLIT=9
+GAP=3
+
 if [[ $# -ne 1 || -z "$1" || "$1" == -* ]]; then
     echo "usage: $0 <qemu-log>" >&2
     exit 64
@@ -105,9 +110,13 @@ while ((SECONDS < CEILING)); do
         seen=0
     fi
     if ((seen >= 2)); then
-        # The one write. A failure here (stdout closed) must end the script,
+        # The probe, once, in TWO chunks a few seconds apart, so the second
+        # chunk needs a second interrupt: it arrives only if TTY re-armed its
+        # line after draining the first. (Written in one piece the whole probe
+        # is one interrupt, and a dropped IRQ_ENABLE passes -- measured, slice
+        # 6.5 mutation 5.) A failure here (stdout closed) must end the script,
         # not send it round the loop again.
-        if ! printf '%b' "$PROBE"; then
+        if ! { printf '%b' "${PROBE:0:SPLIT}" && sleep "$GAP" && printf '%b' "${PROBE:SPLIT}"; }; then
             echo "feed-console: the write failed (stdout closed?); nothing more to do" >&2
             exit 1
         fi

@@ -122,8 +122,10 @@ minix.rs fileio: exit-reset FAIL
 # notification is legal (the acknowledgement precedes the drain); sixty-four in
 # a row is a device not dropping its line, and TTY leaves it masked. `rx FAIL
 # enable rc=<rc>`: the kernel refused the IRQ_ENABLE after a drain, so the next
-# byte's interrupt can never arrive. Either way the console receives nothing
-# more. One substring covers both spellings.
+# byte's interrupt can never arrive. After either of those the console receives
+# nothing more. `rx FAIL notify rc=<rc>`: the wake-up NOTIFY to the endpoint
+# that was refused with EAGAIN did not go out, so a parked reader was not told
+# to ask again (reception itself carries on). One substring covers all three.
 [diag tty] rx FAIL
 # Slice 6.5: init's console-read child got something other than the feeder's
 # probe (tools/feed-console.sh; tests/qemu-boot.expected has the whole path).

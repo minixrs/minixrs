@@ -134,7 +134,7 @@ pub fn mini_notify(
 ///
 /// Immediate delivery if the owner is `RECEIVE`-blocked and would accept from
 /// `CLOCK`; otherwise the bit is recorded in the owner's `notify_pending`
-/// against CLOCK's priv slot, so the owner's next `RECEIVE` synthesizes the
+/// against CLOCK's priv slot, so the owner's next plain `RECEIVE` synthesizes the
 /// message via [`super::receive`]'s `take_pending_notification`.
 pub(crate) fn deliver_alarm(
     proc_table: &mut [Proc; N_PROC_SLOTS],
@@ -185,7 +185,7 @@ pub(crate) fn deliver_alarm(
 ///
 /// Immediate delivery if PM is `RECEIVE`-blocked and would accept from
 /// `SYSTEM`; otherwise the bit is recorded in PM's `notify_pending` against
-/// SYSTEM's priv slot, so PM's next `RECEIVE` synthesizes the message via
+/// SYSTEM's priv slot, so PM's next plain `RECEIVE` synthesizes the message via
 /// [`super::receive`]'s `take_pending_notification`.
 ///
 /// Takes the caller's exclusive table slices — never re-materializes the
@@ -239,7 +239,7 @@ pub(crate) fn deliver_ksig(
 /// `HARDWARE`: the message carries the owner's `int_pending`, taken. Otherwise
 /// the bit is recorded in the owner's `notify_pending` against HARDWARE's priv
 /// slot, and the bitmap stays in `int_pending` — accumulating any further
-/// lines that fire meanwhile — until the owner's next `RECEIVE` takes it in
+/// lines that fire meanwhile — until the owner's next plain `RECEIVE` takes it in
 /// [`super::receive`].
 ///
 /// Runs inside `irq_dispatch`, so it must not reach `schedule_next`: it only

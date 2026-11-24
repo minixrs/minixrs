@@ -214,9 +214,13 @@ fn main() -> ! {
                 let rc = ipc_notify(who);
                 if rc != OK {
                     // The only wake-up a parked reader gets did not go out.
-                    // Keep the waiter, so the next byte tries again, and say
-                    // so once: a reader left parked with no line in the log
-                    // would be indistinguishable from one nobody typed at.
+                    // Say so once: a reader left parked with no line in the
+                    // log would be indistinguishable from one nobody typed
+                    // at. The waiter is kept, but the retry is nominal — every
+                    // error `NOTIFY` can answer here (a dead or unknown
+                    // endpoint, no `ipc_to` edge) is permanent for that
+                    // endpoint, so it fails again until another reader's
+                    // `EAGAIN` replaces the slot.
                     waiter.record(who);
                     if !notify_failed {
                         notify_failed = true;

@@ -2273,7 +2273,10 @@ mod tests {
     fn the_feeder_sends_the_probe() {
         assert_eq!(feeder_probe_bytes(), CONSOLE_PROBE);
         // And it sends them through `%b`, the reading the decoder above models.
-        assert!(FEEDER.contains("printf '%b' \"$PROBE\""));
+        // Sent in two chunks, both through `printf '%b'`, which between them
+        // write the whole value.
+        assert!(FEEDER.contains("printf '%b' \"${PROBE:0:SPLIT}\""));
+        assert!(FEEDER.contains("printf '%b' \"${PROBE:SPLIT}\""));
     }
 
     #[test]

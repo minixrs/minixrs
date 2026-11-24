@@ -4,7 +4,8 @@
 //!
 //! Translation of MINIX 3 `kernel/proc.c:977 mini_receive()`. Searches in
 //! order: pending notifications (synthesized on the fly from the caller's
-//! `priv.notify_pending` bitmap), then queued senders in `caller_q`. If
+//! `priv.notify_pending` bitmap — unless the caller is in the receive half
+//! of a SENDREC, which is owed a reply), then queued senders in `caller_q`. If
 //! nothing matches, the caller blocks with `RTS_RECEIVING` and records
 //! the source filter and user-buffer VA so a later [`mini_send`] can
 //! deposit the message and unblock us.

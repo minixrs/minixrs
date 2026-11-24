@@ -1031,8 +1031,8 @@ minix.rs fileio: malloc ok
 
 # Slice 6.5: a byte on the wire reaches read(0), and the process waiting for it
 # stops nobody else (spec R2, R7, R8). Of the three lines below the LAST holds
-# for a FED boot only: one whose stdin is tools/feed-console.sh, pointed at the log the boot is
-# writing --
+# for a FED boot only: one whose stdin is tools/feed-console.sh, pointed at the
+# log the boot is writing --
 #
 #     ... cargo run ... < <(tools/feed-console.sh qemu.log) > qemu.log 2>&1
 #

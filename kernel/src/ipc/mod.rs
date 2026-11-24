@@ -191,6 +191,17 @@ fn dispatch(
             )
         }),
         RECEIVE => trap_gate(trap_mask, RECEIVE, || {
+            // A plain RECEIVE is by definition not the receive half of a
+            // SENDREC, so whatever `MF_REPLY_PEND` says is stale — clear it
+            // (MINIX 3 proc.c, `do_sync_ipc`'s `case RECEIVE`). This is the
+            // backstop for every way the flag can outlive its SENDREC: a
+            // successful `exec` restarts the caller at `_start` with no reply
+            // ever delivered, for one. Since slice 6.5 the flag withholds
+            // pending notifications in `mini_receive`, so a stale one would
+            // starve a process that receives only notifications.
+            if let Some(caller_idx) = proc_index(caller_nr) {
+                proc_table[caller_idx].misc_flags &= !MF_REPLY_PEND;
+            }
             receive::mini_receive(
                 proc_table,
                 priv_table,
@@ -293,16 +304,17 @@ fn do_sendrec(
         RecvFlags::Blocking,
     );
     if recv_result != OK {
-        // The receive half refused (a dead partner, `ELOCKED`): the caller
-        // returns to user space with an error and is owed no reply, so the
-        // flag must not outlive the call. Since slice 6.5 `MF_REPLY_PEND`
-        // also withholds pending notifications in `mini_receive` — and
-        // `mini_notify` already latches rather than delivers to a flagged
-        // target — so a stale flag would starve a process that waits only on
-        // notifications (a driver in a `HARDWARE`-filtered receive) until
-        // some ordinary message happened to clear it. `OK` covers both
-        // "delivered" (the delivery cleared it) and "blocked" (it must stay).
-        // No boot provokes this path; it is verified by reading.
+        // The receive half refused, so the caller never entered RECEIVING
+        // and is owed no reply: the flag must not outlive the call. The one
+        // error reachable from here is `ELOCKED`, and only when the send half
+        // *blocked* (`mini_send` has just validated the endpoint, and a send
+        // that delivered leaves the partner runnable, which ends any deadlock
+        // chain). `OK` covers both "delivered" (the delivery cleared the
+        // flag) and "blocked receiving" (it must stay). Since slice 6.5 the
+        // flag withholds pending notifications in `mini_receive`, so a stale
+        // one matters; the plain-RECEIVE clear in `dispatch` is the general
+        // backstop and this is the specific one. No boot provokes this path;
+        // it is verified by reading.
         proc_table[caller_idx].misc_flags &= !MF_REPLY_PEND;
     }
     recv_result
