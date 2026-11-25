@@ -163,7 +163,7 @@ kernel-shared/   message types, endpoints, call numbers (shared by all crates)
 minixrs-ipc/       user-space IPC library (the SVC trap stubs)
 server-rt/       server runtime / SEF framework
 servers/         pm, vfs, vm, rs, ds, sched
-drivers/         tty, memory, virtio-blk, driver-rt (real); virtio-net/console (stubs — planned)
+drivers/         tty, memory, virtio-blk, virtio-console, driver-rt (real); virtio-net (stub — planned)
 fs/              mfs, pfs                                     (stubs — planned)
 userland/        init, worker (real); sh, coreutils          (stubs — planned)
 ```

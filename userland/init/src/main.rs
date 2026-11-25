@@ -730,8 +730,9 @@ fn fork_hvc0_probe(pm: Endpoint, vfs: Endpoint) -> i32 {
 /// The second proof child: write a line out through `/dev/hvc0`, have a read
 /// refused without losing a byte, read the feeder's answer, exit.
 ///
-/// Four steps, all through one descriptor (spec C11), which is closed again
-/// before the verdict:
+/// Six steps, each with its own `step=` name in the failure line, all through
+/// one descriptor (spec C11 lists five; **close** was added when a child that
+/// exited with the node open made `pm-exit reset closed=1` vacuous):
 ///
 /// 1. **open** [`DEV_HVC0_PATH`](minixrs_kernel_shared::callnr::DEV_HVC0_PATH),
 ///    read-write.
@@ -753,7 +754,9 @@ fn fork_hvc0_probe(pm: Endpoint, vfs: Endpoint) -> i32 {
 ///    first read finds the chunk the refused copy left behind; the feeder's
 ///    second chunk comes a few seconds later, so a read in between parks again
 ///    and is completed only if the driver re-posted its receive buffer and
-///    re-armed after draining the first. Then **compare** with [`HVC0_IN`].
+///    re-armed after draining the first.
+/// 5. **compare** what was read with [`HVC0_IN`].
+/// 6. **close** the descriptor, on every path, before the verdict is printed.
 ///
 /// Exactly one line, on fd 1 — the serial console, not the node under test:
 ///

@@ -428,8 +428,20 @@ Task 0 of the plan, before any design-dependent code:
 
 Stated so the next two specs can cite it instead of re-deciding:
 
-- **6.6** implements R1 in `virtio-console`, adds `/dev/hvc0` to VFS's device table, and VFS's
-  notification check gains that driver's endpoint. No change to `park.rs`.
+- **6.6** implements R1 in `virtio-console`, adds `/dev/hvc0` to VFS's device table, VFS's
+  notification check gains that driver's endpoint, and **the retry walk becomes per driver**: on a
+  driver's notification VFS passes over the reads parked on any other driver and stops at the first
+  `EAGAIN` the notifier gives. `park.rs` gains an in-order step for that (`oldest_after`), and the
+  decision lives in a new `retry.rs`.
+
+  *Corrected 2026-11-24 by slice 6.6
+  ([C10](./2026-11-24-virtio-console-design.md#c10--vfs-a-fourth-node-a-third-driver-and-a-retry-walk-per-driver)).*
+  As approved, this bullet ended "…and VFS's notification check gains that driver's endpoint. No
+  change to `park.rs`." It was written with one notifier in mind. R2's walk — oldest first across
+  every parked read, stopping at the first `EAGAIN` from whichever driver the oldest reader is on —
+  is correct for one driver and hangs with two: a reader parked on TTY ahead of one parked on `vcon`
+  turns every `vcon` notification into a question to TTY, an `EAGAIN`, and a return. R2's text above
+  describes the walk as 6.5 built it and is left as it was.
 - **6.8** makes TTY a *client* of R1 against `virtio-input`: on that driver's `NOTIFY`, TTY sends
   `CDEV_READ` until it hears `EAGAIN`, pushes through the keymap into the same ring, and notifies
   its own waiter exactly as R4's last line does. The ring gains a second producer and nothing else.

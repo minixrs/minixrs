@@ -143,8 +143,16 @@ tools/check-boot-log.sh reboot reboot.log
 # The runner's QEMU command line: one `-drive file=<image>,format=raw,if=none,id=vblk0`
 # plus `-device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0` (for `nodisk`,
 # one `-drive ...,if=virtio` instead), and `-global virtio-mmio.force-legacy=false`.
-# The runner attaches nothing else (`-M virt` still creates its default devices,
-# a virtio-net-pci card among them: the runner passes no `-nodefaults`). The
+# The runner attaches ONE other device, on every boot whatever the root backend
+# (slice 6.6): `-chardev pipe,id=hvc0,path=<base>` with
+# `-device virtio-serial-device,bus=virtio-mmio-bus.8` and
+# `-device virtconsole,chardev=hvc0` -- the second console, /dev/hvc0, whose host
+# side is the FIFO pair <base>.in / <base>.out (target/hvc0 unless MINIXRS_HVC0
+# is set; see "Fed boots" below). Every boot therefore also prints
+# `[virtio] slot=8 pa=0xa001000 id=3 ver=2 drv=vcon` and
+# `[diag vcon] virtio ok features=0x100000000 rxq=8 txq=8 slot=8`. Nothing else
+# is attached (`-M virt` still creates its default devices, a virtio-net-pci card
+# among them: the runner passes no `-nodefaults`). The
 # runner prints the exact argv on stderr as one
 # `qemu-run: ...` line (and `qemu-run: attaching <file> as-is ...` when it built
 # nothing) -- the first thing to read when a boot surprises. Extra arguments are
@@ -175,7 +183,7 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release -
 # `build.rs` refuses it together with the default-on `boot-stubs` (the stubs spin forever, so the
 # queue could never empty) with a message naming `--no-default-features`. Expect `[idle] wake ok`
 # and `[diag tty] irq ok` in the log. CI does not build this configuration. It does not exercise
-# console input either: init forks no console-read child under this feature (the rule is under
+# console input either: init forks neither proof child under this feature (the rule is under
 # "init: PID 1" in ./servers-and-drivers.md), so feeding it proves nothing.
 timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
   --no-default-features --features idle-probe
@@ -293,8 +301,9 @@ gates, not `build`.)
 ## Fed boots
 
 QEMU's serial is `-serial stdio` (`tools/qemu-run.sh`), so a boot's stdin **is** the PL011's receive
-side. Since slice 6.5 the console can be read, and a boot that is to be checked against the marker
-files has to be given its input — by `tools/feed-console.sh`, never by hand:
+side. Since slice 6.5 the console can be read, and since slice 6.6 there is a second console,
+`/dev/hvc0`, whose host side is a pair of FIFOs. A boot that is to be checked against the marker
+files has to be given its input on **both** — by `tools/feed-console.sh`, never by hand:
 
 ```sh
 MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
@@ -305,14 +314,65 @@ MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch6
   twice. The feeder reads the log the boot is writing. It is a **process substitution**, not a pipe,
   so the shell does not wait on the feeder and the command's exit status is still `timeout`'s (124
   for a healthy boot). Process substitution is bash and zsh, not POSIX `sh`.
-- **What the feeder does.** It polls the log for `[diag vfs] cons.beside ok`, writes the probe —
-  `minix.rs stdin` and a newline, 15 bytes, sent one time only — to its stdout, and exits 0. init's
-  proof child is blocked in `read(0)` for exactly those bytes and prints `minix.rs init: stdin ok
-  n=15`. The script's `PROBE` and init's `CONSOLE_PROBE` are two copies; a host test in
-  `userland/init` reads the script and fails if they differ, so keep the `PROBE='…'` assignment on
-  one single-quoted line.
-- **The probe is written in two chunks, and the gap between them is load-bearing.** The feeder
-  writes the first `SPLIT` (9) bytes, sleeps `GAP` (3) seconds, and writes the rest. One write
+- **What the feeder does: four stages, the second console first** (slice 6.6, C12; before it the
+  feeder had stages 3 and 4 only, and stage 3 waited for one line).
+  1. It reads `<base>.out` until the guest's own line, `minix.rs hvc0 out`, has come out of it —
+     init's second proof child writes that through `/dev/hvc0`, so seeing it is the guest-to-host
+     direction observed on the host.
+  2. It waits `SETTLE` (3) seconds, then writes `minix.rs hvc0 in` and a newline — 17 bytes, one
+     time only — to `<base>.in`, in two chunks.
+  3. It polls the log for **both** `[diag vfs] cons.beside ok` and `minix.rs init: hvc0 ok`.
+  4. It writes the serial probe — `minix.rs stdin` and a newline, 15 bytes, one time only — to its
+     stdout, in two chunks, and exits 0. init's first proof child is blocked in `read(0)` for
+     exactly those bytes and prints `minix.rs init: stdin ok n=15`.
+
+  The script's `PROBE`, `HVC0_OUT`, `HVC0_IN` and `HVC0_OK` and init's `CONSOLE_PROBE`, `HVC0_OUT`,
+  `HVC0_IN` and `HVC0_OK_LINE` are copies of each other; a host test in `userland/init` reads the
+  script and fails if any differs, so keep each assignment on one single-quoted line. stdout carries
+  the serial probe and nothing else: the second console is written through its own descriptor, and
+  every diagnostic goes to stderr, one line per stage.
+- **The second console's host side is a FIFO pair, `target/hvc0.in` and `target/hvc0.out`.**
+  `tools/qemu-run.sh` attaches `-chardev pipe,id=hvc0,path=<base>` to a `virtio-serial-device` on
+  `virtio-mmio-bus.8` with one `virtconsole` port, on every boot, and makes both FIFOs with `mkfifo`
+  when they are missing; QEMU appends `.in` and `.out` itself. The host writes guest input to `.in`
+  and reads guest output from `.out`. **`MINIXRS_HVC0=<base>`** moves the pair, for the runner and
+  the feeder alike (the feeder inherits the boot's environment) — set it when two boots run at once,
+  or they share one console. Something that is not a FIFO at either path is refused, by the runner
+  (exit 73) and by the feeder (exit 1), never replaced. Nobody has to be on either end: QEMU starts
+  with no peer, and a guest write with no reader completes, so an unfed boot is unaffected.
+- **The feeder empties both FIFOs before it looks at them — the stale-bytes drain.** A pipe is not
+  emptied when QEMU exits: on macOS about 826 bytes of an unread boot — the firmware's text and the
+  guest's line — were still in `.out` afterwards with no process holding it. Left there, the next
+  fed boot's feeder finds that **old** line at once, writes its answer into a machine that is still
+  in its firmware, and the answer is lost: no `hvc0 ok`, and by the coupling below no `stdin ok`
+  (observed, exactly so). So a FIFO that already exists when the feeder starts is read for `DRAIN`
+  (0.5) seconds and the bytes discarded, with one stderr line saying how many. It is the two-polls
+  rule's twin, and it is safe only because the feeder starts **with** the boot command — QEMU is a
+  build and a firmware away. Started against a boot that is already running it can throw the guest's
+  line away and then never feed. Unread boots with no fed boot between them accumulate in the pipe;
+  that is a carried debt, not something the runner fixes
+  ([`phase-6-virtio.md`](../plans/phase-6-virtio.md#slice-66-virtio-console-as-a-second-cdev-backend)).
+- **The guest's line is looked for as a substring, never as the first bytes.** edk2 and Limine use
+  the port too and put about 800 bytes of escape-laden boot text on it before the kernel starts. The
+  feeder copies `.out` into a temporary file with a background `cat` and greps that, which also
+  keeps the port drained for the rest of the boot; the `cat`'s end-of-file after it has read
+  something means QEMU is gone, and the feeder then exits 1 instead of polling a dead boot's log.
+- **`SETTLE` is there so that the child's read is parked when the bytes arrive.** The host sees the
+  guest's line the moment the driver hands it to the device, which is before the child's write has
+  returned; written at once, the first chunk beat the child's read on a stubs-on boot, and the read
+  was refused directly without ever having parked. The boot passes either way, but only a parked
+  read is retried by VFS, and that retry — a raw request with an unmapped buffer, re-granted and
+  refused — is what the read is there to exercise. Like `GAP` it is a guess: nothing in the log says
+  whether the read was parked.
+- **The coupling: a boot whose `vcon` is broken loses `stdin ok` as well as `hvc0 ok`.** Stage 4
+  waits for stage 3, deliberately: keeping the serial reader parked for the whole of the `hvc0`
+  exchange is what lets VFS be seen passing over it (`[diag vfs] cons.other ok`). Read the first
+  missing line; the order is `cons.other ok`, `hvc0 ok`, `stdin ok`.
+- **Each probe is written in two chunks, and the gap between them is load-bearing.** The feeder
+  writes the first `SPLIT` (9) bytes, sleeps `GAP` (3) seconds, and writes the rest — to `.in` in
+  stage 2 and to stdout in stage 4. For the second console the second chunk needs a second interrupt
+  **and** a re-posted receive buffer: `vcon` has one, and the chunk arrives only if the driver gave
+  it back to the device and re-armed after the first was drained. For the serial console: one write
   reaches TTY as one interrupt, and a probe that arrives in one interrupt says nothing about what
   TTY does *after* it: with the probe fed in one piece, a TTY that never re-armed its line after the
   drain still passed the boot (slice 6.5, mutation 5). The second chunk needs a second interrupt,
@@ -322,15 +382,16 @@ MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch6
   chunks ever land in one drain the boot still passes and the re-arm simply goes unproved, with
   nothing to say so. The same holds for a hand-rolled feed — a `printf` of the whole string into
   QEMU proves one interrupt.
-- **It waits for a marker, not for a delay, and that is load-bearing twice over.** VFS prints
-  `cons.beside ok` the first time it completes a file read while a console read is parked, so the
-  child's read cannot return before VFS has been seen serving somebody beside it — the proof is
-  causal. And bytes written earlier do not arrive at all (the third measurement below).
-- **The marker must be seen on two consecutive polls** (0.2 s apart). The log path is usually one a
-  previous boot wrote, and the shell starts the feeder an instant before `> <log>` truncates it; one
-  look could find the old boot's line and write into the firmware.
+- **The serial probe waits for a marker, not for a delay, and that is load-bearing twice over.** VFS
+  prints `cons.beside ok` the first time it completes a file read while a console read is parked, so
+  the child's read cannot return before VFS has been seen serving somebody beside it — the proof is
+  causal. And bytes written earlier do not arrive at all (the third serial measurement below).
+- **Stage 3's two lines must be seen, together, on two consecutive polls** (0.2 s apart). The log
+  path is usually one a previous boot wrote, and the shell starts the feeder an instant before `>
+  <log>` truncates it; one look could find the old boot's line and write into the firmware.
 - **`FEED_CONSOLE_CEILING=<seconds>`** (default 1800) is how long the feeder polls before it gives
-  up, exits 1 and writes nothing, so a boot that never parks a read cannot leave a poller behind for
+  up and exits 1 — whichever stage it is in, with nothing written anywhere in stage 1 and nothing
+  written to stdout in stage 3 — so a boot that never gets that far cannot leave a poller behind for
   good. There is no stall detection — it is a ceiling and nothing else. Set it a little over the
   boot's `timeout`; CI uses 1300 against 1200 (see [`ci.md`](./ci.md)).
 - **The gate is ordered, not synchronised.** init forks the reading child before its first file
@@ -338,11 +399,12 @@ MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch6
   boot runs, so a file read after the park is never long in coming — but nothing makes init wait for
   the child to park first. A `cons.beside ok` that came late would only delay the feeder.
 - **The reboot is not fed**, and neither is a boot nobody is going to check. An unfed boot — stdin
-  at EOF, or a terminal nobody types at — prints `cons.park` and `cons.beside ok`, never `stdin ok`,
-  and so **fails `check-boot-log.sh` on that one line by design**; the reading child stays parked
-  for the whole boot, which costs the boot nothing. Type at a hand-run boot and the first input
-  lands in that child's read and prints `stdin FAIL`, which is correct there. Which marker lines
-  hold for which boot is in [`testing-and-markers.md`](./testing-and-markers.md#markers).
+  at EOF, or a terminal nobody types at, and nobody on the FIFOs — prints `cons.park` and
+  `cons.beside ok`, never `cons.other ok`, `hvc0 ok` or `stdin ok`, and so **fails
+  `check-boot-log.sh` on those three lines by design**; both reading children stay parked for the
+  whole boot, which costs the boot nothing but two fork slots. Type at a hand-run boot and the first
+  input lands in that child's read and prints `stdin FAIL`, which is correct there. Which marker
+  lines hold for which boot is in [`testing-and-markers.md`](./testing-and-markers.md#markers).
 - **Nothing is echoed.** The console delivers raw bytes with no line discipline, so typing into a
   hand-run boot shows nothing on screen.
 
@@ -361,6 +423,25 @@ Three facts about QEMU's serial input were measured before the design was fixed 
 3. **Bytes on stdin before the kernel starts never reach TTY.** Five bytes present from time zero
    were consumed by the firmware or Limine. A feeder that wrote at once, or after a short fixed
    delay, would feed the boot loader — so input for a test is always gated on a line from the log.
+
+And five about the second console's `pipe` chardev (2026-11-24, QEMU 11.0.3, Homebrew's edk2, macOS
+on Apple Silicon — one machine; the CI runner's answer is the branch's first run):
+
+1. **QEMU starts with nobody on either FIFO**, and the boot is unchanged.
+2. **A guest write with no reader on the host side completes**, with its transmit interrupt; the
+   bytes sit in the pipe.
+3. **The firmware writes to the port before the kernel starts**: 808 bytes, with the guest's line
+   straight after them. And bytes written to `.in` while the firmware is running are lost, as on the
+   serial console.
+4. **Bytes written while the guest's one receive buffer is held are kept** and delivered when the
+   driver posts it again; a 600-byte host write arrived as three used elements of 256, 256 and 88
+   bytes.
+5. **The pipe keeps an unread boot's bytes after QEMU has exited** — about 826 on macOS — which is
+   what the feeder's drain is for.
+
+Slice 6.6's reading, fed and in the musl flavour: the last required marker at 55.38% of a 600 s disk
+log and 37.65% of the ramdisk one. The second console did not push the budget; see the
+[phase file](../plans/phase-6-virtio.md) for the comparison with 6.5 and what was not established.
 
 ## Feature toggles and dependency claims
 

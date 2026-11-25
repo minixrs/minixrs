@@ -59,6 +59,27 @@ minix.rs init: hvc0 FAIL step=<step> …            forbidden (substring `hvc0 F
 The fork-cycle markers move one slot up (the second long-lived child) and are recomputed, not
 edited.
 
+**Corrections found in implementation (2026-11-24).** The block above is the text as planned. As
+built, and as the marker files hold it:
+
+```text
+[as] vcon nr=12 ttbr0_pa=<…>                       expected; not in the list above
+[virtio] slot=8 pa=0xa001000 id=3 ver=2 drv=vcon   the exact text Task 4's boot printed
+[devmap] vcon va=0x40001000 pa=0xa001000 intid=56  expected; not in the list above
+[dma] vcon va=0xc0000000 pages=16                  the exact text (pa= follows and is not asserted)
+[diag vcon] virtio ok features=0x100000000 rxq=8 txq=8 slot=8
+[diag vcon] ds FAIL rc=<rc>                        forbidden; not in the list above
+[ksys SYS_FORK] parent=i nr=10 child_nr=21         expected: a third fork line, the first worker's
+[diag vfs] grant.test FAIL send rc=<rc>            forbidden (substring `[diag vfs] grant.test FAIL`)
+minix.rs init: hvc0 ok n=17
+```
+
+`HVC0_IN` is 17 bytes and `HVC0_OUT` 18. A third shared string, `HVC0_OK` (`minix.rs init: hvc0
+ok`), is what the feeder waits for, and the host test pins it too. **Task 5's "in that order" is
+wrong**: a fed boot prints `cons.other ok`, then `hvc0 ok`, then `stdin ok n=15`. The fork-cycle
+markers name slot 21 for the first worker (19 and 20 are the two proof children). A full boot is 190
+checks.
+
 ## Review Focus
 
 1. **Advance after the copy** — `off` moves only once `SYS_SAFECOPY` returned `OK`. Pinned by
@@ -291,3 +312,19 @@ One entry per task: its commit, what was verified, and every ruling made in it.
   the host test. (g) unfed boots accumulating unread bytes in `.out` is left as a debt, not fixed in
   the runner. *If wrong:* (a) a boot fails loudly with the named line; (b)–(d) are feeder knobs; (e)
   one call; (g) an untested full pipe after ~80 unfed boots with no fed one between.
+
+- **Task 9 (documentation; no boots, no code).** The phase file's 6.6 section, both checkboxes, the
+  conventions (`servers-and-drivers.md`, `testing-and-markers.md`, `build-and-boot.md`, `ci.md`,
+  `abi.md`), the book (`drivers`, `servers`, `boot`, `build`, `ipc`, `architecture`, `roadmap`), the
+  6.5 spec's R12 and a "Corrections found in implementation" section in this slice's spec and in
+  this plan's marker list. Tasks 7 and 8 are not recorded by this task: the phase file carries
+  `TASK7` / `TASK8` placeholder comments and `build-and-boot.md` a `TASK7: budget` one. **Rulings:**
+  (a) **the book's virtio-console text is a section of `drivers/overview.md`, not a new page**: the
+  book has one page per chapter and `virtio-blk` is a section of that page, so `SUMMARY.md` is
+  unchanged. *If wrong:* move the section to its own file and add one `SUMMARY.md` line; every link
+  to `#virtio-console` then needs its path changed. (b) **R12 in the 6.5 spec is rewritten in place
+  and carries a dated note of what it said**, which is this spec's §4 and `docs-and-workflow.md`'s
+  rule plus an annotation, rather than a note alone. *If wrong:* restore the original sentence above
+  the note. (c) H2's "publishes nothing to DS" sentence in the phase file is narrowed to block
+  drivers, since C4 contradicts it for `vcon`. (d) Task 5's one fed full disk boot is recorded in
+  the phase file as Task 5's, not as a Task 7 result.

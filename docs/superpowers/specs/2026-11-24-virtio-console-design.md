@@ -499,3 +499,50 @@ Decisions the phase file did not make. Each is undone by the change in its last 
 - **Hardening "always reply" against a reply-shaped message** (6.5's debt 9, owner 6.8).
 - **The kernel.** If Task 0 or a mutation shows it has to change, that is a finding to stop on, as
   6.5's was, not a change to make in passing.
+
+---
+
+## 7. Corrections found in implementation
+
+Added 2026-11-24, after Tasks 0 to 5. The decisions above are left as approved; this section records
+where building them showed the text to be wrong or incomplete. The plan's ledger has the detail, and
+the phase file's
+[6.6 section](../../plans/phase-6-virtio.md#slice-66-virtio-console-as-a-second-cdev-backend) is the
+record of what was built.
+
+- **§3's marker table has the two fed lines in the wrong order.** It lists `minix.rs init: hvc0 ok
+  n=…` before `[diag vfs] cons.other ok`. In the log `cons.other ok` comes **first**: VFS prints it
+  at the first chunk's walk, when its answer for the reader behind the passed-over serial one is the
+  `EFAULT` of C11's step 3, and the child's verdict follows a feeder gap later. The order on a fed
+  boot is `cons.other ok`, `hvc0 ok n=17`, `stdin ok n=15`.
+- **§3's marker table omits four lines that were added.** Expected: `[as] vcon nr=12 ttbr0_pa=`,
+  `[devmap] vcon va=0x40001000 pa=0xa001000 intid=56`, and a third `[ksys SYS_FORK] parent=i nr=10
+  child_nr=21` (the table's "fork-cycle slot numbers" row covers the renumbering but not the new
+  line). Forbidden: `[diag vfs] grant.test FAIL`, and also `[diag vcon] ds FAIL`. The kernel's
+  `[dma] vcon` line reads `va=0xc0000000 pages=16`, and the driver's verdict `rxq=8 txq=8 slot=8`.
+- **C11 lists four numbered steps — five actions, counting the compare — and there are six.** The
+  child also **closes** the descriptor, on every path, before it prints its verdict: open, write,
+  bad-read, read, compare, close, with `hvc0 FAIL step=close rc=…` for a close that fails. Without
+  it the child exits with one descriptor open and VFS prints `[diag vfs] pm-exit reset closed=1` —
+  `fileio`'s marker — far too early.
+- **C12 says nothing about stale bytes in the FIFOs, and its stage list is short by a wait.** C2
+  assumed an unfed boot's output "sits in the pipe" harmlessly. On macOS it is still there after
+  QEMU has exited, so the next fed boot's feeder found the previous boot's line at once and fed a
+  machine still in its firmware. The feeder now empties both FIFOs when it starts, and between
+  seeing the guest's line and writing its answer it waits `SETTLE` seconds so that the child's
+  unmapped read is parked, not refused directly. C2's "no stale-file race" claim for the FIFO is
+  therefore wrong as written: the race exists and the drain is its guard.
+- **C9 assumed a failed TX proof already left TTY's line stopped.** It did not: `proof_round`
+  printed its `FAIL` and stayed in `Proof`. The slice made it enter `Stopped`, which C9 needs.
+- **C10 says `cdev_endpoint` "grows an arm".** It left `main.rs` instead: `CharPeers::endpoint` in
+  the new `retry.rs`, beside `CharPeers::notifier`, so both are host-tested. And the step function
+  is in `retry.rs`, not `park.rs`.
+- **C4's sentence on VFS's prologue is incomplete.** "`vcon_endpoint()` resolves `vcon` once in the
+  prologue beside the other three" put a fourth blocking lookup ahead of VFS's `grant_test` send to
+  PM, and with the boot stubs on that lost PM's four grant markers. `grant_test` now precedes every
+  lookup. The rule is in
+  [`servers-and-drivers.md`](../../conventions/servers-and-drivers.md#prologue-ordering).
+- **§4 asks for the 6.5 spec's R12 sentence to be "rewritten in place, not bannered".** It was
+  rewritten in place, with a dated note under it saying what it had said.
+- **C14 items 3 and 5 were not done in Task 0.** Item 3 was measured on the real driver's first
+  boot, and item 5's baseline was moved to Task 7 (ledger, Task 0 rulings).

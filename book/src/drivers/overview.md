@@ -11,18 +11,20 @@ What separates a driver from a server is one page in its address space that no o
 the device's memory-mapped registers. Everything interesting about this chapter follows from that
 page.
 
-There are three drivers with an ELF today: **TTY** (`drivers/tty/`), the console; **`memory`**
+There are four drivers with an ELF today: **TTY** (`drivers/tty/`), the serial console; **`memory`**
 (`drivers/memory/`), the boot ramdisk plus, since slice 5.11, the
-[`/dev/null` and `/dev/zero` character minors](#the-character-minors); and, since slice 6.2,
+[`/dev/null` and `/dev/zero` character minors](#the-character-minors); since slice 6.2,
 **`virtio-blk`** (`drivers/virtio-blk/`), which [brings a virtio disk up](#virtio-drivers) and,
 since slice 6.3, [serves it as a block device](#virtio-blk) — since slice 6.4 the machine's GPT boot
 disk, whose partitions it serves as minors when the disk carries a minix.rs root partition, and none
-at all when it does not. Three more slots (`vcon`, `vinput`, `vnet`) are wired in the kernel but
-hold no ELF, and `drivers/virtio-console` and `drivers/virtio-net` are still empty placeholders.
-`drivers/driver-rt` is the runtime the virtio drivers share: the interrupt-line helper, the virtio
-transport, the typed handles on DMA memory, the virtqueue, and a GPT parser for block drivers.
+at all when it does not; and, since slice 6.6, **`virtio-console`** (`drivers/virtio-console/`), a
+[second character device](#virtio-console) behind `/dev/hvc0`. Two more slots (`vinput`, `vnet`) are
+wired in the kernel but hold no ELF, and `drivers/virtio-net` is still an empty placeholder.
+`drivers/driver-rt` is the runtime the drivers share: the interrupt-line helper, the virtio
+transport, the typed handles on DMA memory, the virtqueue, a GPT parser for block drivers, and the
+pure half of the character-driver read contract.
 
-`memory` is worth contrasting with the other two up front, because it is the counter-example to the
+`memory` is worth contrasting with the others up front, because it is the counter-example to the
 paragraph above: **its window is ordinary RAM, not MMIO**. It owns no hardware at all. What makes it
 a driver rather than a server is its *protocol* — it answers
 [BDEV](#the-bdev-protocol-and-the-memory-ramdisk) requests for the ramdisk and
@@ -174,7 +176,7 @@ one payload:
 
 | Field    | Payload offset | Meaning                                                                    |
 | -------- | -------------- | -------------------------------------------------------------------------- |
-| minor    | `0..4` (i32)   | which device; `CDEV_MINOR_CONSOLE = 0` is the UART                         |
+| minor    | `0..4` (i32)   | which of the driver's devices; `CDEV_MINOR_CONSOLE = 0` is TTY's UART      |
 | grant id | `4..8` (i32)   | names the client's buffer (`CPF_READ` for a write, `CPF_WRITE` for a read) |
 | length   | `8..12` (i32)  | bytes requested                                                            |
 | offset   | `16..24` (u64) | where in the granted range to start                                        |
@@ -195,8 +197,9 @@ the whole buffer went out.
 **A driver MAY answer short — never must.** The client's contract, POSIX `write()`'s, is to re-send
 with `offset` advanced until the request is out; that is what lets a driver stage through a fixed
 buffer in its `main` frame with no allocator at all. TTY clamps to `CDEV_MAX_IO` (256 bytes) for
-exactly that reason. The memory driver's `/dev/null` and `/dev/zero` (slice 5.11) stage nothing and
-never clamp — a `CDEV_WRITE` longer than `CDEV_MAX_IO` still comes back reporting the whole count.
+exactly that reason, and `virtio-console` for the same one: its transmit buffer is that long. The
+memory driver's `/dev/null` and `/dev/zero` (slice 5.11) stage nothing and never clamp — a
+`CDEV_WRITE` longer than `CDEV_MAX_IO` still comes back reporting the whole count.
 
 **`CDEV_READ` is the same payload, copy reversed** (slice 5.11). The reply is the byte count read,
 `0` is EOF, and a short read is legal — POSIX `read()`'s contract and the one VFS already assumes
@@ -207,14 +210,18 @@ served it since slice 6.5, when the PL011's receive interrupt gave it something 
 [TTY](#tty)).
 
 **A read is answered at once, even when there is nothing to give** (slice 6.5). The memory driver's
-minors always have an answer. The console does not — its input arrives when somebody types — and it
-may not simply hold the request until then, because its client is VFS: a VFS blocked in a `SENDREC`
-to a driver serves nobody else, so one process waiting on a keyboard would stop every file operation
-in the system. The next section is what a driver does instead.
+minors always have an answer. A console does not — its input arrives when somebody types, or when
+the host writes to it — and it may not simply hold the request until then, because its client is
+VFS: a VFS blocked in a `SENDREC` to a driver serves nobody else, so one process waiting on a
+keyboard would stop every file operation in the system. The next section is what a driver does
+instead.
 
 **Minors are a per-driver namespace.** TTY's console is 0; the memory driver's `/dev/null` and
 `/dev/zero` are CDEV minors 3 and 5 (MINIX 3's `NULL_DEV` and `ZERO_DEV`), on the same driver as
-BDEV minor 0's ramdisk. The request band, not the minor value, tells them apart.
+BDEV minor 0's ramdisk — the request band, not the minor value, tells those apart. And
+`virtio-console`'s one port is minor 0 too, `CDEV_MINOR_HVC0`: the same number as the console's on a
+different driver, with its own name so that neither is taken for the other. Which driver a request
+goes to is decided by the descriptor, in [VFS](../servers/overview.md#the-descriptor-table).
 
 ### Notify-then-pull: a read with nothing to give
 
@@ -257,20 +264,31 @@ The details that make the contract usable:
 - **`0` keeps meaning EOF**, so a driver that can say `EAGAIN` never sends `0` for a non-zero
   request. A *zero-length* read answers `0` before the buffer is even looked at, and records no
   waiter.
-- **A driver that cannot deliver the notification must not promise it.** TTY answers `EIO`, not
-  `EAGAIN`, if it failed to claim its interrupt line at boot: no byte can ever arrive, and a reader
-  left waiting for one would hang with nothing in the log to say why.
+- **A driver that cannot deliver the notification must not promise it.** Once no input can ever
+  arrive the answer is `EIO`, not `EAGAIN`: for TTY when it failed to claim its interrupt line at
+  boot or its line has stopped since, for `virtio-console` once its device has broken. A reader left
+  waiting would hang with nothing in the log to say why.
+- **A driver whose device stops wakes whoever is parked on it** (slice 6.6). A reader that was
+  answered `EAGAIN` *before* the device stopped is waiting for a notification that input will never
+  cause. So the driver sends its recorded waiter the one `NOTIFY` when the device stops; the
+  waiter's retry then hears the `EIO`.
 - **One waiter, the last to ask.** A second endpoint asking while one is recorded replaces it. Every
-  console reader goes through VFS today, so there is only ever one.
+  reader of either console goes through VFS today, so each driver only ever has one.
 - **No value moved for this.** `EAGAIN` (11) was already an errno, and the CDEV band's only clients
   are VFS and — when the keyboard driver lands — TTY. A C program never sees it from a console
   `read()`: VFS [parks the read](../servers/overview.md#parking-a-console-read) instead of relaying
   the errno.
 
-The contract runs in whichever direction a driver's input flows. Here VFS pulls from TTY. A
-`virtio-console` driver will implement the same driver side; and the keyboard driver will too, with
-TTY as the *caller* — on the keyboard's `NOTIFY`, TTY will read until it hears `EAGAIN` and push
-what it got into the same input buffer its own interrupt fills.
+Two drivers implement the driver side today, TTY and [`virtio-console`](#virtio-console), and the
+decisions they share are code they share: `driver-rt`'s [`cdev` module](#driver-rt) holds the
+request validator, the order a read is answered in (`read_plan`) and the one waiter. VFS, which
+pulls from both, has to keep their notifications apart — a `NOTIFY` from one driver says nothing
+about the other's input — and
+[retries only the notifier's readers](../servers/overview.md#parking-a-console-read).
+
+The contract runs in whichever direction a driver's input flows. The keyboard driver will implement
+the driver side too, with TTY as the *caller* — on the keyboard's `NOTIFY`, TTY will read until it
+hears `EAGAIN` and push what it got into the same input buffer its own interrupt fills.
 
 ## Interrupts reach a driver as a `HARDWARE` notification
 
@@ -345,18 +363,19 @@ stub-free boot whose `init` parks) proves it with a one-shot `[idle] wake ok`.
 A virtio driver is the same kind of process as TTY, with three things delivered by the kernel
 instead of discovered: a register page, an interrupt line and a block of DMA memory. Slice 6.2 built
 that machinery around one device, `virtio-blk`; slice 6.3 put block requests through it; slice 6.4
-made that device the disk the machine boots from.
+made that device the disk the machine boots from; slice 6.6 added a second device and a second
+driver, [`virtio-console`](#virtio-console).
 
 ### Four slots, one device each
 
 `kernel-shared/src/com.rs` names four driver slots, appended after `init`: `VBLK_PROC_NR` 11
 (`vblk`, virtio `DeviceID` 2), `VCON_PROC_NR` 12 (`vcon`, 3), `VINPUT_PROC_NR` 13 (`vinput`, 18) and
 `VNET_PROC_NR` 14 (`vnet`, 1). `NR_BOOT_PROCS` is therefore 15, the demo stubs sit at 15–18 and PM's
-fork pool starts at 19. Every slot has a `BootEntry` row and a privilege slot, but only `vblk` has
-an ELF; the other three stay blocked on `RTS_NO_PRIV` like `PFS`. A boot process's priv id is its
-`IMAGE` index, so the four rows take priv ids 16–19 and the stubs' dedicated priv ids sit above the
-shared user slot (`USER_PRIV_ID` = 20), at 21–24; two compile-time asserts pin that ordering:
-`USER_PRIV_ID >= N_IMAGE` in `kernel/src/proc/table.rs`, and the stub assert in
+fork pool starts at 19. Every slot has a `BootEntry` row and a privilege slot, but only `vblk` and
+`vcon` have an ELF; the other two stay blocked on `RTS_NO_PRIV` like `PFS`. A boot process's priv id
+is its `IMAGE` index, so the four rows take priv ids 16–19 and the stubs' dedicated priv ids sit
+above the shared user slot (`USER_PRIV_ID` = 20), at 21–24; two compile-time asserts pin that
+ordering: `USER_PRIV_ID >= N_IMAGE` in `kernel/src/proc/table.rs`, and the stub assert in
 `kernel/src/arch/aarch64/userland.rs` (gated on `boot-stubs`).
 
 ### The kernel finds the device
@@ -389,28 +408,36 @@ does not judge `Version`: it prints it and leaves a legacy transport's refusal t
 is the one place that knows what the version means and can name the QEMU flag that fixes it. For
 that reason `tools/qemu-run.sh` passes `-global virtio-mmio.force-legacy=false` and pins every
 device with `bus=virtio-mmio-bus.N`; `N` is the transport slot, and the buses are eight apart so
-each device owns its page. All four pages are taken by the four planned devices, so a fifth device
-would have no page of its own.
+each device owns its page. The disk is on bus 0 and the console on bus 8 — slot 8, the first slot of
+the second page, `[virtio] slot=8 pa=0xa001000 id=3 ver=2 drv=vcon`. All four pages are taken by the
+four planned devices, so a fifth device would have no page of its own.
 
 ### What the kernel hands over
 
 For a driver the probe assigned, `load_boot_server` adds one arm beside TTY's and the ramdisk's. It
 maps the register page `Prot::DEVICE_RW` at `VIRTIO_MMIO_PAGE_VA`, pushes the device's INTID onto
 the driver's `Priv::irqs` — so the allow-list is exactly one line long — and maps the driver's
-[DMA run](../memory/overview.md#the-dma-window) at `DMA_VA`. It logs two lines, which are required
-markers of both full boots, since each attaches the boot disk:
+[DMA run](../memory/overview.md#the-dma-window) at `DMA_VA`. It logs two lines per driver, which are
+required markers of both full boots, since each attaches the boot disk and the console:
 
 ```text
 [devmap] vblk va=0x40001000 pa=0xa000000 intid=48
 [dma] vblk va=0xc0000000 pages=16 pa=0x...
+[devmap] vcon va=0x40001000 pa=0xa001000 intid=56
+[dma] vcon va=0xc0000000 pages=16 pa=0x...
 ```
+
+The two drivers' virtual addresses are the same numbers because each has its own address space;
+`pa=` and `intid=` are what tell the lines apart.
 
 The driver learns the addresses through two more `SYS_GETINFO` selectors,
 [`GET_VIRTIO_MMIO` (65) and `GET_DMA` (66)](../reference/syscalls.md#sys_getinfo-selectors). Both
 answer `EPERM` to any process that is not one of the four driver slots, and a driver slot with no
-device gets `ENOENT` — which is how a driver is told it has no device, not an error: `virtio-blk`
-publishes nothing to DS and prints `no device`. The register base a driver uses is the reply's VA,
-which already includes the device's offset inside its page.
+device gets `ENOENT` — which is how a driver is told it has no device, not an error. Either driver
+then prints `no device` and answers `ENXIO` to every request. What it does about DS differs, because
+a miss means something different to each one's client: `virtio-blk` publishes nothing, and
+`virtio-console` [publishes regardless](#always-published). The register base a driver uses is the
+reply's VA, which already includes the device's offset inside its page.
 
 ### What the boundaries do not stop
 
@@ -426,17 +453,17 @@ mistakes; isolating a driver from the rest of the machine needs an IOMMU, which 
 configuration does not offer.
 
 The trust runs the other way too. The same table gives every `SRV_T` row an IPC mask covering every
-other boot process, so each server and driver — PM, VFS, RS, `memory`, TTY, DS, MFS, VM, SCHED — may
-send `virtio-blk` a `BDEV_WRITE`; a user process may not (its mask is PM, VFS and VM). Since slice
-6.4 that reaches further than the root filesystem: [every minor is read-write](#minors), the disk
-behind the driver is the one the machine boots from, and so any of those servers could overwrite the
-kernel on the ESP (minor 2) or the partition table and its backup (minor 1), and the damage would
-outlast a reboot. In 6.3 the same request could reach only the root image. Nothing in the system
-sends such a write, and nothing but the IPC mask prevents it.
+other boot process, so each server and driver — PM, VFS, RS, `memory`, TTY, DS, MFS, VM, SCHED,
+`vcon` — may send `virtio-blk` a `BDEV_WRITE`; a user process may not (its mask is PM, VFS and VM).
+Since slice 6.4 that reaches further than the root filesystem: [every minor is read-write](#minors),
+the disk behind the driver is the one the machine boots from, and so any of those servers could
+overwrite the kernel on the ESP (minor 2) or the partition table and its backup (minor 1), and the
+damage would outlast a reboot. In 6.3 the same request could reach only the root image. Nothing in
+the system sends such a write, and nothing but the IPC mask prevents it.
 
 ### `driver-rt`
 
-`drivers/driver-rt/` has five pieces and no `std`:
+`drivers/driver-rt/` has six pieces and no `std`:
 
 - **`IrqLine`** (`irq.rs`) is a claim on one interrupt line: `new(intid, notify_id)` issues
   `IRQ_SETPOLICY`, `rearm()` issues `IRQ_ENABLE`, `fired(pending)` tests the line's bit in a
@@ -466,7 +493,11 @@ sends such a write, and nothing but the IPC mask prevents it.
   the remainder then hands out bounds-checked `DmaBuf`s, each a virtual address, a physical address
   and a length; a `DmaBuf`'s `read_into` and `write_from` are bounds-checked volatile copies, which
   is how a driver touches a request header or a status byte without an `unsafe` block of its own.
-  `DmaRegion::peek` reads the run without creating a handle.
+  `DmaBuf::prefix(len)` is the first `len` bytes of a buffer as a handle of their own — what a
+  descriptor names when a transfer is shorter than the buffer it is staged in; it can only narrow.
+  `DmaRegion::peek` reads the run without creating a handle. A driver with two queues calls
+  `split_queue` twice, on the region and then on its remainder, and so gets two queue pages no
+  buffer can reach.
 - **The split virtqueue** (`queue.rs`) is `queue_layout` / `clamp_queue_size` (pure arithmetic over
   a power-of-two size up to 32768; `clamp_queue_size` and `VirtQueue::new` cap it at `QUEUE_SIZE` =
   8 entries) and `VirtQueue`, the driver's half of the descriptor table and the available and used
@@ -490,17 +521,27 @@ sends such a write, and nothing but the IPC mask prevents it.
   computed a bit at a time rather than from a table, since the input is at most 16 KiB once per
   boot. It shares no code with `tools/mkimage`, which writes the tables. What each refusal means to
   a driver is under [the root check](#the-root-check).
+- **The character-driver read contract** (`cdev.rs`, moved here from TTY in slice 6.6) is the pure
+  half of [notify-then-pull](#notify-then-pull-a-read-with-nothing-to-give), for drivers that serve
+  one minor. One private `validate` serves `validate_write(req, minor)` and `validate_read(req,
+  minor)`, so the two directions cannot drift: a minor other than the driver's own → `ENXIO`,
+  negative length → `EINVAL`, invalid grant id → `EINVAL`, then clamp to `CDEV_MAX_IO` (the
+  four-field parse itself is `server-rt::cdev`'s). `read_plan(want, buffered, can_receive)` decides
+  how a validated read is answered — `Zero`, `Stopped`, `Empty` or `Copy(n)`, in that order of
+  precedence — and `Waiter` is the one endpoint owed a `NOTIFY`. No IPC, no device, no `unsafe`:
+  each driver's `main` does what these decide. TTY and `virtio-console` use it; the memory driver,
+  which never says `EAGAIN`, does not.
 
 `unsafe` is confined to `mmio.rs` (volatile register accesses) and `dma.rs` (every access to the
 memory the device shares); `queue.rs` has none, because its ring accesses go through the handle it
-holds, and neither has `gpt.rs`. Because `VirtQueue::new`, `add` and `queue_enable` take handles
-instead of addresses, all three are safe functions, and safe driver code cannot aim the device at
-memory outside its own run through them — nor behind their backs, because the ring memory was split
-off before any buffer handle existed and no `DmaBuf` can overlap it. That is a guard against
-mistakes and not a new boundary: [the trust model above](#what-the-boundaries-do-not-stop) is
-unchanged, and two data buffers can still overlap each other. `irq.rs` is the only piece that traps
-into the kernel. The rest is host-tested against a mock transport and hand-written rings, with a
-second handle on the same memory playing the device's half; the parser's tests build headers and
+holds, and neither have `gpt.rs` and `cdev.rs`. Because `VirtQueue::new`, `add` and `queue_enable`
+take handles instead of addresses, all three are safe functions, and safe driver code cannot aim the
+device at memory outside its own run through them — nor behind their backs, because the ring memory
+was split off before any buffer handle existed and no `DmaBuf` can overlap it. That is a guard
+against mistakes and not a new boundary: [the trust model above](#what-the-boundaries-do-not-stop)
+is unchanged, and two data buffers can still overlap each other. `irq.rs` is the only piece that
+traps into the kernel. The rest is host-tested against a mock transport and hand-written rings, with
+a second handle on the same memory playing the device's half; the parser's tests build headers and
 entry arrays by hand, flipping one field at a time and recomputing the CRC so each refusal is for
 its stated reason.
 
@@ -516,6 +557,10 @@ acknowledgement comes before the walk because a virtio-mmio line is level-trigge
 acknowledgement placed after the walk would be cleared by that acknowledgement, and the re-arm would
 find the line low and lose the interrupt. Acknowledged first, any later completion re-raises the
 line, and the walk, which runs afterwards, still sees everything already published.
+
+A driver with more than one queue keeps the order and adds a walk: `virtio-console` acknowledges,
+walks its receive queue to empty, walks its transmit queue to empty, and re-arms — on every
+interrupt, whichever queue caused it.
 
 ### `virtio-blk`
 
@@ -798,6 +843,244 @@ a line that cannot be re-armed, a failed receive, or a queue that refuses a chai
 flight. The driver then writes `FAILED`, prints one `virtio FAIL step=io …` line naming the cause,
 leaves the line masked, and answers `EIO` to every later request.
 
+### `virtio-console`
+
+`drivers/virtio-console/` (slice 6.6) is the second consumer of `driver-rt` and the second driver
+that can keep a reader waiting on the [CDEV band](#the-cdev-protocol). It publishes itself under its
+proc name, `vcon`, and serves one device: `/dev/hvc0`, minor `CDEV_MINOR_HVC0`. Standard input,
+output and error stay on TTY in every process; a program reaches this console only by opening the
+node.
+
+The device is a QEMU `virtio-serial-device` with one `virtconsole` port, attached to **every** boot
+on `virtio-mmio-bus.8`. Its host side is not the terminal: it is a `pipe` chardev over two FIFOs,
+`target/hvc0.out` (what the guest writes) and `target/hvc0.in` (what it reads), which is how a boot
+is [fed on the second console](../build.md#feeding-the-console) without the two input streams
+getting mixed.
+
+The crate has `virtio-blk`'s shape. The pure half is host-tested: where the two queues and two
+buffers sit in the DMA run (`bringup.rs`), and the port's state — who holds the receive buffer,
+whether a transmit is in flight, and every step taken out of turn (`port.rs`). `main.rs` does the
+kernel calls, the queues and the interrupt around them, and holds the crate's only two `unsafe`
+blocks: the `driver-rt` constructors for the DMA run and for the register window.
+
+#### Always published
+
+`vcon_init`, the `init_fresh` callback, publishes the name to DS **unconditionally** — it does not
+ask whether there is a device first. That is the opposite of [`virtio-blk`](#virtio-blk), and for a
+reason: there, a DS miss is an answer ("no disk") that MFS acts on. Nothing selects between
+consoles, so a miss here would mean nothing, and with the name always present VFS's lookup can
+follow the ordinary rule — find `vcon` in DS, or fall back to the boot endpoint and say so (`[diag
+vfs] vcon.ds ok ep=…` / `vcon.ds FAIL rc=… fallback=…`). The process is always in its receive loop
+to answer, so the fallback is always sound. The one ordering this needs is `vcon` before `vfs` in
+[the boot archive](../boot/overview.md#boot-modules).
+
+A driver with no working device — none assigned, or a failed bring-up — answers **`ENXIO`** to every
+`CDEV_READ` and `CDEV_WRITE`, well-formed or not. `open("/dev/hvc0")` still succeeds, because a
+device open consults only VFS's table; the first `read` or `write` hears the `ENXIO`.
+
+#### Bringing the console up
+
+Bring-up runs once, after `sef_startup`, in straight-line code, and prints exactly one verdict line:
+
+1. `GET_VIRTIO_MMIO`; `ENOENT` prints `no device`. The runner attaches the console to every boot, so
+   on this driver that line is a forbidden marker, not a healthy path.
+2. `GET_DMA`, then the kernel's stamp in the run's first eight bytes, checked as
+   [`virtio-blk` checks it](#bring-up).
+3. `MmioTransport::new`, then `DeviceID` must be 3.
+4. `negotiate`, **asking for nothing**. The accepted word is `VIRTIO_F_VERSION_1` alone. The
+   console's three optional features are a window size (`F_SIZE`), more than one port
+   (`F_MULTIPORT`) and an emergency write register (`F_EMERG_WRITE`); every field of the console's
+   configuration space is valid only under one of them, so the driver **reads no device
+   configuration at all**. The firmware used this device before the kernel started; `negotiate`
+   begins with a reset, which is what takes it back.
+5. Size both queues under the device's `QueueNumMax`, lay the four pages out (next section), enable
+   both queues, set `DRIVER_OK`, read it back. Without the multiport feature the device has exactly
+   two queues: queue 0 receives, queue 1 transmits.
+6. Claim the INTID, then claim `INTID + 1`, which must be refused with `EPERM`.
+7. Post the one receive buffer: chain it device-writable into the receive queue and notify.
+8. `[diag vcon] virtio ok features=0x100000000 rxq=8 txq=8 slot=8`.
+
+`features=0x100000000` is bit 32, `VERSION_1`, and nothing else — a `…1`, `…2` or `…4` there would
+be a feature the driver did not ask for. `rxq=` and `txq=` are the two queue sizes: `driver-rt`'s
+cap of 8 under a `QueueNumMax` of 1024 on QEMU 11. A failing step prints `virtio FAIL step=<step> …`
+and abandons the rest; one after the negotiation also marks the device `FAILED`. No step waits on a
+register or a ring and none needs a completion, so the first client can be answered as soon as the
+loop is reached — which is why nothing constrains this driver's place in the archive except `vcon`
+before `vfs`.
+
+#### Four pages
+
+The driver uses four of its DMA run's sixteen pages, one for each thing:
+
+| DMA page | Holds                                                         |
+| -------- | ------------------------------------------------------------- |
+| 0        | the receive queue (queue 0)                                   |
+| 1        | the transmit queue (queue 1)                                  |
+| 2        | the receive buffer, `CDEV_MAX_IO` (256) bytes, device-written |
+| 3        | the transmit buffer, `CDEV_MAX_IO` bytes, device-read         |
+
+`bringup::vcon_layout` consumes the `DmaRegion` and produces all four handles. The two queue pages
+come off the front with two `split_queue` calls **before** either buffer is taken, so no `DmaBuf`
+can reach a ring — the same guard [`driver-rt`](#driver-rt) gives `virtio-blk`, applied twice. A run
+that is not page-aligned, or holds fewer than four whole pages, is refused (`virtio FAIL
+step=queue`).
+
+There is **one** buffer in each direction, not a pool. That is `virtio-blk`'s "one request in
+flight" applied to both directions of a console, and it is what makes the receive state a
+two-variant enum rather than a queue of buffers. Throughput is not a goal here.
+
+#### Receive: one buffer, posted or held
+
+`port::Rx` says who has the receive buffer:
+
+- **`Posted`** — chained into the receive queue. The device may fill it.
+- **`Held { len, off }`** — the device returned it with `len` bytes, and readers have taken `off` of
+  them.
+
+A used element in the receive queue moves `Posted` to `Held { len, off: 0 }`. The length is the
+device's word, so it is clamped to the buffer's; a zero-length element holds nothing and the buffer
+is chained straight back in. A read is then served **directly from the DMA buffer** — one
+`SYS_SAFECOPY` from the buffer's own address to the caller's grant, with no staging copy in between
+— and follows the order `read_plan` fixes for every character driver:
+
+1. validate, by `CDEV_WRITE`'s rules in `CDEV_WRITE`'s order;
+2. a zero-length read answers `0`, before the buffer is looked at;
+3. a broken device answers `EIO`;
+4. `Posted` records the caller as the waiter and *then* answers `EAGAIN`;
+5. `Held` copies `min(asked, len - off)` bytes: `Rx::peek` says which, the copy is made, and **only
+   if it returned `OK`** does `Rx::advance` move `off`. A refused copy — `EPERM`, `EFAULT`, relayed
+   verbatim — leaves the bytes owed to whoever asks next.
+
+When a read takes the last held byte, `advance` reports the buffer drained, and the driver chains it
+into the receive queue again and notifies the device **before the reply goes out**. (If that re-post
+fails the device is broken, but the caller has its bytes and still gets its count; the next request
+hears `EIO`.)
+
+**There is no input ring, and nothing is ever dropped.** TTY has a ring and an overflow line because
+a UART cannot make its sender wait. A virtqueue can: while the buffer is held the device has nowhere
+to put more input, so the bytes stay in the host's end of the chardev until the buffer is posted
+again. Measured on QEMU 11: bytes written while the buffer was held were kept and delivered at the
+re-post, and a 600-byte host write arrived as three used elements of 256, 256 and 88 bytes, one per
+re-post. So this driver has no `rx overflow`, and no storm guard either — `InterruptStatus` is
+cleared by the acknowledgement, so a line that keeps firing with nothing to receive has no virtio
+form.
+
+#### Transmit: one chain, waited for
+
+A `CDEV_WRITE` is validated; a zero-length one answers `0` and touches nothing. Otherwise up to
+`CDEV_MAX_IO` bytes are copied from the caller's grant **straight into the transmit buffer** — so a
+refused grant or an unmapped buffer is relayed verbatim and never reaches the device — and a
+`DmaBuf::prefix` of exactly that many bytes is chained into the transmit queue. The driver notifies
+the device and then **waits for that chain to come back**, in a receive filtered to `HARDWARE`:
+blocked, never polling, with a second client left queued in the kernel. The reply is the count
+moved, so a longer write is a short write and VFS's loop re-sends the rest, as it does for TTY.
+
+The wait is `virtio-blk`'s, with one difference that matters: **a receive completion can arrive
+during it**. Every interrupt taken in the wait goes through the same handler the main loop uses, so
+input that lands while a write is in flight is taken into the held buffer and its waiter notified
+from inside the wait. VFS is in the middle of a `SENDREC` to this driver at that moment, and the
+kernel keeps the notification for VFS's next plain `RECEIVE`
+([IPC](../ipc/overview.md#a-notification-is-never-the-reply-to-a-sendrec)) — the shape that rule
+exists for.
+
+A device that never completes a transmit hangs the driver in that wait with VFS behind it, and
+nothing reports it. QEMU completes a console write, with one interrupt, whether or not anything
+reads the host side.
+
+#### One handler for both queues
+
+Every interrupt, wherever it is received, is handled the same way:
+
+```text
+read InterruptStatus; acknowledge exactly those bits
+walk the receive queue until it is empty
+walk the transmit queue until it is empty
+IRQ_ENABLE                               re-arm the line
+NOTIFY the waiter, if input arrived      after the re-arm; then forget the waiter
+```
+
+That is [the driver loop](#the-driver-loop) with a second walk, and the last line is after the
+re-arm for the reason it is in TTY: the line is live before the waiter can come back with a read. A
+configuration-change interrupt walks two empty rings and re-arms. A wake-up `NOTIFY` that fails
+keeps the waiter and prints `[diag vcon] rx FAIL notify rc=…` once, exactly as TTY's does.
+
+A used element nobody was waiting for is a fault, not something to skip: a transmit completion with
+no write in flight or for the wrong chain head, a receive completion while the buffer is already
+held, or any `QueueFault` from the queue itself. So is a line that cannot be re-armed, and a failed
+receive during the transmit wait. On any of them the driver writes `FAILED`, prints one `[diag vcon]
+virtio FAIL step=io …` line naming the cause, leaves the line masked, answers `EIO` from then on —
+and sends its recorded waiter the one `NOTIFY`, so that a reader already parked on `/dev/hvc0` is
+retried and hears the `EIO` instead of waiting for an interrupt that can no longer come. Whether a
+wake-up is due is one small pure function, `port::wake_due`: input arrived, or the device has *just*
+broken.
+
+No healthy boot reaches the broken state, and QEMU cannot be made to produce it; it is held by host
+tests on `port.rs` and by reading.
+
+#### What a console client hears
+
+- **`ENXIO`** for every `CDEV_READ` and `CDEV_WRITE` when there is no working device — decided
+  before the request is parsed, so a malformed request and a zero-length one hear it too — and for
+  any minor but `CDEV_MINOR_HVC0` on a device that came up.
+- **`EINVAL`** for a malformed request, from the validator TTY also uses.
+- **`EAGAIN`** for a read that finds no input; the caller is owed a `NOTIFY`. VFS never passes this
+  on: it [parks the read](../servers/overview.md#parking-a-console-read).
+- **`EIO`** for a read, or a non-empty write, once the device has broken.
+- A negative `SYS_SAFECOPY` result, **verbatim**.
+- **`ENOSYS`** for any other request number. A notification that is not the interrupt line's is
+  dropped without a reply.
+
+Like every virtio driver, [it cannot exit](#a-virtio-driver-cannot-exit).
+
+#### The proof on a fed boot
+
+Bring-up is proved on every boot by five lines — the probe's, the two mappings, the driver's verdict
+and VFS's lookup:
+
+```text
+[virtio] slot=8 pa=0xa001000 id=3 ver=2 drv=vcon
+[devmap] vcon va=0x40001000 pa=0xa001000 intid=56
+[dma] vcon va=0xc0000000 pages=16 pa=0x...
+[diag vcon] virtio ok features=0x100000000 rxq=8 txq=8 slot=8
+[diag vfs] vcon.ds ok ep=12
+```
+
+The data path is proved by a second child of `init` ([init](../servers/overview.md#init-pid-1) has
+its steps) and by the script that feeds the boot. The child opens `/dev/hvc0` and writes `minix.rs
+hvc0 out` through it. That line leaves the machine on the second chardev, and the feeder sends
+nothing at all until it has read it there, on the host — among some 800 bytes of boot text, because
+edk2 and Limine use the port too before the kernel starts. The child meanwhile issues one read into
+an address that is not mapped. Nothing has been fed, so the driver answers `EAGAIN` and VFS parks
+the request, behind the `read(0)` child's, which parked first.
+
+The feeder then writes `minix.rs hvc0 in` and a newline in two pieces a few seconds apart, and two
+lines appear in the serial log, in this order:
+
+```text
+[diag vfs] cons.other ok
+minix.rs init: hvc0 ok n=17
+```
+
+The first piece's interrupt makes the driver notify VFS. VFS walks its parked reads on this driver's
+behalf, **passes over** the serial reader, and asks for the one behind it. The driver has bytes held
+and tries the copy; the kernel refuses it, because the buffer is not mapped; and VFS, which now has
+an answer for a reader that sat behind another driver's, prints `cons.other ok` and passes the
+`EFAULT` on to the child. The child then reads into a real buffer until it holds all seventeen bytes
+and compares them. That one line, `hvc0 ok n=17`, therefore says four things:
+
+- **guest to host**: the feeder's bytes are the only way the line can print, and the feeder sends
+  them only after seeing the guest's own line on the host;
+- **host to guest**, twice;
+- **the refused copy consumed nothing**: the first piece was still there to be read after the
+  `EFAULT`. A driver that advanced before its copy returned would have thrown it away, and the child
+  would come up short and stay parked;
+- **the buffer was re-posted and the line re-armed**: the second piece has nowhere to land unless
+  the driver gave its one buffer back to the device after the child drained the first.
+
+The serial console is fed only after `hvc0 ok` is in the log, so [the serial proof](#tty) follows
+this one, and a boot whose second console is broken loses `stdin ok` as well. A boot nobody feeds
+prints the five bring-up lines and neither of these two: both children stay parked.
+
 ### A virtio driver cannot exit
 
 The DMA run is ordinary RAM, so every address-space teardown would free it while the device may
@@ -810,15 +1093,10 @@ guard firing.
 
 ## TTY
 
-`drivers/tty/` is five files:
+`drivers/tty/` is four files. (Until slice 6.6 there was a fifth, `cdev.rs`: the request validator,
+`read_plan` and `Waiter`. They are [`driver-rt`'s `cdev` module](#driver-rt) now, shared with
+`virtio-console`, and TTY passes `CDEV_MINOR_CONSOLE` as its one minor.)
 
-- **`cdev.rs`** — the pure, host-tested half of both requests. One private `validate` serves
-  `validate_write` and `validate_read`, so the two directions cannot drift: unknown minor → `ENXIO`,
-  negative length → `EINVAL`, invalid grant id → `EINVAL`, then clamp to `CDEV_MAX_IO` (the
-  four-field parse moved to `server-rt::cdev` in 5.11, when the memory driver became its second
-  user). It is a total function, so a malformed request becomes an invalid *value* the validator
-  rejects, never a panic. `read_plan` decides how a validated read is answered, and `Waiter` is the
-  one endpoint owed a `NOTIFY`.
 - **`input.rs`** — the input ring, also pure and host-tested: received bytes waiting to be read.
 - **`irq.rs`** — the interrupt line: the claim, its denial battery, the delivery proof, and the
   receive service.
@@ -874,7 +1152,9 @@ TTY claims INTID 33 at startup and runs a battery of claims that must each be re
   receive *timeout*, which covers a FIFO holding fewer bytes than its trigger level — and prints
   `[diag tty] rx on`. From here every notification on the line is receive service.
 - **`Stopped`.** A failure that has been reported; the line is left masked and nothing more is
-  serviced.
+  serviced. A proof round that goes wrong, a refused re-arm and a storm all end here, and nothing
+  leaves it: `IrqService::can_receive` is `false` from then on. The step from one phase to the next
+  is a pure function, `Phase::after`, host-tested for each way of stopping.
 
 Receive service is the pattern from [above](#interrupts-reach-a-driver-as-a-hardware-notification),
 in its acknowledge-first order:
@@ -902,11 +1182,13 @@ raises the receive interrupt on the first byte regardless of the trigger level.)
 Two guards stand behind the loop, each with a forbidden boot marker (the refused `NOTIFY` above is a
 third). A notification that drains nothing is legal — it is the price of acknowledging first — but
 `RX_EMPTY_STORM` (64) of them **in a row** is a device that is not dropping its line: TTY prints
-`[diag tty] rx FAIL storm` and does not re-arm. A refused `IRQ_ENABLE` prints `rx FAIL enable rc=…`;
-the bytes already drained are still delivered. The run of empty notifications is counted by a small
-pure type, `EmptyRun`, so the rule is pinned by host tests rather than by a boot that would need a
-misbehaving UART. (QEMU's cannot be made to misbehave this way from the driver's side: skip the
-drain and the bytes sit in the FIFO in silence, because the acknowledgement alone drops the line.)
+`[diag tty] rx FAIL storm` and does not re-arm. A refused `IRQ_ENABLE` prints `rx FAIL enable rc=…`.
+Either way the line has stopped: TTY wakes the reader parked on it, once, and answers every later
+read `EIO` ([below](#receive-answering-cdev_read)) — including for bytes already in the ring. The
+run of empty notifications is counted by a small pure type, `EmptyRun`, so the rule is pinned by
+host tests rather than by a boot that would need a misbehaving UART. (QEMU's cannot be made to
+misbehave this way from the driver's side: skip the drain and the bytes sit in the FIFO in silence,
+because the acknowledgement alone drops the line.)
 
 ### The input ring
 
@@ -935,17 +1217,23 @@ contract:
 
 1. **A zero-length read answers `0`** — before the ring is looked at, and without recording a
    waiter.
-2. **No interrupt line answers `EIO`.** If the claim was refused at boot, no byte can ever arrive.
+2. **A line that can deliver nothing more answers `EIO`.** If the claim was refused at boot, or the
+   line has stopped since, no byte can ever arrive. This comes before the ring is looked at.
 3. **An empty ring answers `EAGAIN`**, and the caller is recorded as the waiter — see
    [notify-then-pull](#notify-then-pull-a-read-with-nothing-to-give).
 4. **Otherwise copy** `min(asked, buffered, CDEV_MAX_IO)` bytes: `peek` into the staging buffer,
    `SYS_SAFECOPY(SAFECOPY_TO, …)` into the caller's grant, and `consume` only if the copy succeeded.
    The reply is the count, always at least one.
 
-`EIO` covers the refused claim and nothing else. If the delivery proof fails, or the line storms or
-cannot be re-armed, receive has stopped but a read of an empty ring still answers `EAGAIN`, and its
-reader waits for a notification that will not come. Each of those has already printed a forbidden
-`FAIL` line, so the boot is reported broken; the reader is simply not told.
+Until slice 6.6 `EIO` covered the refused claim and nothing else: if the delivery proof failed, or
+the line stormed or could not be re-armed, a read of an empty ring still answered `EAGAIN` and its
+reader waited for a notification that would never come. Now each of those stops the line for good (a
+failed proof round did not even leave the `Proof` phase before), every later read answers `EIO`, and
+the reader that was already parked is sent its one `NOTIFY` on the transition, so its retry hears
+the `EIO` too. During the proof itself receive is merely not on *yet*, so a read then is still
+answered `EAGAIN` — its waiter is woken by the first byte, or by the proof failing. Each way of
+stopping has already printed a forbidden `FAIL` line, so no healthy boot shows any of this; it is
+held by host tests.
 
 ## What the boot log proves
 
@@ -996,7 +1284,9 @@ Receive is proved end to end, by a byte that really travels the wire. QEMU's ser
 standard input, so the two full boots CI checks are *fed*: a small script
 ([`tools/feed-console.sh`](../build.md#feeding-the-console)) watches the boot's own log and, at the
 right moment, writes `minix.rs stdin` and a newline to QEMU — in two pieces, a few seconds apart,
-for a reason that comes at the end. Four lines tell the story in order:
+for a reason that comes at the end. (Since slice 6.6 the script feeds
+[the second console](#the-proof-on-a-fed-boot) first and the serial one after; what follows is the
+serial half.) Four lines tell the story in order:
 
 ```text
 [diag tty] rx on
@@ -1009,11 +1299,12 @@ minix.rs init: stdin ok n=15
 it. `cons.park` is VFS saying it has parked its first console read — a child of `init` blocked in
 `read(0)`. `cons.beside ok` is VFS saying it has just completed a file read for somebody else *while
 that read was parked*, which is the line that shows a process waiting on the console costs the rest
-of the system nothing. Only then does the script write, and `stdin ok n=15` is the child reporting
-that the fifteen bytes it read are the fifteen that were sent, unechoed and unrewritten. Nothing but
-TTY's `NOTIFY` can complete that read, so the last line appearing at all is the proof that the
-interrupt, the ring, the notification and VFS's retry each did their part. A boot nobody feeds
-prints the first three and never the fourth.
+of the system nothing. Only then — and once the second console's `hvc0 ok` is in the log as well —
+does the script write, and `stdin ok n=15` is the child reporting that the fifteen bytes it read are
+the fifteen that were sent, unechoed and unrewritten. Nothing but TTY's `NOTIFY` can complete that
+read, so the last line appearing at all is the proof that the interrupt, the ring, the notification
+and VFS's retry each did their part. A boot nobody feeds prints the first three and never the
+fourth.
 
 The two pieces are what make that last line prove the *loop* and not just its first turn. Bytes
 written together reach TTY as one interrupt, so a probe written in one go would be delivered whole
@@ -1026,8 +1317,10 @@ What the log does *not* prove is worth stating, because the code looks more test
 Nothing shows that acknowledging before draining is the right order — under QEMU the reverse order
 behaves identically, so that rests on the argument
 [above](#the-interrupt-line-a-proof-then-receive). And nothing exercises the step that keeps a
-failed copy from consuming bytes: `peek` and `consume` are each tested, but no boot refuses a copy
-with bytes waiting, so their order in the read handler is checked by reading it.
+failed copy from consuming bytes **in TTY**: `peek` and `consume` are each tested, but no boot
+refuses a console copy with bytes waiting, so their order in TTY's read handler is checked by
+reading it. (`virtio-console` has the same step and does prove it, with a read into an unmapped
+buffer.)
 
 ## The BDEV protocol and the `memory` ramdisk
 
@@ -1066,8 +1359,9 @@ differs by driver. `validate_range(req, blocks)` is everything after the minor c
 block count, and never reads the minor. `validate_read(req, blocks)` is the minor check for a driver
 whose only minor is the root, followed by `validate_range`; `memory` calls it with the image's block
 count, as it always has. `virtio-blk` resolves the minor to a partition's extent itself and then
-calls `validate_range` with that extent's block count. CDEV shares only its parse through
-`server-rt::cdev`.
+calls `validate_range` with that extent's block count. On the CDEV band every driver shares the
+parse through `server-rt::cdev`; TTY and `virtio-console` also share a validator, in `driver-rt`,
+and the memory driver keeps its own.
 
 Most of that table repeats CDEV's rules — no granter field, and the reply `m_type` *is* the byte
 count. Four things are deliberately different:

@@ -264,10 +264,13 @@ jobs:
           rustup component add miri
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # `minixrs-tty` qualifies despite owning volatile MMIO: its only `unsafe`
-      # lives in `pl011.rs`, which no test reaches — the measured logic is
-      # `cdev.rs`'s pure parse/validate. `minixrs-driver-rt` is here for the
+      # lives in `pl011.rs`, which no test reaches — the measured logic is its
+      # pure line and interrupt state. `minixrs-driver-rt` is here for the
       # opposite reason: its tests drive the virtqueue's `unsafe` ring accesses,
-      # which is where Miri caught a write through a shared-borrow pointer.
+      # which is where Miri caught a write through a shared-borrow pointer (and
+      # since slice 6.6 it also holds the CDEV parse/validate TTY used to own).
+      # `minixrs-virtio-console` is not here, like `minixrs-virtio-blk`: the
+      # tested half of each is safe code, and their `unsafe` is behind MMIO.
       # `minixrs-mkimage` is pure and still NOT here: it has no `unsafe` for
       # Miri to check, and its integration tests build whole 37 MiB disk images,
       # which under an interpreter would take a very long time. Its tests run
@@ -582,11 +585,16 @@ jobs:
             fi
           }
 
-          # The two full boots are FED (slice 6.5): tools/feed-console.sh
-          # watches the boot's own log and, once VFS has printed `cons.beside
-          # ok` (a file read served while a console read is parked), writes the
-          # probe string to QEMU's stdin, which `-serial stdio` makes the
-          # PL011's receive side. It is a process substitution so the shell
+          # The two full boots are FED (slices 6.5, 6.6): tools/feed-console.sh
+          # first waits for the guest's line on the virtio console's FIFO
+          # (target/hvc0.out, made by tools/qemu-run.sh) and writes the hvc0
+          # string to target/hvc0.in; then it watches the boot's own log and,
+          # once VFS has printed `cons.beside ok` (a file read served while a
+          # console read is parked) and init `hvc0 ok`, writes the probe
+          # string to QEMU's stdin, which `-serial stdio` makes the PL011's
+          # receive side. The two full boots share the default FIFO pair,
+          # which is safe only because they run one after the other. It is a
+          # process substitution so the shell
           # does not wait on it and `$?` is still timeout's. Its ceiling only
           # has to exceed the boot's timeout (the build runs inside `timeout
           # 1200 cargo run`, so nothing is in front of the boot), and it is

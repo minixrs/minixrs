@@ -26,8 +26,8 @@
 //! VFS resolves the descriptor, issues a **magic** (third-party) grant naming the
 //! *caller's* buffer with the driver as grantee, and forwards the id. TTY and
 //! the virtio console driver safecopy straight out of the caller's address
-//! space into their own buffers; the memory driver's `/dev/null` and `/dev/zero` writes issue no
-//! `SYS_SAFECOPY` at all — they discard the bytes and reply `len` with no copy,
+//! space into their own buffers; the memory driver's `/dev/null` and
+//! `/dev/zero` writes issue no `SYS_SAFECOPY` at all — they discard the bytes and reply `len` with no copy,
 //! Linux's unmapped-buffer-succeeds behaviour. Either way the bytes never pass
 //! through VFS — at most one copy happens, from the process that wrote them to
 //! the driver that transmits them, which is the whole point of the D4 grant
@@ -983,8 +983,9 @@ fn do_open(caller_e: Endpoint, msg: &Message, mount: &mut Option<Mount>, mfs: En
 /// A device descriptor takes the same shape against its driver, with `CDEV_READ`
 /// in place of `FS_READ` and no position to advance — and one more outcome. A
 /// driver with nothing buffered — TTY, or the virtio console — answers
-/// **`EAGAIN`** at once and owes a `NOTIFY` (slice 6.5, R1). That answer is never relayed: the grant is revoked, the raw
-/// request is parked, and the caller hears nothing until [`retry_parked`] has a
+/// **`EAGAIN`** at once and owes a `NOTIFY` (slice 6.5, R1). That answer is
+/// never relayed: the grant is revoked, the raw request is parked, and the
+/// caller hears nothing until [`retry_parked`] has a
 /// real answer for it (R2). Every check above the driver call still runs first,
 /// so a malformed read is refused and never parked.
 #[cfg_attr(test, allow(dead_code))]

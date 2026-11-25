@@ -98,18 +98,37 @@ full boot and one for the reboot:
   consequences: `persist gen=0` is required of every full boot and forbidden on a reboot, so neither
   log can pass as the other; and the common forbidden list is not applied to a reboot, so a panic
   there is caught only by `persist gen=1` never appearing.
-- **The full boots are fed boots, and exactly one required line needs the feeding.** Slice 6.5 put
+- **The full boots are fed boots, and exactly three required lines need the feeding.** Slice 6.5 put
   five console lines in the common expected file — `[diag tty] rx on`, `[diag vfs] cons.notify ok`,
-  `[diag vfs] cons.park`, `[diag vfs] cons.beside ok` and `minix.rs init: stdin ok n=15` — and only
-  the last can print solely when `tools/feed-console.sh` supplied the boot's stdin (the command
-  form, and what the feeder waits for, are under [Fed boots](./build-and-boot.md#fed-boots)). The
-  other four depend on no input and every boot prints them, fed or not: the receive masks were set,
-  TTY's notify probe arrived at VFS, a read was parked, a file read was served beside it. An
-  **unfed** full boot therefore fails on `stdin ok` alone, by design; that is a missing feeder, not
-  a regression, and it is the first thing to rule out when `stdin ok` is the only line missing. The
-  same goes for the forbidden `stdin FAIL`: it describes a fed boot, and a boot somebody typed at
-  prints it correctly. The **reboot is not fed** and loses nothing by it — it is checked against its
-  own pair only, which holds none of the five.
+  `[diag vfs] cons.park`, `[diag vfs] cons.beside ok` and `minix.rs init: stdin ok n=15` — and slice
+  6.6 added two for the second console, `[diag vfs] cons.other ok` and `minix.rs init: hvc0 ok
+  n=17`. The last of 6.5's and both of 6.6's print only when `tools/feed-console.sh` fed the boot
+  (the command form, and what the feeder waits for, are under
+  [Fed boots](./build-and-boot.md#fed-boots)). The other four depend on no input and every boot
+  prints them, fed or not: the receive masks were set, TTY's notify probe arrived at VFS, a read was
+  parked, a file read was served beside it. An **unfed** full boot therefore fails on exactly
+  `cons.other ok`, `hvc0 ok` and `stdin ok`, by design; that is a missing feeder, not a regression,
+  and it is the first thing to rule out when those three are the only lines missing. The same goes
+  for the forbidden `stdin FAIL` and `hvc0 FAIL`: they describe a fed boot, and a boot somebody
+  typed at prints `stdin FAIL` correctly. The **reboot is not fed** and loses nothing by it — it is
+  checked against its own pair only, which holds none of the seven.
+- **The three fed lines come in a fixed order: `cons.other ok`, then `hvc0 ok n=17`, then `stdin ok
+  n=15`** — and the first missing one names the cause. The feeder feeds the second console first.
+  Its first chunk makes `vcon` notify VFS, whose walk passes over the parked serial reader and gets
+  an answer for the `/dev/hvc0` reader behind it — the `EFAULT` for that child's read into an
+  unmapped buffer — and that is when VFS prints `cons.other ok`, a whole feeder gap ahead of the
+  child's verdict. (The 6.6 spec and plan had `hvc0 ok` first; three fed stub-free boots and a fed
+  full one all showed this order.) The serial console is fed only after `hvc0 ok` is in the log, so
+  **a boot whose `vcon` is broken loses `stdin ok` as well** — a coupling the feeder states rather
+  than hides. A missing `stdin ok` with `hvc0 ok` present is the serial path; all three missing is
+  an unfed boot or the second console, and `cons.other ok` present with `hvc0 ok` missing points
+  past the first chunk's walk — at the bytes the child then has to collect.
+- **`hvc0 ok` proves the second console in both directions, and the order of a copy and a consume.**
+  It cannot print unless the feeder's bytes arrived, and the feeder sends them only after reading
+  the guest's own line off the host side of the chardev. The child's first read is into an unmapped
+  address and must answer `EFAULT` having consumed nothing — it then has to read all 17 bytes. And
+  the probe arrives in two chunks, so the second needs `vcon` to have re-posted its one receive
+  buffer and re-armed its line after the first was drained.
 - **`stdin ok` proves two interrupts, not one, and only because of how the boot is fed.** The feeder
   sends the probe in two chunks a few seconds apart ([Fed boots](./build-and-boot.md#fed-boots) has
   the why), so the line needs the receive interrupt, the drain, the notification, VFS's retry — and
@@ -152,9 +171,31 @@ A few properties of the checker matter when you're reading its output rather tha
   N expected and M forbidden lines moves the total by N + M — don't be surprised when the total
   moves by more than the expected-marker count alone. The total is per boot kind, because each adds
   its own pair to the common one (6.4: 165 for each full boot, 7 for the reboot; 6.5 added six
-  expected and three forbidden lines to the common pair, so 174 and still 7 — counted from the files
-  as committed: 113 + 48 common, 8 + 5 per backend, 3 + 4 for the reboot); count the marker files
-  rather than quoting a number from a plan.
+  expected and three forbidden lines to the common pair, so 174 and still 7; 6.6 added nine expected
+  and seven forbidden, so **190** and still 7 — counted from the files as committed: 122 + 55
+  common, 8 + 5 per backend, 3 + 4 for the reboot); count the marker files rather than quoting a
+  number from a plan.
+- **The fork-cycle markers name slots, and a long-lived child of init moves them.** PM's fork pool
+  starts at 19 and init's first forks are its two proof children, so the `read(0)` child holds slot
+  19, the `/dev/hvc0` child slot 20, and the rotation's first `worker` runs in **slot 21** — three
+  `SYS_FORK … child_nr=` lines (19, 20, 21), then `SYS_EXEC target=21 name=worker` and `SYS_EXIT …
+  nr=21`. That holds with the stubs and without them (their slots, 15–18, lie below the pool), and
+  fed or unfed: an unfed child stays parked in its slot, and a fed one that has already exited is
+  still a zombie holding it when the rotation first forks, because init's first `wait()` comes after
+  that fork. Later turns recycle whichever slots are free, so only the *first* worker's slot is
+  fixed — which is all a first-occurrence check needs — and no marker names the slot of the first
+  `hello` (22 with stubs, 21 without). **Recompute these lines from the fork order when a slice adds
+  or removes a child that outlives the first rotation turn; do not edit the digit.** 6.5 moved the
+  worker 19 → 20 and 6.6 moved it 20 → 21.
+- **A proof child closes every descriptor it opened before it exits.** VFS prints `[diag vfs]
+  pm-exit reset closed=1` for any process that exits with one descriptor open, and that line is
+  `fileio`'s to earn, late in the boot, by leaking one on purpose. 6.6's `/dev/hvc0` child first
+  exited with its descriptor open: the line printed at 3.6% of a fed disk log instead of about 63%,
+  every check still passed, and `fileio`'s proof had become vacuous — satisfied minutes early by a
+  different process. The child now closes the node on every path, pass or fail, before it prints its
+  verdict, and a failed close is its own `hvc0 FAIL step=close`. The general form: **a
+  first-occurrence marker is owned by the first process that can print it**, so a new process that
+  can print an existing marker's text has to be kept from doing so.
 - **Never copy a count into a marker from a plan** — recompute it from the constant. 5.8's plan said
   `n=30` for what was actually a 31-byte `ROOTFS_MOTD`.
 - **A marker must be able to fail on the thing it proves.** The script matches with `grep -F`, so a
@@ -227,7 +268,11 @@ This runs against an **uncommitted** working tree, so the restore step has real 
   boots that would each have cost 240 s otherwise. Judge such a run by grepping the specific marker,
   since `check-boot-log.sh` FAILs the stub A–D markers there by design. A mutation whose marker
   depends on console input needs the boot [fed](./build-and-boot.md#fed-boots) like any other; an
-  unfed one never prints `stdin ok` whatever the code does.
+  unfed one never prints `cons.other ok`, `hvc0 ok` or `stdin ok` whatever the code does. **And a
+  stub-free pass is not a verification of anything the stubs can disturb** — a change to a server's
+  prologue or to when it first blocks needs a default boot through `check-boot-log.sh` (the rule and
+  the defect that paid for it are under
+  [Prologue ordering](./servers-and-drivers.md#prologue-ordering)).
 - **Feed a receive-path mutation with the standard feeder, never with a `printf` of your own.**
   `tools/feed-console.sh` sends the probe in two chunks; a hand-rolled feed that writes it at once
   delivers one interrupt, and every mutation of what TTY does *after* its first drain then passes.
