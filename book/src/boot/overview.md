@@ -86,39 +86,42 @@ target binary — the mechanism `worker` rides on.
 
 ### Boot modules
 
-The archive holds fourteen modules: thirteen ELFs (`kernel/build.rs`'s `servers` array) and one that
-is not a program at all, the `rootfs` filesystem image. Eleven of the ELFs have non-negative proc
+The archive holds fifteen modules: fourteen ELFs (`kernel/build.rs`'s `servers` array) and one that
+is not a program at all, the `rootfs` filesystem image. Twelve of the ELFs have non-negative proc
 numbers and are loaded into a process slot at boot; `worker` and `bigprog` (a fixture for the user
 VA map) are tagged with the sentinel `EXEC_ONLY_PROC_NR = -1`, so the loader skips them — they have
 no boot slot and exist only to be resolved by name at `exec` time. `rootfs` carries `-1` too and is
 never loaded as a process: the kernel copies it into the ramdisk. The array's order is the order the
 boot log's `[as]` lines appear in, and it is load-bearing: DS first so every later publish lands,
-then each server before its first client's lookup (`ds < tty < memory < vblk < mfs < vfs < pm`).
-`vblk` sits before `mfs` because MFS asks DS for it first when it
+then each server before its first client's lookup (`ds < tty < memory < vblk < mfs < vfs < pm`, and
+`vcon < vfs`). `vblk` sits before `mfs` because MFS asks DS for it first when it
 [chooses its root device](../servers/overview.md#choosing-the-root-device), and a `vblk` that had
-not yet published would read as "no virtio-mmio disk attached".
+not yet published would read as "no virtio-mmio disk attached". `vcon` sits directly after `vblk`;
+all its place has to satisfy is that it comes before `vfs`, which looks it up at start-up and, on a
+miss, falls back to the boot endpoint and says so.
 
-| Module    | Proc nr | Loaded at boot?       |
-| --------- | ------: | --------------------- |
-| `vm`      |       7 | yes                   |
-| `ds`      |       5 | yes                   |
-| `tty`     |       4 | yes                   |
-| `memory`  |       3 | yes                   |
-| `vblk`    |      11 | yes — the virtio disk |
-| `mfs`     |       6 | yes                   |
-| `vfs`     |       1 | yes                   |
-| `sched`   |       9 | yes                   |
-| `rs`      |       2 | yes                   |
-| `pm`      |       0 | yes                   |
-| `init`    |      10 | yes — becomes PID 1   |
-| `worker`  |      −1 | no — exec-only target |
-| `bigprog` |      −1 | no — exec-only target |
-| `rootfs`  |      −1 | no — not an ELF       |
+| Module    | Proc nr | Loaded at boot?          |
+| --------- | ------: | ------------------------ |
+| `vm`      |       7 | yes                      |
+| `ds`      |       5 | yes                      |
+| `tty`     |       4 | yes                      |
+| `memory`  |       3 | yes                      |
+| `vblk`    |      11 | yes — the virtio disk    |
+| `vcon`    |      12 | yes — the virtio console |
+| `mfs`     |       6 | yes                      |
+| `vfs`     |       1 | yes                      |
+| `sched`   |       9 | yes                      |
+| `rs`      |       2 | yes                      |
+| `pm`      |       0 | yes                      |
+| `init`    |      10 | yes — becomes PID 1      |
+| `worker`  |      −1 | no — exec-only target    |
+| `bigprog` |      −1 | no — exec-only target    |
+| `rootfs`  |      −1 | no — not an ELF          |
 
 Proc number 8 (`PFS`) is reserved in `kernel-shared/src/com.rs` for a server that does not yet
-exist, and so are the three virtio driver slots that have no ELF: 12 (`vcon`), 13 (`vinput`) and 14
-(`vnet`). A reserved slot is fully wired — a `BootEntry` row, a privilege slot, `ipc_to` edges — and
-stays blocked on `RTS_NO_PRIV` until its module arrives. Kernel tasks (`ASYNCM`, `IDLE`, `CLOCK`,
+exist, and so are the two virtio driver slots that have no ELF: 13 (`vinput`) and 14 (`vnet`). A
+reserved slot is fully wired — a `BootEntry` row, a privilege slot, `ipc_to` edges — and stays
+blocked on `RTS_NO_PRIV` until its module arrives. Kernel tasks (`ASYNCM`, `IDLE`, `CLOCK`,
 `SYSTEM`, `HARDWARE`) occupy the negative proc numbers and are internal to the kernel — they have no
 ELF binary. `NR_BOOT_PROCS` is 15: slots `0..=14`.
 
@@ -126,7 +129,7 @@ Alongside the boot modules, `userland_bootstrap` hand-installs four demo stubs (
 15–18, just past the boot image; PM's fork pool starts at 19. They are not part of the archive; they
 are small EL0 programs kept as a live regression battery for the IPC primitives, SCHED delegation,
 and the page-fault / SIGSEGV paths that `init` and `worker` do not exercise. So the boot trace shows
-fifteen address-space (`[as]`) lines — ten servers and drivers, `init`, and the four stubs — but
+sixteen address-space (`[as]`) lines — eleven servers and drivers, `init`, and the four stubs — but
 neither exec-only module, which is never loaded until an `exec` names it.
 
 ### The virtio probe
@@ -145,8 +148,10 @@ FAT32 EFI System Partition (Limine, its configuration and the kernel) and the Mi
 partition; the cargo runner (`tools/qemu-run.sh`) builds that image on every run and attaches it as
 a single virtio-blk device. The firmware reads the kernel from it, and minix.rs's
 [`virtio-blk` driver](../drivers/overview.md#virtio-blk) then brings the same device up and serves
-the root partition from it. The runner attaches nothing else, and nothing else on the machine holds
-a kernel, so a kernel banner in the log is itself the proof that edk2 and Limine read the image.
+the root partition from it. Nothing else on the machine holds a kernel, so a kernel banner in the
+log is itself the proof that edk2 and Limine read the image. The runner attaches one other device,
+on every boot: a virtio console, which is [a second character device](#the-second-console) and has
+nothing to boot from.
 
 ### The disk image
 
@@ -263,6 +268,9 @@ qemu-system-aarch64 \
     -global virtio-mmio.force-legacy=false \
     -drive file=target/disk.img,format=raw,if=none,id=vblk0 \
     -device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0 \
+    -chardev pipe,id=hvc0,path=target/hvc0 \
+    -device virtio-serial-device,bus=virtio-mmio-bus.8 \
+    -device virtconsole,chardev=hvc0 \
     -display none -serial stdio -no-reboot
 ```
 
@@ -270,10 +278,43 @@ The one drive is a virtio-blk-**mmio** device pinned to transport slot 0, which 
 [boot probe](#the-virtio-probe) finds and hands to `virtio-blk`. `force-legacy=false` makes every
 mmio transport modern (version 2), the only version the drivers accept, and edk2 boots from a modern
 one; a later `-global` on the command line overrides it, which is how the version-refusal boot is
-produced. There is no directory-as-FAT drive, and on this default command line the runner attaches
-no PCI device of its own (the `nodisk` backend below is the one case where it does). The machine is
-not PCI-free for all that: `-M virt` still creates its default devices, a `virtio-net-pci` network
-card among them, because the runner does not pass `-nodefaults`. Nothing in minix.rs sees it.
+produced. The last three device lines are [the second console](#the-second-console). There is no
+directory-as-FAT drive, and on this default command line the runner attaches no PCI device of its
+own (the `nodisk` backend below is the one case where it does). The machine is not PCI-free for all
+that: `-M virt` still creates its default devices, a `virtio-net-pci` network card among them,
+because the runner does not pass `-nodefaults`. Nothing in minix.rs sees it.
+
+### The second console
+
+Since slice 6.6 every boot — whatever its root backend, the reboot and the hand-run `nodisk` boot
+included — also carries a virtio console: a `virtio-serial-device` pinned to `virtio-mmio-bus.8`,
+transport slot 8, the first slot of the second register page, with a single `virtconsole` port.
+`virtconsole` rather than `virtserialport` because QEMU reserves port 0 for a console, and port 0 is
+the only port a driver that does not negotiate the multiport feature can see. The kernel's probe
+assigns it to the [`virtio-console` driver](../drivers/overview.md#virtio-console), which serves it
+as `/dev/hvc0`. Attaching it always means there is one machine shape, not two, and the reboot proves
+the same driver path as the boot before it.
+
+Its host side is a `pipe` chardev over two FIFOs under `target/`:
+
+| File              | Direction    | Carries                                |
+| ----------------- | ------------ | -------------------------------------- |
+| `target/hvc0.out` | guest → host | what is written to `/dev/hvc0`         |
+| `target/hvc0.in`  | host → guest | what a read of `/dev/hvc0` will return |
+
+QEMU appends `.in` and `.out` to the chardev's path itself, and the runner creates both with
+`mkfifo` when they are missing. `MINIXRS_HVC0=<base>` moves the pair to `<base>.in` and
+`<base>.out`, so that two boots run at once do not share one. A regular file in a FIFO's place is
+refused (exit 73) rather than replaced. The serial log carries none of the second console's bytes.
+
+Nobody has to be on either end. QEMU opens both FIFOs read-write, so it starts with no peer, and a
+guest write with no reader completes: the bytes sit in the pipe. Two things about that pipe are
+worth knowing before reading it. The firmware uses the port too — edk2 and Limine put about 800
+bytes of boot text on it before the kernel starts — so a reader must look for its line among other
+output. And the pipe is not reliably emptied when QEMU exits: on macOS the bytes of an unread boot
+were still in `target/hvc0.out` afterwards with no process holding it, which is why
+[the feeder](../build.md#feeding-the-console) discards whatever it finds there before it starts
+looking, and why unread boots with no fed boot between them accumulate.
 
 ### The root backend
 

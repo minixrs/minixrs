@@ -36,8 +36,11 @@ whole-project picture.
   covers the host-testable crates — the `-p` list in the `miri` job of `.github/workflows/ci.yml` is
   the authority, and `minixrs-driver-rt` joined it in 6.2 because its MMIO and shared-memory code
   (`mmio.rs`, and `dma.rs` since 6.3, driven by the virtqueue's tests) are the `unsafe` Miri is for
-  — while `minixrs-ipc` stays out, having inline asm. `geiger`'s per-package sweep filters out
-  `minixrs-kernel` (it can't host-build)
+  — while `minixrs-ipc` stays out, having inline asm. Since slice 6.6 `driver-rt` also holds the
+  CDEV validators and read plan that `minixrs-tty` used to own, so those tests run under Miri there;
+  `minixrs-tty` stays on the list for its ring and its line's phases. `minixrs-virtio-console` is
+  not on it, like `minixrs-virtio-blk`: the tested half of each is safe code. `geiger`'s per-package
+  sweep filters out `minixrs-kernel` (it can't host-build)
 - The `clippy` job runs a **second `run:` step**, `cargo clippy -p minixrs-mfs --features server
   --all-targets -- -D warnings`, and it blocks like the first. It exists because `fs/mfs`'s
   `[[bin]]` carries `required-features = ["server"]`, so `main.rs` is **invisible to every other CI
@@ -96,22 +99,28 @@ whole-project picture.
   phase-5-prep chunk 7. The marker-file contract itself — which file a marker belongs in, what the
   scripts match, and why expectations must be first-occurrence-only — lives in
   [`testing-and-markers.md`](./testing-and-markers.md#markers)
-- **The two full boots are fed their console input; the reboot is not** (slice 6.5). Each full
-  boot's stdin is `< <(FEED_CONSOLE_CEILING=1300 tools/feed-console.sh <its own log>)` — the form,
-  the feeder and the measurements behind it are under [Fed boots](./build-and-boot.md#fed-boots),
-  and which marker lines depend on it under [Markers](./testing-and-markers.md#markers). Two things
-  are CI's own. The ceiling is **1300 s** against the boot's 1200 s timeout, and the only thing it
-  has to do is exceed that timeout: the build runs *inside* `timeout 1200 cargo run`, so nothing is
-  in front of the boot for the ceiling to allow for, and the feeder's clock starts with the boot's.
-  The margin is so that the feeder never gives up on a boot that is still running; the cap is so
-  that a boot that never parks a read does not leave a poller behind for long. Whoever changes a
-  full boot's timeout changes its ceiling in the same edit. And the redirection reads and writes one
-  log file on one command line, which `actionlint`'s shellcheck reports as an informational SC2094 —
-  that is the design, not a finding. **None of this has run on CI**: the feeder was exercised only
-  on a dev machine (macOS, QEMU 11, Homebrew's edk2), so whether the runner's bash, QEMU and
-  firmware carry the bytes the same way — and deliver the feeder's two chunks as two interrupts — is
-  unmeasured until the branch's first CI run. A `stdin ok` missing there with `cons.beside ok`
-  present is the feeder path, not the driver, until shown otherwise
+- **The two full boots are fed their console input, on both consoles; the reboot is not** (slices
+  6.5 and 6.6). Each full boot's stdin is `< <(FEED_CONSOLE_CEILING=1300 tools/feed-console.sh <its
+  own log>)` — the form, the feeder, the second console's FIFO pair and the measurements behind them
+  are under [Fed boots](./build-and-boot.md#fed-boots), and which marker lines depend on it under
+  [Markers](./testing-and-markers.md#markers). The invocation did not change for the second console:
+  the same script feeds `/dev/hvc0` through `target/hvc0.{in,out}` first and the serial console
+  after. **Both full boots use the default FIFO pair, which is safe only because they run one after
+  the other** — a job that ever ran two boots at once would have to give each its own
+  `MINIXRS_HVC0`. Two more things are CI's own. The ceiling is **1300 s** against the boot's 1200 s
+  timeout, and the only thing it has to do is exceed that timeout: the build runs *inside* `timeout
+  1200 cargo run`, so nothing is in front of the boot for the ceiling to allow for, and the feeder's
+  clock starts with the boot's. The margin is so that the feeder never gives up on a boot that is
+  still running; the cap is so that a boot that never parks a read does not leave a poller behind
+  for long. Whoever changes a full boot's timeout changes its ceiling in the same edit. And the
+  redirection reads and writes one log file on one command line, which `actionlint`'s shellcheck
+  reports as an informational SC2094 — that is the design, not a finding. **None of this has run on
+  CI**: the feeder was exercised only on a dev machine (macOS, QEMU 11, Homebrew's edk2), so whether
+  the runner's bash, QEMU and firmware carry the bytes the same way — deliver each probe's two
+  chunks as two interrupts, and behave as macOS does with a `pipe` chardev over FIFOs nobody else
+  holds — is unmeasured until the branch's first CI run. `cons.other ok`, `hvc0 ok` and `stdin ok`
+  all missing there with `cons.beside ok` present is the feeder path or the FIFOs, not a driver,
+  until shown otherwise: the feeder's stderr says which stage it reached
 - **The boots run in sequence in one job, not as a matrix.** A matrix would rename the required
   "QEMU boot smoke" check, which needs a branch-protection edit, and two QEMUs on one runner would
   starve each other. The price is the job's `timeout-minutes`, **90** since slice 6.4 (50 before
@@ -276,14 +285,15 @@ The mitigation is local. Run the **three-boot matrix** when touching `build_c_*`
 - **A correct row 3 FAILS `check-boot-log.sh`, by design.** The fallback packs `worker` under the
   names `hello` and `fileio`, so the C programs' own markers cannot appear. Exactly sixteen expected
   markers go missing and nothing else (on a [fed](./build-and-boot.md#fed-boots) boot — unfed,
-  `stdin ok` is a seventeenth) — `hello`'s five (`hello: Hello from C!`, `hello: stderr works`,
-  `hello: errno ok`, `iov-end`, `hello: iov ok match=1`), `fileio`'s ten (`fileio: read`, `lseek
-  ok`, `lseek deny ok`, `readv ok`, `fresh-buf ok`, `seek-hole ok`, `brk ok`, `stdio ok`, `mmap ok`,
-  `malloc ok`), and VFS's `[diag vfs] pm-exit reset closed=1`, since `worker` leaves no descriptor
-  open for the exit reset to close. The two exec-trace markers still match, because `worker` is
-  exec'd under those names. Any *other* missing marker is a real regression — and a **full `PASS` on
-  row 3 (every check of the common and backend sets, none missing) means the fallback did not
-  engage**, so what you measured was the musl row again. Rows 1 and 2 must be fully clean.
+  `cons.other ok`, `hvc0 ok` and `stdin ok` make nineteen) — `hello`'s five (`hello: Hello from C!`,
+  `hello: stderr works`, `hello: errno ok`, `iov-end`, `hello: iov ok match=1`), `fileio`'s ten
+  (`fileio: read`, `lseek ok`, `lseek deny ok`, `readv ok`, `fresh-buf ok`, `seek-hole ok`, `brk
+  ok`, `stdio ok`, `mmap ok`, `malloc ok`), and VFS's `[diag vfs] pm-exit reset closed=1`, since
+  `worker` leaves no descriptor open for the exit reset to close. The two exec-trace markers still
+  match, because `worker` is exec'd under those names. Any *other* missing marker is a real
+  regression — and a **full `PASS` on row 3 (every check of the common and backend sets, none
+  missing) means the fallback did not engage**, so what you measured was the musl row again. Rows 1
+  and 2 must be fully clean.
 
 Identify the flavour from the **build-script warnings**, never from the boot log: the C markers are
 byte-identical across the SDK and musl flavours, so the log physically cannot tell them apart.

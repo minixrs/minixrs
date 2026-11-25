@@ -206,7 +206,7 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
     // the right proc slot. `worker` is packed with proc_nr -1
     // (`com::EXEC_ONLY_PROC_NR`): it is not a boot server — the loader skips any
     // negative proc_nr — but it is resolvable by name for `SYS_EXEC` (slice 4.7).
-    let servers: [(&str, std::path::PathBuf, i32); 13] = [
+    let servers: [(&str, std::path::PathBuf, i32); 14] = [
         ("minixrs-vm", workspace.join("servers/vm"), 7), // VM_PROC_NR
         ("minixrs-ds", workspace.join("servers/ds"), 5), // DS_PROC_NR
         // **This ordering is load-bearing, and it is a chain, not a preference.**
@@ -231,6 +231,22 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
         // MFS's root-device lookup must find it (`vblk < mfs`). Unlike the two
         // links above, a miss here prints no FAIL line of its own — MFS takes
         // `memory` — so it is the disk boot's marker set that catches it.
+        //
+        // virtio-console sits **directly after virtio-blk**, and the one link
+        // it adds to the chain is `vcon < vfs` (slice 6.6): `vcon` publishes
+        // its name unconditionally in `init_fresh`, and VFS resolves it in its
+        // prologue. That lookup has a `boot_endpoint` fallback and a
+        // distinguishable line — `vcon.ds ok` / `vcon.ds FAIL … fallback=…` —
+        // so a lookup that misses turns that one marker red and nothing else.
+        // **The marker does not police this row's position**, though: moved
+        // after `vfs`, the lookup still succeeded (6.6's mutation 10), because
+        // it is VFS's fourth blocking call and `vcon` has published by then.
+        // The order is kept for the reason the chain exists, not because a
+        // boot proves it. Its bring-up waits on no completion, so nothing constrains it
+        // against `mfs`; the chain is now
+        //
+        //     ds  <  tty  <  memory  <  vblk  <  mfs  <  vfs  <  pm
+        //                                  vcon  <  vfs
         ("minixrs-tty", workspace.join("drivers/tty"), 4), // TTY_PROC_NR
         ("minixrs-memory", workspace.join("drivers/memory"), 3), // MEM_PROC_NR
         (
@@ -238,6 +254,11 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
             workspace.join("drivers/virtio-blk"),
             11,
         ), // VBLK_PROC_NR
+        (
+            "minixrs-virtio-console",
+            workspace.join("drivers/virtio-console"),
+            12,
+        ), // VCON_PROC_NR
         ("minixrs-mfs", workspace.join("fs/mfs"), 6),      // MFS_PROC_NR
         ("minixrs-vfs", workspace.join("servers/vfs"), 1), // VFS_PROC_NR
         ("minixrs-sched", workspace.join("servers/sched"), 9), // SCHED_PROC_NR

@@ -7,20 +7,30 @@
 # (Limine, its config, the kernel) and -- on a disk boot -- the MinixFS root
 # partition. It is attached as a single modern virtio-blk device on
 # virtio-mmio-bus.0; the firmware reads the kernel from it and minix.rs's
-# `vblk` driver then brings the same device up. This script attaches nothing
-# else (`-M virt`'s own default devices are still there: no -nodefaults), and
-# nothing else on the machine holds a kernel, so a kernel banner in the log is
-# itself the proof that edk2 and Limine read the image (slice 6.4, spec P3/P4).
+# `vblk` driver then brings the same device up. Nothing else on the machine
+# holds a kernel, so a kernel banner in the log is itself the proof that edk2
+# and Limine read the image (slice 6.4, spec P3/P4).
+#
+# The script attaches ONE other device, on every boot whatever the root backend
+# (slice 6.6, spec C1/C2): a virtio console -- a `virtio-serial-device` on
+# virtio-mmio-bus.8 with a single `virtconsole` port -- which minix.rs's `vcon`
+# driver serves as /dev/hvc0. Its host side is a pair of FIFOs, described at
+# the console block below. (`-M virt`'s own default devices are still there: no
+# -nodefaults.)
 #
 # stdout is the guest's serial log, which callers redirect and grep. Everything
 # the runner itself says -- the nested cargo's output, mkimage's summary, and
 # one `qemu-run: ...` line holding the exact QEMU command line -- goes to stderr.
+# The second console's bytes are on neither: they go to and come from the FIFOs.
 #
-# Environment (all optional; see the root-backend block below for the last three):
+# Environment (all optional; see the root-backend block below for the three
+# after the firmware, and the console block for the last):
 #   QEMU_EFI_AARCH64=<fw.fd>        the UEFI firmware, instead of the search below
 #   MINIXRS_ROOT=disk|ramdisk|nodisk
 #   MINIXRS_VBLK_IMAGE=<file>
 #   MINIXRS_VBLK_DRIVE_OPTS=<opts>
+#   MINIXRS_HVC0=<base>             the console's FIFO pair is <base>.in and
+#                                   <base>.out, instead of target/hvc0.{in,out}
 
 set -euo pipefail
 
@@ -47,10 +57,11 @@ esac
 # Bus pinning for the phase: one device per transport page (a page holds 8
 # 0x200-byte slots), eight buses apart, so each driver's registers can be mapped
 # on their own page. `virtio-mmio-bus.N` is transport slot N (measured for buses
-# 0 and 8, slice 6.2 Task 0). blk is bus 0; the later devices are planned for
-# buses 8 (console), 16 (input) and 24 (net), inferred from that and not yet
-# measured.
+# 0 and 8, slice 6.2 Task 0). blk is bus 0 and the console is bus 8 -- slot 8,
+# the first slot of the second page (slice 6.6); the later devices are planned
+# for buses 16 (input) and 24 (net), inferred from that and not yet measured.
 BUS_VBLK=0
+BUS_VCON=8
 
 # The root backend (phase decision H5: what is attached selects it; slice 6.4,
 # spec P4: the machine always boots from the disk image, so what differs is
@@ -212,6 +223,46 @@ case "$ROOT_BACKEND" in
         ;;
 esac
 
+# The second console (slice 6.6, spec C1/C2): one `virtconsole` port -- QEMU's
+# port 0, the only port a driver without the multiport feature can see -- on a
+# `pipe` chardev. QEMU appends `.in` and `.out` to the chardev's path itself:
+# the host writes guest input to <base>.in and reads guest output from
+# <base>.out. Both are FIFOs, made here when missing.
+#
+# Nobody has to be on either end. QEMU opens both read-write, so it starts with
+# no peer (measured, 6.6 Task 0) and a guest write with no reader completes
+# (measured, 6.6 Task 4): the bytes sit in the pipe. They are NOT reliably
+# emptied when QEMU exits -- on macOS about 800 bytes of an unread boot were
+# still in <base>.out with no process holding it (measured, 6.6 Task 5) -- so
+# tools/feed-console.sh discards what it finds there before it starts looking,
+# and unread boots with no fed boot between them accumulate. The firmware uses
+# the port too -- edk2 and Limine put about 800 bytes of boot text on it before
+# the kernel starts -- so whatever reads <base>.out must look for its line
+# among other output, never at "the first bytes".
+#
+# MINIXRS_HVC0=<base> moves the pair, so that two boots run at once do not
+# share one. A regular file in a FIFO's place is refused rather than replaced:
+# QEMU would open it, the guest's output would land in it, and a feeder
+# blocked on the FIFO it expected would wait for good.
+HVC0_BASE="${MINIXRS_HVC0:-$ROOT/target/hvc0}"
+for fifo in "$HVC0_BASE.in" "$HVC0_BASE.out"; do
+    if [[ -p "$fifo" ]]; then
+        continue
+    fi
+    if [[ -e "$fifo" || -L "$fifo" ]]; then
+        echo "error: $fifo exists and is not a FIFO; remove it, or set MINIXRS_HVC0" >&2
+        exit 73
+    fi
+    mkdir -p "$(dirname "$fifo")"
+    mkfifo "$fifo"
+done
+# A comma in a QEMU option value is written doubled.
+VCON_ARGS=(
+    -chardev "pipe,id=hvc0,path=${HVC0_BASE//,/,,}"
+    -device "virtio-serial-device,bus=virtio-mmio-bus.$BUS_VCON"
+    -device "virtconsole,chardev=hvc0"
+)
+
 # `force-legacy=false` makes the mmio transports modern (version 2); the
 # drivers refuse version 1, and edk2 boots from a modern one (measured, 6.4
 # P11.1). "$@" stays last so a later -global can override it for the refusal
@@ -222,6 +273,7 @@ QEMU=(
     -bios "$FIRMWARE"
     -global virtio-mmio.force-legacy=false
     "${DISK_ARGS[@]}"
+    "${VCON_ARGS[@]}"
     -display none
     -serial stdio
     -no-reboot

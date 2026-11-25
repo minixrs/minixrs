@@ -45,7 +45,7 @@ take; it has to find a home outside that span.
 | `VFS_RQ_BASE`   | `0x800` | VFS: `VFS_WRITE` / `OPEN` / `READ` / `CLOSE` / `EXEC_STAGE`                           |
 | `FS_RQ_BASE`    | `0x900` | File systems: `FS_READSUPER` / `LOOKUP` / `READ` / `WRITE` / `CREATE` / `TRUNC` (MFS) |
 | `BDEV_RQ_BASE`  | `0xA00` | Block drivers: `BDEV_READ` / `BDEV_WRITE` (`memory`, `virtio-blk`)                    |
-| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` / `CDEV_READ` (TTY, memory driver)                    |
+| `CDEV_RQ_BASE`  | `0xB00` | Character drivers: `CDEV_WRITE` / `CDEV_READ` (TTY, memory driver, virtio-console)    |
 | `VM_RQ_BASE`    | `0xC00` | VM: `VM_PAGEFAULT` / `BRK` / `MMAP` / `MUNMAP` / `FORK`                               |
 | `SEF_RQ_BASE`   | `0xD00` | SEF control messages (ping / signal / init)                                           |
 | `DS_RQ_BASE`    | `0xE00` | DS: `DS_PUBLISH` / `RETRIEVE` / `CHECK`                                               |
@@ -164,12 +164,12 @@ user ──VFS_WRITE{fd,buf,len}──► VFS ──CDEV_WRITE{minor,gid,len,off
 ```
 
 VFS resolves the descriptor, issues a **magic** (third-party) grant naming the *caller's* buffer
-with the driver as grantee, and forwards the grant id. TTY safecopies straight out of the caller's
-address space; the memory driver's `/dev/null` and `/dev/zero` writes issue no `SYS_SAFECOPY` at all
-— they discard the bytes and reply the whole count with no copy. Either way the bytes never pass
-through VFS: at most one copy happens, from the process that wrote them to the driver that transmits
-them. This is the first consumer of the magic grant form on a real data path, and the rail slice
-5.6's musl `write()` lands on.
+with the driver as grantee, and forwards the grant id. TTY and the virtio console driver safecopy
+straight out of the caller's address space into their own buffers; the memory driver's `/dev/null`
+and `/dev/zero` writes issue no `SYS_SAFECOPY` at all — they discard the bytes and reply the whole
+count with no copy. Either way the bytes never pass through VFS: at most one copy happens, from the
+process that wrote them to the driver that transmits them. This is the first consumer of the magic
+grant form on a real data path, and the rail slice 5.6's musl `write()` lands on.
 
 Three properties hold that path together:
 
@@ -187,7 +187,7 @@ Three properties hold that path together:
   moves.
 - **Every request gets exactly one reply**, including an unknown one (`ENOSYS`). VFS's clients are
   all inside a SENDREC, so a dropped message blocks the caller forever. Since slice 6.5 the reply is
-  not always sent before the next request is served — a console read that finds nothing is
+  not always sent before the next request is served — a read of either console that finds nothing is
   [parked](#parking-a-console-read) and answered later — and a *notification*, which is not a
   request, gets no reply at all.
 
@@ -202,14 +202,30 @@ exists.
 Since slice 5.11 a character-device entry names its **driver** as well as its minor (`Fd::CharDev {
 dev: CharDriver, minor }`, with `CharDriver` an enum because the default row is a `const` and a
 DS-resolved endpoint is not) — minors are a per-driver namespace, so the driver is half the address.
-`open` consults a three-row **device-node table** (`servers/vfs/src/dev.rs`: `/dev/console`,
-`/dev/null`, `/dev/zero`, matched byte-for-byte) after copying the path in and *before* touching the
-mount, so a device open needs no filesystem; `O_CREAT` and `O_TRUNC` are ignored on a hit, Linux's
+There are three drivers: `Tty`, `Memory` and, since slice 6.6, `Vcon`. `open` consults a four-row
+**device-node table** (`servers/vfs/src/dev.rs`, matched byte-for-byte) after copying the path in
+and *before* touching the mount, so a device open needs no filesystem:
+
+| Path           | Driver                      | Minor                    |
+| -------------- | --------------------------- | ------------------------ |
+| `/dev/console` | TTY                         | 0 (`CDEV_MINOR_CONSOLE`) |
+| `/dev/null`    | the memory driver           | 3                        |
+| `/dev/zero`    | the memory driver           | 5                        |
+| `/dev/hvc0`    | the virtio console (`vcon`) | 0 (`CDEV_MINOR_HVC0`)    |
+
+The console's minor and `hvc0`'s are both 0, on different drivers; each has its own constant so
+neither is taken for the other. A device open succeeds whatever state the driver is in; the first
+`read` or `write` hears the driver's answer. `O_CREAT` and `O_TRUNC` are ignored on a hit, Linux's
 behaviour for a device node. Everything else falls through to MFS, `/dev/other` included, and there
 is no `/dev` on the image at all. A device `read()` is one `CDEV_READ` against the descriptor's
 driver, no loop and no position; a console `read()` therefore reaches TTY, which since slice 6.5
 answers with the bytes it has buffered — or, with none, with an `EAGAIN` that VFS does not pass on
-([Parking a console read](#parking-a-console-read)).
+([Parking a console read](#parking-a-console-read)). A read of `/dev/hvc0` reaches the virtio
+console driver, which gives the same two answers.
+
+The drivers' endpoints are resolved through DS once, at start-up, and travel together from there as
+one small `Copy` value, `CharPeers` (`servers/vfs/src/retry.rs`): `CharPeers::endpoint(driver)` is
+the one place a `CharDriver` becomes an address.
 
 Slice 5.8's `open` is what makes rows diverge, and it moved the storage to the `UnsafeCell` newtype
 VM's region table already uses. That brings a rule with it: **never hold a borrow of the table
@@ -274,17 +290,18 @@ Two more properties, each with its own boot marker:
 ### Parking a console read
 
 ```text
-user ──VFS_READ{fd,buf,len}──► VFS ──CDEV_READ──► TTY   → EAGAIN (nothing buffered)
+user ──VFS_READ{fd,buf,len}──► VFS ──CDEV_READ──► drv   → EAGAIN (nothing buffered)
   (stays blocked)               └── revoke the grant, park {caller,fd,buf,len}, no reply
 
-                                VFS ◄──NOTIFY──── TTY   (input arrived)
-                                 └──CDEV_READ──► TTY    → n, through a fresh grant
+                                VFS ◄──NOTIFY──── drv   (input arrived)
+                                 └──CDEV_READ──► drv    → n, through a fresh grant
 user ◄────────── n ──────────── VFS                     the reply to the original VFS_READ
 ```
 
-A file always has an answer. A console does not: its bytes arrive when somebody types. TTY never
-makes VFS wait for them — with nothing buffered it answers `EAGAIN` at once and promises one
-`NOTIFY` when input arrives
+A file always has an answer. A console does not: its bytes arrive when somebody types. Two drivers
+are in that position — TTY, the serial console, and since slice 6.6 the virtio console behind
+`/dev/hvc0`. Neither makes VFS wait: with nothing to give it answers `EAGAIN` at once and promises
+one `NOTIFY` when input arrives
 ([notify-then-pull](../drivers/overview.md#notify-then-pull-a-read-with-nothing-to-give)). VFS then
 has a caller it cannot answer yet, and two wrong things it could do. Relaying the `EAGAIN` would
 turn every `read()` of an idle console into an error. Waiting — asking again in a loop, or holding
@@ -315,25 +332,46 @@ parked, and every retry issues its own, so a reader nobody types for holds no sl
 eight-entry grant pool for as long as it waits. The table itself is a value in `main`'s frame, like
 the grant pool, which is why the module needs no `unsafe`.
 
-**The retry walk** runs when TTY's notification arrives. VFS's receive loop checks for a
-`NOTIFY_MESSAGE` *before* the request dispatch; one whose kernel-stamped source is the console
-driver starts `retry_parked`, and one from anybody else is dropped. Neither is replied to — a
-notifier is not waiting for an answer, and the check sits where it does so that a notification can
-never fall into the unknown-request arm and be sent an `ENOSYS`. The walk takes the parked reads
-oldest first, and for each one:
+**The retry walk** runs when a driver's notification arrives. VFS's receive loop checks for a
+`NOTIFY_MESSAGE` *before* the request dispatch. One whose kernel-stamped source is a driver that can
+say `EAGAIN` — TTY or the virtio console, compared as whole endpoints by `CharPeers::notifier` —
+starts `retry_parked` on that driver's behalf; one from anybody else, the memory driver included, is
+dropped. Neither is replied to — a notifier is not waiting for an answer, and the check sits where
+it does so that a notification can never fall into the unknown-request arm and be sent an `ENOSYS`.
 
-1. re-resolves the descriptor (`EBADF` if it is no longer a character device — it cannot have been
-   closed while its owner is blocked, but the check is free);
-2. issues a fresh magic grant naming the *stored* endpoint as owner, and sends `CDEV_READ` (a grant
-   that cannot be issued is answered with its own errno, like any other error);
-3. **any answer but `EAGAIN`** — a count or an error — frees the entry and is then sent as the reply
-   to that reader's original `VFS_READ`;
-4. **`EAGAIN` ends the walk.** The driver is empty again, and that refusal re-armed its waiter, so
-   the next byte will bring the next notification. Asking on behalf of the readers further back
-   would only collect the same answer.
+**The walk is per driver**, because a notification speaks for its sender's input only. It takes the
+parked reads oldest first, re-resolves each one's descriptor, and a small pure function,
+`retry::step`, says which of three things to do:
 
-So a notification that turns out to be spurious costs one round trip, and VFS never spins. Every
-pass either frees an entry or returns, so the walk terminates.
+1. **Pass over it** — the descriptor belongs to another driver. The entry stays parked, untouched:
+   no grant, no request, no reply. That driver's own notification will come for it.
+2. **Ask** — it is the notifier's. VFS issues a fresh magic grant naming the *stored* endpoint as
+   owner and sends `CDEV_READ` (a grant that cannot be issued is answered with its own errno, like
+   any other error). **Any answer but `EAGAIN`** — a count or an error — frees the entry and is then
+   sent as the reply to that reader's original `VFS_READ`. **The first `EAGAIN` ends the walk**: the
+   notifier is empty again, and that refusal re-armed its waiter, so its next byte will bring its
+   next notification. Asking on behalf of its readers further back would only collect the same
+   answer.
+3. **Answer `EBADF`** — the descriptor is no longer a character device at all. That cannot happen
+   while its owner is blocked, but the check is free, and it applies on any driver's walk.
+
+So a notification that turns out to be spurious costs one round trip, and VFS never spins — per
+driver: a walk sends at most one `CDEV_READ` that is answered `EAGAIN`, and it goes to the driver
+that notified.
+
+The reason the walk is not simply "ask for the oldest reader, stop at the first `EAGAIN`" — which is
+what it was while TTY was the only notifier — is that with two drivers that walk hangs. Put a reader
+on the serial console ahead of one on `/dev/hvc0`: every notification from the virtio console
+becomes a question to TTY, an `EAGAIN`, and a return, and the second reader waits on bytes its
+driver already holds.
+
+Passing over an entry means the walk cannot work by repeatedly removing the head of the queue. The
+park table therefore has `oldest_after(seq)`, which returns the oldest entry strictly newer than a
+sequence number; the walk keeps the `seq` of the last entry it left behind as a cursor and never
+looks at that entry, or anything older, again. Every pass frees the entry it looked at, moves the
+cursor forward, or returns, so the walk terminates. Which driver an entry belongs to is not stored
+in the table: the descriptor is resolved afresh at every retry, and a second copy of the answer
+could disagree with it.
 
 **Entries do not outlive their process.** Proc numbers are recycled, and a parked read retried
 against the *next* occupant of a slot would read into a stranger's buffer through a stranger's
@@ -346,19 +384,24 @@ there under a different endpoint is evicted before the request is served.
 Everything above the driver call still runs first — the descriptor lookup, `rw::validate`, the
 zero-length fast path — so a malformed read is refused and never parked. And VFS parks on the
 *answer*, not on the device: it does not know which driver is a console, only that whoever said
-`EAGAIN` has promised to notify. The notifier it accepts today is the one TTY endpoint it resolved
-through DS at startup.
+`EAGAIN` has promised to notify. The notifiers it accepts are the endpoints it resolved through DS
+at startup for the drivers that can give that answer.
 
-VFS reports three moments that nothing outside it can observe: `[diag vfs] cons.notify ok` for the
-first notification of a boot that reaches its receive loop from the console driver, `[diag vfs]
-cons.park` the first time it parks a read, and `[diag vfs] cons.beside ok` the first time it
-completes a file read — one that made a real round trip to MFS — while a read is parked. The first
-arrives before anything is parked: it is a notification TTY sends on purpose at start-up, and it
-proves that the kernel delivers a notification at a plain `RECEIVE` and never as the reply to a
-`SENDREC` ([IPC](../ipc/overview.md#a-notification-is-never-the-reply-to-a-sendrec)) — the property
-the retry walk above cannot work without, since VFS is forever sending TTY requests while TTY may be
-about to notify it. The last is the proof of the parking arrangement itself, and
-[what the boot log shows](../drivers/overview.md#what-the-boot-log-proves) builds on both.
+VFS reports four moments that nothing outside it can observe: `[diag vfs] cons.notify ok` for the
+first notification of a boot that reaches its receive loop from TTY, `[diag vfs] cons.park` the
+first time it parks a read, `[diag vfs] cons.beside ok` the first time it completes a file read —
+one that made a real round trip to MFS — while a read is parked, and `[diag vfs] cons.other ok` the
+first time one walk passes over a read parked on another driver and then gets a real answer from the
+notifier for a reader behind it. The first arrives before anything is parked: it is a notification
+TTY sends on purpose at start-up, and it proves that the kernel delivers a notification at a plain
+`RECEIVE` and never as the reply to a `SENDREC`
+([IPC](../ipc/overview.md#a-notification-is-never-the-reply-to-a-sendrec)) — the property the retry
+walk above cannot work without, since VFS is forever sending TTY requests while TTY may be about to
+notify it. The third is the proof of the parking arrangement itself, and
+[what the boot log shows](../drivers/overview.md#what-the-boot-log-proves) builds on both. The
+fourth is the proof that the walk is per driver, and it appears only on a boot that is fed on the
+second console: [the virtio console's proof](../drivers/overview.md#the-proof-on-a-fed-boot)
+arranges for the serial reader to be parked first and to stay parked while the other is answered.
 
 ### Staging an executable
 
@@ -398,12 +441,18 @@ which bumps the sequence and kills the previous id, and PM serialises exec so tw
 never alive at once.
 
 VFS also remains the system's first *grant* client and first *console* client: its startup still
-direct-grants a read-only buffer to PM (slice 5.2) and drives `CDEV_WRITE` by hand (slice 5.3).
-Those are kept deliberately, as the regression battery for three contracts the real write path never
-reaches — the direct-grant form, a *visible* short write, and the two `CDEV_WRITE` refusals a
-well-formed `write()` cannot provoke. Slice 5.7's block-device demo, by contrast, is **gone**: MFS
-is the real BDEV client now, so the battery moved there and VFS is back to knowing nothing about
-block devices.
+direct-grants a read-only buffer to PM (slice 5.2) and drives `CDEV_WRITE` by hand (slice 5.3). The
+grant hand-over is the **first** thing VFS does, before it looks any peer up in DS, and the order
+matters: it is VFS's one `SEND` to PM that is not a reply, and PM calls VFS whenever a process
+exits. If a process dies while VFS is still blocked in a lookup, PM is already waiting on VFS when
+the `SEND` goes out, and the kernel refuses it rather than let the two wait on each other. Slice 6.6
+added a fourth lookup ahead of that `SEND` and lost exactly that race to a boot stub that faults on
+purpose; VFS now sends first, and prints `[diag vfs] grant.test FAIL send rc=…` if the send is ever
+refused. Those are kept deliberately, as the regression battery for three contracts the real write
+path never reaches — the direct-grant form, a *visible* short write, and the two `CDEV_WRITE`
+refusals a well-formed `write()` cannot provoke. Slice 5.7's block-device demo, by contrast, is
+**gone**: MFS is the real BDEV client now, so the battery moved there and VFS is back to knowing
+nothing about block devices.
 
 ## MFS: the file system
 
@@ -645,6 +694,37 @@ trailing input in the same batch is a failure rather than something left unread 
 exits with a positive sentinel status either way, and init — which reaps it by pid whenever it
 happens to come back — prints `stdin FAIL no-verdict` if the child died without one. On a boot
 nobody feeds, the child simply stays parked for the whole run and costs one fork-pool slot.
+
+Since slice 6.6 a second child, forked straight after the first, does the same for the virtio
+console — and a little more, because it is also the proof of two things no other process exercises.
+Through one descriptor it:
+
+1. **opens** `/dev/hvc0`, read-write;
+2. **writes** the line `minix.rs hvc0 out` — which leaves the machine on QEMU's second chardev,
+   where the feeder waits to see it before sending anything;
+3. issues one **read into an address that is not mapped**. Nothing has been fed, so the read is
+   parked. When the first bytes arrive VFS retries it, the driver's copy into the unmapped page is
+   refused, and the child hears `EFAULT` — nothing else is a pass, and the bytes must still be
+   there;
+4. **reads** into a real buffer until it holds seventeen bytes — a read between the feeder's two
+   pieces parks again;
+5. **compares** them with `minix.rs hvc0 in` and a newline;
+6. **closes** the descriptor.
+
+Then it prints one line on fd 1, the serial console: `minix.rs init: hvc0 ok n=17`, or `hvc0 FAIL
+step=<step> …` naming the first step that did not do what it should. A driver that *loses* bytes
+prints neither: the child comes up short and stays parked in step 4, and the failure is the missing
+`ok`. The close is not tidiness. VFS prints `[diag vfs] pm-exit reset closed=1` for a process that
+exits with a descriptor open, and that line is `fileio`'s to earn much later in the boot; a proof
+child that exited with `/dev/hvc0` open would print it minutes early and leave that proof vacuous.
+
+The order of the two forks is load-bearing. The `read(0)` child has nothing to do before its read
+and parks at once; the second child opens and writes first. So the serial reader is the older entry
+in VFS's park table when the virtio console's notification arrives, and the retry walk has to
+[pass over it](#parking-a-console-read) to answer the other — which is what `[diag vfs] cons.other
+ok` reports. Both children hold a fork-pool slot for as long as they live (19 and 20, so the
+rotation's first `worker` runs in slot 21), and init's `wait()` loop recognises either by pid and
+waits again whenever it reaped one of them instead of a rotation child.
 
 The probe it replaced asserted the opposite. Until 6.5 init called `read()` on fd 1 and expected
 `ENOSYS`, because TTY had no receive side; with one, that read would park init itself for the rest

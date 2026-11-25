@@ -238,7 +238,7 @@ generation 0 so they can never collide with a real `(gen, proc)` endpoint:
 |       9 | SCHED                   | yes                                        |
 |      10 | `init` (PID 1)          | yes                                        |
 |      11 | `VBLK` (virtio-blk)     | yes — serves its disk when one is attached |
-|      12 | `VCON` (virtio-console) | reserved, not built                        |
+|      12 | `VCON` (virtio-console) | yes — serves `/dev/hvc0`                   |
 |      13 | `VINPUT` (virtio-input) | reserved, not built                        |
 |      14 | `VNET` (virtio-net)     | reserved, not built                        |
 

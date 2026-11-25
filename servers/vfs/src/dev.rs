@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! The device-node table: three paths VFS answers itself, ahead of the mount
-//! (slice 5.11, decision Z6).
+//! The device-node table: four paths VFS answers itself, ahead of the mount
+//! (slice 5.11, decision Z6; `/dev/hvc0` from slice 6.6, decision C10).
 //!
 //! There is no `/dev` on the image and no device inode — the deliberate
 //! simplification decision D11 names — so `open` matches these paths
@@ -17,21 +17,26 @@
 //! Pure and host-tested; the copy-in and the descriptor allocation are `main.rs`'s.
 
 use minixrs_kernel_shared::callnr::{
-    CDEV_MINOR_CONSOLE, CDEV_MINOR_NULL, CDEV_MINOR_ZERO, DEV_CONSOLE_PATH, DEV_NULL_PATH,
-    DEV_ZERO_PATH,
+    CDEV_MINOR_CONSOLE, CDEV_MINOR_HVC0, CDEV_MINOR_NULL, CDEV_MINOR_ZERO, DEV_CONSOLE_PATH,
+    DEV_HVC0_PATH, DEV_NULL_PATH, DEV_ZERO_PATH,
 };
 
 use crate::fd::{CharDriver, Fd};
 
 /// Rows in the table.
-pub const NR_DEV_NODES: usize = 3;
+pub const NR_DEV_NODES: usize = 4;
 
 /// The table: path, driver, minor. Paths come from `kernel-shared` so init's
 /// probes cannot drift from what VFS matches.
+///
+/// Minors are a per-driver namespace: the console's and `hvc0`'s are both 0, on
+/// different drivers, and each row names its own constant so neither is taken
+/// for the other.
 static DEV_NODES: [(&str, CharDriver, i32); NR_DEV_NODES] = [
     (DEV_CONSOLE_PATH, CharDriver::Tty, CDEV_MINOR_CONSOLE),
     (DEV_NULL_PATH, CharDriver::Memory, CDEV_MINOR_NULL),
     (DEV_ZERO_PATH, CharDriver::Memory, CDEV_MINOR_ZERO),
+    (DEV_HVC0_PATH, CharDriver::Vcon, CDEV_MINOR_HVC0),
 ];
 
 /// Resolve `path` — the exact bytes VFS copied in, no terminator — against the
@@ -70,6 +75,27 @@ mod tests {
                 minor: CDEV_MINOR_ZERO,
             })
         );
+        assert_eq!(
+            lookup(b"/dev/hvc0"),
+            Some(Fd::CharDev {
+                dev: CharDriver::Vcon,
+                minor: CDEV_MINOR_HVC0,
+            })
+        );
+    }
+
+    #[test]
+    fn every_row_resolves_to_itself() {
+        // The literal paths above are spelled by hand; this is the same claim
+        // for whatever rows the table holds, so a fifth row is covered the
+        // moment it is added.
+        for &(path, dev, minor) in &DEV_NODES {
+            assert_eq!(
+                lookup(path.as_bytes()),
+                Some(Fd::CharDev { dev, minor }),
+                "{path}"
+            );
+        }
     }
 
     #[test]
@@ -90,20 +116,30 @@ mod tests {
             b"/dev",
             b"/dev/",
             b"/dev/nope",
+            b"/dev/hvc",
+            b"/dev/hvc00",
+            b"/dev/hvc1",
+            b"/dev/HVC0",
         ] {
             assert_eq!(lookup(path), None, "{:?}", core::str::from_utf8(path));
         }
     }
 
     #[test]
-    fn the_table_has_no_duplicate_paths_and_uses_both_drivers() {
+    fn the_table_has_no_duplicate_paths_and_uses_every_driver() {
         for (i, (a, _, _)) in DEV_NODES.iter().enumerate() {
             for (b, _, _) in &DEV_NODES[i + 1..] {
                 assert_ne!(a, b);
             }
         }
-        assert!(DEV_NODES.iter().any(|(_, d, _)| *d == CharDriver::Tty));
-        assert!(DEV_NODES.iter().any(|(_, d, _)| *d == CharDriver::Memory));
+        // Every `CharDriver`, not a list of them typed here: a driver with no
+        // node is a variant nothing can open.
+        for driver in CharDriver::ALL {
+            assert!(
+                DEV_NODES.iter().any(|(_, d, _)| *d == driver),
+                "{driver:?} has no device node"
+            );
+        }
         assert_eq!(DEV_NODES.len(), NR_DEV_NODES);
     }
 }

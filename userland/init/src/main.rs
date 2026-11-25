@@ -46,6 +46,12 @@
 //! `tools/feed-console.sh` types a fixed line at the boot, and says what it
 //! read. See [`fork_stdin_probe`].
 //!
+//! Slice 6.6 adds a second console, `/dev/hvc0`, and a second such child
+//! straight after the first: it writes a line out through the node, parks a
+//! read on it, and reads back what the same feeder sends in answer. See
+//! [`fork_hvc0_probe`]. So two of init's children are not the rotation's, and
+//! both can outlive the whole boot.
+//!
 //! Built as a freestanding aarch64 ELF (`userland/init/user.ld`). It uses
 //! `minixrs-ipc` directly — no `server-rt`/SEF, because it is a plain user program,
 //! not a server. The `_start` shim and panic handler are gated to `not(test)`.
@@ -162,7 +168,8 @@ const _: () = assert!(UNMAPPED_VA < USER_DEVICE_WINDOW_BASE);
 /// What `init` execs, in rotation — one per fork cycle.
 ///
 /// **`worker` must stay first.** It is slice 5.5's exec-stack probe, and the
-/// verdict is keyed on the *first* child's pid ([`main`]'s `probe_pid`), so
+/// verdict is keyed on the rotation's *first* child's pid ([`main`]'s
+/// `probe_pid`; the two proof children forked before the rotation are not it), so
 /// reordering this array silently retires the `exec stack ok` marker while
 /// leaving every other marker in place.
 ///
@@ -241,6 +248,15 @@ fn main() -> ! {
     // [`fork_stdin_probe`].
     #[cfg(not(feature = "idle-probe"))]
     let mut stdin_pid = fork_stdin_probe(pm, vfs);
+    // Slice 6.6: the second console's proof child, forked **second** and
+    // straight after the first. The order is the arrangement `[diag vfs]
+    // cons.other ok` proves held: the `read(0)` child above parks at once,
+    // this one opens and writes `/dev/hvc0` before it parks, so the console
+    // reader is the OLDER entry in VFS's park table when the virtio
+    // console's notification arrives and the walk has to pass over it. Like
+    // the first, nothing below waits for it. See [`fork_hvc0_probe`].
+    #[cfg(not(feature = "idle-probe"))]
+    let mut hvc0_pid = fork_hvc0_probe(pm, vfs);
     // The read path runs after the console write path, and the order is
     // load-bearing in the usual direction: a hang inside it localizes to the
     // `fs.*` markers instead of taking 5.4's, 5.5's and 5.6's with it. Do not
@@ -285,7 +301,8 @@ fn main() -> ! {
     // must fail — see [`exec_denials`].
     exec_denials(pm, vfs);
 
-    // One-shot: the exec-ABI verdict of the first child init forks (slice 5.5).
+    // One-shot: the exec-ABI verdict of the first child the rotation forks
+    // (slice 5.5) — init's third fork, after the two proof children above.
     //
     // Keyed on that child's **pid**, not on "the first reap", because the two are
     // not the same reap. PM seeds the demo stubs as init's children, and stub D
@@ -338,8 +355,9 @@ fn main() -> ! {
             }
             n if n > 0 => {
                 cycle = cycle.wrapping_add(1);
-                // Parent: `n` is the new child's pid. Remember the first one —
-                // that is the process whose exec-ABI verdict gets reported.
+                // Parent: `n` is the new child's pid. Remember the rotation's
+                // first — that is the process whose exec-ABI verdict gets
+                // reported.
                 if probe_pid == 0 {
                     probe_pid = n;
                 }
@@ -355,19 +373,35 @@ fn main() -> ! {
                 let mut w = pm_msg(PM_WAIT);
                 #[cfg_attr(feature = "idle-probe", allow(unused_mut))]
                 let mut rc = ipc_sendrec(pm, &mut w);
-                // The console-read child (slice 6.5) is not one of the
-                // rotation's, and it comes back whenever it happens to — on a
-                // fed boot some cycle after the feeder wrote, on an unfed one
-                // never. Keyed on its pid like the two below. If this `wait()`
-                // reaped it, the turn has not reaped a child of its own yet, so
-                // wait once more: without that the rotation runs one child
-                // deeper for the rest of the boot and every later exit lands a
-                // whole turn later — measured as `pm-exit reset closed=1`
-                // moving from 64.7% to 76.6% of a 600 s disk log.
+                // The two proof children — the console-read one (slice 6.5)
+                // and the `/dev/hvc0` one (slice 6.6) — are not the
+                // rotation's, and each comes back whenever it happens to: on a
+                // fed boot some cycle after the feeder wrote to its console,
+                // on an unfed one never. Keyed on their pids like the two
+                // below. If this `wait()` reaped one of them, the turn has not
+                // reaped a child of its own yet, so wait once more: without
+                // that the rotation runs one child deeper for the rest of the
+                // boot and every later exit lands a whole turn later —
+                // measured in slice 6.5, with one such child, as `pm-exit
+                // reset closed=1` moving from 64.7% to 76.6% of a 600 s disk
+                // log. Two children would make it two deeper.
+                //
+                // A loop, not an `if` per child: the second wait can return
+                // the *other* proof child (the feeder writes to the two
+                // consoles seconds apart), and that turn is still owed a reap
+                // of its own. It ends: each pass that goes round again has
+                // zeroed one of the two pids, so there are at most two.
                 #[cfg(not(feature = "idle-probe"))]
-                if rc == OK && stdin_pid != 0 && w.m_type == stdin_pid {
-                    stdin_pid = 0;
-                    report_stdin_reap(vfs, rd_i32(&w, 0));
+                while rc == OK {
+                    if stdin_pid != 0 && w.m_type == stdin_pid {
+                        stdin_pid = 0;
+                        report_proof_reap(vfs, b"stdin", rd_i32(&w, 0));
+                    } else if hvc0_pid != 0 && w.m_type == hvc0_pid {
+                        hvc0_pid = 0;
+                        report_proof_reap(vfs, b"hvc0", rd_i32(&w, 0));
+                    } else {
+                        break;
+                    }
                     w = pm_msg(PM_WAIT);
                     rc = ipc_sendrec(pm, &mut w);
                 }
@@ -472,21 +506,22 @@ const STDIN_BUF_LEN: usize = 64;
 
 const _: () = assert!(STDIN_BUF_LEN > CONSOLE_PROBE.len());
 
-/// The proof child's exit status when what it read was the probe.
+/// A proof child's exit status when what it read was its probe. Both proof
+/// children — this slice's and slice 6.6's [`hvc0_probe_child`] — use the pair.
 ///
 /// A **positive sentinel**, not 0, for [`report_exec_stack`]'s reason: 0 is
 /// what a child that never got as far as a verdict leaves behind. The child
 /// prints its own verdict, so the status carries only *that it gave one*.
 #[cfg_attr(any(test, feature = "idle-probe"), allow(dead_code))]
-const STDIN_PROBE_PASS: i32 = 0x53;
-/// ...and when it was not. Also positive: the child printed `stdin FAIL`
+const PROOF_CHILD_PASS: i32 = 0x53;
+/// ...and when it was not. Also positive: the child printed its `FAIL` line
 /// itself, and init must not print a second line for the same failure.
 #[cfg_attr(any(test, feature = "idle-probe"), allow(dead_code))]
-const STDIN_PROBE_FAIL: i32 = 0x46;
+const PROOF_CHILD_FAIL: i32 = 0x46;
 
-const _: () = assert!(STDIN_PROBE_PASS > 0 && STDIN_PROBE_PASS <= 0xff);
-const _: () = assert!(STDIN_PROBE_FAIL > 0 && STDIN_PROBE_FAIL <= 0xff);
-const _: () = assert!(STDIN_PROBE_PASS != STDIN_PROBE_FAIL);
+const _: () = assert!(PROOF_CHILD_PASS > 0 && PROOF_CHILD_PASS <= 0xff);
+const _: () = assert!(PROOF_CHILD_FAIL > 0 && PROOF_CHILD_FAIL <= 0xff);
+const _: () = assert!(PROOF_CHILD_PASS != PROOF_CHILD_FAIL);
 
 /// Fork the console-read proof child (slice 6.5, spec R7) and return its pid,
 /// or 0 if the fork was refused (reported as `stdin FAIL fork rc=-N`).
@@ -504,20 +539,38 @@ const _: () = assert!(STDIN_PROBE_PASS != STDIN_PROBE_FAIL);
 /// What the fork costs the rotation: one fork-pool slot for as long as the
 /// child lives (the whole boot when unfed), out of the pool's thirteen, of
 /// which the rotation uses about five with the boot stubs on and one without.
+/// Slice 6.6's [`fork_hvc0_probe`] costs a second, on the same terms.
 #[cfg(not(feature = "idle-probe"))]
 #[cfg_attr(test, allow(dead_code))]
 fn fork_stdin_probe(pm: Endpoint, vfs: Endpoint) -> i32 {
+    fork_proof_child(pm, vfs, b"stdin", stdin_probe_child)
+}
+
+/// Fork one proof child running `body`, and return its pid — or 0 if the fork
+/// was refused, which is reported as `<marker> FAIL fork rc=-N`.
+///
+/// The one fork both proof children go through ([`fork_stdin_probe`],
+/// [`fork_hvc0_probe`]). `body` never returns: it prints its verdict and
+/// exits with [`PROOF_CHILD_PASS`] or [`PROOF_CHILD_FAIL`].
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn fork_proof_child(
+    pm: Endpoint,
+    vfs: Endpoint,
+    marker: &[u8],
+    body: fn(Endpoint, Endpoint) -> !,
+) -> i32 {
     let mut m = pm_msg(PM_FORK);
     let trap_rc = ipc_sendrec(pm, &mut m);
     if trap_rc != OK {
-        report_rc(vfs, b"stdin", b"fork", trap_rc);
+        report_rc(vfs, marker, b"fork", trap_rc);
         return 0;
     }
     match m.m_type {
-        0 => stdin_probe_child(pm, vfs),
+        0 => body(pm, vfs),
         n if n > 0 => n,
         e => {
-            report_rc(vfs, b"stdin", b"fork", e);
+            report_rc(vfs, marker, b"fork", e);
             0
         }
     }
@@ -571,7 +624,7 @@ fn stdin_probe_child(pm: Endpoint, vfs: Endpoint) -> ! {
 
     if stop.is_none() && &buf[..got] == CONSOLE_PROBE {
         let _ = vfs_write(vfs, STDOUT, b"minix.rs init: stdin ok n=15\n");
-        exit_request(pm, STDIN_PROBE_PASS)
+        exit_request(pm, PROOF_CHILD_PASS)
     }
 
     let mut line = [0u8; 64];
@@ -593,25 +646,268 @@ fn stdin_probe_child(pm: Endpoint, vfs: Endpoint) -> ! {
     }
     n = append(&mut line, n, b"\n");
     let _ = vfs_write(vfs, STDOUT, &line[..n]);
-    exit_request(pm, STDIN_PROBE_FAIL)
+    exit_request(pm, PROOF_CHILD_FAIL)
 }
 
-/// The parent's half of the proof child's verdict: say something only when
-/// the child said nothing.
+/// The parent's half of a proof child's verdict: say something only when the
+/// child said nothing. `marker` is `stdin` or `hvc0`.
 ///
 /// `status` is the `W_EXITCODE` PM encodes, as in [`report_exec_stack`]. Either
 /// sentinel means the child printed its own line. Anything else — 0 above
 /// all, which is what PM's kill path leaves — means it died before it could,
-/// and that gets a `no-verdict` spelling of the forbidden marker rather than
-/// silence: a missing `stdin ok` alone would not say whether the child was
-/// never fed or never survived.
+/// and that gets a `no-verdict` spelling of the forbidden marker (`stdin FAIL
+/// no-verdict`, `hvc0 FAIL no-verdict`) rather than silence: a missing `ok`
+/// line alone would not say whether the child was never fed or never
+/// survived.
 #[cfg(not(feature = "idle-probe"))]
 #[cfg_attr(test, allow(dead_code))]
-fn report_stdin_reap(vfs: Endpoint, status: i32) {
+fn report_proof_reap(vfs: Endpoint, marker: &[u8], status: i32) {
     let code = (status >> 8) & 0xff;
-    if code != STDIN_PROBE_PASS && code != STDIN_PROBE_FAIL {
-        report_step(vfs, b"stdin", b"no-verdict");
+    if code != PROOF_CHILD_PASS && code != PROOF_CHILD_FAIL {
+        report_step(vfs, marker, b"no-verdict");
     }
+}
+
+// ----- Slice 6.6: the second console's proof -------------------------------
+
+/// The line the second proof child writes **to** `/dev/hvc0`: the guest's half
+/// of the proof, which leaves the machine on QEMU's second chardev and is what
+/// `tools/feed-console.sh` waits to see on the host before it sends anything
+/// back (spec C11, C12).
+///
+/// The script holds its own copy, as shell.
+/// [`tests::the_feeder_and_init_agree_on_hvc0`] reads the script and compares,
+/// so neither can move alone.
+#[cfg_attr(feature = "idle-probe", allow(dead_code))]
+const HVC0_OUT: &[u8] = b"minix.rs hvc0 out\n";
+
+/// The bytes the feeder then writes to the host side of that chardev, and so
+/// the bytes the child must read back from the node: raw, exactly as sent.
+/// Held to the script's copy by the same test.
+#[cfg_attr(feature = "idle-probe", allow(dead_code))]
+const HVC0_IN: &[u8] = b"minix.rs hvc0 in\n";
+
+/// The child's verdict when every step did what it should. `tools/feed-console.sh`
+/// waits for this line (up to the count) in the serial log before it feeds the
+/// serial console; the same test holds the two together.
+#[cfg_attr(feature = "idle-probe", allow(dead_code))]
+const HVC0_OK_LINE: &[u8] = b"minix.rs init: hvc0 ok n=17\n";
+
+// The `n=17` in that line is a literal — it is a `grep -aF` marker and is
+// written whole, like `stdin ok n=15` — so this is what pins it to the probe's
+// length.
+const _: () = assert!(HVC0_IN.len() == 17);
+// The two directions must not be mistakable for each other: a host side that
+// looped the guest's output back would otherwise be one compare from passing.
+const _: () = assert!(HVC0_OUT.len() != HVC0_IN.len());
+
+/// Bytes the child asks for on each read of `/dev/hvc0` — the unmapped one
+/// included. **More than the probe holds**, [`STDIN_BUF_LEN`]'s reasoning:
+/// input that runs past the probe comes back as a longer count and is refused.
+#[cfg_attr(any(test, feature = "idle-probe"), allow(dead_code))]
+const HVC0_BUF_LEN: usize = 64;
+
+const _: () = assert!(HVC0_BUF_LEN > HVC0_IN.len());
+
+/// Fork the second console's proof child (slice 6.6, spec C11) and return its
+/// pid, or 0 if the fork was refused (reported as `hvc0 FAIL fork rc=-N`).
+///
+/// [`fork_stdin_probe`]'s twin, and everything said there holds here: the
+/// child never returns, the parent waits for nothing, [`main`]'s rotation
+/// reaps the child by pid if and when it exits, it holds one fork-pool slot
+/// for as long as it lives, and it is **not forked under `idle-probe`** — on
+/// an unfed boot its read never completes, and that build ends by waiting
+/// until no child is left.
+///
+/// It is the **second** of the two forks, and that is load-bearing — see the
+/// call site.
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn fork_hvc0_probe(pm: Endpoint, vfs: Endpoint) -> i32 {
+    fork_proof_child(pm, vfs, b"hvc0", hvc0_probe_child)
+}
+
+/// The second proof child: write a line out through `/dev/hvc0`, have a read
+/// refused without losing a byte, read the feeder's answer, exit.
+///
+/// Six steps, each with its own `step=` name in the failure line, all through
+/// one descriptor (spec C11 lists five; **close** was added when a child that
+/// exited with the node open made `pm-exit reset closed=1` vacuous):
+///
+/// 1. **open** [`DEV_HVC0_PATH`](minixrs_kernel_shared::callnr::DEV_HVC0_PATH),
+///    read-write.
+/// 2. **write** [`HVC0_OUT`] — the virtio console driver chains it to the
+///    device and it appears on the host side of QEMU's second chardev. The
+///    feeder sends nothing until it has seen that line there, so everything
+///    below also says the guest's output reached the host. (VFS loops a
+///    `write` to completion; the loop here is for a short count all the same.)
+/// 3. **bad-read**: one `read` into [`UNMAPPED_VA`]. Nothing has been fed, so
+///    the driver answers `EAGAIN` and VFS parks the raw request — address and
+///    all, no grant held. When the feeder's first chunk arrives, VFS's retry
+///    reaches the driver with bytes held, the kernel refuses the driver's copy
+///    into the unmapped page, and the child hears `EFAULT`. **Nothing else is a
+///    pass** — and the bytes are still owed: a driver that consumed before its
+///    copy returned has just thrown the first chunk away. This is the boot's
+///    proof of the consume-after-copy order (slice 6.5's debt 11, paid for this
+///    driver).
+/// 4. **read** into a real buffer until it holds [`HVC0_IN`]'s length. The
+///    first read finds the chunk the refused copy left behind; the feeder's
+///    second chunk comes a few seconds later, so a read in between parks again
+///    and is completed only if the driver re-posted its receive buffer and
+///    re-armed after draining the first.
+/// 5. **compare** what was read with [`HVC0_IN`].
+/// 6. **close** the descriptor, on every path, before the verdict is printed.
+///
+/// Exactly one line, on fd 1 — the serial console, not the node under test:
+///
+/// - `minix.rs init: hvc0 ok n=17` ([`HVC0_OK_LINE`]) — every step did what it
+///   should;
+/// - `minix.rs init: hvc0 FAIL step=<step> …` otherwise, naming the first step
+///   that did not: `step=open rc=-N`; `step=write n=<sent so far>` and the
+///   answer that stopped it; `step=bad-read` and the answer that was not
+///   `EFAULT`; `step=read n=<got so far>` and the answer that stopped it;
+///   `step=compare n=<got> first=<hex>`; `step=close rc=-N`. An answer is
+///   spelled `rc=-N` for an errno, `eof` for 0, and `count=<n>` for a positive
+///   count where none was acceptable (`over` for one larger than was asked
+///   for).
+///
+/// A driver that loses bytes prints **neither**: the child comes up short and
+/// stays parked in step 4, so the failure is the missing `ok` line.
+///
+/// While this child is parked the `read(0)` child is too, on the other
+/// console, and it parked first — which is what makes VFS's retry walk pass
+/// over one reader to answer another (`[diag vfs] cons.other ok`).
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn hvc0_probe_child(pm: Endpoint, vfs: Endpoint) -> ! {
+    use minixrs_kernel_shared::callnr::DEV_HVC0_PATH;
+
+    let fd = vfs_open(vfs, DEV_HVC0_PATH);
+    if fd < 0 {
+        let why = Hvc0Why::Answer { rc: fd, asked: 0 };
+        hvc0_fail(pm, vfs, b"open", None, why)
+    }
+    let verdict = hvc0_steps(vfs, fd);
+    // Closed on every path, pass or fail, and before the verdict is printed.
+    // A process that exits with a descriptor open makes VFS print `[diag vfs]
+    // pm-exit reset closed=1` — the line `fileio` earns by leaking one on
+    // purpose, late in the boot. This child exiting with its descriptor open
+    // would print that line minutes early and leave fileio's proof vacuous
+    // (seen: the marker moved from ~63% of a fed disk log to 3.6%).
+    let closed = vfs_close(vfs, fd);
+    if let Err((step, n, why)) = verdict {
+        hvc0_fail(pm, vfs, step, n, why)
+    }
+    if closed != OK {
+        let why = Hvc0Why::Answer {
+            rc: closed,
+            asked: 0,
+        };
+        hvc0_fail(pm, vfs, b"close", None, why)
+    }
+    let _ = vfs_write(vfs, STDOUT, HVC0_OK_LINE);
+    exit_request(pm, PROOF_CHILD_PASS)
+}
+
+/// A failed step of [`hvc0_steps`]: its name, the byte count so far if the
+/// step has one, and what stopped it.
+#[cfg(not(feature = "idle-probe"))]
+type Hvc0Fail = (&'static [u8], Option<usize>, Hvc0Why);
+
+/// Steps 2 to 4 of [`hvc0_probe_child`], on the open descriptor `fd`: the
+/// write, the refused read, the real reads and the compare. `Err` names the
+/// first step that did not do what it should. Returns rather than exits so
+/// that the caller closes `fd` whatever happened.
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn hvc0_steps(vfs: Endpoint, fd: i32) -> Result<(), Hvc0Fail> {
+    let mut sent = 0usize;
+    while sent < HVC0_OUT.len() {
+        let rest = &HVC0_OUT[sent..];
+        let asked = rest.len();
+        let rc = vfs_write(vfs, fd, rest);
+        if rc <= 0 || rc as usize > asked {
+            return Err((b"write", Some(sent), Hvc0Why::Answer { rc, asked }));
+        }
+        // Cannot overflow: `rc` fits what was left of the line.
+        sent = sent.saturating_add(rc as usize);
+    }
+
+    // One read, into a hole. Parked until the feeder's first bytes arrive, and
+    // then refused by the copy — with those bytes left where they were.
+    let asked = HVC0_BUF_LEN;
+    let rc = vfs_request(vfs, VFS_READ, fd, UNMAPPED_VA, asked as i32);
+    if rc != EFAULT {
+        return Err((b"bad-read", None, Hvc0Why::Answer { rc, asked }));
+    }
+
+    let mut buf = [0u8; HVC0_BUF_LEN];
+    let mut got = 0usize;
+    while got < HVC0_IN.len() {
+        let room = &mut buf[got..];
+        let asked = room.len();
+        let rc = vfs_read(vfs, fd, room);
+        if rc <= 0 || rc as usize > asked {
+            return Err((b"read", Some(got), Hvc0Why::Answer { rc, asked }));
+        }
+        // Cannot overflow: `rc` fits the room left, so the sum fits the buffer.
+        got = got.saturating_add(rc as usize);
+    }
+
+    if &buf[..got] != HVC0_IN {
+        return Err((b"compare", Some(got), Hvc0Why::Bytes { first: buf[0] }));
+    }
+    Ok(())
+}
+
+/// What stopped a step of [`hvc0_probe_child`], for its `FAIL` line.
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Copy, Clone)]
+enum Hvc0Why {
+    /// A reply that was not acceptable, and the byte count that request
+    /// asked for — which is what tells `over` from a merely unwelcome count.
+    Answer { rc: i32, asked: usize },
+    /// Every reply was acceptable and the bytes were wrong; the first of them.
+    Bytes { first: u8 },
+}
+
+/// Print the second proof child's one `hvc0 FAIL step=<step> …` line on fd 1
+/// and exit with [`PROOF_CHILD_FAIL`].
+///
+/// `n` is a byte count so far, printed as ` n=<n>` when the step has one;
+/// `why` is spelled as [`hvc0_probe_child`] lists.
+#[cfg(not(feature = "idle-probe"))]
+#[cfg_attr(test, allow(dead_code))]
+fn hvc0_fail(pm: Endpoint, vfs: Endpoint, step: &[u8], n: Option<usize>, why: Hvc0Why) -> ! {
+    let mut line = [0u8; 80];
+    let mut len = append(&mut line, 0, b"minix.rs init: hvc0 FAIL step=");
+    len = append(&mut line, len, step);
+    if let Some(n) = n {
+        len = append(&mut line, len, b" n=");
+        len = append_dec(&mut line, len, n as u64);
+    }
+    match why {
+        Hvc0Why::Answer { rc, .. } if rc < 0 => {
+            len = append(&mut line, len, b" rc=-");
+            len = append_dec(&mut line, len, u64::from(rc.unsigned_abs()));
+        }
+        Hvc0Why::Answer { rc: 0, .. } => len = append(&mut line, len, b" eof"),
+        Hvc0Why::Answer { rc, asked } if rc as usize > asked => {
+            len = append(&mut line, len, b" over");
+        }
+        Hvc0Why::Answer { rc, .. } => {
+            len = append(&mut line, len, b" count=");
+            len = append_dec(&mut line, len, u64::from(rc.unsigned_abs()));
+        }
+        Hvc0Why::Bytes { first } => {
+            len = append(&mut line, len, b" first=");
+            len = append_hex2(&mut line, len, first);
+        }
+    }
+    len = append(&mut line, len, b"\n");
+    let _ = vfs_write(vfs, STDOUT, &line[..len]);
+    exit_request(pm, PROOF_CHILD_FAIL)
 }
 
 /// `exit(status)` through PM. Never returns: PM tears the caller down and
@@ -2094,7 +2390,7 @@ fn report_fail(vfs: Endpoint, name: &str) {
     let _ = vfs_write(vfs, STDERR, &line[..n]);
 }
 
-/// Report the exec-ABI verdict the first reaped child carried out (slice 5.5).
+/// Report the exec-ABI verdict the rotation's first child carried out (slice 5.5).
 ///
 /// `worker` reads its own `sp` and checks the SysV initial stack `SYS_EXEC` built
 /// — `argc`/`argv`/`envp`/auxv — then exits with `0` or the number of the first
@@ -2237,26 +2533,23 @@ mod tests {
     /// bare-metal build never sees the line.
     const FEEDER: &str = include_str!("../../../tools/feed-console.sh");
 
-    /// The one assignment the feeder writes from, e.g. `PROBE='minix.rs stdin\n'`.
-    const FEEDER_PROBE_PREFIX: &str = "PROBE='";
-
-    /// What the feeder's `printf '%b'` makes of its `PROBE` value: `\n` is a
-    /// newline and any other backslash is refused, so an escape this decoder
-    /// does not know cannot pass as a match.
-    fn feeder_probe_bytes() -> Vec<u8> {
-        let mut lines = FEEDER
-            .lines()
-            .filter(|l| l.starts_with(FEEDER_PROBE_PREFIX));
+    /// The value of the feeder's one `<name>='...'` assignment — e.g.
+    /// `PROBE='minix.rs stdin\n'` — as the feeder's `printf '%b'` reads it:
+    /// `\n` is a newline and any other backslash is refused, so an escape this
+    /// decoder does not know cannot pass as a match.
+    fn feeder_bytes(name: &str) -> Vec<u8> {
+        let prefix = format!("{name}='");
+        let mut lines = FEEDER.lines().filter(|l| l.starts_with(&prefix));
         let line = lines
             .next()
-            .expect("feed-console.sh has no PROBE='...' line");
+            .unwrap_or_else(|| panic!("feed-console.sh has no {name}='...' line"));
         assert!(
             lines.next().is_none(),
-            "feed-console.sh assigns PROBE more than once"
+            "feed-console.sh assigns {name} more than once"
         );
-        let value = line[FEEDER_PROBE_PREFIX.len()..]
+        let value = line[prefix.len()..]
             .strip_suffix('\'')
-            .expect("the PROBE line does not end at its closing quote");
+            .unwrap_or_else(|| panic!("the {name} line does not end at its closing quote"));
 
         let mut out = Vec::new();
         let mut bytes = value.bytes();
@@ -2273,12 +2566,40 @@ mod tests {
 
     #[test]
     fn the_feeder_sends_the_probe() {
-        assert_eq!(feeder_probe_bytes(), CONSOLE_PROBE);
+        assert_eq!(feeder_bytes("PROBE"), CONSOLE_PROBE);
         // And it sends them through `%b`, the reading the decoder above models.
         // Sent in two chunks, both through `printf '%b'`, which between them
         // write the whole value.
         assert!(FEEDER.contains("printf '%b' \"${PROBE:0:SPLIT}\""));
         assert!(FEEDER.contains("printf '%b' \"${PROBE:SPLIT}\""));
+    }
+
+    #[test]
+    fn the_feeder_and_init_agree_on_hvc0() {
+        // The line the feeder waits for on the host side of the second
+        // console is the line the child writes there. (The script drops the
+        // final newline to make its `grep -F` pattern; that it is final, and
+        // the only one, is what makes the pattern the whole line.)
+        assert_eq!(feeder_bytes("HVC0_OUT"), HVC0_OUT);
+        assert_eq!(
+            HVC0_OUT.iter().position(|&b| b == b'\n'),
+            Some(HVC0_OUT.len() - 1)
+        );
+        assert!(FEEDER.contains("HVC0_LINE=${HVC0_OUT%\\\\n}\n"));
+
+        // What it then writes there is what the child compares against, sent
+        // in two chunks through `%b` on descriptor 4 — the FIFO, never stdout,
+        // which is the serial console's.
+        assert_eq!(feeder_bytes("HVC0_IN"), HVC0_IN);
+        assert!(FEEDER.contains("printf '%b' \"${HVC0_IN:0:SPLIT}\" >&4"));
+        assert!(FEEDER.contains("printf '%b' \"${HVC0_IN:SPLIT}\" >&4"));
+
+        // And the serial-log line it waits for before feeding the serial
+        // console is the child's verdict up to the count, so the count can
+        // move with `HVC0_IN` and the script need not.
+        let ok = feeder_bytes("HVC0_OK");
+        assert!(HVC0_OK_LINE.starts_with(&ok));
+        assert_eq!(&HVC0_OK_LINE[ok.len()..], b" n=17\n");
     }
 
     #[test]

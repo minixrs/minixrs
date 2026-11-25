@@ -18,7 +18,8 @@
 //!   no accessor a driver can read or write through, and is consumed by
 //!   `VirtQueue::new`, so only the queue's own code ever touches those bytes.
 //! - [`DmaBuf`], from [`DmaRegion::buf`]: a bounds-checked request buffer, `Copy`,
-//!   with public volatile copies in and out. A descriptor names one.
+//!   with public volatile copies in and out. A descriptor names one, or the
+//!   front of one ([`DmaBuf::prefix`], which can only narrow).
 //!
 //! **Queue memory is disjoint from every `DmaBuf` that can ever exist.**
 //! `split_queue` consumes the region and refuses one that has already handed out
@@ -298,6 +299,24 @@ impl DmaBuf {
     /// this buffer in a `sys_safecopy`).
     pub fn va(&self) -> u64 {
         self.va.as_ptr().addr() as u64
+    }
+
+    /// The first `len` bytes of this buffer as a handle of their own: what a
+    /// descriptor names when a transfer is shorter than the buffer it is staged
+    /// in (a driver-to-device chain must carry exactly the bytes to send).
+    /// `None` if `len` is 0 or more than the buffer holds. The result starts at
+    /// the same two addresses and lies wholly inside this buffer, so it can
+    /// reach nothing this one could not.
+    pub fn prefix(&self, len: usize) -> Option<DmaBuf> {
+        let len32 = u32::try_from(len).ok()?;
+        if len32 == 0 || len32 > self.len {
+            return None;
+        }
+        Some(DmaBuf {
+            va: self.va,
+            pa: self.pa,
+            len: len32,
+        })
     }
 
     /// Pointer to `off..off + n` of the buffer, or `None` if that leaves it.
@@ -588,6 +607,43 @@ mod tests {
         // An empty copy at the very end is in range.
         assert!(b.read_into(8, &mut []));
         assert!(b.write_from(8, &[]));
+    }
+
+    #[test]
+    fn prefix_is_the_front_of_the_buffer_and_never_longer_than_it() {
+        let host = HostDma::new(PA);
+        let b = host.region.buf(0x100, 16).unwrap();
+        let p = b.prefix(5).unwrap();
+        assert_eq!((p.va(), p.pa(), p.len()), (b.va(), b.pa(), 5));
+        // The whole buffer is its own longest prefix; one byte is the shortest.
+        assert_eq!(b.prefix(16).unwrap().len(), 16);
+        assert_eq!(b.prefix(1).unwrap().len(), 1);
+        assert!(b.prefix(0).is_none());
+        assert!(b.prefix(17).is_none());
+        assert!(b.prefix(usize::MAX).is_none());
+        // A prefix of a prefix is bounded by the shorter one.
+        assert_eq!(p.prefix(5).unwrap().len(), 5);
+        assert!(p.prefix(6).is_none());
+    }
+
+    #[test]
+    fn a_prefix_shares_its_bytes_and_refuses_an_access_past_its_own_end() {
+        let host = HostDma::new(PA);
+        let b = host.region.buf(0x100, 16).unwrap();
+        let p = b.prefix(4).unwrap();
+        assert!(b.write_from(0, &[1, 2, 3, 4, 5, 6, 7, 8]));
+        let mut got = [0u8; 4];
+        assert!(p.read_into(0, &mut got));
+        assert_eq!(got, [1, 2, 3, 4]);
+        // Bounded by its own length, not by the buffer it came from.
+        assert!(!p.read_into(0, &mut [0u8; 5]));
+        assert!(!p.write_from(4, &[0xFF]));
+        assert!(!p.write_from(1, &[0xFF; 4]));
+        // A write through the prefix lands in the buffer, and nowhere past it.
+        assert!(p.write_from(0, &[9, 9, 9, 9]));
+        let mut all = [0u8; 8];
+        assert!(b.read_into(0, &mut all));
+        assert_eq!(all, [9, 9, 9, 9, 5, 6, 7, 8]);
     }
 
     #[test]

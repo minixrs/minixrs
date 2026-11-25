@@ -56,10 +56,15 @@
 //! One empty notification is legal; a line that keeps firing with nothing to
 //! drain is a device that is not dropping its line. [`EmptyRun`] counts
 //! consecutive empty notifications, and at [`RX_EMPTY_STORM`] of them TTY
-//! prints `[diag tty] rx FAIL storm` and leaves the line masked (spec R5). That
-//! replaces slice 6.1's post-proof guard, which reported every notification
-//! after the proof as a failure and so could not survive a line that is meant
-//! to keep firing.
+//! prints `[diag tty] rx FAIL storm` and leaves the line masked (spec R5). A
+//! line that stops — that way, by a refused re-arm, or by a proof round going
+//! wrong — can deliver nothing more: [`IrqService::can_receive`] turns `false`
+//! for good, `main` answers every later read `EIO`, and it wakes the reader
+//! parked on the line once so that its retry hears so (slice 6.6, spec C9).
+//!
+//! The storm guard replaces slice 6.1's post-proof guard, which reported every
+//! notification after the proof as a failure and so could not survive a line
+//! that is meant to keep firing.
 
 // Only `main.rs`'s `not(test)`-gated paths reach this, so under `cargo test`
 // (which drops `_start` and `main`) it would read as dead code.
@@ -216,16 +221,55 @@ pub fn claim_and_probe() -> Option<IrqLine> {
 }
 
 /// What [`IrqService`] is doing with its line.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     /// The I13 delivery proof, with this many TX rounds serviced so far.
     Proof(u32),
     /// The proof passed and the RX masks are set: every notification is
     /// receive service.
     Rx,
-    /// A re-arm failed or the line stormed. The failure has been printed and
-    /// the line is masked at the GIC, so nothing further is serviced.
+    /// A proof round went wrong, a re-arm failed or the line stormed. The
+    /// failure has been printed and the line is masked at the GIC, so nothing
+    /// further is serviced and no byte can arrive: a read is answered `EIO`
+    /// (slice 6.6, spec C9).
     Stopped,
+}
+
+impl Phase {
+    /// Whether a byte can still arrive: everything but [`Phase::Stopped`].
+    ///
+    /// During the proof receive is not on *yet*, but it is coming, so the
+    /// answer is `true`: a read then is answered `EAGAIN` and its waiter is
+    /// owed a `NOTIFY` that will be sent — for the first byte, or for the
+    /// proof failing.
+    const fn can_receive(self) -> bool {
+        !matches!(self, Phase::Stopped)
+    }
+
+    /// The phase after one serviced notification, given what its re-arm
+    /// answered: `Some(rc)` is `IRQ_ENABLE`'s result, `None` a line that was
+    /// not re-armed at all (a proof notification without the line's bit, a
+    /// storm).
+    ///
+    /// The line lives only on `Some(OK)`; anything else leaves it masked at
+    /// the GIC with no interrupt to come, which is [`Phase::Stopped`], and
+    /// nothing leaves that. Plain data, so each way of stopping is pinned by a
+    /// host test rather than by a boot that would need a broken device.
+    fn after(self, rearm: Option<i32>) -> Self {
+        match (self, rearm) {
+            (Phase::Stopped, _) => Phase::Stopped,
+            (Phase::Proof(rounds), Some(OK)) => {
+                let rounds = rounds.saturating_add(1);
+                if rounds < IRQ_PROOF_ROUNDS {
+                    Phase::Proof(rounds)
+                } else {
+                    Phase::Rx
+                }
+            }
+            (Phase::Rx, Some(OK)) => Phase::Rx,
+            (Phase::Proof(_) | Phase::Rx, _) => Phase::Stopped,
+        }
+    }
 }
 
 /// The owner of TTY's interrupt line: first the I13 delivery proof —
@@ -244,7 +288,9 @@ impl IrqService {
     /// Start the proof on `line` (the result of [`claim_and_probe`]) by
     /// setting `TXIM`, which makes the PL011 raise its line. A `None` line is a
     /// failed claim, already reported: `TXIM` stays clear, there is no proof,
-    /// and RX is never enabled — `main` answers `CDEV_READ` with `EIO`.
+    /// and RX is never enabled — `main` answers `CDEV_READ` with `EIO`, as it
+    /// does once a service that did start reports it cannot receive
+    /// ([`IrqService::can_receive`]).
     pub fn start(line: Option<IrqLine>) -> Option<Self> {
         let line = line?;
         pl011::set_txim(true);
@@ -253,6 +299,18 @@ impl IrqService {
             phase: Phase::Proof(0),
             empty: EmptyRun::new(),
         })
+    }
+
+    /// Whether a byte can still arrive on this line (slice 6.6, spec C9).
+    ///
+    /// `true` through the proof — receive is not on yet, but it will be — and
+    /// while receiving; `false` once the line has stopped, for any of the four
+    /// reasons it can: `irq FAIL bits`, `irq FAIL enable`, `rx FAIL storm`,
+    /// `rx FAIL enable`. It never turns `true` again. `main` answers a read
+    /// `EIO` when this is `false`, and wakes its waiter once when a
+    /// notification's handling makes it so.
+    pub const fn can_receive(&self) -> bool {
+        self.phase.can_receive()
     }
 
     /// Service one `HARDWARE` notification, whose payload carried `bits`.
@@ -264,8 +322,8 @@ impl IrqService {
     /// (spec R4).
     pub fn on_notify(&mut self, bits: u32, ring: &mut Ring) -> bool {
         match self.phase {
-            Phase::Proof(rounds) => {
-                self.proof_round(bits, rounds);
+            Phase::Proof(_) => {
+                self.proof_round(bits);
                 false
             }
             Phase::Rx => self.service_rx(bits, ring),
@@ -273,40 +331,37 @@ impl IrqService {
         }
     }
 
-    /// One round of the TX proof, `rounds` being those already serviced.
+    /// One round of the TX proof.
     ///
     /// The order is I12's: quiesce the device (clear `TXIM`, which drops the
     /// line), *then* re-arm the line at the GIC. Re-arming first would take the
     /// still-asserted line again at once. Prints `[diag tty] irq ok` when the
     /// last round is in — and hands the line to receive — or one
-    /// `[diag tty] irq FAIL …` line, leaving the line masked and RX off, if a
-    /// round goes wrong.
-    fn proof_round(&mut self, bits: u32, rounds: u32) {
+    /// `[diag tty] irq FAIL …` line, leaving the line masked, RX off and the
+    /// service stopped, if a round goes wrong.
+    fn proof_round(&mut self, bits: u32) {
         if !self.line.fired(bits) {
+            self.phase = self.phase.after(None);
             diag_fmt(format_args!("irq FAIL bits={bits:#x}"));
             return;
         }
         pl011::set_txim(false);
         let rc = self.line.rearm();
-        if rc != OK {
-            diag_fmt(format_args!("irq FAIL enable rc={rc}"));
-            return;
-        }
-        let rounds = rounds.saturating_add(1);
-        if rounds < IRQ_PROOF_ROUNDS {
-            self.phase = Phase::Proof(rounds);
+        self.phase = self.phase.after(Some(rc));
+        match self.phase {
+            Phase::Stopped => diag_fmt(format_args!("irq FAIL enable rc={rc}")),
             // Raise the line again; the next notification is the next round.
-            pl011::set_txim(true);
-            return;
+            Phase::Proof(_) => pl011::set_txim(true),
+            Phase::Rx => {
+                // TXIM stays clear (I13): see the module docs.
+                diag_fmt(format_args!("irq ok rounds={IRQ_PROOF_ROUNDS}"));
+                // The hand-over (spec R5). The line was re-armed just above,
+                // so a byte already sitting in the FIFO raises it the moment
+                // the masks are set and is serviced like any other.
+                pl011::set_rx_masks(true);
+                diag_fmt(format_args!("rx on"));
+            }
         }
-        // TXIM stays clear (I13): see the module docs.
-        diag_fmt(format_args!("irq ok rounds={IRQ_PROOF_ROUNDS}"));
-        // The hand-over (spec R5). The line was re-armed just above, so a byte
-        // already sitting in the FIFO raises it the moment the masks are set
-        // and is serviced like any other.
-        self.phase = Phase::Rx;
-        pl011::set_rx_masks(true);
-        diag_fmt(format_args!("rx on"));
     }
 
     /// Receive service for one notification (spec R4): acknowledge, drain to
@@ -338,16 +393,18 @@ impl IrqService {
         if self.empty.note(drained) {
             // Not re-armed: the line stays masked at the GIC, so this is the
             // last notification and the line prints once.
-            self.phase = Phase::Stopped;
+            self.phase = self.phase.after(None);
             diag_fmt(format_args!("rx FAIL storm"));
             return pushed;
         }
 
         let rc = self.line.rearm();
+        self.phase = self.phase.after(Some(rc));
         if rc != OK {
             // The next byte's interrupt can never arrive. Whatever was just
-            // drained is still in the ring and still owed to a reader.
-            self.phase = Phase::Stopped;
+            // drained stays in the ring, but nobody reads it: from here a
+            // read is answered `EIO` (`read_plan` puts a stopped device
+            // before the buffer; slice 6.6, spec C9).
             diag_fmt(format_args!("rx FAIL enable rc={rc}"));
         }
         pushed
@@ -357,6 +414,86 @@ impl IrqService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the phases, and the ways the line stops (slice 6.6, spec C9) ----
+
+    /// A refusal `IRQ_ENABLE` can answer; which one does not matter.
+    const REFUSED: i32 = EINVAL;
+
+    /// Receive is not on during the proof, but it is coming: a read then is
+    /// answered `EAGAIN`, not `EIO`.
+    #[test]
+    fn a_line_still_in_its_proof_can_receive() {
+        for rounds in 0..IRQ_PROOF_ROUNDS {
+            assert!(Phase::Proof(rounds).can_receive(), "rounds {rounds}");
+        }
+        assert!(Phase::Rx.can_receive());
+    }
+
+    #[test]
+    fn a_stopped_line_cannot_receive() {
+        assert!(!Phase::Stopped.can_receive());
+    }
+
+    /// The healthy path: each re-armed proof round is one step, the last one
+    /// hands the line to receive, and receive stays receive.
+    #[test]
+    fn re_armed_rounds_walk_the_proof_into_receive_and_stay_there() {
+        let mut phase = Phase::Proof(0);
+        for round in 1..IRQ_PROOF_ROUNDS {
+            phase = phase.after(Some(OK));
+            assert_eq!(phase, Phase::Proof(round));
+        }
+        phase = phase.after(Some(OK));
+        assert_eq!(phase, Phase::Rx);
+        assert_eq!(phase.after(Some(OK)), Phase::Rx);
+    }
+
+    /// `irq FAIL bits=…`: a proof notification without the line's bit is not
+    /// re-armed, and receive is over before it began.
+    #[test]
+    fn a_proof_round_with_the_wrong_bits_ends_receive() {
+        for rounds in 0..IRQ_PROOF_ROUNDS {
+            let phase = Phase::Proof(rounds).after(None);
+            assert_eq!(phase, Phase::Stopped, "rounds {rounds}");
+            assert!(!phase.can_receive(), "rounds {rounds}");
+        }
+    }
+
+    /// `irq FAIL enable rc=…`: the proof's re-arm was refused.
+    #[test]
+    fn a_refused_re_arm_in_the_proof_ends_receive() {
+        for rounds in 0..IRQ_PROOF_ROUNDS {
+            let phase = Phase::Proof(rounds).after(Some(REFUSED));
+            assert_eq!(phase, Phase::Stopped, "rounds {rounds}");
+            assert!(!phase.can_receive(), "rounds {rounds}");
+        }
+    }
+
+    /// `rx FAIL storm`: the line is deliberately left without a re-arm.
+    #[test]
+    fn a_storm_ends_receive() {
+        let phase = Phase::Rx.after(None);
+        assert_eq!(phase, Phase::Stopped);
+        assert!(!phase.can_receive());
+    }
+
+    /// `rx FAIL enable rc=…`: the re-arm after a drain was refused.
+    #[test]
+    fn a_refused_re_arm_in_receive_ends_receive() {
+        let phase = Phase::Rx.after(Some(REFUSED));
+        assert_eq!(phase, Phase::Stopped);
+        assert!(!phase.can_receive());
+    }
+
+    /// Nothing restarts a stopped line: `main` wakes the waiter on the one
+    /// transition into `Stopped`, and there must be only one.
+    #[test]
+    fn a_stopped_line_stays_stopped() {
+        for rearm in [Some(OK), Some(REFUSED), None] {
+            assert_eq!(Phase::Stopped.after(rearm), Phase::Stopped, "{rearm:?}");
+        }
+    }
 
     #[test]
     fn a_fresh_run_is_not_a_storm() {

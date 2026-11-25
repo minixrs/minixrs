@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
-//! The park table: console reads VFS has accepted and not yet answered (slice
-//! 6.5, decision R2).
+//! The park table: character-device reads VFS has accepted and not yet answered
+//! (slice 6.5, decision R2; walked per driver since 6.6, decision C10).
 //!
 //! A character driver never withholds a `CDEV_READ` reply; with nothing buffered
 //! it answers `EAGAIN` and owes its caller one `NOTIFY` (R1). VFS, in turn, must
@@ -11,6 +11,16 @@
 //! the order of the asking, and nothing else: pure, total, no IPC and no
 //! `unsafe`, with the grant, the `CDEV_READ` and the late reply in `main.rs`.
 //! The `rw.rs` / `fd.rs` split.
+//!
+//! ## One table for every driver, walked in order
+//!
+//! Reads parked on different drivers — the serial console and the virtio
+//! console — share this table and one oldest-first order. A driver's
+//! notification retries only that driver's readers, so the walk has to be able
+//! to leave an entry where it is and go on to the next:
+//! [`ParkTable::oldest_after`] is that step. Which driver an entry belongs to
+//! is **not** recorded here — the descriptor is re-resolved at every retry
+//! (`retry.rs`), and a second copy of the answer could disagree with it.
 //!
 //! ## One entry per proc slot, so it cannot fill
 //!
@@ -37,8 +47,8 @@
 //!   whatever now holds the slot;
 //! - [`ParkTable::park`] **replaces** whatever the slot held — see there;
 //! - [`ParkTable::evict_stale`] drops an entry the moment the slot is seen to
-//!   have a different occupant, so [`ParkTable::oldest`] never hands a recycled
-//!   slot's read to the retry walk.
+//!   have a different occupant, so [`ParkTable::oldest_after`] never hands a
+//!   recycled slot's read to the retry walk.
 //!
 //! VFS keeps no process table, so "the slot's current occupant" is only ever
 //! known from evidence: a `VFS_PM_EXIT` naming the slot ([`ParkTable::free`]),
@@ -79,7 +89,8 @@ pub struct Parked {
     /// Bytes asked for, already through `rw::validate` and non-zero.
     pub len: usize,
     /// Position in the oldest-first order: smaller is older. Unique among the
-    /// entries of one table.
+    /// entries of one table, and the retry walk's cursor — see
+    /// [`ParkTable::oldest_after`].
     pub seq: u64,
 }
 
@@ -204,13 +215,43 @@ impl ParkTable {
         }
     }
 
-    /// The oldest parked read, or `None` when nothing is parked.
+    /// The oldest parked read, or `None` when nothing is parked: the head of
+    /// the walk, [`ParkTable::oldest_after`]`(None)`. The tests' shorthand —
+    /// the retry walk itself always carries a cursor.
+    #[cfg(test)]
+    fn oldest(&self) -> Option<Parked> {
+        self.oldest_after(None)
+    }
+
+    /// The next parked read in oldest-first order: with `after == None` the
+    /// oldest of all, with `Some(seq)` the oldest entry **strictly newer** than
+    /// sequence number `seq`. `None` when there is no such entry.
     ///
-    /// A copy, not a borrow: the retry walk issues a SENDREC between looking an
-    /// entry up and freeing it, and nothing of this table may be held across
-    /// that (`fd.rs`'s rule, kept here by construction rather than by care).
-    pub fn oldest(&self) -> Option<Parked> {
-        self.slots.iter().flatten().min_by_key(|p| p.seq).copied()
+    /// This is how the retry walk steps past an entry that stays parked — a
+    /// read on a driver other than the one that notified. The walk keeps the
+    /// `seq` of the last entry it left behind as its cursor and never looks at
+    /// that entry, or anything older, again; an entry it answers is freed, so
+    /// the same cursor finds the next one. Each call therefore either returns
+    /// an entry the walk has not seen or ends it.
+    ///
+    /// The cursor is a number, not a slot: freeing any entry — the one it
+    /// names included — changes nobody else's `seq`, so a walk is undisturbed by
+    /// its own frees. The one thing that does move sequence numbers is the
+    /// renumbering in [`ParkTable::take_seq`], which only a `park` can trigger.
+    /// **A cursor must not be carried across a `park`**, and the walk cannot do
+    /// so: it runs to completion inside one pass of VFS's receive loop, and a
+    /// read is parked only while serving a `VFS_READ`, which is another pass.
+    ///
+    /// A copy, not a borrow: the walk issues a SENDREC between looking an entry
+    /// up and freeing it, and nothing of this table may be held across that
+    /// (`fd.rs`'s rule, kept here by construction rather than by care).
+    pub fn oldest_after(&self, after: Option<u64>) -> Option<Parked> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|p| after.is_none_or(|seq| p.seq > seq))
+            .min_by_key(|p| p.seq)
+            .copied()
     }
 
     /// Whether any read is parked.
@@ -244,8 +285,9 @@ mod tests {
         make_endpoint(1, ProcNr::new(slot))
     }
 
-    /// Drain the table oldest-first, returning the endpoints in walk order. The
-    /// retry walk's own shape: look at the oldest, free it, look again.
+    /// Drain the table oldest-first, returning the endpoints in walk order: look
+    /// at the oldest, free it, look again — a retry walk in which every entry is
+    /// the notifier's and is answered.
     fn drain(t: &mut ParkTable) -> Vec<Endpoint> {
         let mut order = Vec::new();
         while let Some(p) = t.oldest() {
@@ -255,11 +297,156 @@ mod tests {
         order
     }
 
+    /// Walk the table in order the way the per-driver retry walk does: `keep`
+    /// says whether an entry stays parked (passed over) or is answered (freed).
+    /// Returns the endpoints visited, in order — every one, kept or not.
+    fn walk(t: &mut ParkTable, keep: impl Fn(Endpoint) -> bool) -> Vec<Endpoint> {
+        let mut visited = Vec::new();
+        let mut after = None;
+        while let Some(p) = t.oldest_after(after) {
+            // Strictly forward, or the walk could visit an entry twice.
+            assert!(after.is_none_or(|a| p.seq > a), "{after:?} then {}", p.seq);
+            visited.push(p.endpoint);
+            if keep(p.endpoint) {
+                after = Some(p.seq);
+            } else {
+                assert!(t.free(endpoint_proc(p.endpoint).get()));
+            }
+        }
+        visited
+    }
+
     #[test]
     fn a_new_table_is_empty() {
         let t = ParkTable::new();
         assert!(!t.any_parked());
         assert_eq!(t.oldest(), None);
+        assert_eq!(t.oldest_after(None), None);
+        assert_eq!(t.oldest_after(Some(0)), None);
+    }
+
+    #[test]
+    fn oldest_after_none_is_the_oldest_entry() {
+        let mut t = ParkTable::new();
+        assert!(t.park(ep(SLOT_B), 0, 0x1000, 8));
+        assert!(t.park(ep(SLOT_A), 1, 0x2000, 16));
+        let head = t.oldest_after(None).expect("two entries");
+        assert_eq!(
+            (head.endpoint, head.fd, head.buf, head.len),
+            (ep(SLOT_B), 0, 0x1000, 8)
+        );
+        // Looking is not taking: the same entry is still the head.
+        assert_eq!(t.oldest_after(None), Some(head));
+    }
+
+    #[test]
+    fn oldest_after_steps_through_every_entry_in_order_and_then_ends() {
+        let mut t = ParkTable::new();
+        // Neither ascending nor descending by slot, so a step by slot index
+        // cannot pass.
+        assert!(t.park(ep(SLOT_B), 0, 0, 1));
+        assert!(t.park(ep(SLOT_C), 0, 0, 1));
+        assert!(t.park(ep(SLOT_A), 0, 0, 1));
+        // Nothing is freed: every entry is passed over, and the walk still ends.
+        assert_eq!(
+            walk(&mut t, |_| true),
+            vec![ep(SLOT_B), ep(SLOT_C), ep(SLOT_A)]
+        );
+        // ...and every one of them is still parked, in the same order.
+        assert_eq!(drain(&mut t), vec![ep(SLOT_B), ep(SLOT_C), ep(SLOT_A)]);
+    }
+
+    #[test]
+    fn oldest_after_is_strictly_after_its_cursor() {
+        let mut t = ParkTable::new();
+        assert!(t.park(ep(SLOT_A), 0, 0, 1));
+        assert!(t.park(ep(SLOT_B), 0, 0, 1));
+        let a = t.oldest_after(None).expect("a");
+        let b = t.oldest_after(Some(a.seq)).expect("b");
+        assert_eq!((a.endpoint, b.endpoint), (ep(SLOT_A), ep(SLOT_B)));
+        // An entry is never "after" itself — the step that would loop for ever.
+        assert_eq!(t.oldest_after(Some(b.seq)), None);
+        // A cursor past everything, and the largest there is.
+        assert_eq!(t.oldest_after(Some(b.seq + 1)), None);
+        assert_eq!(t.oldest_after(Some(u64::MAX)), None);
+    }
+
+    #[test]
+    fn a_walk_passes_over_a_kept_entry_and_reaches_the_one_behind_it() {
+        // The shape the per-driver walk exists for: the oldest read belongs to
+        // another driver and stays; the one behind it is answered.
+        let mut t = ParkTable::new();
+        assert!(t.park(ep(SLOT_A), 0, 0, 1));
+        assert!(t.park(ep(SLOT_B), 0, 0, 1));
+        assert!(t.park(ep(SLOT_C), 0, 0, 1));
+        let kept = t.oldest_after(None).expect("a");
+        assert_eq!(
+            walk(&mut t, |e| e == ep(SLOT_A)),
+            vec![ep(SLOT_A), ep(SLOT_B), ep(SLOT_C)]
+        );
+        // The kept entry is untouched — same request, same place in the order.
+        assert_eq!(t.oldest_after(None), Some(kept));
+        assert_eq!(drain(&mut t), vec![ep(SLOT_A)]);
+    }
+
+    #[test]
+    fn a_walk_keeps_alternate_entries_and_their_order() {
+        let mut t = ParkTable::new();
+        assert!(t.park(ep(SLOT_C), 0, 0, 1));
+        assert!(t.park(ep(SLOT_A), 0, 0, 1));
+        assert!(t.park(ep(SLOT_B), 0, 0, 1));
+        // Answer the middle one only.
+        assert_eq!(
+            walk(&mut t, |e| e != ep(SLOT_A)),
+            vec![ep(SLOT_C), ep(SLOT_A), ep(SLOT_B)]
+        );
+        assert_eq!(drain(&mut t), vec![ep(SLOT_C), ep(SLOT_B)]);
+    }
+
+    #[test]
+    fn an_entry_freed_mid_walk_is_not_visited_and_does_not_move_the_cursor() {
+        let mut t = ParkTable::new();
+        assert!(t.park(ep(SLOT_A), 0, 0, 1));
+        assert!(t.park(ep(SLOT_B), 0, 0, 1));
+        assert!(t.park(ep(SLOT_C), 0, 0, 1));
+        // Pass over A; the cursor now names A's place.
+        let a = t.oldest_after(None).expect("a");
+        // B — the next in line — goes away (answered, or its owner exited).
+        assert!(t.free(SLOT_B));
+        // The walk continues with C, and from the same cursor: freeing an entry
+        // changes nobody else's number.
+        let c = t.oldest_after(Some(a.seq)).expect("c");
+        assert_eq!(c.endpoint, ep(SLOT_C));
+        // And freeing the entry the cursor itself names is harmless too: the
+        // cursor is a number, not a reference to a slot.
+        assert!(t.free(SLOT_A));
+        assert_eq!(t.oldest_after(Some(a.seq)), Some(c));
+    }
+
+    #[test]
+    fn a_walk_begun_after_the_counter_ended_is_in_order() {
+        // A walk never *spans* the renumbering in `take_seq` — nothing parks
+        // during one — but it may be the first thing to run after it. Parked
+        // across the end of the counter, with the oldest entry kept.
+        let mut t = ParkTable::with_next_seq(u64::MAX - 1);
+        assert!(t.park(ep(SLOT_B), 0, 0, 1));
+        assert!(t.park(ep(SLOT_C), 0, 0, 1));
+        assert!(t.park(ep(SLOT_A), 0, 0, 1));
+        assert_eq!(
+            walk(&mut t, |e| e == ep(SLOT_B)),
+            vec![ep(SLOT_B), ep(SLOT_C), ep(SLOT_A)]
+        );
+        assert_eq!(drain(&mut t), vec![ep(SLOT_B)]);
+    }
+
+    #[test]
+    fn a_full_table_walked_with_nothing_freed_visits_each_entry_once() {
+        let mut t = ParkTable::new();
+        let want: Vec<Endpoint> = (0..NR_PARK_SLOTS as i32).rev().map(ep).collect();
+        for &e in &want {
+            assert!(t.park(e, 0, 0, 1));
+        }
+        assert_eq!(walk(&mut t, |_| true), want);
     }
 
     #[test]

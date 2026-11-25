@@ -40,7 +40,7 @@
 //!
 //! ## Why this is the crate's only `unsafe`
 //!
-//! Everything else in the driver is message parsing (`cdev.rs`) or IPC through
+//! Everything else in the driver is message parsing (`driver-rt`'s `cdev`) or IPC through
 //! `minixrs-ipc`. The volatile register accesses here are what
 //! `#![forbid(unsafe_code)]` on `server-rt` exists to keep out of shared code.
 

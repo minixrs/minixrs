@@ -130,16 +130,21 @@ No new boot priv wiring is needed — `init_boot_image` already grants every boo
 That is how `userland/worker` gets into the archive as an exec target only (slice 4.7 — see
 [phase-4-servers.md](../plans/phase-4-servers.md)).
 
-**Array position is load-bearing.** DS ordering is a chain — `ds < tty < memory < vblk < mfs < vfs`
-— and it is satisfied only by array position in `kernel/build.rs`, so that a server is in its
-receive loop before its first client looks it up (slice 5.8 — see
-[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)). The `vblk < mfs` link is the one with **no
-fallback line behind it**: MFS reads a missing `vblk` as "no virtio-mmio disk attached" and mounts
-the ramdisk without a word, so a `vblk` that had not published when MFS looked would give a ramdisk
-root, not a FAIL line. Only the per-backend marker pairs catch it, and since slice 6.4 both do: the
-disk boot requires `bdev.ds ok name=vblk` and forbids `name=memory`, and the ramdisk boot requires
-the `bdev.root vblk rc=-6 fallback=memory` line, which MFS prints only after finding `vblk` (slices
-6.3 and 6.4 — see [the 6.3 design](../superpowers/specs/2026-11-21-virtio-blk-design.md) and
+**Array position is load-bearing.** DS ordering is a chain — `ds < tty < memory < vblk < mfs < vfs <
+pm`, plus `vcon < vfs` since slice 6.6 — and it is satisfied only by array position in
+`kernel/build.rs`, so that a server is in its receive loop before its first client looks it up
+(slice 5.8 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)). `vcon` (proc 12) is packed
+directly after `vblk`; all its place has to satisfy is `vcon < vfs`, and that link has the ordinary
+fallback behind it: a `vcon` lookup that misses prints `vcon.ds FAIL … fallback=…` (forbidden) and
+nothing else moves. **No boot polices that link**, though: with the row moved after `vfs` the lookup
+still succeeded (6.6's mutation 10), because it is VFS's fourth blocking call and `vcon` has
+published by then. The `vblk < mfs` link is the one with **no fallback line behind it**: MFS reads a
+missing `vblk` as "no virtio-mmio disk attached" and mounts the ramdisk without a word, so a `vblk`
+that had not published when MFS looked would give a ramdisk root, not a FAIL line. Only the
+per-backend marker pairs catch it, and since slice 6.4 both do: the disk boot requires `bdev.ds ok
+name=vblk` and forbids `name=memory`, and the ramdisk boot requires the `bdev.root vblk rc=-6
+fallback=memory` line, which MFS prints only after finding `vblk` (slices 6.3 and 6.4 — see
+[the 6.3 design](../superpowers/specs/2026-11-21-virtio-blk-design.md) and
 [the 6.4 design](../superpowers/specs/2026-11-21-mkimage-gpt-disk-design.md)).
 
 ## DS: discovering peers
@@ -301,11 +306,24 @@ usable proof of the user-facing paths. `USR_T` admits **SENDREC only**: a user-g
 fails `ETRAPDENIED`. To block a user-grade process, SENDREC to a server that never replies (6.1's
 `idle_park`).
 
-**init's console-read proof child is not forked under `idle-probe`** (slice 6.5). The child blocks
-in `read(0)` until the console is fed, which on an unfed boot is never, and `idle_park` waits for
-`ECHILD` — so the wait would never return and `idle.park` would never print. The fork and its reap
-are `cfg(not(feature = "idle-probe"))`, which means that hand-run configuration does not exercise
-receive at all. Drop the `cfg` when the idle debt is paid and `idle-probe` goes.
+**init's two proof children are not forked under `idle-probe`** (slices 6.5 and 6.6). The first
+blocks in `read(0)` and the second in a read of `/dev/hvc0`, each until its console is fed, which on
+an unfed boot is never, and `idle_park` waits for `ECHILD` — so the wait would never return and
+`idle.park` would never print. The forks and their reaps are `cfg(not(feature = "idle-probe"))`,
+which means that hand-run configuration does not exercise receive at all. Drop the `cfg` when the
+idle debt is paid and `idle-probe` goes.
+
+**The proof children are forked in a fixed order, hold a fork slot each, and are reaped by pid.**
+The `read(0)` child is init's first fork and the `/dev/hvc0` child its second, both through one
+`fork_proof_child`. The order is load-bearing: the serial reader has to be the *older* entry in
+VFS's park table for the per-driver walk to have something to pass over (see
+[Parking a console read](#parking-a-console-read)). Neither is one of the rotation's children, and
+each comes back whenever its console happens to be fed, so the rotation's `wait()` checks every
+reaped pid against both and **waits again** — in a loop, since the second wait can return the other
+proof child — whenever it reaped one of them: that turn has not yet reaped a child of its own, and
+without the extra wait the rotation runs one child deeper for the rest of the boot. What the slots
+do to the fork-cycle markers, and why a proof child closes its descriptor before it exits, are in
+[`testing-and-markers.md`](./testing-and-markers.md#markers).
 
 `MF_PRIV_PROC` stays set on init's `mproc` seed (unkillable PID 1). That flag gates only the kill
 path — not fork, wait or getpid — so PM still serves init as an ordinary client.
@@ -513,11 +531,16 @@ Beyond the shared contracts above, the driver-specific rules:
   `irq.rs`'s `IrqService` runs the two-round TX delivery proof (`Proof`), then sets `RXIM | RTIM`,
   prints `rx on` and services receive for the rest of the boot (`Rx`); `Stopped` is a line left
   masked after a failure that has already been printed. A proof round that goes wrong prints `irq
-  FAIL bits=…` or `irq FAIL enable rc=…` and receive is never turned on. In the `Rx` phase a
-  notification that drains nothing is legal once — it is the price of acknowledging before draining
-  — but `RX_EMPTY_STORM` (64) **consecutive** empty ones print `rx FAIL storm` and the line is not
-  re-armed, and a refused re-arm prints `rx FAIL enable rc=…`. A byte that finds the 256-byte input
-  ring full is dropped (the newest is the one lost) and the first drop of a boot prints `rx
+  FAIL bits=…` or `irq FAIL enable rc=…`, receive is never turned on, and — since slice 6.6 — the
+  service enters `Stopped` (before, it stayed in `Proof`, and could print `irq ok` after an `irq
+  FAIL bits`). The transition is one pure function, `Phase::after(rearm)`, host-tested per cause,
+  and nothing leaves `Stopped`: `IrqService::can_receive` is `false` from then on, which is what
+  makes a read answer `EIO` (see
+  [the `CDEV_READ` contract](#a-character-driver-never-withholds-a-cdev_read-reply)). In the `Rx`
+  phase a notification that drains nothing is legal once — it is the price of acknowledging before
+  draining — but `RX_EMPTY_STORM` (64) **consecutive** empty ones print `rx FAIL storm` and the line
+  is not re-armed, and a refused re-arm prints `rx FAIL enable rc=…`. A byte that finds the 256-byte
+  input ring full is dropped (the newest is the one lost) and the first drop of a boot prints `rx
   overflow`. All of these are forbidden markers. 6.1's post-proof `irq FAIL extra` guard — every
   notification after the proof was a failure — is gone: it could not survive a line that is meant to
   keep firing. The storm guard is what would now report a line that keeps firing with nothing to
@@ -558,17 +581,27 @@ Beyond the shared contracts above, the driver-specific rules:
   [Fed boots](./build-and-boot.md#fed-boots))
 - **A driver that wakes a waiter does it after the re-arm**, so its line is live again before the
   waiter can come back with a request. In TTY that is why `IrqService::on_notify` only *reports*
-  that bytes arrived and `main` sends the `NOTIFY`
+  that bytes arrived and `main` sends the `NOTIFY`; in `virtio-console` it is why `on_interrupt`
+  returns what its two walks found and `service` sends the `NOTIFY` afterwards
 - **`pop_used` returning `Err(QueueFault)` ends the device, it is not an element to skip.** A fault
   is sticky — nothing was consumed, so popping again reports it again — so stop the walk, write
   `FAILED`, print one `virtio FAIL step=io …` line, leave the line masked, and answer `EIO` from
   then on. The same goes for anything else that leaves a request unanswerable: a `rearm` that fails
   (the next completion would never arrive, so the next request would hang) and a failed receive
-  while a request is in flight. 6.2's queue skipped a bad used element silently
+  while a request is in flight. 6.2's queue skipped a bad used element silently. **A used element
+  nobody was waiting for is a fault too, even when the queue itself accepts it**: `virtio-console`
+  ends its device on a `transmitq` completion for a head that is not the one in flight, and on a
+  `receiveq` completion while its one buffer is already held (`port.rs`'s `Fault`). And a
+  **character** driver that ends its device also sends its recorded waiter one `NOTIFY`, so a parked
+  reader's retry hears the `EIO`
 - **A driver waiting for its own completion receives from `HARDWARE` only**, blocked, never polling.
   The filter is what makes one-request-in-flight need no queue in the driver: a second client stays
-  a blocked sender in the kernel until the main loop receives again. The cost is stated, not hidden
-  — a device that never completes hangs the driver with its client behind it, nothing reports it (RS
+  a blocked sender in the kernel until the main loop receives again. **Every interrupt taken in that
+  wait goes through the driver's one handler**, not a cut-down copy of it: `virtio-console`'s
+  transmit wait walks `receiveq` as well as `transmitq`, so input that lands during a write is taken
+  and its waiter notified from inside the wait (VFS is mid-`SENDREC` to the driver then, and the
+  kernel keeps the notification for its next plain `RECEIVE`). The cost is stated, not hidden — a
+  device that never completes hangs the driver with its client behind it, nothing reports it (RS
   pings DS, VM, SCHED, VFS and PM, never a driver — the symptom is the marker set going missing
   behind a silent `vblk` and MFS), and there is no timeout because no user-space driver holds an
   alarm
@@ -578,10 +611,15 @@ Beyond the shared contracts above, the driver-specific rules:
   line. No bring-up step waits on a register or a ring; and a failed step prints its name (`virtio
   FAIL step=<step>`), abandons the rest, and leaves the driver in its receive loop, replying to
   every request rather than dropping it. A driver whose `SYS_GETINFO(GET_VIRTIO_MMIO)` answers
-  `ENOENT` has no device: it publishes nothing, prints `no device` and stays in its receive loop —
-  healthy, not a failure. The one thing that **does** belong in `init_fresh` is the DS publish,
-  decided by that same one kernel call and nothing that touches the device (see
-  [Block drivers](#block-drivers))
+  `ENOENT` has no device: it prints `no device` and stays in its receive loop, answering `ENXIO`.
+  For `vblk` that is healthy, not a failure; for `vcon` the line is forbidden, because the runner
+  attaches a console to every boot. The one thing that **does** belong in `init_fresh` is the DS
+  publish, and nothing in it touches the device. **Whether a driver without a device publishes is
+  decided by what a miss means to its client.** `vblk` publishes only when `GET_VIRTIO_MMIO`
+  assigned it a device, because MFS reads a miss as "no disk" (see [Block drivers](#block-drivers)).
+  `vcon` publishes unconditionally (slice 6.6, C4): nothing selects between consoles, so a miss
+  would carry no meaning, and with the name always there VFS's lookup keeps the ordinary rule — a
+  `boot_endpoint` fallback and a distinguishable line
 - **A virtio driver never exits and never execs.** Its DMA run is ordinary RAM that every
   address-space teardown frees while the device may still be writing to it; `do_exit` and `do_exec`
   halt the kernel for a process holding a virtio assignment until a device-reset path exists
@@ -590,9 +628,9 @@ Beyond the shared contracts above, the driver-specific rules:
   `VIRTIO_F_VERSION_1` requirement and the version-2-only refusal belong to its `Transport` and
   `negotiate`; a driver passes the optional features it wants and decides what a refusal means
 - **`driver-rt`'s `unsafe` is confined to `mmio.rs` (register accesses) and `dma.rs` (every access
-  to memory the device shares); keep `queue.rs`, `gpt.rs` and every driver's request path free of
-  it.** (`gpt.rs`, the partition-table parser added in 6.4, is pure: byte slices in, no I/O, no
-  `unsafe`, `checked_*` arithmetic throughout — see [Block drivers](#block-drivers).)
+  to memory the device shares); keep `queue.rs`, `gpt.rs`, `cdev.rs` and every driver's request path
+  free of it.** (`gpt.rs`, the partition-table parser added in 6.4, is pure: byte slices in, no I/O,
+  no `unsafe`, `checked_*` arithmetic throughout — see [Block drivers](#block-drivers).)
   `DmaRegion::new` is the one `unsafe` constructor — its contract is that the kernel-reported run
   stays mapped for the life of the process and that **no Rust reference to it ever exists**, since
   the device writes it too, and that the run is adopted **once**. Queue memory comes off the front
@@ -607,9 +645,13 @@ Beyond the shared contracts above, the driver-specific rules:
   address, notify.) Read the run before the split with `DmaRegion::peek`, which lends nothing. A new
   driver gets its buffers the same way and adds **one** `unsafe` block for the region, never a raw
   `(pa, len)` pair and never a `&mut [u8]` over the run — 6.2's queue held one, which was a contract
-  the driver could not keep once the queue outlived bring-up. What the handles do not buy: two data
-  buffers can still overlap each other (a logic bug: the device corrupts the driver's own data), and
-  none of it constrains a hostile driver — there is no IOMMU
+  the driver could not keep once the queue outlived bring-up. A driver with two queues calls
+  `split_queue` twice, on the region and then on its remainder, before it takes any buffer
+  (`virtio-console`'s `vcon_layout`). A transfer shorter than the buffer it is staged in chains
+  `DmaBuf::prefix(len)`, which can only narrow — a driver-to-device chain must carry exactly the
+  bytes to send. What the handles do not buy: two data buffers can still overlap each other (a logic
+  bug: the device corrupts the driver's own data), and none of it constrains a hostile driver —
+  there is no IOMMU
 - **`Transport::notify` carries its own barrier.** `MmioTransport::notify` issues a `SeqCst` fence
   before the `QueueNotify` write, so the store that published `avail.idx` is ordered before the
   device is told to look whatever the caller did in between. Do not rely on `VirtQueue::add`
@@ -737,8 +779,16 @@ them apart, and nothing asserts `CDEV_MINOR_*` against `BDEV_MINOR_*`. BDEV mino
 too: `memory` has minor 0 alone, and `virtio-blk` has the table under
 [Block drivers](#block-drivers).
 
-The four-field CDEV parse lives in **`server-rt::cdev`** now that two drivers decode it;
-**validation stays per driver**.
+**Two CDEV minors are both 0, on different drivers**: `CDEV_MINOR_CONSOLE` is TTY's and
+`CDEV_MINOR_HVC0` (slice 6.6) is `virtio-console`'s. The driver a descriptor names, never the minor
+value, tells them apart, and each has its own constant so that no reader takes one for the other —
+use the one that belongs to the driver being addressed.
+
+The four-field CDEV parse lives in **`server-rt::cdev`**, which every character driver uses.
+**Validation is shared by the drivers that serve exactly one minor and stage through `CDEV_MAX_IO`**
+— TTY and `virtio-console` call `driver-rt::cdev`'s `validate_read` / `validate_write(req, minor)`,
+each passing its own minor — and stays the memory driver's own, since it serves two minors and never
+clamps.
 
 **The memory driver never clamps.** `CDEV_MAX_IO` protects TTY's stack staging buffer and there is
 no staging here, so a null or zero write answers the whole count with **no copy at all** — an
@@ -778,32 +828,46 @@ process waiting on a keyboard would stop every file operation in the system. So 
   part is the kernel's, and the argument is false without it:
   [a pending notification is never the reply to a `SENDREC`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec).
 - **A wake-up `NOTIFY` that fails keeps the waiter.** It is the only wake-up a parked reader gets,
-  so TTY checks `ipc_notify`'s result: on anything but `OK` it records the waiter again, so the next
-  byte tries again, and prints `[diag tty] rx FAIL notify rc=…` once per boot — forbidden, under the
-  `[diag tty] rx FAIL` line. A reader left parked with nothing in the log would look exactly like
-  one nobody typed at.
+  so a driver checks `ipc_notify`'s result: on anything but `OK` it records the waiter again, so the
+  next arrival tries again, and prints `rx FAIL notify rc=…` once per boot — forbidden, under the
+  `[diag tty] rx FAIL` and `[diag vcon] rx FAIL` lines. A reader left parked with nothing in the log
+  would look exactly like one nobody typed at.
 - **A driver that answers `EAGAIN` without owing a `NOTIFY` hangs its reader**, silently: VFS parks
   on the answer, whoever gave it, and nothing else will ever retry the read. So a driver that cannot
-  deliver the notification must not say `EAGAIN`. TTY answers **`EIO`** when it failed to claim its
-  interrupt line at boot, because no byte can ever arrive. That is as far as the `EIO` goes: a
-  failed TX proof, `rx FAIL storm` and `rx FAIL enable` also end reception, and a reader then stays
-  parked for good — each behind a forbidden marker that already fails the boot (6.5's carried debt
-  in
-  [`phase-6-virtio.md`](../plans/phase-6-virtio.md#slice-65-tty-rx--pl011-receive-interrupt--cdev_read)).
+  deliver the notification must not say `EAGAIN`.
+- **A device that can deliver no more input answers `EIO`, and its driver wakes whoever is parked on
+  it** (slice 6.6, C9, which paid 6.5's first debt). `read_plan`'s third argument is `can_receive` —
+  whether input can still arrive. It is `false` for TTY when its interrupt claim was refused at boot
+  **or its line has stopped since** (a proof round gone wrong, `rx FAIL storm`, `rx FAIL enable`),
+  and for a virtio driver once it has marked its device `FAILED`; it is `true` for a device that is
+  merely not receiving *yet* (TTY during its delivery proof), where `EAGAIN` is still a promise the
+  driver can keep. Two halves, and the second is the one that is easy to leave out: answer `EIO` to
+  every later read, **and send the recorded waiter one `NOTIFY` on the transition**, because a
+  reader already parked would otherwise wait for an interrupt that can no longer come. Its retry
+  then hears the `EIO`. The wake-up is sent once — a stopped device never restarts — and both
+  drivers decide it in a pure function (`Phase::after` and `can_receive` in TTY's `irq.rs`,
+  `wake_due` in `virtio-console`'s `port.rs`). **`EIO` comes before the buffer**: bytes still
+  buffered when a device stops are not readable. No healthy boot reaches any of this and no mutation
+  QEMU can be made to produce does; it is held by host tests and by reading.
 - **`0` stays EOF** and is never sent for a non-zero request by a driver that can say `EAGAIN`. A
   **zero-length** read answers `0` *before the buffer is looked at* — never `EAGAIN` — and records
   no waiter, so it cannot be used to take the one notification. Validation runs before that, by
-  `CDEV_WRITE`'s rules in `CDEV_WRITE`'s order (TTY's two validators call one function), so a
-  zero-length read with a bad minor or grant id is still the error it is.
+  `CDEV_WRITE`'s rules in `CDEV_WRITE`'s order (`driver-rt::cdev`'s two validators call one
+  function), so a zero-length read with a bad minor or grant id is still the error it is.
 - **Peek, copy, then consume.** A copy the kernel refuses (`EPERM`, `EFAULT`, relayed verbatim)
   consumes nothing: the bytes are still owed to whoever asks next. TTY's ring has `peek` and
-  `consume` as two calls for exactly this. The two calls are host-tested; **their order in TTY's
-  `do_read` is not proved by anything** — no host test calls it and no boot refuses a copy with
-  bytes buffered — so it is a line to check by reading whenever that function changes.
+  `consume` as two calls for exactly this, and `virtio-console`'s `Rx` has `peek` and `advance`.
+  **In `virtio-console` the order is proved on every fed boot**: init's second proof child reads
+  `/dev/hvc0` into an unmapped address, hears `EFAULT`, and must then read the whole probe — a
+  driver that advanced before its copy returned comes up short and `hvc0 ok` is absent. **In TTY's
+  `do_read` it is still not proved by anything** — no host test calls it and no boot refuses a
+  console copy with bytes buffered — so it is a line to check by reading whenever that function
+  changes (the recipe is 6.6's debt 4 in
+  [`phase-6-virtio.md`](../plans/phase-6-virtio.md#slice-66-virtio-console-as-a-second-cdev-backend)).
 - **One waiter, not a queue; the last asker wins.** Every reader goes through VFS, so one endpoint
   to notify is the whole state. A second, different endpoint asking while one is recorded replaces
-  it, and the first would never be notified — unreachable while VFS is the only CDEV client of TTY,
-  pinned by a host test, and a debt the day a second client appears.
+  it, and the first would never be notified — unreachable while VFS is the only CDEV client of TTY
+  and of `virtio-console`, pinned by a host test, and a debt the day a second client appears.
 - **The bytes are raw.** No echo, no CR→LF, no erase, no line buffering: a line discipline without
   `termios` to turn it off is a policy with no way out. Echo arrives with 6.8 and canonical mode
   with Phase 7, both in `drivers/tty/src/input.rs`.
@@ -811,11 +875,48 @@ process waiting on a keyboard would stop every file operation in the system. So 
 The memory driver never answers `EAGAIN` — `/dev/null` and `/dev/zero` always have an answer — and
 so owes nobody a notification.
 
-**This is the contract 6.6 and 6.8 reuse** (R12, which turns phase decision H8's notify-then-pull to
-face both ways). `virtio-console` implements the driver side as written here; `virtio-input`
-implements it too, with TTY as the *caller* — on that driver's `NOTIFY`, TTY sends `CDEV_READ` until
-it hears `EAGAIN`. Design:
-[`2026-11-23-tty-rx-design.md`](../superpowers/specs/2026-11-23-tty-rx-design.md).
+**The pure half of this contract is `driver-rt::cdev`** (slice 6.6; it was
+`drivers/tty/src/cdev.rs`): `Waiter`, `ReadPlan` / `read_plan`, `read_len`, and `validate_read` /
+`validate_write(req, minor)`. TTY and `virtio-console` both call it, and each driver's `main` does
+what it decides; a third driver uses it rather than copying "record the waiter before answering
+`EAGAIN`" a third time. `virtio-input` (6.8) implements the driver side too, with TTY as the
+*caller* — on that driver's `NOTIFY`, TTY sends `CDEV_READ` until it hears `EAGAIN` (R12, which
+turns phase decision H8's notify-then-pull to face both ways). Designs:
+[`2026-11-23-tty-rx-design.md`](../superpowers/specs/2026-11-23-tty-rx-design.md) and
+[`2026-11-24-virtio-console-design.md`](../superpowers/specs/2026-11-24-virtio-console-design.md).
+
+### A second backend on the CDEV band
+
+What a character driver owes before VFS can route a node to it — the list `virtio-console` was
+written against (slice 6.6), and the one the next backend starts from:
+
+- **The read contract above, through `driver-rt::cdev`**, in its order: validate; a zero-length read
+  is `0`; a stopped device is `EIO`; nothing to give records the waiter and *then* answers `EAGAIN`;
+  otherwise peek, copy, and consume only after the copy returned `OK`.
+- **A write is copied in before the device is touched**, so a refused grant or an unmapped buffer is
+  relayed verbatim and nothing reaches the device; a zero-length write answers `0` and touches
+  nothing, broken device or not, so it cannot be used to probe a grant; a write longer than
+  `CDEV_MAX_IO` is a short write, which VFS's loop absorbs.
+- **The granter of every copy is the kernel-stamped `m_source`**, never a payload field.
+- **Exactly one minor, with its own named constant**, and `ENXIO` for any other.
+- **No working device is `ENXIO` for every request, decided before the request is parsed** — a
+  malformed one and a zero-length one included (`port::absent_reply`). A device that came up and
+  broke later is a different case: it exists, and says `EIO`.
+- **A DS name, and a decision about publishing without a device** (above).
+- **A `NOTIFY_MESSAGE` that is not from `HARDWARE` is dropped, never answered**, and every other
+  unknown `m_type` is answered `ENOSYS`.
+- **Backpressure belongs to the device when the device can apply it.** TTY has an input ring and an
+  overflow line because a UART cannot make its sender wait. A virtqueue can: `virtio-console` keeps
+  its one receive buffer *held* until a reader has drained it, the device has nowhere to put more
+  input, and the host's end of the chardev waits. So it has no ring, no `rx overflow` line and no
+  byte it can drop — and no storm guard, since `InterruptStatus` is cleared by the acknowledgement.
+  Do not add a ring to a driver whose device can be made to wait.
+
+And what VFS owes in the same change, each with a tripwire that fails until it is grown: a
+`CharDriver` variant (and its place in `CharDriver::ALL`), a row in the
+[device-node table](#the-device-node-table), a field and two `match` arms in `retry.rs`'s
+`CharPeers`, a side of `can_say_eagain`, and a DS lookup in the prologue —
+[after `grant_test`](#prologue-ordering).
 
 ## VFS
 
@@ -852,15 +953,48 @@ waited on:
   fresh magic grant and revokes it before the attempt ends, so a reader nobody types for costs no
   slot of `GRANT_SLOTS`.
 - **`rw::validate` still runs first**, so a malformed read is refused and never parked.
-- **Retry on the driver's notification, oldest first.** A `NOTIFY_MESSAGE` whose kernel-stamped
-  `m_source` is the console driver runs `retry_parked`: for each entry in sequence order, re-resolve
-  the descriptor, grant afresh, send `CDEV_READ`. Any answer but `EAGAIN` — a count or an error — is
-  sent as the reply to that reader's original `VFS_READ` and the entry is freed (freed *before* the
-  reply goes out). **`EAGAIN` stops the walk**: the driver is empty again and that refusal re-armed
-  its waiter, so asking for the readers behind would only collect the same answer. VFS therefore
-  never spins on `EAGAIN`, and a spurious notification costs one round.
-- **Never reply to a notification** — the console driver's or anyone else's. The check sits before
-  the request dispatch, so a `NOTIFY_MESSAGE` cannot fall into the `_ => ENOSYS` arm and have an
+- **Retry on the driver's notification, oldest first, and only that driver's readers** (per driver
+  since slice 6.6, C10). A `NOTIFY_MESSAGE` whose kernel-stamped `m_source` is a driver that can say
+  `EAGAIN` runs `retry_parked` on that driver's behalf. The entries are taken in sequence order and
+  `retry.rs`'s pure `step(notifier, resolved)` decides each from what its descriptor resolves to
+  *now*:
+  - `Step::Skip` — the descriptor is another driver's. The entry stays parked, untouched — no grant,
+    no request, no reply — and the walk moves past it.
+  - `Step::Ask` — it is the notifier's: grant afresh, send `CDEV_READ`, revoke. Any answer but
+    `EAGAIN` — a count or an error — is sent as the reply to that reader's original `VFS_READ` and
+    the entry is freed (freed *before* the reply goes out). **The first `EAGAIN` from the notifier
+    ends the walk**: that driver is empty again and the refusal re-armed its waiter, so asking for
+    its readers further back would only collect the same answer.
+  - `Step::Reply(EBADF)` — the descriptor is no longer a character device. Answered and freed on any
+    driver's walk.
+
+  VFS therefore never spins on `EAGAIN`, and a spurious notification costs one round — **per
+  driver**: a walk sends at most one `CDEV_READ` that is answered `EAGAIN`, and it goes to the
+  driver that notified.
+- **A notification speaks for its sender's input only.** 6.5's walk asked the oldest entry's driver,
+  whoever had notified, and stopped at the first `EAGAIN`. With one notifier that is the same thing.
+  With two it hangs: a reader parked on TTY ahead of one parked on `vcon` turns every `vcon`
+  notification into a question to TTY, an `EAGAIN`, and a return, and the `vcon` reader waits on
+  bytes its driver already holds. Widening the notifier check alone — which is all 6.5's R12 said
+  6.6 would need — produces exactly that.
+- **Walk with a cursor, not by removing the head.** `ParkTable::oldest_after(seq)` returns the
+  oldest entry strictly newer than `seq`; the walk keeps the sequence number of the last entry it
+  left parked and never looks at that entry, or anything older, again. Every pass frees the entry it
+  looked at, moves the cursor forward, or returns, so the walk terminates. A cursor must not be
+  carried across a `park` (parking can renumber); the walk runs to completion inside one pass of the
+  receive loop, where nothing parks. `ParkTable::oldest` is test-only now.
+- **Which driver an entry belongs to is not stored.** The descriptor is re-resolved at every retry,
+  and a second copy of the answer in the entry could disagree with it. One table serves every
+  driver, indexed by proc slot — which is what makes it unable to fill.
+- **The notifier set is `CharPeers::notifier`, not a comparison in `main.rs`.** `CharPeers`
+  (`retry.rs`) holds the character drivers' endpoints, resolved once in the prologue;
+  `CharPeers::endpoint(dev)` is the one place a `CharDriver` becomes an address (it replaced
+  `main.rs`'s `cdev_endpoint`), and `notifier(source)` compares the whole endpoint, generation
+  included, against the drivers `can_say_eagain` admits — TTY and `vcon`, not the memory driver,
+  whose notification is dropped like a stranger's. `can_say_eagain` has no wildcard arm, so a new
+  driver must be placed on one side or the other.
+- **Never reply to a notification** — a console driver's or anyone else's. The check sits before the
+  request dispatch, so a `NOTIFY_MESSAGE` cannot fall into the `_ => ENOSYS` arm and have an
   unasked-for message sent at a driver — which does not fail the boot, it quietly ruins it (the
   hazard under [Always reply](#always-reply)). A notification from any other source is dropped.
   (RS's heartbeat never gets that far: `sef.receive` answers it.)
@@ -877,16 +1011,25 @@ waited on:
 - **The table is a `main`-frame value handed down by `&mut`**, the `GrantPool` arrangement, not an
   `UnsafeCell` static like `fd.rs` — which is what keeps `park.rs` free of `unsafe` and its host
   tests single-owner.
-- **The notifier check is one endpoint today**: `m_source == tty`, the DS-resolved endpoint VFS
-  already holds. 6.6 widens it to the set of character drivers; `park.rs` does not change.
 
-Three markers, all VFS's because nothing outside VFS can know any of them: `[diag vfs] cons.notify
-ok` for the first notification of a boot that reaches the receive loop from the console driver,
-`[diag vfs] cons.park` at the first park, and `[diag vfs] cons.beside ok` the first time a file read
-that made a real `FS_READ` round trip completes while a read is parked. The first is TTY's
+Four markers, all VFS's because nothing outside VFS can know any of them: `[diag vfs] cons.notify
+ok` for the first notification of a boot that reaches the receive loop **from TTY**, `[diag vfs]
+cons.park` at the first park, `[diag vfs] cons.beside ok` the first time a file read that made a
+real `FS_READ` round trip completes while a read is parked, and — since slice 6.6 — `[diag vfs]
+cons.other ok` the first time one walk passes over a read parked on another driver and then has a
+real `CDEV_READ` answer for one of the notifier's behind it. The first is TTY's
 [notify probe](#writing-probes-and-denial-batteries) arriving, before anything is parked, and proves
-a kernel rule rather than anything about parking. The last is ordered, not synchronised — see
-[Fed boots](./build-and-boot.md#fed-boots).
+a kernel rule rather than anything about parking; it stays keyed to TTY, whose probe arranges it,
+and a notification from `vcon` prints nothing there. `cons.beside ok` is ordered, not synchronised —
+see [Fed boots](./build-and-boot.md#fed-boots). `cons.other ok` is a **fed** boot's line, and it
+proves that a pass-over happened at *some* `vcon` walk, not which child parked first: were the
+`/dev/hvc0` reader the older of the two, the first walk would answer it with nothing passed over,
+its next read would park behind the `read(0)` reader, and the second chunk's walk would print the
+line anyway. init's fork order makes the first walk the one that does it, and the feeder keeps a
+serial reader parked throughout by not feeding the serial console until `hvc0 ok` is in the log. An
+`EBADF` step or a grant errno behind the pass-over does not earn the line — it is about the notifier
+being *asked*. The pass-over's flag (`retry::Walk`) is made fresh for each notification, so the
+claim is about one walk.
 
 ### Grants on the write path
 
@@ -909,7 +1052,10 @@ because the kernel's page-table walk answers `EFAULT` regardless (slice 5.4 — 
 - `Fd::File { ino, pos }` carries **no cached size** — EOF is `n == 0`, one source of truth, and a
   cached size is exactly what a write path would invalidate.
 - `Fd::CharDev { dev: CharDriver, minor }` names its driver with an **enum, not an `Endpoint`**,
-  because `DEFAULT_ROW` is a `const`.
+  because `DEFAULT_ROW` is a `const`. `CharDriver` has three variants — `Tty`, `Memory`, `Vcon` —
+  and `CharDriver::ALL` lists them once each; iterate that instead of naming drivers in a table or a
+  test. Its tripwire is a `match` with no wildcard, so a new variant does not compile until it is
+  given a place and the test fails until `ALL` has grown.
 - Storage is an interior-mutable `UnsafeCell<[FdRow; N]>` newtype (the `vm/region.rs` shape),
   **whose rule is never hold a table borrow across a SENDREC**. `Fd` is `Copy`, so the borrow dies
   at the destructuring `let`.
@@ -922,11 +1068,15 @@ because the kernel's page-table walk answers `EFAULT` regardless (slice 5.4 — 
 
 ### The device-node table
 
-`servers/vfs/src/dev.rs` is a three-row device-node table consulted **after the path copy and before
-the mount** — a device open needs no filesystem. `O_CREAT`/`O_TRUNC` are ignored on a hit, the match
-is exact bytes (there is no `/dev` on the image), and `/dev/other` falls through to MFS's `ENOENT`.
-Paths are `callnr::DEV_*_PATH` so clients and VFS cannot drift (slice 5.11 — see
-[phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+`servers/vfs/src/dev.rs` is a four-row device-node table — `/dev/console` (TTY, minor 0),
+`/dev/null` and `/dev/zero` (the memory driver, minors 3 and 5) and, since slice 6.6, `/dev/hvc0`
+(`virtio-console`, `CDEV_MINOR_HVC0`) — consulted **after the path copy and before the mount** — a
+device open needs no filesystem. So `open("/dev/hvc0")` succeeds whatever state the driver is in,
+and the first `read` or `write` hears its answer. `NR_DEV_NODES` and the "uses every driver" test
+are the tripwires: the test iterates `CharDriver::ALL`, so a driver with no node fails it.
+`O_CREAT`/`O_TRUNC` are ignored on a hit, the match is exact bytes (there is no `/dev` on the
+image), and `/dev/other` falls through to MFS's `ENOENT`. Paths are `callnr::DEV_*_PATH` so clients
+and VFS cannot drift (slice 5.11 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
 
 ### Open flags and dispatch
 
@@ -969,6 +1119,31 @@ VFS's probe batteries run in a fixed order in `main`'s prologue, each new one ap
 retired BDEV demo, then `fs.deny`, then `mem.deny`), so that a hang localizes to the newest battery
 instead of blacking out every earlier slice's markers. **Do not tidy the prologue into alphabetical
 order** (slices 5.7 and 5.11 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+
+**`grant_test` comes first — before every blocking call in the prologue, the DS lookups included**
+(slice 6.6). It is VFS's one `ipc_send` to PM, and PM `SENDREC`s VFS (`VFS_PM_EXIT`) as soon as a
+user process dies. If PM is already blocked there when VFS sends, the kernel's cycle check refuses
+the send rather than deadlock, and PM's four grant lines — `grant.test ok`, `copy ok`, `magic ok`,
+`grant.deny ok` — never print. Every blocking call ahead of the send is a window in which a process
+can run and die, and the boot stubs supply one that does: stub D faults by design. Slice 6.6 added a
+fourth DS lookup ahead of `grant_test` and lost the race on 3 stubs-on boots of 3. So:
+
+- `grant_test` stays the first thing `main` does after building its grant pool; a new lookup, probe
+  or peer goes **after** it.
+- Its send result is checked and printed — `[diag vfs] grant.test FAIL send rc=…`, forbidden — so a
+  refusal names itself instead of leaving four of PM's markers missing with nothing to say why.
+  **Never discard the result of a send whose failure silences another server's markers.**
+- This is an ordering fix, not a retry: a stub that faulted before VFS's first instruction after
+  `sef_startup` would still win. The forbidden line is what would say so.
+
+**Anything verified only on stub-free boots has not been verified.** Tasks 2 to 4 of slice 6.6 —
+VFS's node and walk, the driver's pure half, and the driver itself — were verified stub-free, and
+the defect above, which Task 2 introduced, stayed in the tree through all three: no stub, no early
+death, no race. Task 5's first stubs-on boot found it. The stub-free config is for iterating and for
+mutations judged by one marker
+([`testing-and-markers.md`](./testing-and-markers.md#mutation-testing)); a change to a server's
+prologue, to its lookups, or to anything that shifts when a server first blocks is not verified
+until a **default (stubs-on) boot has passed `check-boot-log.sh`**.
 
 ## MFS
 
@@ -1117,8 +1292,9 @@ A server's probe battery is how these rules stay proved. The rules for writing o
   the probe's premise had become a fact about one disk image instead of about the driver. The
   constant is `i32::MAX`, and each block driver holds it outside its own minors at compile time
   (`virtio-blk`'s `part.rs`, `server-rt`'s `bdev`), so a table that grows to reach it fails the
-  build. The CDEV probes still use a literal 7; they are a different namespace with two fixed
-  tables, and owe the same treatment the day one of them grows.
+  build. The CDEV probes still use a literal 7; they are a different namespace with three small
+  fixed tables (TTY's, the memory driver's and, since 6.6, `virtio-console`'s, which no probe is
+  aimed at), and owe the same treatment the day one of them grows.
 - **Never aim a "must be refused" probe at a file or block whose accidental write would destroy
   something**, and retire a probe visibly — decrement the `n=` in its marker so the retirement is a
   diff rather than a deletion nobody reviews.
@@ -1158,4 +1334,7 @@ A server's probe battery is how these rules stay proved. The rules for writing o
 Report through the path under test where that is what is being proved: a client's write proof must
 be written **through** the descriptor under test (e.g. `/dev/console`, never fd 1), because the
 descriptor is the only thing that proves the table row points where it claims (slices 5.8, 5.10a,
-5.10b and 5.11 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)).
+5.10b and 5.11 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)). The verdict goes the other
+way when the path under test is a *second* console: init's `/dev/hvc0` child writes its line through
+that descriptor — the host reads it off the second chardev — and prints `hvc0 ok` on fd 1, the
+serial console, because the marker files are checked against the serial log (slice 6.6).

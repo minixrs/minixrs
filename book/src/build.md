@@ -71,11 +71,11 @@ HHDM offset: 0xffff000000000000
 
 The root `Cargo.toml` declares every crate as a workspace member: `kernel`, `kernel-shared`,
 `minixrs-ipc`, `minixrs-abi-note`, `server-rt`, the six `servers/*`, `drivers/{driver-rt,tty,memory,
-virtio-blk}` and `fs/mfs`, `userland/{init,worker,bigprog}`, the umbrella crate `minixrs`, and the
-three host tools `tools/{gen-c-headers,mkfs-mfs,mkimage}`. Five more members are still empty stubs:
-`drivers/virtio-console`, `drivers/virtio-net`, `fs/pfs`, `userland/sh` and `userland/coreutils`.
-The C programs `userland/hello` and `userland/fileio` are not Cargo members; `kernel/build.rs`
-builds them.
+virtio-blk,virtio-console}` and `fs/mfs`, `userland/{init,worker,bigprog}`, the umbrella crate
+`minixrs`, and the three host tools `tools/{gen-c-headers,mkfs-mfs,mkimage}`. Four more members are
+still empty stubs: `drivers/virtio-net`, `fs/pfs`, `userland/sh` and `userland/coreutils`. The C
+programs `userland/hello` and `userland/fileio` are not Cargo members; `kernel/build.rs` builds
+them.
 
 The kernel builds against the **builtin `aarch64-unknown-none` target** — not a custom JSON spec.
 `.cargo/config.toml` wires the details:
@@ -313,8 +313,8 @@ some sharp edges worth knowing:
   on the ramdisk). Update the marker files in the same change when trace formats or the boot roster
   shift.
 - **Feeding the console.** See [the next section](#feeding-the-console): a full boot that was not
-  fed fails exactly one required line, `minix.rs init: stdin ok n=15`, and that is the feeder
-  missing, not a regression.
+  fed fails exactly three required lines — `[diag vfs] cons.other ok`, `minix.rs init: hvc0 ok n=17`
+  and `minix.rs init: stdin ok n=15` — and that is the feeder missing, not a regression.
 - **Quiet the stubs.** Stub C's `SYS_GETINFO` loop dominates the `[ipc]`/`[ksys]` sample stream.
   When you're chasing a server or init/musl issue, boot `--no-default-features` to drop the demo
   stubs A–D entirely (see [Boot stubs](#boot-stubs-boot-stubs-feature)) — the trace then shows only
@@ -325,43 +325,73 @@ some sharp edges worth knowing:
 
 QEMU runs with `-serial stdio`, so the boot's standard input is the PL011's receive side, and since
 slice 6.5 something reads it: a child of `init` blocks in `read(0)` and reports what arrives
-([Drivers](drivers/overview.md#what-the-boot-log-proves) has the whole path). A boot that is to pass
-`tools/check-boot-log.sh` is therefore given its input by `tools/feed-console.sh`:
+([Drivers](drivers/overview.md#what-the-boot-log-proves) has the whole path). Since slice 6.6 there
+is a second console, `/dev/hvc0`, whose host side is
+[a pair of FIFOs](boot/overview.md#the-second-console), and a second child of `init` that writes to
+it and reads from it ([Drivers](drivers/overview.md#the-proof-on-a-fed-boot)). A boot that is to
+pass `tools/check-boot-log.sh` is therefore given its input on both by `tools/feed-console.sh`:
 
 ```sh
 MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
   < <(tools/feed-console.sh disk.log) > disk.log 2>&1
 ```
 
-The script is the boot's stdin and is pointed at the log the same boot is writing. It polls that log
-for `[diag vfs] cons.beside ok` — VFS's line saying it served a file read while a console read was
-parked — and then writes `minix.rs stdin` and a newline, and exits. It is a process substitution
-rather than a pipe so that the shell does not wait for it and the command's exit status is still
-`timeout`'s.
+The script is the boot's stdin and is pointed at the log the same boot is writing. It is a process
+substitution rather than a pipe so that the shell does not wait for it and the command's exit status
+is still `timeout`'s. It works in four stages, the second console first:
 
-The fifteen bytes go out in **two pieces**: the first nine, a three-second pause, then the rest
-(`SPLIT` and `GAP` in the script). Bytes written together arrive at TTY as a single interrupt, and a
-probe that needs only one interrupt cannot tell a driver that re-arms its interrupt line from one
-that does not. The second piece needs a second interrupt, so `stdin ok` appears only if the line was
-re-armed after the first. The pause is a guess rather than a measurement — if the two pieces ever
-arrived together the boot would still pass, with that one property unproved — so leave it generous,
-and feed a boot by hand the same way if what is being tested is the receive path.
+1. It reads `target/hvc0.out` until the guest's own line, `minix.rs hvc0 out`, has come out of it.
+   That is the guest-to-host direction, seen on the host. The firmware's boot text is on the same
+   port, so the line is looked for as a substring of everything read so far.
+2. It waits a few seconds (`SETTLE`), then writes `minix.rs hvc0 in` and a newline — seventeen bytes
+   — to `target/hvc0.in`.
+3. It polls the serial log for **both** `[diag vfs] cons.beside ok` — VFS's line saying it served a
+   file read while a console read was parked — and `minix.rs init: hvc0 ok`, the second child's
+   verdict on stage 2.
+4. It writes `minix.rs stdin` and a newline — fifteen bytes — to its standard output, which is
+   QEMU's serial port, and exits.
 
-Waiting for a line in the log, rather than for a delay, does two jobs. It makes the proof causal:
-the reading process cannot be woken before VFS has been seen serving somebody else beside it. And it
+Each probe goes out in **two pieces**: the first nine bytes, a three-second pause, then the rest
+(`SPLIT` and `GAP` in the script). Bytes written together arrive at a driver as a single interrupt,
+and a probe that needs only one interrupt cannot tell a driver that re-arms its interrupt line from
+one that does not. The second piece needs a second interrupt, so `stdin ok` appears only if TTY
+re-armed its line after the first — and `hvc0 ok` only if the virtio console driver re-armed *and*
+gave its one receive buffer back to the device. The pauses are guesses rather than measurements — if
+two pieces ever arrived together the boot would still pass, with that one property unproved — so
+leave them generous, and feed a boot by hand the same way if what is being tested is a receive path.
+`SETTLE` is the same kind of guess: it gives the second child's read time to be parked inside VFS
+before the bytes arrive, which is the case the read exists to exercise.
+
+**The serial console is fed only after the second console's proof has passed.** That is deliberate:
+it keeps the `read(0)` reader parked for the whole of the `hvc0` exchange, so that VFS can be seen
+passing over it to answer the other reader (`[diag vfs] cons.other ok`). The price is a coupling — a
+boot whose virtio console is broken loses `stdin ok` as well as `hvc0 ok`. The three fed lines
+appear in the order `cons.other ok`, `hvc0 ok n=17`, `stdin ok n=15`; read the first one missing.
+
+Before stage 1 the script **empties both FIFOs** if they already exist. A pipe can still hold an
+earlier boot's bytes after QEMU has exited, and an old copy of the guest's line would make the
+feeder answer a machine that is still in its firmware. That is safe only because the script starts
+with the boot command; started against a boot that is already running, it may throw the guest's line
+away and then never feed.
+
+Waiting for lines in the log, rather than for a delay, does two jobs. It makes the proof causal: the
+reading process cannot be woken before VFS has been seen serving somebody else beside it. And it
 keeps the bytes away from the boot loader — anything on stdin before the kernel starts is consumed
-by the firmware or Limine and never reaches TTY. The script wants to see the line on two polls in a
-row, because the log path is usually one an earlier boot wrote and the shell starts the script an
-instant before truncating it.
+by the firmware or Limine and never reaches TTY. The script wants to see stage 3's lines on two
+polls in a row, because the log path is usually one an earlier boot wrote and the shell starts the
+script an instant before truncating it.
 
-- If the line never appears the script gives up after `FEED_CONSOLE_CEILING` seconds (1800 by
-  default) having written nothing. CI sets 1300 for its 1200 s boots.
+- If a line it waits for never appears the script gives up `FEED_CONSOLE_CEILING` seconds after it
+  started (1800 by default), whichever stage it is in. CI sets 1300 for its 1200 s boots. It also
+  gives up as soon as QEMU closes `target/hvc0.out`, since nothing more can arrive.
+- `MINIXRS_HVC0=<base>` moves the FIFO pair for the runner and the script alike.
 - Closing QEMU's stdin is harmless — QEMU carries on at EOF — so the script does not linger once it
   has written.
-- The string the script sends and the one `init` expects are two copies; a host test in
-  `userland/init` reads the script and fails if they differ.
-- An **unfed** boot is healthy and prints everything except `stdin ok`; the reader stays parked. The
-  reboot of a disk image is run unfed, since its marker set needs no input.
+- The strings the script sends and waits for and the ones `init` holds are copies; a host test in
+  `userland/init` reads the script and fails if any differs.
+- An **unfed** boot is healthy and prints everything except `cons.other ok`, `hvc0 ok` and `stdin
+  ok`; both readers stay parked. The reboot of a disk image is run unfed, since its marker set needs
+  no input.
 - A boot run by hand with a terminal attached delivers whatever is typed to that same reader, which
   will almost certainly print `stdin FAIL` — correct, and harmless outside a checked boot. Nothing
   is echoed: the console has no line discipline yet.

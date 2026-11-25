@@ -156,6 +156,22 @@ Slice 6.5 gave one reply value on the CDEV band a defined meaning, and moved not
 
 (slice 6.5 — see [the design](../superpowers/specs/2026-11-23-tty-rx-design.md))
 
+Slice 6.6 added a second character device and, again, moved nothing:
+
+- **Two new names in `kernel-shared`'s `callnr.rs`: `DEV_HVC0_PATH` (`"/dev/hvc0"`) and
+  `CDEV_MINOR_HVC0` (0).** The minor is 0 in `virtio-console`'s own namespace — equal to
+  `CDEV_MINOR_CONSOLE`, which is TTY's, and meant to be: minors are per driver, and the constant has
+  its own name so that no reader takes one for the other.
+- **Neither is emitted into the generated C headers** (6.6's C13). No C program opens the node —
+  init is Rust — and a constant nobody consumes is better absent than frozen. The headers were
+  diffed before and after the change and are byte-identical, so the musl fork did not move. Adding
+  them later is two `define`s and still additive.
+- **No `Message` layout, call number, endpoint or errno value changed.** `virtio-console` answers
+  `CDEV_READ` and `CDEV_WRITE` as they were already defined, `EAGAIN` contract included, and
+  `NR_CDEV_MSGS` is unmoved.
+
+(slice 6.6 — see [the design](../superpowers/specs/2026-11-24-virtio-console-design.md))
+
 ## Grant ABI (D4)
 
 `kernel-shared/src/grant.rs` defines the cross-address-space copy ABI: a flat `#[repr(C)]`
