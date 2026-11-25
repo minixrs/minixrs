@@ -1906,15 +1906,20 @@ fn reply(target_e: Endpoint, msg: &mut Message, m_type: i32) {
 /// ignores the payload, which is exactly its anti-spoof property.
 ///
 /// `ipc_send` blocks until PM's receive loop picks the message up, so the demo
-/// is self-synchronizing — no assumption is made about the two servers' SEF init
-/// ordering. There is no cycle, but the reason is narrower than it used to be:
-/// slice 5.9 made PM a *client* of VFS (`VFS_EXEC_STAGE`), so "PM never sends to
-/// VFS" is no longer true. What holds instead is that this send is confined to
-/// VFS's **prologue**, which runs before its receive loop and before PM can have
-/// served a `PM_EXEC` — and PM's own prologue only SENDRECs DS. The standing rule
-/// is therefore: nothing VFS does *inside its receive loop* may send to PM, or a
-/// PM blocked in `VFS_EXEC_STAGE` and a VFS blocked replying to PM would
-/// deadlock.
+/// needs no assumption about the two servers' SEF init ordering. It does need
+/// one about **PM not already waiting on VFS**. Slice 5.9 made PM a client of
+/// VFS (`VFS_EXEC_STAGE`, and `VFS_PM_EXIT` on every exit), and a PM blocked in
+/// either SENDREC when this send arrives is a cycle, which the kernel refuses
+/// rather than deadlocks. No `PM_EXEC` can precede the prologue, but an exit
+/// can: a boot stub that faults while VFS is blocked on DS. So `main` calls this
+/// **before its DS lookups** (slice 6.6 — a fourth lookup made the stub win
+/// every time), and a refused send is printed, never discarded.
+///
+/// That narrows the window; it does not close it. `sef_startup`'s own publish
+/// to DS is a blocking call ahead of this one, and a process that died during
+/// it would still win — the boot then fails on the forbidden
+/// `grant.test FAIL send` line, which names the cause. The standing rule is
+/// unchanged: nothing VFS does *inside its receive loop* may send to PM.
 ///
 /// The buffer's raw address rides along too, so PM can read the same bytes a
 /// second time with the ungranted `SYS_COPY` and compare.

@@ -340,6 +340,11 @@ MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch6
   or they share one console. Something that is not a FIFO at either path is refused, by the runner
   (exit 73) and by the feeder (exit 1), never replaced. Nobody has to be on either end: QEMU starts
   with no peer, and a guest write with no reader completes, so an unfed boot is unaffected.
+- **One feeder per FIFO pair.** A fed boot whose build fails never starts QEMU, so nothing closes
+  the FIFO under its feeder, which then waits out its ceiling. Two readers on one FIFO split the
+  guest's line, and the old feeder could take the next boot's. Each feeder therefore writes its pid
+  to `<base>.feeder` and kills the feeder it finds named there (checked by command line, so a
+  recycled pid is not signalled), saying so on stderr. Found by the slice's review, not by a boot.
 - **The feeder empties both FIFOs before it looks at them — the stale-bytes drain.** A pipe is not
   emptied when QEMU exits: on macOS about 826 bytes of an unread boot — the firmware's text and the
   guest's line — were still in `.out` afterwards with no process holding it. Left there, the next

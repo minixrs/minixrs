@@ -135,10 +135,12 @@ pm`, plus `vcon < vfs` since slice 6.6 — and it is satisfied only by array pos
 `kernel/build.rs`, so that a server is in its receive loop before its first client looks it up
 (slice 5.8 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md)). `vcon` (proc 12) is packed
 directly after `vblk`; all its place has to satisfy is `vcon < vfs`, and that link has the ordinary
-fallback behind it: a `vcon` row moved after `vfs` prints `vcon.ds FAIL … fallback=…` (forbidden)
-and nothing else moves. The `vblk < mfs` link is the one with **no fallback line behind it**: MFS
-reads a missing `vblk` as "no virtio-mmio disk attached" and mounts the ramdisk without a word, so a
-`vblk` that had not published when MFS looked would give a ramdisk root, not a FAIL line. Only the
+fallback behind it: a `vcon` lookup that misses prints `vcon.ds FAIL … fallback=…` (forbidden) and
+nothing else moves. **No boot polices that link**, though: with the row moved after `vfs` the lookup
+still succeeded (6.6's mutation 10), because it is VFS's fourth blocking call and `vcon` has
+published by then. The `vblk < mfs` link is the one with **no fallback line behind it**: MFS reads a
+missing `vblk` as "no virtio-mmio disk attached" and mounts the ramdisk without a word, so a `vblk`
+that had not published when MFS looked would give a ramdisk root, not a FAIL line. Only the
 per-backend marker pairs catch it, and since slice 6.4 both do: the disk boot requires `bdev.ds ok
 name=vblk` and forbids `name=memory`, and the ramdisk boot requires the `bdev.root vblk rc=-6
 fallback=memory` line, which MFS prints only after finding `vblk` (slices 6.3 and 6.4 — see
@@ -1020,12 +1022,14 @@ real `CDEV_READ` answer for one of the notifier's behind it. The first is TTY's
 a kernel rule rather than anything about parking; it stays keyed to TTY, whose probe arranges it,
 and a notification from `vcon` prints nothing there. `cons.beside ok` is ordered, not synchronised —
 see [Fed boots](./build-and-boot.md#fed-boots). `cons.other ok` is a **fed** boot's line, and it
-proves an arrangement as well as the walk: were the `/dev/hvc0` reader the older of the two, the
-walk would have nothing to pass over and the boot would print `hvc0 ok` without ever exercising the
-pass-over. init's fork order arranges it and the feeder keeps it so, by not feeding the serial
-console until `hvc0 ok` is in the log. An `EBADF` step or a grant errno behind the pass-over does
-not earn the line — it is about the notifier being *asked*. The pass-over's flag (`retry::Walk`) is
-made fresh for each notification, so the claim is about one walk.
+proves that a pass-over happened at *some* `vcon` walk, not which child parked first: were the
+`/dev/hvc0` reader the older of the two, the first walk would answer it with nothing passed over,
+its next read would park behind the `read(0)` reader, and the second chunk's walk would print the
+line anyway. init's fork order makes the first walk the one that does it, and the feeder keeps a
+serial reader parked throughout by not feeding the serial console until `hvc0 ok` is in the log. An
+`EBADF` step or a grant errno behind the pass-over does not earn the line — it is about the notifier
+being *asked*. The pass-over's flag (`retry::Walk`) is made fresh for each notification, so the
+claim is about one walk.
 
 ### Grants on the write path
 

@@ -243,6 +243,8 @@ FIFO_IN="$HVC0_BASE.in"
 # Everything read from <base>.out so far, and the `cat` that is reading it.
 CAPTURE=""
 CAT_PID=""
+PIDFILE="$HVC0_BASE.feeder"
+CLAIMED=""
 
 # shellcheck disable=SC2329  # invoked by the EXIT trap below
 cleanup() {
@@ -252,6 +254,10 @@ cleanup() {
     fi
     if [[ -n "$CAPTURE" ]]; then
         rm -f -- "$CAPTURE"
+    fi
+    # Only our own claim: a newer feeder that retired us has overwritten it.
+    if [[ -n "$CLAIMED" && "$(cat -- "$PIDFILE" 2>/dev/null)" == "$$" ]]; then
+        rm -f -- "$PIDFILE"
     fi
 }
 trap cleanup EXIT
@@ -324,6 +330,28 @@ has_line() {
 }
 
 SECONDS=0
+# One feeder per FIFO pair. An earlier one may still be waiting on this pair --
+# its boot never started (a failed build), so nothing ever closed the FIFO
+# under it -- and two readers on one FIFO split the guest's line between them:
+# the old one could take it, feed a machine it knows nothing about, and leave
+# this one waiting for good. Retire it. The pid file holds the pid of the
+# feeder that claimed the pair; the command-line check keeps a recycled pid
+# from being signalled. Best effort where the directory is missing: the claim
+# is skipped and the script carries on as it always did.
+if [[ -d "$(dirname -- "$PIDFILE")" ]]; then
+    OLD="$(cat -- "$PIDFILE" 2>/dev/null || true)"
+    if [[ "$OLD" =~ ^[0-9]+$ && "$OLD" != "$$" ]] &&
+        ps -p "$OLD" -o command= 2>/dev/null | grep -q 'feed-console\.sh'; then
+        echo "feed-console: retiring an earlier feeder (pid $OLD) still waiting on $HVC0_BASE" >&2
+        kill "$OLD" 2>/dev/null || true
+        # Give its trap time to stop its own `cat` before ours opens the FIFO.
+        sleep 0.2
+    fi
+    if echo "$$" >"$PIDFILE" 2>/dev/null; then
+        CLAIMED=1
+    fi
+fi
+
 CAPTURE="$(mktemp "${TMPDIR:-/tmp}/feed-console.XXXXXX")"
 
 # ---- Before anything: empty the FIFOs an earlier boot left behind. ---------

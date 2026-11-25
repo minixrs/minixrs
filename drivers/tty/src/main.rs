@@ -207,16 +207,17 @@ fn main() -> ! {
             // The kernel writes the word little-endian; `rd_i32` reads native,
             // which on aarch64 is the same thing.
             let bits = rd_i32(&msg, NOTIFY_IRQ_PENDING_OFF) as u32;
-            // `stopped` is this notification ending reception: the service
-            // could receive before handling it and cannot after. That happens
-            // at most once a boot, since a stopped line never restarts.
-            let (arrived, stopped) = match irq_service.as_mut() {
+            // The line stopping is this notification ending reception: the
+            // service could receive before handling it and cannot after. That
+            // happens at most once a boot, since a stopped line never restarts.
+            // `cdev::wake_due` folds it with arrival into one decision.
+            let wake = match irq_service.as_mut() {
                 Some(service) => {
-                    let could_receive = service.can_receive();
+                    let was_stopped = !service.can_receive();
                     let arrived = service.on_notify(bits, &mut ring);
-                    (arrived, could_receive && !service.can_receive())
+                    cdev::wake_due(arrived, was_stopped, !service.can_receive())
                 }
-                None => (false, false),
+                None => false,
             };
             // Input arrived: tell whoever was refused with `EAGAIN` to ask
             // again — once, then forget them (spec R1). The line stopping is
@@ -229,9 +230,7 @@ fn main() -> ! {
             // it until its next plain `RECEIVE` — never as the reply to a
             // SENDREC (spec R9). With nobody waiting the bytes simply
             // stay in the ring for the next `CDEV_READ`.
-            if (arrived || stopped)
-                && let Some(who) = waiter.take()
-            {
+            if wake && let Some(who) = waiter.take() {
                 let rc = ipc_notify(who);
                 if rc != OK {
                     // The only wake-up a parked reader gets did not go out.

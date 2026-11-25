@@ -138,16 +138,10 @@ pub const fn absent_reply(up: bool) -> Option<i32> {
     if up { None } else { Some(ENXIO) }
 }
 
-/// Whether the recorded waiter is owed its `NOTIFY` now (spec C6, C9).
-///
-/// `input` is [`Irq::input`] for the event just handled. `was_broken` and
-/// `broken` are the device's state before and after it: the transition is what
-/// counts, so a reader parked on a device that stops is woken once — its retry
-/// then hears `EIO` instead of waiting for an interrupt that cannot come — and
-/// nothing is sent for a device that was already broken.
-pub const fn wake_due(input: bool, was_broken: bool, broken: bool) -> bool {
-    input || (broken && !was_broken)
-}
+/// Whether the recorded waiter is owed its `NOTIFY` now (spec C6, C9): the
+/// decision both character drivers share, with `broken` as this driver's
+/// "stopped".
+pub use minixrs_driver_rt::cdev::wake_due;
 
 /// Bytes one `CDEV_WRITE` moves: `want`, capped at the transmit buffer. A longer
 /// write is a short write, and the caller's loop re-sends the rest.

@@ -1165,9 +1165,9 @@ so it has no field it may read (C3).
   stub-free boot printed none of the three and no `FAIL`. The spec's §3 table and the plan had `hvc0
   ok` first; VFS prints `cons.other ok` at the first chunk's walk, when the answer behind the
   passed-over serial reader is the `EFAULT`.
-- *The marker count.* The files as committed hold 190 checks for each full boot (122 + 55 common, 8
-  - 5 per backend) and still 7 for the reboot: nine expected and seven forbidden lines were added to
-    the common pair.
+- *The marker count.* The files as committed hold 190 checks for each full boot (122 expected and 55
+  forbidden in the common pair, 8 and 5 per backend) and still 7 for the reboot: nine expected and
+  seven forbidden lines were added to the common pair.
 - *The fork-cycle markers moved a slot again.* init's first two forks are its proof children, so the
   `read(0)` child holds slot 19, the `/dev/hvc0` child slot 20, and the rotation's first `worker`
   runs in slot 21; the common expected file gained a third `SYS_FORK … child_nr=21` line.
@@ -1198,7 +1198,31 @@ so it has no field it may read (C3).
   and no merge-base boot was re-run on this machine for the comparison — 6.5's recorded figures are
   the baseline. No timeout changes.
 
-<!-- TASK8: mutations -->
+- *The mutations* — fourteen, each applied, booted fed and stub-free (14 with the stubs on),
+  observed and reverted; a clean baseline printed `cons.park`, `cons.beside ok`, `cons.other ok`,
+  `hvc0 ok n=17`, `stdin ok n=15` in that order. As predicted: 2 (no re-post), 5 (no transmit notify
+  — the boot stops at 640 lines behind VFS), 7 and 8 (VFS drops `vcon`'s notification; the walk
+  stops at the first `EAGAIN` — `cons.other ok`, `hvc0 ok` and `stdin ok` all go, with two `retry`
+  host tests failing each), 9 (the row names TTY — `minix.rs hvc0 out` appears on the serial log),
+  11 (ack after the walks — nothing moves), 13 (one-piece feed makes mutation 2 pass, which is why
+  the feed is two chunks) and 14 (`grant_test` after the lookups — `grant.test FAIL send rc=-208`
+  and PM's four lines gone). **Not as predicted:**
+  - **10, the archive row moved after `vfs`, moved nothing.** `vcon.ds ok ep=12` still printed: the
+    lookup is VFS's fourth blocking call and `vcon` has published by then. So `vcon.ds ok` does not
+    police the packing order, as the spec's §3 and `kernel/build.rs` had claimed; both are
+    corrected. A wrong lookup key does print `vcon.ds FAIL rc=-3 fallback=12` with everything else
+    passing, so the fallback itself is sound.
+  - **12, the stopped-device wake-up, is caught only in the shared helper.** Dropping the wake at
+    either driver's call site left every host test green and every marker unmoved. TTY had no tested
+    helper for the decision at all; it now shares `driver-rt::cdev::wake_due` with `vcon`. The call
+    sites remain proved by reading only (debt 5).
+  - **1, advance before the copy, removes `hvc0 ok` — but by hanging, not by a short count.** The
+    refused read consumes the first chunk and the child waits for ever; no `hvc0 FAIL` line is
+    printed in either form tried. The proof holds; the probe cannot say "bytes were lost".
+  - **3, no re-arm, hangs the first write**, and is indistinguishable from 5 in the serial log; only
+    the feeder's stderr tells them apart (in 3 the host did see the guest's line).
+  - **4 and 6 also remove `cons.other ok`**, which the walk that the `NOTIFY` triggers prints; the
+    spec's "everything before it unmoved" had the order wrong.
 
 **Rulings made during the run** — the spec's §5 table has the fifteen it started with; these are the
 ledger's, each with what it costs if it was wrong.
@@ -1278,6 +1302,21 @@ ledger's, each with what it costs if it was wrong.
 10. **`cookie_ok` and `reply` are copied into `virtio-console`** (owner: 6.8, the third virtio
     driver). A few lines each, duplicated on purpose so that this slice edited neither `virtio-blk`
     nor `driver-rt` for them.
+11. **A device that returns zero-length used elements for ever spins `vcon`'s receive walk** (owner:
+    whoever hardens the driver against a hostile host). Each one is re-posted inside the handler;
+    nothing caps the re-posts per interrupt.
+12. **A feed cut short can leave bytes in `target/hvc0.in`** that reach the next *unfed* local boot,
+    whose `/dev/hvc0` child may then print `hvc0 FAIL` (owner: with debt 1). Only fed boots drain.
+13. **PM discards the result of its `VFS_PM_EXIT` send** (owner: whoever next touches PM's exit
+    path). With `grant_test` first, a process that dies while VFS is blocked sending to PM gets its
+    exit SENDREC refused instead, and VFS never resets that descriptor row. Harmless for a boot
+    stub, which holds none.
+14. **`kernel/src/proc/table.rs` still says only `vblk` has a boot module** (owner: the next slice
+    that touches the kernel). Left alone to keep `kernel/src` unchanged by this slice.
+15. **`vcon.ds ok` does not police `vcon < vfs`** (mutation 10; owner: none unless the lookup moves
+    earlier in VFS's prologue). The order is kept by convention.
+16. **The `hvc0` probe reports lost bytes as a hang** (mutation 1; owner: whoever gives the feeder
+    or the child a timeout).
 
 ### Slice 6.7: framebuffer console
 

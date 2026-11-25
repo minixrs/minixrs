@@ -111,6 +111,22 @@ pub fn read_len(want: usize, buffered: usize) -> usize {
     want.min(buffered).min(CDEV_MAX_IO)
 }
 
+/// Whether the recorded waiter is owed its `NOTIFY` now (slice 6.6, C6 and C9).
+///
+/// `input` is whether the event just handled made bytes readable. `was_stopped`
+/// and `stopped` are whether the device could no longer receive before and
+/// after it: the transition is what counts, so a reader parked on a device that
+/// stops is woken once — its retry then hears `EIO` instead of waiting for an
+/// interrupt that cannot come — and nothing is sent for a device that had
+/// already stopped. Both at once is still one `NOTIFY`.
+///
+/// Both character drivers decide through this one function. The call sites
+/// themselves are not host-testable, and no boot stops a device, so a call
+/// site that ignores the answer is caught by reading only (6.6's mutation 12).
+pub const fn wake_due(input: bool, was_stopped: bool, stopped: bool) -> bool {
+    input || (stopped && !was_stopped)
+}
+
 /// What the driver does with one validated `CDEV_READ` (slice 6.5, spec R1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadPlan {
@@ -417,6 +433,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_waiter_is_woken_by_input_or_by_the_device_stopping_once() {
+        // Input always wakes, whatever the device's state did.
+        for (was, now) in [(false, false), (false, true), (true, true)] {
+            assert!(wake_due(true, was, now), "input, {was} -> {now}");
+        }
+        // No input: only the transition into stopped wakes.
+        assert!(wake_due(false, false, true));
+        assert!(!wake_due(false, false, false));
+        // Already stopped: nothing more is owed.
+        assert!(!wake_due(false, true, true));
     }
 
     #[test]

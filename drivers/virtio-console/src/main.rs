@@ -348,10 +348,12 @@ fn break_device(port: &mut Port, why: core::fmt::Arguments<'_>) {
 /// for the next `CDEV_READ`.
 ///
 /// A `NOTIFY` that fails is the only wake-up a parked reader gets not going
-/// out. The waiter is recorded again, so the next arrival tries again, and the
-/// failure is reported once per boot — TTY's lines exactly. The retry is
-/// nominal: every error `NOTIFY` can answer here is permanent for that
-/// endpoint, so it fails again until another reader's `EAGAIN` replaces it.
+/// out. The failure is reported once per boot — TTY's line exactly. The waiter
+/// is recorded again, but unlike TTY nothing here will retry it: the buffer is
+/// now held, so no further receive interrupt can come until a read drains it,
+/// and a transmit interrupt owes no wake-up. It stays recorded only until
+/// another reader's `EAGAIN` replaces it. Every error `NOTIFY` can answer here
+/// is permanent for that endpoint, so a retry would fail the same way.
 #[cfg_attr(test, allow(dead_code))]
 fn wake_waiter(wake: &mut Wake) {
     if let Some(who) = wake.waiter.take() {

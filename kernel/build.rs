@@ -237,8 +237,12 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
         // its name unconditionally in `init_fresh`, and VFS resolves it in its
         // prologue. That lookup has a `boot_endpoint` fallback and a
         // distinguishable line — `vcon.ds ok` / `vcon.ds FAIL … fallback=…` —
-        // so a row moved after `vfs` turns that one marker red and nothing
-        // else. Its bring-up waits on no completion, so nothing constrains it
+        // so a lookup that misses turns that one marker red and nothing else.
+        // **The marker does not police this row's position**, though: moved
+        // after `vfs`, the lookup still succeeded (6.6's mutation 10), because
+        // it is VFS's fourth blocking call and `vcon` has published by then.
+        // The order is kept for the reason the chain exists, not because a
+        // boot proves it. Its bring-up waits on no completion, so nothing constrains it
         // against `mfs`; the chain is now
         //
         //     ds  <  tty  <  memory  <  vblk  <  mfs  <  vfs  <  pm

@@ -546,3 +546,10 @@ record of what was built.
   rewritten in place, with a dated note under it saying what it had said.
 - **C14 items 3 and 5 were not done in Task 0.** Item 3 was measured on the real driver's first
   boot, and item 5's baseline was moved to Task 7 (ledger, Task 0 rulings).
+- **§3 says `vcon.ds ok` proves the packing order, and mutation 10 predicts `vcon.ds FAIL` for a row
+  moved after `vfs`.** Observed: nothing moves. The line proves the lookup, not the order.
+- **§3's mutation 12 predicts "a host test fails".** True only for the shared helper; the call sites
+  that send the wake-up are not host-testable. TTY's decision was moved into the same helper.
+- **§3's mutations 1, 3, 4 and 6** behaved as recorded in the
+  [phase file](../../plans/phase-6-virtio.md), not as their rows read.
+- **§3's "budget reading against the merge base"** — see the phase file for what was booted.
