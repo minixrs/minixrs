@@ -444,9 +444,11 @@ on Apple Silicon — one machine; the CI runner's answer is the branch's first r
 5. **The pipe keeps an unread boot's bytes after QEMU has exited** — about 826 on macOS — which is
    what the feeder's drain is for.
 
-Slice 6.6's reading, fed and in the musl flavour: the last required marker at 55.38% of a 600 s disk
-log and 37.65% of the ramdisk one. The second console did not push the budget; see the
-[phase file](../plans/phase-6-virtio.md) for the comparison with 6.5 and what was not established.
+Slice 6.6's reading, fed and in the musl flavour: the last required marker at 57.51% of a 600 s disk
+log and 36.46% of the ramdisk one, against 54.91% for the merge base's disk boot on the same day.
+Take the baseline that way — the merge base checked out **in the main checkout**, the same day. A
+`git worktree` build silently packed the fallback `worker` in place of the C programs, and a figure
+recorded by an earlier slice drifted eight points with no code change.
 
 ## Feature toggles and dependency claims
 

@@ -317,14 +317,47 @@ One entry per task: its commit, what was verified, and every ruling made in it.
   conventions (`servers-and-drivers.md`, `testing-and-markers.md`, `build-and-boot.md`, `ci.md`,
   `abi.md`), the book (`drivers`, `servers`, `boot`, `build`, `ipc`, `architecture`, `roadmap`), the
   6.5 spec's R12 and a "Corrections found in implementation" section in this slice's spec and in
-  this plan's marker list. Tasks 7 and 8 are not recorded by this task: the phase file carries
-  `TASK7` / `TASK8` placeholder comments and `build-and-boot.md` a `TASK7: budget` one. **Rulings:**
-  (a) **the book's virtio-console text is a section of `drivers/overview.md`, not a new page**: the
-  book has one page per chapter and `virtio-blk` is a section of that page, so `SUMMARY.md` is
-  unchanged. *If wrong:* move the section to its own file and add one `SUMMARY.md` line; every link
-  to `#virtio-console` then needs its path changed. (b) **R12 in the 6.5 spec is rewritten in place
-  and carries a dated note of what it said**, which is this spec's §4 and `docs-and-workflow.md`'s
-  rule plus an annotation, rather than a note alone. *If wrong:* restore the original sentence above
-  the note. (c) H2's "publishes nothing to DS" sentence in the phase file is narrowed to block
-  drivers, since C4 contradicts it for `vcon`. (d) Task 5's one fed full disk boot is recorded in
-  the phase file as Task 5's, not as a Task 7 result.
+  this plan's marker list. Tasks 7 and 8 were recorded afterwards by the coordinator, in the
+  placeholders this task left. **Rulings:** (a) **the book's virtio-console text is a section of
+  `drivers/overview.md`, not a new page**: the book has one page per chapter and `virtio-blk` is a
+  section of that page, so `SUMMARY.md` is unchanged. *If wrong:* move the section to its own file
+  and add one `SUMMARY.md` line; every link to `#virtio-console` then needs its path changed. (b)
+  **R12 in the 6.5 spec is rewritten in place and carries a dated note of what it said**, which is
+  this spec's §4 and `docs-and-workflow.md`'s rule plus an annotation, rather than a note alone. *If
+  wrong:* restore the original sentence above the note. (c) H2's "publishes nothing to DS" sentence
+  in the phase file is narrowed to block drivers, since C4 contradicts it for `vcon`. (d) Task 5's
+  one fed full disk boot is recorded in the phase file as Task 5's, not as a Task 7 result.
+- **Task 6 (in `347b8cc`).** `ci.yml` needed no change to what it runs: the feeder's invocation is
+  the same and `qemu-run.sh` makes the FIFOs. Two comments were corrected (the fed boots, the Miri
+  list). `actionlint` reports the same four findings before and after. **Ruling:**
+  `minixrs-virtio-console` is not added to the Miri list, like `minixrs-virtio-blk`: its tested half
+  is safe code. *If wrong:* one `-p` argument.
+- **Task 7 (`347b8cc`, re-run on `5a55b7d`).** Both fed musl-flavour full boots pass 190, the unfed
+  reboot its 7, `diff-backends.sh` clean, headers identical to `origin/main`. Budget 57.51% disk /
+  36.46% ramdisk (55.38% / 37.65% one commit earlier) against **54.91% for the merge base booted the
+  same day**. **Mistakes made and caught:** the first set of boots was SDK-flavour (no
+  `MINIXRS_SDK=/nonexistent`) and was discarded; the first baseline, from a worktree, packed the
+  fallback `worker` for the C programs and was discarded; the baseline that counts was taken by
+  checking the merge base out in the main checkout. **Ruling:** 6.5's recorded 63.20% is not used as
+  the baseline — the merge base itself reads 54.91% on this machine now. *If wrong:* nothing; the
+  same-day pair is the stricter comparison.
+- **Task 8 (no commit of its own; recorded in `5a55b7d`).** Fourteen mutations applied, booted,
+  observed and reverted by a subagent; tree clean afterwards. Results are in the phase file. Rows 10
+  and 12 did not behave as the spec predicted and each exposed a weak proof: `vcon.ds ok` does not
+  police the packing order (claims corrected, debt 15), and the stopped-device wake-up had no tested
+  helper in TTY (now `driver-rt::cdev::wake_due`, shared; the call sites remain proved by reading).
+  Rows 1, 3, 4 and 6 moved their markers by a different route than predicted.
+- **Whole-branch review (fresh reviewer on `git diff origin/main...HEAD` at `347b8cc`; fixes in
+  `5a55b7d`).** No code blocker. Should-fix: (S1) the verification record was incomplete — closed by
+  the three entries above and the baseline; (S2) whether the exit-reset marker had gone vacuous —
+  checked in every recorded log, it has not; (S3) `grant_test`'s comment contradicted the fix —
+  rewritten; (S4) an orphaned feeder could take the next boot's line — a pid-file claim, exercised
+  against fake FIFOs. Nits fixed: what `cons.other ok` proves, `wake_waiter`'s comment, a sum dprint
+  turned into a bullet, two over-long lines. **Rulings:** (a) the `grant_test` race is left
+  narrowed, not closed — no retry was added; a loss prints a forbidden line. (b) the zero-length
+  used-element loop, stale `.in` bytes on an unfed local boot, PM discarding its `VFS_PM_EXIT`
+  result, and a stale comment in `kernel/src/proc/table.rs` are entered as debts 11 to 14 rather
+  than fixed; the last so that `kernel/src` stays untouched. (c) the review-round fixes were not
+  given a second fresh review; they were verified by tests, Miri and the three recorded boots. *If
+  wrong:* (a) a flaky CI boot that names its cause; (b) each is a small change in a later slice; (c)
+  a defect in about sixty changed lines of code and the feeder's claim.

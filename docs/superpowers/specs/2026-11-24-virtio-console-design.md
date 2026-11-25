@@ -552,4 +552,5 @@ record of what was built.
   that send the wake-up are not host-testable. TTY's decision was moved into the same helper.
 - **§3's mutations 1, 3, 4 and 6** behaved as recorded in the
   [phase file](../../plans/phase-6-virtio.md), not as their rows read.
-- **§3's "budget reading against the merge base"** — see the phase file for what was booted.
+- **C14 item 5's baseline was taken last, not first**, and from the main checkout rather than a
+  worktree; the phase file has the figures.

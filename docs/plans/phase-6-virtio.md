@@ -1183,20 +1183,27 @@ so it has no field it may read (C3).
   (forbidden) if the send is refused; the rule it left is under
   [Prologue ordering](../conventions/servers-and-drivers.md#prologue-ordering).
 
-- *The recorded boots* (final code, the musl flavour CI builds, 600 s for the two full boots and 180
-  s for the reboot, on the development machine):
+- *The recorded boots* (final code `5a55b7d`, the musl flavour CI builds, 600 s for the two full
+  boots and 180 s for the reboot, on the development machine):
   - the fed disk boot and the fed ramdisk boot each pass all **190** checks;
   - the unfed reboot of the image the disk boot left passes its seven;
   - `diff-backends.sh` is clean across the pair;
-  - the feeder saw the guest's `hvc0` line 23 s into the disk boot and 20 s into the ramdisk one,
-    and wrote the serial probe at 33 s and 30 s;
+  - the feeder saw the guest's `hvc0` line 23 s into the disk boot and 18 s into the ramdisk one,
+    and wrote the serial probe at 34 s and 28 s;
   - the generated C headers are byte-identical to `origin/main`.
-- *The budget.* The last required marker (`[diag vfs] pm-exit reset closed=1`) sits at **55.38%** of
-  the fed disk log (about 332 s) and **37.65%** of the fed ramdisk log (about 226 s), against 6.5's
-  63.20% and 41.41%. It moved *earlier*, by about 47 s and 22 s, and **why was not established**:
-  the direction is not the wait-again defect's (that one reads about 73%), every marker is present,
-  and no merge-base boot was re-run on this machine for the comparison — 6.5's recorded figures are
-  the baseline. No timeout changes.
+
+  An earlier set, one commit before the review round, passed the same checks; a first set was
+  discarded because it had been booted in the SDK flavour, which is not a marker verification.
+- *The budget.* The last required marker (`[diag vfs] pm-exit reset closed=1`) sits at **57.51%** of
+  the fed disk log (about 345 s) and **36.46%** of the fed ramdisk log (about 219 s); the earlier
+  set read 55.38% and 37.65%. **The merge base, booted the same day in the same checkout, reads
+  54.91%** (about 329 s) for the fed disk boot. So the slice moves the disk reading by between half
+  a point and two and a half, which is the spread between its own two runs, and no timeout changes.
+  Both are well under 6.5's recorded 63.20%: the machine reads lower than it did then, for the merge
+  base too, so that figure is not a baseline to compare against. In every log the marker's first
+  occurrence follows fileio's own `malloc ok`, so it is not the vacuous form Task 5 found. A first
+  attempt at the baseline, from a `git worktree`, was thrown away: its build packed the 15 KB
+  fallback in place of the C programs and the marker never printed.
 
 - *The mutations* — fourteen, each applied, booted fed and stub-free (14 with the stubs on),
   observed and reverted; a clean baseline printed `cons.park`, `cons.beside ok`, `cons.other ok`,
