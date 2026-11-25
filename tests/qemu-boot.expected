@@ -54,20 +54,25 @@ minix.rs booting on aarch64
 # init's fork/exec/wait cycle (head-carved kernel traces; slot 19 is the
 # fork-pool base; exec renames the child to "worker").
 #
-# Since slice 6.5 init's FIRST fork is the console-read child, not a rotation
-# child, so slot 19 is that child's and the rotation's first `worker` runs in
-# slot 20. That holds on a fed boot and an unfed one alike: an unfed child
-# stays parked in slot 19 for good, and a fed one that has already exited is
-# still a zombie holding the slot when the rotation forks for the first time,
-# because init's first wait() comes after that fork. Later turns recycle
-# whichever slots are free, 19 among them, so only the first worker's slot is
-# fixed -- which is all a first-occurrence check needs. (Under the hand-run
-# `idle-probe` feature there is no console-read child and worker is back in
-# slot 19; no marker file is checked against that boot.)
+# init's first TWO forks are its proof children, not rotation children: the
+# console-read child (slice 6.5) and then the /dev/hvc0 child (slice 6.6). So
+# slot 19 is the first's, slot 20 the second's, and the rotation's first
+# `worker` runs in slot 21 -- with the boot stubs (the default, which is what
+# this file describes) and without them (--no-default-features) alike, since
+# the stubs' slots, 15-18, lie below the pool either way. It also holds on a
+# fed boot and an unfed one alike: an unfed child stays parked in its slot for
+# good, and a fed one that has already exited is still a zombie holding its
+# slot when the rotation forks for the first time, because init's first wait()
+# comes after that fork. Later turns recycle whichever slots are free, 19 and
+# 20 among them once their children have been fed and reaped, so only the
+# first worker's slot is fixed -- which is all a first-occurrence check needs.
+# (Under the hand-run `idle-probe` feature there is neither proof child and
+# worker is back in slot 19; no marker file is checked against that boot.)
 [ksys SYS_FORK] parent=i nr=10 child_nr=19
 [ksys SYS_FORK] parent=i nr=10 child_nr=20
-[ksys SYS_EXEC] target=20 name=worker src=name entry=
-[ksys SYS_EXIT] target=w nr=20 freed=
+[ksys SYS_FORK] parent=i nr=10 child_nr=21
+[ksys SYS_EXEC] target=21 name=worker src=name entry=
+[ksys SYS_EXIT] target=w nr=21 freed=
 
 # Stub D's designed SIGSEGV chain: page fault -> VM -> SYS_KILL sig=11 -> PM
 # tears the stub down with SYS_EXIT
@@ -329,11 +334,13 @@ minix.rs init: exec stack ok
 # land inside do_exec's 6-call head carve-out, so both traces appear.
 #
 # Deliberately NOT keyed on the `target=` slot number, and therefore not on the
-# whole `[ksys SYS_EXEC] ` prefix either (the slot sits between them): init's
-# fork pool hands out 19 and 20 in alternation, and which one carries `hello`
-# differs between the default and --no-default-features configs (19 stub-free,
-# 20 with stubs). A marker naming a slot passes in one config and is vacuous in
-# the other -- the slice-5.5 lesson, applied before it could bite. `entry=` is
+# whole `[ksys SYS_EXEC] ` prefix either (the slot sits between them): which
+# slot carries the first `hello` differs between the default and
+# --no-default-features configs (22 with stubs, where the first worker is
+# still alive in 21; 21 stub-free, where it has been reaped), and later turns
+# take whichever slots are free, 19 and 20 among them once init's two proof
+# children have gone. A marker naming a slot passes in one config and is
+# vacuous in the other -- the slice-5.5 lesson, applied before it could bite. `entry=` is
 # kept so this matches do_exec's trace and not some other line.
 #
 # `src=grant` is slice 5.9: `hello` is no longer in the boot archive at all, so
@@ -1035,17 +1042,18 @@ minix.rs fileio: malloc ok
 [diag tty] rx on
 
 # Slice 6.5: a byte on the wire reaches read(0), and the process waiting for it
-# stops nobody else (spec R2, R7, R8). Of the three lines below the LAST holds
-# for a FED boot only: one whose stdin is tools/feed-console.sh, pointed at the
-# log the boot is writing --
+# stops nobody else (spec R2, R7, R8). Slice 6.6: the same for a second
+# console, /dev/hvc0, with a reader parked on each (spec C10, C11, C12). Of
+# the five lines below the LAST THREE hold for a FED boot only: one whose
+# stdin is tools/feed-console.sh, pointed at the log the boot is writing --
 #
 #     ... cargo run ... < <(tools/feed-console.sh qemu.log) > qemu.log 2>&1
 #
 # The disk and ramdisk full boots are fed. An unfed boot (stdin at EOF, or a
-# terminal nobody types at) prints the first two and never the third, and the
-# reboot, which is not fed, is not checked against this file at all.
+# terminal nobody types at) prints the first two and never the other three,
+# and the reboot, which is not fed, is not checked against this file at all.
 #
-# init, after its console banner and before its first file read, forks one
+# init, after its console banner and before its first file read, forks a
 # child that calls read(0, buf, 64). fd 0 is the console in every process, the
 # console is empty, TTY answers CDEV_READ with EAGAIN and records VFS as the
 # endpoint it owes a NOTIFY -- and VFS, instead of relaying that or waiting,
@@ -1065,11 +1073,86 @@ minix.rs fileio: malloc ok
 # fileio reads /etc/motd on every fourth turn of the rotation, so a file read after
 # the park is never long in coming.
 #
-# It is also THE GATE: the feeder writes nothing until it has seen this line in
-# the log, so the bytes cannot arrive before the read is parked and VFS has
-# been seen serving somebody beside it (and cannot be eaten by the firmware or
-# Limine, which consume whatever is on stdin before the kernel starts).
+# It is also THE GATE on the serial console: the feeder writes nothing to
+# QEMU's stdin until it has seen this line in the log (and `hvc0 ok`, below),
+# so those bytes cannot arrive before the read is parked and VFS has been seen
+# serving somebody beside it (and cannot be eaten by the firmware or Limine,
+# which consume whatever is on stdin before the kernel starts).
 [diag vfs] cons.beside ok
+
+# Slice 6.6: the second console, and two readers parked at once.
+#
+# Straight after the read(0) child init forks a second one, which opens
+# /dev/hvc0 -- the virtio console, `vcon` -- and writes `minix.rs hvc0 out`
+# through that descriptor. The line leaves the machine on QEMU's second
+# chardev, and the feeder sends nothing at all until it has read it there, on
+# the host. The child meanwhile issues ONE read on the node with a buffer
+# address that is in the user range and not mapped. Nothing has been fed, so
+# vcon answers EAGAIN and VFS parks the request as it stands -- BEHIND the
+# read(0) child's, which parked first because that child was forked first and
+# had nothing to do before its read.
+#
+# The feeder waits a few seconds for that read to be parked, then writes
+# `minix.rs hvc0 in` and a newline to the chardev's input in two chunks a few
+# seconds apart. The first chunk's interrupt makes vcon notify VFS, and VFS
+# walks its parked reads oldest first, on vcon's behalf: it PASSES OVER the
+# read(0) reader -- that one is TTY's, and stays parked, unasked -- and asks
+# vcon for the one behind it. That answer is EFAULT (below), and an answer is
+# all this line needs: VFS prints it the first time one walk has left another
+# driver's reader where it was and then had a real CDEV_READ answer for a
+# reader behind it. Only VFS can know that happened. It is what the walk being
+# PER DRIVER means: make the walk stop at
+# the first EAGAIN from any driver, as it did when TTY was the only one, and
+# it asks TTY for the older reader, hears EAGAIN, and stops -- this line and
+# `hvc0 ok` are absent, the hvc0 reader waiting on bytes its driver already
+# holds. Drop vcon's notification in VFS instead and the same two go.
+#
+# It also proves an ARRANGEMENT, and fails if the arrangement does not hold:
+# were the hvc0 reader the older of the two, the walk would have nothing to
+# pass over and the boot would print `hvc0 ok` without ever exercising the
+# pass-over. The fork order arranges it; the feeder keeps it so, by not
+# feeding the serial console until `hvc0 ok` is in the log.
+#
+# It comes BEFORE `hvc0 ok` in the log: at the first chunk's walk, the
+# feeder's gap ahead of it. (Should the first chunk ever beat the child's read
+# to the driver, that read is refused directly without having parked, and the
+# line prints at the second chunk's walk instead, which answers the child's
+# next read -- parked between the chunks, still behind the read(0) reader.
+# Measured on a stubs-on boot before the feeder waited; the line is required
+# either way.)
+[diag vfs] cons.other ok
+
+# The child's verdict, printed on fd 1 -- the serial console, not the node
+# under test -- only if every step did what it should:
+#
+#   - the write went out whole, and the HOST saw it: the feeder's bytes are
+#     the only way this line can print, and the feeder sends them only after
+#     reading the guest's line off the chardev. Guest to host.
+#   - the read into the unmapped buffer came back EFAULT -- from the kernel's
+#     page-table walk under vcon's safecopy, on VFS's retry of the parked
+#     request when the first chunk arrived -- and CONSUMED NOTHING. The child then reads into a real buffer until it
+#     holds 17 bytes and compares them with init's HVC0_IN: all of them, the
+#     first chunk included. A driver that advanced before its copy returned
+#     has thrown that chunk away, the child comes up short and parks for good,
+#     and this line is absent (so is `stdin ok`; see the coupling below).
+#   - the second chunk arrived. vcon has one receive buffer; once the child
+#     has drained the first chunk the driver must post it to the device again
+#     and re-arm its interrupt, or the second chunk has nowhere to land. The
+#     child's read between the chunks parks again and is completed by the
+#     second notification. Host to guest, twice.
+#
+# n=17 is HVC0_IN.len(), pinned by a const assert, and a host test in init
+# holds both strings and this line's text to the copies the feeder carries.
+# Every other outcome is one `hvc0 FAIL step=...` line (forbidden).
+#
+# The child CLOSES the node before it prints this and exits. It has to: VFS
+# prints `[diag vfs] pm-exit reset closed=1` for any process that exits with
+# one descriptor open, and that line is fileio's to earn, much later.
+#
+# THE COUPLING: the feeder waits for this line before it feeds the serial
+# console. A boot whose vcon is broken therefore loses `stdin ok` below as
+# well -- read the first missing line, which is this one.
+minix.rs init: hvc0 ok n=17
 
 # The feeder then writes `minix.rs stdin` and a newline to QEMU's stdin, in two chunks a
 # few seconds apart. The second chunk's interrupt arrives only if TTY re-armed

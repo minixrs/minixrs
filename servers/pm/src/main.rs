@@ -990,12 +990,17 @@ fn vm_exec(vm: Endpoint, target_e: Endpoint, image_end: u64) -> i32 {
 ///
 /// Deadlock check: a PM->VFS SENDREC blocks PM until VFS replies, so it is safe
 /// only if VFS can never be blocked sending *to PM* when a user process exits.
-/// VFS's only `ipc_send` to PM outside replies is `grant_test` at VFS startup,
-/// before VFS enters its receive loop and hence before any user process can run
-/// or exit; every other VFS send is a SENDREC to MFS, TTY, or the memory driver
+/// VFS's only `ipc_send` to PM outside replies is `grant_test` in VFS's
+/// prologue; every other VFS send is a SENDREC to MFS or a character driver
 /// (none of which call PM) or a reply to a client already blocked in SENDREC.
-/// So VFS is always either in its loop or waiting on a non-PM server when PM
-/// sends here.
+/// So there is no deadlock: VFS is either in its loop, waiting on a non-PM
+/// server, or about to make that one send.
+///
+/// The prologue is **not** before every exit, though — a boot stub can fault
+/// while VFS is still blocked on a DS lookup. PM then waits here, and a
+/// `grant_test` sent after that is refused by the kernel's cycle check rather
+/// than deadlocking. VFS therefore sends it before its lookups (slice 6.6 found
+/// the four grant markers missing when a fourth lookup widened the window).
 #[cfg_attr(test, allow(dead_code))]
 fn vfs_pm_exit(vfs: Endpoint, target_e: Endpoint) -> i32 {
     let mut m = Message {

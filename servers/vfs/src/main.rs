@@ -454,6 +454,14 @@ fn main() -> ! {
     // static precisely so it can be owned like this.)
     let mut grants: GrantPool<GRANT_SLOTS> = GrantPool::new();
 
+    // First, before any lookup below — the order is load-bearing (slice 6.6).
+    // This is VFS's one `ipc_send` to PM, and it is refused if PM is by then
+    // blocked in its `VFS_PM_EXIT` SENDREC to VFS, which happens as soon as a
+    // user process dies. Each DS lookup below is a block that lets one run and
+    // fault; with four of them the boot stubs' first death won the race every
+    // time and PM's four grant markers went missing.
+    grant_test(&mut grants);
+
     // Resolve the four peers once, before serving anyone: every `VFS_WRITE`
     // targets a character driver or MFS, every `VFS_OPEN`/`VFS_READ` targets MFS
     // or a driver, and a DS lookup per request would be a round trip per request
@@ -484,7 +492,6 @@ fn main() -> ! {
     // until a driver first answers `CDEV_READ` with `EAGAIN`.
     let mut parking = Parking::new();
 
-    grant_test(&mut grants);
     tty_demo(&mut grants, peers.tty);
     mount_root(&mut mount, mfs);
     exec_stage_selftest(&mut grants, &mut mount, mfs);
@@ -1944,7 +1951,12 @@ fn grant_test(grants: &mut GrantPool<GRANT_SLOTS>) {
     msg.payload[4..8].copy_from_slice(&(GRANT_TEST_LEN as i32).to_ne_bytes());
     msg.payload[8..12].copy_from_slice(&rw_gid.to_ne_bytes());
     msg.payload[16..24].copy_from_slice(&addr.to_ne_bytes());
-    let _ = ipc_send(pm, &mut msg);
+    // Not discarded: a refusal here is PM's four grant markers going missing
+    // with nothing in the log to say why (slice 6.6 found it that way).
+    let rc = ipc_send(pm, &mut msg);
+    if rc != OK {
+        diag_fmt(format_args!("grant.test FAIL send rc={rc}"));
+    }
 }
 
 /// Slice 5.3 demo: drive the TTY console driver over `CDEV_WRITE` directly.

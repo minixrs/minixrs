@@ -231,10 +231,14 @@ esac
 #
 # Nobody has to be on either end. QEMU opens both read-write, so it starts with
 # no peer (measured, 6.6 Task 0) and a guest write with no reader completes
-# (measured, 6.6 Task 4): the bytes sit in the pipe, which is emptied when QEMU
-# exits. The firmware uses the port too -- edk2 and Limine put about 800 bytes
-# of boot text on it before the kernel starts -- so whatever reads <base>.out
-# must look for its line among other output, never at "the first bytes".
+# (measured, 6.6 Task 4): the bytes sit in the pipe. They are NOT reliably
+# emptied when QEMU exits -- on macOS about 800 bytes of an unread boot were
+# still in <base>.out with no process holding it (measured, 6.6 Task 5) -- so
+# tools/feed-console.sh discards what it finds there before it starts looking,
+# and unread boots with no fed boot between them accumulate. The firmware uses
+# the port too -- edk2 and Limine put about 800 bytes of boot text on it before
+# the kernel starts -- so whatever reads <base>.out must look for its line
+# among other output, never at "the first bytes".
 #
 # MINIXRS_HVC0=<base> moves the pair, so that two boots run at once do not
 # share one. A regular file in a FIFO's place is refused rather than replaced:

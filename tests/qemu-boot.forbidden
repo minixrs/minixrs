@@ -142,6 +142,22 @@ minix.rs fileio: exit-reset FAIL
 # boot and the first line entered lands in that read and prints this, which is
 # correct and harmless there. Unprefixed, so every spelling is covered.
 stdin FAIL
+# Slice 6.6: init's /dev/hvc0 child (tests/qemu-boot.expected has the whole
+# path) found a step that did not do what it should, and names the first one:
+# `minix.rs init: hvc0 FAIL step=open rc=-<N>`; `step=write n=<sent>` and the
+# answer that stopped the write of its line; `step=bad-read` and whatever the
+# read into an unmapped buffer answered that was not EFAULT (`count=<n>` is a
+# driver that claimed to have copied into a hole, `rc=-11` VFS relaying
+# EAGAIN instead of parking); `step=read n=<got>` and the answer that stopped
+# the real reads; `step=compare n=<got> first=<hex>`, the right count of the
+# wrong bytes; `step=close rc=-<N>`. An answer is `rc=-<N>`, `eof` for 0, `over` for more than was
+# asked, `count=<n>` otherwise. init prints two more spellings itself, as for
+# `stdin FAIL`: `hvc0 FAIL fork rc=-<N>` and `hvc0 FAIL no-verdict`. Bytes
+# LOST by the driver print none of these: the child comes up short and stays
+# parked, and the failure is the missing `hvc0 ok`. A FED boot's line, like
+# `stdin FAIL` -- an unfed child never gets past its parked read. Unprefixed,
+# so every spelling is covered.
+hvc0 FAIL
 
 # Slice 6.2: the virtio boot probe refused a device whose register page is shared
 # with another transport (spec T4 rule 1), and TTY's GETINFO denial battery
@@ -215,3 +231,9 @@ minix.rs init: persist FAIL
 # `vfs` in kernel/build.rs prints. Unprefixed, like `stdin FAIL`.
 [diag vcon] ds FAIL
 vcon.ds FAIL
+# VFS's one `ipc_send` to PM -- the grant demo's hand-over -- was refused. It is
+# what PM's four missing lines (`grant.test ok`, `copy ok`, `magic ok`,
+# `grant.deny ok`) trace back to: PM was already blocked in VFS_PM_EXIT because
+# a process died before VFS sent. VFS sends before its DS lookups to stay ahead
+# of that (slice 6.6).
+[diag vfs] grant.test FAIL

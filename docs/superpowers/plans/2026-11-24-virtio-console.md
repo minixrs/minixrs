@@ -258,3 +258,36 @@ One entry per task: its commit, what was verified, and every ruling made in it.
   nr=12` and `[devmap] vcon … intid=56` — and `[diag vcon] ds FAIL` forbidden. (g) `[diag vcon] no
   device` is forbidden in the common file: unlike `vblk`'s, no boot attaches no console. *If wrong:*
   each is a few lines in the driver or a marker line.
+- **Task 5.** init's second proof child on `/dev/hvc0` (open, write `HVC0_OUT`, a read into unmapped
+  memory expecting `EFAULT`, read `HVC0_IN`, compare, close, `minix.rs init: hvc0 ok n=17`), both
+  proof children through one `fork_proof_child` / `report_proof_reap`; `tools/feed-console.sh` in
+  two stages (hvc0 first, the serial probe gated on `hvc0 ok` as well); three expected lines
+  (`cons.other ok`, `hvc0 ok n=17`, a third `SYS_FORK … child_nr=21`), the worker's slot 20 → 21,
+  `hvc0 FAIL` and `[diag vfs] grant.test FAIL` forbidden; 190 checks for a full boot. Verified by
+  the coordinator: init/vfs/pm tests, clippy, fmt, shellcheck, and a **fed full disk boot passing
+  all 190** with the feeder reporting the hvc0 line at 26 s, hvc0 fed at 32 s, the probe at 36 s.
+  Fed stub-free ×3 and unfed stub-free by the agent: order always `cons.other ok`, `hvc0 ok`, `stdin
+  ok`; unfed shows none of the three and no `FAIL`. **A defect this slice introduced and this task
+  found:** with boot stubs on, PM's four grant lines (`grant.test ok`, `copy ok`, `magic ok`,
+  `grant.deny ok`) were missing, 3 boots of 3. VFS's `grant_test` is an `ipc_send` to PM; Task 2's
+  fourth DS lookup ahead of it let stub D's fault land first, PM blocked in `VFS_PM_EXIT`, and the
+  kernel refused the send, whose result was discarded. Tasks 2–4 were verified stub-free and never
+  saw it. Fixed: `grant_test` runs before the lookups, its send result is printed (`grant.test FAIL
+  send rc=`), and PM's comment claiming the prologue precedes every exit is corrected. **Spec and
+  plan errors:** `cons.other ok` comes *before* `hvc0 ok` (VFS prints it when the answer behind the
+  passed-over serial reader is the `EFAULT`), not after as §3's table and the plan's "in that order"
+  had it; C12 says nothing of stale FIFO bytes; C11 lists five steps and there are six.
+  **Measured:** bytes written to `.in` while the firmware runs are lost; on macOS an unread boot's
+  ~826 bytes stay in `.out` after QEMU exits with no holder (`qemu-run.sh`'s comment corrected).
+  **Rulings:** (a) the grant-test fix is an ordering fix, not a retry — a stub that faulted before
+  VFS's first instruction after `sef_startup` would still win; the forbidden line now names it. (b)
+  the feeder discards whatever is in the FIFOs when it starts (`DRAIN=0.5`), so a feeder started
+  against an already-running boot can lose the guest's line. (c) the feeder reads `.out` with a
+  background `cat` into a temp file and treats its EOF as "QEMU gone", exiting 1. (d) `SETTLE=3`
+  before the first hvc0 chunk, so the unmapped read is parked, not refused directly, when the bytes
+  arrive — a guess like `GAP`, 3 s per fed boot. (e) the child closes `/dev/hvc0` on every path
+  before its verdict, a sixth step `step=close`: exiting with it open printed `pm-exit reset
+  closed=1` early and left fileio's marker vacuous. (f) a third shared string `HVC0_OK`, pinned by
+  the host test. (g) unfed boots accumulating unread bytes in `.out` is left as a debt, not fixed in
+  the runner. *If wrong:* (a) a boot fails loudly with the named line; (b)–(d) are feeder knobs; (e)
+  one call; (g) an untested full pipe after ~80 unfed boots with no fed one between.
