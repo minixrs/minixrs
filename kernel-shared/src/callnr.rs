@@ -235,7 +235,7 @@ const _: () = assert!(NR_SYS_CALLS.is_multiple_of(32));
 //
 // `0..=31` is reserved for selectors that mirror a MINIX 3 one, so a future
 // import can keep MINIX's number. minix.rs-specific selectors start at 32;
-// [`GET_RAMDISK`] is the first, at 64.
+// [`GET_RAMDISK`] is the first, at 64, and [`GET_FRAMEBUFFER`] the latest, at 67.
 // ---------------------------------------------------------------------------
 
 /// `SYS_GETINFO` request: return the caller's endpoint, priv flags, init
@@ -312,13 +312,60 @@ pub const GETINFO_DMA_PA_OFF: usize = 8;
 /// Offset of the DMA run length in a [`GET_DMA`] reply (u64).
 pub const GETINFO_DMA_LEN_OFF: usize = 16;
 
+/// `SYS_GETINFO` request: report the framebuffer the kernel mapped into the
+/// caller's address space (slice 6.7, decision F4). Reply payload, with
+/// `m_type == OK`:
+///
+/// | offset | type | constant | meaning |
+/// |---|---|---|---|
+/// | `0..8` | u64 | [`GETINFO_FB_VA_OFF`] | the mapping's VA (`uspace::FB_VA`) |
+/// | `8..12` | u32 | [`GETINFO_FB_WIDTH_OFF`] | width in pixels |
+/// | `12..16` | u32 | [`GETINFO_FB_HEIGHT_OFF`] | height in pixels |
+/// | `16..20` | u32 | [`GETINFO_FB_PITCH_OFF`] | pitch: bytes per row |
+/// | `20..21` | u8 | [`GETINFO_FB_RED_SHIFT_OFF`] | red channel's bit offset in a pixel |
+/// | `21..22` | u8 | [`GETINFO_FB_GREEN_SHIFT_OFF`] | green channel's bit offset |
+/// | `22..23` | u8 | [`GETINFO_FB_BLUE_SHIFT_OFF`] | blue channel's bit offset |
+/// | `23..24` | u8 | [`GETINFO_FB_BPP_OFF`] | bits per pixel (32 is all the kernel accepts) |
+///
+/// **Gated on the caller being the TTY driver** (`TTY_PROC_NR`); anyone else
+/// gets `EPERM`. The framebuffer is pre-mapped into exactly one address space,
+/// so — as with [`GET_RAMDISK`] — the VA means nothing anywhere else, and the
+/// loader's arm and this gate must name the same process. `ENOENT` when the
+/// kernel accepted no framebuffer, which is how TTY learns it is serial-only.
+///
+/// Like its three driver-gated neighbours it is deliberately not emitted into
+/// the C headers: only a Rust driver can call it, so its value and layout stay
+/// free to change.
+pub const GET_FRAMEBUFFER: i32 = 67;
+/// Offset of the framebuffer VA in a [`GET_FRAMEBUFFER`] reply (u64).
+pub const GETINFO_FB_VA_OFF: usize = 0;
+/// Offset of the width in pixels in a [`GET_FRAMEBUFFER`] reply (u32).
+pub const GETINFO_FB_WIDTH_OFF: usize = 8;
+/// Offset of the height in pixels in a [`GET_FRAMEBUFFER`] reply (u32).
+pub const GETINFO_FB_HEIGHT_OFF: usize = 12;
+/// Offset of the pitch, in bytes per row, in a [`GET_FRAMEBUFFER`] reply (u32).
+pub const GETINFO_FB_PITCH_OFF: usize = 16;
+/// Offset of the red channel's bit offset in a [`GET_FRAMEBUFFER`] reply (u8).
+pub const GETINFO_FB_RED_SHIFT_OFF: usize = 20;
+/// Offset of the green channel's bit offset in a [`GET_FRAMEBUFFER`] reply (u8).
+pub const GETINFO_FB_GREEN_SHIFT_OFF: usize = 21;
+/// Offset of the blue channel's bit offset in a [`GET_FRAMEBUFFER`] reply (u8).
+pub const GETINFO_FB_BLUE_SHIFT_OFF: usize = 22;
+/// Offset of the bits-per-pixel count in a [`GET_FRAMEBUFFER`] reply (u8).
+pub const GETINFO_FB_BPP_OFF: usize = 23;
+
 const _: () = assert!(GET_VIRTIO_MMIO > 31);
 const _: () = assert!(GET_DMA > 31);
+const _: () = assert!(GET_FRAMEBUFFER > 31);
 const _: () = assert!(GET_VIRTIO_MMIO != GET_RAMDISK);
 const _: () = assert!(GET_DMA != GET_VIRTIO_MMIO);
 const _: () = assert!(GET_DMA != GET_RAMDISK);
 const _: () = assert!(GET_VIRTIO_MMIO != GET_WHOAMI);
 const _: () = assert!(GET_DMA != GET_WHOAMI);
+const _: () = assert!(GET_FRAMEBUFFER != GET_DMA);
+const _: () = assert!(GET_FRAMEBUFFER != GET_VIRTIO_MMIO);
+const _: () = assert!(GET_FRAMEBUFFER != GET_RAMDISK);
+const _: () = assert!(GET_FRAMEBUFFER != GET_WHOAMI);
 
 // `GET_VIRTIO_MMIO`: u64 then two u32, ordered, disjoint, naturally aligned
 // within the message (payload starts at byte 8).
@@ -335,6 +382,22 @@ const _: () = assert!(GETINFO_DMA_LEN_OFF + 8 <= 96);
 const _: () = assert!((8 + GETINFO_DMA_VA_OFF).is_multiple_of(8));
 const _: () = assert!((8 + GETINFO_DMA_PA_OFF).is_multiple_of(8));
 const _: () = assert!((8 + GETINFO_DMA_LEN_OFF).is_multiple_of(8));
+// `GET_FRAMEBUFFER`: one u64, three u32, four u8 — ordered, disjoint, inside the
+// payload, and the multi-byte fields naturally aligned within the message (a u8
+// is aligned anywhere). The one-byte fields are compared with `<`: `a + 1 <= b`
+// trips clippy's `int_plus_one`.
+const _: () = assert!(GETINFO_FB_VA_OFF + 8 <= GETINFO_FB_WIDTH_OFF);
+const _: () = assert!(GETINFO_FB_WIDTH_OFF + 4 <= GETINFO_FB_HEIGHT_OFF);
+const _: () = assert!(GETINFO_FB_HEIGHT_OFF + 4 <= GETINFO_FB_PITCH_OFF);
+const _: () = assert!(GETINFO_FB_PITCH_OFF + 4 <= GETINFO_FB_RED_SHIFT_OFF);
+const _: () = assert!(GETINFO_FB_RED_SHIFT_OFF < GETINFO_FB_GREEN_SHIFT_OFF);
+const _: () = assert!(GETINFO_FB_GREEN_SHIFT_OFF < GETINFO_FB_BLUE_SHIFT_OFF);
+const _: () = assert!(GETINFO_FB_BLUE_SHIFT_OFF < GETINFO_FB_BPP_OFF);
+const _: () = assert!(GETINFO_FB_BPP_OFF < 96);
+const _: () = assert!((8 + GETINFO_FB_VA_OFF).is_multiple_of(8));
+const _: () = assert!((8 + GETINFO_FB_WIDTH_OFF).is_multiple_of(4));
+const _: () = assert!((8 + GETINFO_FB_HEIGHT_OFF).is_multiple_of(4));
+const _: () = assert!((8 + GETINFO_FB_PITCH_OFF).is_multiple_of(4));
 
 // ---------------------------------------------------------------------------
 // `SYS_PRIVCTL` subcodes.
@@ -1790,6 +1853,67 @@ mod tests {
         );
         assert_eq!((8 + GETINFO_VIRTIO_VA_OFF) % 8, 0);
         assert_eq!((8 + GETINFO_DMA_LEN_OFF) % 8, 0);
+    }
+
+    #[test]
+    fn every_getinfo_selector_is_pairwise_distinct() {
+        // All five share one kernel call and one `match`, so any collision
+        // routes one driver's question into another's answer. Swept pairwise so
+        // the next selector is one row here rather than `n` new `assert_ne!`s.
+        let selectors = [
+            ("GET_WHOAMI", GET_WHOAMI),
+            ("GET_RAMDISK", GET_RAMDISK),
+            ("GET_VIRTIO_MMIO", GET_VIRTIO_MMIO),
+            ("GET_DMA", GET_DMA),
+            ("GET_FRAMEBUFFER", GET_FRAMEBUFFER),
+        ];
+        for (i, &(a, a_nr)) in selectors.iter().enumerate() {
+            for &(b, b_nr) in &selectors[i + 1..] {
+                assert_ne!(a_nr, b_nr, "{a} collides with {b}");
+            }
+            // Only `GET_WHOAMI` sits in the `0..=31` MINIX-mirrored block.
+            assert_eq!(a_nr > 31, a != "GET_WHOAMI", "{a} is in the wrong block");
+        }
+    }
+
+    #[test]
+    fn framebuffer_getinfo_selector_is_distinct_and_laid_out() {
+        assert_eq!(GET_FRAMEBUFFER, 67);
+        assert_ne!(GET_FRAMEBUFFER, GET_DMA);
+        assert_ne!(GET_FRAMEBUFFER, GET_VIRTIO_MMIO);
+        assert_ne!(GET_FRAMEBUFFER, GET_RAMDISK);
+        assert_ne!(GET_FRAMEBUFFER, GET_WHOAMI);
+        assert_eq!(GET_FRAMEBUFFER.min(32), 32);
+
+        // F4's table, field by field: (name, offset, width in bytes).
+        let fields = [
+            ("va", GETINFO_FB_VA_OFF, 8_usize),
+            ("width", GETINFO_FB_WIDTH_OFF, 4),
+            ("height", GETINFO_FB_HEIGHT_OFF, 4),
+            ("pitch", GETINFO_FB_PITCH_OFF, 4),
+            ("red shift", GETINFO_FB_RED_SHIFT_OFF, 1),
+            ("green shift", GETINFO_FB_GREEN_SHIFT_OFF, 1),
+            ("blue shift", GETINFO_FB_BLUE_SHIFT_OFF, 1),
+            ("bpp", GETINFO_FB_BPP_OFF, 1),
+        ];
+        assert_eq!(
+            fields.map(|(_, off, _)| off),
+            [0, 8, 12, 16, 20, 21, 22, 23]
+        );
+        let mut next = 0;
+        for (name, off, width) in fields {
+            // Ordered and disjoint — and, as F4 draws it, with no padding.
+            assert_eq!(
+                off, next,
+                "{name} does not start where the last field ended"
+            );
+            // Naturally aligned within the message, whose payload starts at
+            // byte 8.
+            assert_eq!((8 + off) % width, 0, "{name} is misaligned");
+            next = off.checked_add(width).expect("offset overflows");
+        }
+        assert_eq!(next, 24);
+        assert!(next <= 96, "the reply runs past the payload");
     }
 
     #[test]

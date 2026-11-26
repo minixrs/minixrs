@@ -23,6 +23,7 @@ pub mod fcntl;
 pub mod grant;
 pub mod ipc_const;
 pub mod irq;
+pub mod memrange;
 pub mod message;
 pub mod rootfs;
 pub mod signal;
