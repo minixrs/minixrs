@@ -423,13 +423,14 @@ follows is the engine and the policy.
 - The device VA map lives in `kernel-shared/src/uspace.rs`: `USER_DEVICE_WINDOW_BASE = 0x4000_0000`
   (one whole L1 slot), `USER_DEVICE_WINDOW_SIZE = 16 MiB`, `TTY_UART_VA` = page 0. For what kind of
   ABI that module is, see [`abi.md`](./abi.md)
-- TTY's pre-map lives in `load_boot_server` gated on `nr == TTY_PROC_NR`, **deliberately not in
-  `load_exec_image`** (shared with `do_exec`, so every exec'd binary would inherit a device window —
-  and conversely a proc that exec'd would *lose* its window, which is why `do_exec` drops the device
-  count). **No TLB maintenance**, because the AS was built moments ago and never installed in TTBR0
-  (a recycled ASID is clean — `teardown_addrspace` flushes before `free_asid`) and
-  `switch_ttbr0_with_asid` already issues `isb; tlbi aside1; dsb ish; isb` on TTY's first schedule —
-  the same reasoning the stack mapping in `load_exec_image` relies on. Do not diverge
+- TTY's pre-map lives in `load_boot_server` gated on `nr == TTY_PROC_NR` (since slice 6.7 that arm
+  maps two things, the UART page and [the framebuffer](#the-framebuffer-window)), **deliberately not
+  in `load_exec_image`** (shared with `do_exec`, so every exec'd binary would inherit a device
+  window — and conversely a proc that exec'd would *lose* its window, which is why `do_exec` drops
+  the device count). **No TLB maintenance**, because the AS was built moments ago and never
+  installed in TTBR0 (a recycled ASID is clean — `teardown_addrspace` flushes before `free_asid`)
+  and `switch_ttbr0_with_asid` already issues `isb; tlbi aside1; dsb ish; isb` on TTY's first
+  schedule — the same reasoning the stack mapping in `load_exec_image` relies on. Do not diverge
 - PL011 register offsets are duplicated between the kernel and `drivers/tty`, deliberately; that
   rule lives in [`servers-and-drivers.md`](./servers-and-drivers.md)
 
@@ -511,6 +512,63 @@ follows is the engine and the policy.
   driver slot with no assignment — the driver's "no device", not an error. Each gate is probed
   separately by TTY's `getinfo.deny` battery (TTY is not a virtio driver). Neither is emitted into
   the generated C headers ([`abi.md`](./abi.md))
+
+## The framebuffer window
+
+(slice 6.7 — design in
+[`2026-11-26-framebuffer-console-design.md`](../superpowers/specs/2026-11-26-framebuffer-console-design.md))
+
+- **The kernel decides once, and never draws.** `limine::framebuffer()` reads the *first*
+  framebuffer of Limine's response (request revision 0; no resolution is asked for) and the decision
+  is the pure `kernel-shared::framebuffer::validate` — the standing carve-out for logic the kernel
+  crate cannot host-test, like `virtio::assign`. `arch::aarch64::framebuffer` holds the accepted
+  record in a static of the usual shape (`UnsafeCell` newtype, written once by `init` during
+  single-threaded boot, read-only after), and its three consumers — the allocator seed, the loader's
+  TTY arm, `GET_FRAMEBUFFER` — all read that one copy, so the range carved, the range mapped and the
+  geometry reported cannot disagree. Add a fourth consumer the same way; do not re-read Limine
+- **`framebuffer::init()` runs before `mm::init_from_limine_memmap`, and nothing between them
+  allocates.** The allocator is seeded *around* the accepted range; in the other order a frame
+  already handed out could be part of the screen. `init` only follows Limine's pointers. The one
+  `[fb]` line is printed after the seed, not at the decision, because it reports how many pages the
+  seed removed. Whoever adds an early allocation to `kmain` puts it below the seed
+- **The carve is `kernel-shared::memrange::subtract`, applied to every `MEMMAP_USABLE` entry.** One
+  entry minus the hole is zero, one or two regions; a split takes a second `MAX_REGIONS` slot and
+  running out panics with the existing message. The hole is `Framebuffer::range()` — the physical
+  range rounded outward to whole pages — and the seed `assert!`s it non-empty and 4 KiB-aligned,
+  because `subtract` treats a malformed hole as "remove nothing", which would silently leave the
+  screen's frames allocatable. **No boot runs the carve**: QEMU's memory map reports the framebuffer
+  as its own kind, so `usable=0` and the marker says so. The arithmetic is host-tested in
+  `memrange`; the call is held by reading
+- **Always a device mapping, whatever the memory map calls the range** (phase decision H9).
+  `load_boot_server`'s TTY arm maps `fb.pages` — `ceil(pitch * height / 4096)` — pages
+  `Prot::DEVICE_RW` at `uspace::FB_VA`, with the same four answers as the other arms (not in
+  `load_exec_image`, no TLB maintenance, no cache maintenance — the kernel never reads or writes
+  these pages — and every step `.expect()`s). `map_page_in`'s device ⇒ ¬RAM assert holds by
+  construction rather than by luck: the range mapped is the range the seed subtracted. As device
+  leaves the pages are skipped by all five leaf sweeps and never reach `free_frame`. The last page
+  may run past the framebuffer's final byte; bounding stores to the screen is TTY's job
+  ([`servers-and-drivers.md`](./servers-and-drivers.md#ttys-screen-a-library-half-and-stores-only))
+- **It is the fourth kernel-owned window**: `FB_WINDOW_BASE = 0x1_0000_0000` (one L1 slot, 16 MiB),
+  above the DMA window, so `USER_REGION_LIMIT` does not move and VM needs no edit. Since there are
+  four, `uspace.rs` asserts **all six pairs** disjoint through `windows_disjoint` instead of each
+  window against its neighbour, and a host test sweeps the same table. A fifth window adds a row to
+  that test and its pairs to the `const _` block — a window placed *between* two others can satisfy
+  one neighbour's assert and still overlap the other
+- **`GET_FRAMEBUFFER = 67` is gated on `caller.nr == TTY_PROC_NR` → `EPERM`**, and answers `ENOENT`
+  when no framebuffer was accepted — TTY's "serial-only", not an error. **The loader's arm and this
+  gate must name the same process**, the rule `GET_RAMDISK` states for `MEM_PROC_NR`: too narrow and
+  TTY is serial-only beside a mapped screen (`[diag tty] fb none rc=-1`, forbidden), too wide and a
+  process is told about a VA it does not have mapped. **Nothing probes the too-wide direction**:
+  TTY's `getinfo.deny` battery asks for the two virtio selectors only, and no other process asks for
+  67, so a gate opened to a second process moves no marker. The reply's layout and why it is not in
+  the C headers are in [`abi.md`](./abi.md#sys_getinfo-selectors-held-back-from-c)
+- **The lines.** `[fb] ok w=… h=… pitch=… r=… g=… b=… usable=… pa=…`, `[fb] none` (no response, or
+  zero framebuffers) or `[fb] FAIL <token>`, exactly one per boot; and `[devmap] tty fb va=… pages=…
+  pa=…` when one was mapped. The tokens are `validate`'s nine, in the order it tests them — `bpp`,
+  `model`, `mask-size`, `shift`, `size`, `pitch`, `address`, `align`, `window` — plus `pointer` for
+  a null array or first entry, and `address` again when there is no HHDM response to judge an
+  address by (`validate` given a zero offset would pass every address, so it is not called). Which
+  of these are markers is in [`testing-and-markers.md`](./testing-and-markers.md#markers)
 
 ## `exec` — the kernel call
 

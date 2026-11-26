@@ -57,8 +57,10 @@ the kernel touches is addressed this way.
 
 `kernel/src/mm/` is the kernel-side physical allocator. At boot it walks Limine's `MEMMAP_USABLE`
 entries and seeds a per-region bump pointer for each (`MAX_REGIONS = 16` regions — QEMU virt and
-Apple-Silicon QEMU both fit comfortably). Freed frames go onto an intrusive free-list threaded
-through the frames themselves, reached via Limine's higher-half direct map (HHDM).
+Apple-Silicon QEMU both fit comfortably), leaving out any part of an entry that is the boot
+framebuffer (see [The framebuffer window](#the-framebuffer-window)). Freed frames go onto an
+intrusive free-list threaded through the frames themselves, reached via Limine's higher-half direct
+map (HHDM).
 
 Two invariants keep callers honest:
 
@@ -74,7 +76,8 @@ and nothing ever returns such a run to the allocator.
 
 Frames inside the kernel image, the embedded boot image, and the static EL0 test-stub pages live in
 Limine's `EXECUTABLE_AND_MODULES` region and are never visible to the allocator, so no explicit
-reservation logic is needed.
+reservation logic is needed for them. The framebuffer is the one range the allocator is told to keep
+out of.
 
 ## Per-process address spaces
 
@@ -159,6 +162,73 @@ writing to. Nothing can reach one today: a virtio driver halts the kernel if it 
 `VMCTL_PT_UNMAP` answers `EPERM` for an address in an assigned driver's DMA window (see
 [the drivers chapter](../drivers/overview.md#a-virtio-driver-cannot-exit)). Removing those guards
 needs a device-reset path that runs before the run is freed.
+
+## The framebuffer window
+
+The fourth kernel-owned window holds the screen (slice 6.7). When the bootloader reports a
+framebuffer the kernel accepts — [Boot](../boot/overview.md#the-boot-framebuffer) has the conditions
+— its pages are mapped into the TTY driver's address space, and no other, at the base of a window
+one L1 slot above the DMA window:
+
+```rust
+pub const FB_WINDOW_BASE: u64 = 0x1_0000_0000;  // 4 GiB — one whole L1 slot
+pub const FB_WINDOW_SIZE: u64 = 0x0100_0000;    // 16 MiB
+pub const FB_VA: u64 = FB_WINDOW_BASE;          // page 0 of the window
+```
+
+Like the two before it, it sits above the device window, so `USER_REGION_LIMIT` does not move and VM
+needs no edit. With four windows `uspace.rs` no longer relies on each one being asserted against its
+neighbour: compile-time asserts check all six pairs for overlap, so a fifth window placed between
+two others cannot pass by clearing only one of them. Sixteen mebibytes is room for 1920×1080 at 32
+bits per pixel (8.3 MiB); a framebuffer whose `pitch * height` does not fit is refused, and the
+machine boots without a screen.
+
+**It is always a device mapping.** `load_boot_server`'s TTY arm maps `ceil(pitch * height / 4096)`
+pages `Prot::DEVICE_RW`, whatever the memory map calls the range: the frames are the display's and
+must never reach `free_frame`, which is exactly what the device flag
+[guarantees](../drivers/overview.md#protdevice-and-the-ramdevice-invariant) in every leaf sweep. It
+is also why TTY touches the mapping only with aligned 32-bit stores and
+[never reads it](../drivers/overview.md#stores-only-never-a-read). The page count is rounded up, so
+the last page can run past the framebuffer's final byte into whatever follows it in physical memory;
+TTY bounds its stores by the screen's size in pixels, not by the pages mapped.
+
+### Carving the framebuffer out of the allocator
+
+`map_page_in` asserts that a device leaf is **not** a frame the allocator owns. A framebuffer the
+memory map reports as usable RAM would fail that assert — and mapping it as ordinary RAM instead
+would pass, and then hand the screen to `free_frame` at teardown. So the kernel removes the
+framebuffer's range from the allocator *before any frame is handed out*, and then maps it device
+either way.
+
+The arithmetic is one pure function in `kernel-shared`, where it can be host-tested (the kernel
+crate has no tests):
+
+```rust
+pub const fn subtract(region: Range, hole: Range) -> [Option<Range>; 2]   // memrange.rs
+```
+
+Ranges are half-open `(base, end)` pairs. The result is what is left of `region` outside `hole`: the
+part below the hole and the part above it, either of which may be absent — so a hole in the middle
+of a region gives two regions, one over its head or tail gives one, one covering it gives none, and
+one that misses it (or merely touches its edge) gives the region back whole. It only compares and
+selects, so it cannot overflow.
+
+`mm::init_from_limine_memmap(hole)` applies it to every `MEMMAP_USABLE` entry as it seeds the
+allocator. The hole is the accepted framebuffer's range rounded outward to whole pages — the very
+range the TTY arm later maps, taken from the same record — and the function asserts it is non-empty
+and page-aligned, because `subtract` treats a malformed hole as "remove nothing" and that would
+silently leave the screen's frames allocatable. An entry split in two takes two of the allocator's
+sixteen region slots; running out panics, as it always has. The function returns how many pages it
+removed, which the kernel prints as `usable=` on its `[fb]` line.
+
+That order is why
+[the kernel reads the framebuffer before it seeds the allocator](../boot/overview.md#boot-flow-aarch64).
+
+On QEMU the count is zero. Its memory map reports the framebuffer under a kind of its own, not as
+usable RAM, so no entry overlaps the hole and the carve removes nothing on any boot CI runs
+(`usable=0` is part of the asserted marker). The arithmetic is held by `memrange`'s host tests and
+the wiring by reading: where there is nothing to carve, no boot can tell a kernel that carves from
+one that does not.
 
 ## `SYS_VMCTL`: kernel mechanism, VM policy
 

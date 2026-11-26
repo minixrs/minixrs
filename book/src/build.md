@@ -59,8 +59,9 @@ without the root partition instead, so `virtio-blk` declines it and MFS falls ba
 `MINIXRS_ROOT=nodisk` puts the disk where only the firmware can see it (see
 [The root backend](boot/overview.md#the-root-backend)). The image is rebuilt on every run; to boot
 one again as it was left — the persistence proof — see
-[Booting the same image twice](boot/overview.md#booting-the-same-image-twice). Early serial output
-looks like:
+[Booting the same image twice](boot/overview.md#booting-the-same-image-twice). Every boot also has a
+display that nothing shows unless asked; `MINIXRS_DISPLAY=window` opens it (see
+[The screen](#the-screen)). Early serial output looks like:
 
 ```text
 minix.rs booting on aarch64
@@ -72,10 +73,10 @@ HHDM offset: 0xffff000000000000
 The root `Cargo.toml` declares every crate as a workspace member: `kernel`, `kernel-shared`,
 `minixrs-ipc`, `minixrs-abi-note`, `server-rt`, the six `servers/*`, `drivers/{driver-rt,tty,memory,
 virtio-blk,virtio-console}` and `fs/mfs`, `userland/{init,worker,bigprog}`, the umbrella crate
-`minixrs`, and the three host tools `tools/{gen-c-headers,mkfs-mfs,mkimage}`. Four more members are
-still empty stubs: `drivers/virtio-net`, `fs/pfs`, `userland/sh` and `userland/coreutils`. The C
-programs `userland/hello` and `userland/fileio` are not Cargo members; `kernel/build.rs` builds
-them.
+`minixrs`, and the four host tools `tools/{gen-c-headers,mkfs-mfs,mkimage,fbcheck}`. Four more
+members are still empty stubs: `drivers/virtio-net`, `fs/pfs`, `userland/sh` and
+`userland/coreutils`. The C programs `userland/hello` and `userland/fileio` are not Cargo members;
+`kernel/build.rs` builds them.
 
 The kernel builds against the **builtin `aarch64-unknown-none` target** — not a custom JSON spec.
 `.cargo/config.toml` wires the details:
@@ -196,6 +197,8 @@ Logic that can run off-target lives in `kernel-shared` and in the host-testable 
 cargo test -p minixrs-kernel-shared
 cargo test -p minixrs-gen-c-headers    # the C ABI header generator
 cargo test -p minixrs-mkimage          # the disk-image writer, read back by independent readers
+cargo test -p minixrs-tty              # the console renderer: font, grid, painter, reply check
+cargo test -p minixrs-fbcheck          # the screen check, against rendered images and a mock QMP
 ```
 
 There is no `#[cfg(test)]` code under `kernel/src/` — the crate cannot be host-tested and in-QEMU
@@ -223,7 +226,7 @@ waits on `coverage`:
 | `geiger`        | advisory  | `unsafe` surface report (per package, kernel filtered out)                                                                                 |
 | `miri`          | advisory  | UB check on the host-testable crates                                                                                                       |
 | `boot-scope`    | —         | classifies the change with `tools/boot-relevant.sh`; `qemu-smoke` skips the boots when it says docs-only                                   |
-| `qemu-smoke`    | yes       | boots the kernel three times — disk, a reboot of that image, the rootless-disk fallback — and greps the serial logs                        |
+| `qemu-smoke`    | yes       | boots the kernel three times — disk, a reboot of that image, the rootless-disk fallback — greps the serial logs, and checks the screen     |
 | `coverage`      | yes       | `cargo-llvm-cov` → `lcov.info` (kernel excluded)                                                                                           |
 | `sonar`         | —         | feeds LCOV to SonarQube Cloud                                                                                                              |
 
@@ -241,10 +244,13 @@ of all three — the `timeout(1)` status a healthy, never-exiting kernel must pr
 against the common marker files `tests/qemu-boot.expected` / `.forbidden` plus their backend's own
 pair (`tests/qemu-boot.disk.*` or `tests/qemu-boot.ramdisk.*`); the reboot is checked against
 `tests/qemu-boot.reboot.*` alone. `tools/diff-backends.sh` then requires the filesystem's own output
-to be the same on both full boots. There is no separate `cargo test` job: the host tests run inside
-`coverage`. Keep the expectations timing-robust (first occurrences, never counts), because CI's TCG
-is slower than a local run. `Cargo.lock` is committed so `audit` / `deny` are reproducible, and
-third-party actions are pinned to commit SHAs.
+to be the same on both full boots. Since slice 6.7 each full boot is also
+[screen-checked](#the-screen-check): `tools/screendump.sh` runs beside it, and a check that does not
+pass fails the job like a missing marker. The dump it took (`fb-disk.ppm`, `fb-ramdisk.ppm`) and its
+output are uploaded with the three logs. There is no separate `cargo test` job: the host tests run
+inside `coverage`. Keep the expectations timing-robust (first occurrences, never counts), because
+CI's TCG is slower than a local run. `Cargo.lock` is committed so `audit` / `deny` are reproducible,
+and third-party actions are pinned to commit SHAs.
 
 ## Generated C headers
 
@@ -395,6 +401,108 @@ script an instant before truncating it.
 - A boot run by hand with a terminal attached delivers whatever is typed to that same reader, which
   will almost certainly print `stdin FAIL` — correct, and harmless outside a checked boot. Nothing
   is echoed: the console has no line discipline yet.
+
+## The screen
+
+Every boot has a display — QEMU's `ramfb`, which TTY
+[draws the console on](drivers/overview.md#the-screen) — and by default nothing shows it. To watch a
+boot, ask for a window:
+
+```sh
+MINIXRS_DISPLAY=window timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
+```
+
+QEMU opens its own display window and the serial log stays on the terminal as before. The window
+shows only what user space writes to the console; the kernel's trace lines and the servers' `[diag]`
+lines are on the serial line alone. `MINIXRS_DISPLAY` and the QMP socket's `MINIXRS_QMP` are
+described with the runner, under [The display](boot/overview.md#the-display).
+
+### The screen check
+
+That the screen shows the right thing is checked from the host, with no window involved. Every boot
+has a QMP socket (`target/qmp.sock`), and a host tool, `minixrs-fbcheck` (`tools/fbcheck`), uses it
+to take a picture of the running guest and decide whether the picture is this boot's console.
+
+A screen that scrolls for ever has no fixed image to be compared with, so the check is against two
+things that *are* known — the renderer and the boot's own serial log — in three steps, the first
+failure being the answer:
+
+1. **Geometry.** The dump is exactly the size TTY reported in its `[diag tty] fb ok w=… h=… cols=…
+   rows=…` line (the last one in the log), and the renderer library derives the same grid from that
+   size.
+2. **Every cell is a glyph.** Each 8×16 cell decodes, pixel for pixel, to one printable character in
+   the console's two colours, and every pixel outside the grid is background. The decoded text is
+   then painted again with the same library and must reproduce the dump exactly.
+3. **The text is the boot's.** At least eight rows are non-blank, and every non-blank row is found
+   in the console's part of the serial log.
+
+Step 3 is what makes this more than the renderer agreeing with itself: the serial log was written by
+TTY's UART sink, which shares nothing with the renderer but the bytes. It is also not a plain
+substring search, because the serial line has two other writers. The kernel writes whole trace lines
+— which can begin in the middle of a console line — and one byte per timer tick, the first letter of
+the running process's name, singly or in runs. So the check first removes every kernel line from the
+log (a `[`, a lower-case name, then a space or `]`, through the end of the line), and then finds a
+row if what is left holds its bytes in order with nothing between them but tick bytes — ASCII
+letters or `?` — at most 32 of them in a row of text. The price of that tolerance is that a row
+which *lost* a few letters still passes; the repository's `docs/conventions/testing-and-markers.md`
+lists what the check does not see.
+
+`tools/screendump.sh <qemu-log> <out.ppm>` wraps the tool for a boot in progress. It runs **beside**
+a fed boot, as a background job pointed at the log that boot is writing:
+
+```sh
+tools/screendump.sh disk.log screen.ppm &
+dumper=$!
+MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
+  < <(tools/feed-console.sh disk.log) > disk.log 2>&1
+wait "$dumper"      # 0: a dump passed
+```
+
+It works in three stages:
+
+1. It builds `minixrs-fbcheck` once (`cargo build --release -p minixrs-fbcheck`) and from then on
+   runs the binary directly. `MINIXRS_FBCHECK=<binary>` names one already built and skips the build,
+   which is what CI does so that no cargo runs beside the boot.
+2. It polls the log for `minix.rs init: stdin ok` — the last line [the feeder](#feeding-the-console)
+   causes, so by then every proof child has printed and `init`'s rotation is what keeps the screen
+   moving. Like the feeder it wants the line on two polls in a row, because the log is usually one
+   an earlier boot wrote. An unfed boot never prints the line, and the script then waits out its
+   ceiling and fails.
+3. It runs `minixrs-fbcheck dump-and-check <socket> <out.ppm> <qemu-log>` up to ten times, three
+   seconds apart. Each try stops the guest over QMP, has QEMU write the screen to `<out.ppm>`, lets
+   the guest run again — always, whatever the dump did — and only then reads the log and checks.
+   **The first try that passes wins.** The retries are there because a dump can catch a glyph half
+   painted, or a row whose bytes have not reached the log file yet; a screen that is actually wrong
+   fails every try the same way.
+
+The script exits 0 when a dump passed and 1 otherwise, and writes everything to stderr. `<out.ppm>`
+is overwritten by each try and never deleted, so after a failure it is the last dump taken.
+`SCREENDUMP_TRIES`, `SCREENDUMP_GAP` (seconds between tries) and `SCREENDUMP_CEILING` (how long to
+wait for stage 2's line; 1300 by default) adjust it, and it finds the socket through `MINIXRS_QMP`
+as the runner does. It cannot see QEMU exit, so a script whose line never came waits out its
+ceiling; CI instead kills one that is still running when the boot's timeout fires, and counts it as
+failed.
+
+The tool can also be used by hand, against any running boot or any dump:
+
+```sh
+cargo build --release -p minixrs-fbcheck
+target/release/minixrs-fbcheck dump target/qmp.sock screen.ppm      # stop, screendump, cont
+target/release/minixrs-fbcheck check screen.ppm disk.log            # the three steps above
+```
+
+The dump is a binary PPM (`P6`). The verdict is one line — on stdout when the check passes, on
+stderr as `fbcheck: FAIL <reason>` when it does not:
+
+```text
+fbcheck: ok <w>x<h> <cols>x<rows> rows=<n> wraps=<n> stray=<n> worst=<n>
+```
+
+That is the screen's size in pixels and in cells (`800x600 100x37` under QEMU), then four counts:
+`rows`, the non-blank rows; `wraps`, the rows that fill the last column and run straight on into the
+next row's text in the log (long lines seen whole — informational, it refuses nothing); `stray`, the
+rows found only by allowing tick bytes inside them; and `worst`, the most tick bytes any one row
+needed, to be read against the limit of 32.
 
 ## Debugging with GDB
 

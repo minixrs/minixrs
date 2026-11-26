@@ -1,7 +1,7 @@
 # Testing and markers
 
 How to verify a server that cannot print, what the two kernel trace samplers do and do not catch,
-the boot-marker-file contract, and the mutation-testing discipline. See
+the boot-marker-file contract, the screen check, and the mutation-testing discipline. See
 [`build-and-boot.md`](./build-and-boot.md) for the boot commands themselves (how to produce and time
 a log) — this file covers how to read one.
 
@@ -138,6 +138,20 @@ full boot and one for the reboot:
   for the same one: a kernel rule about notifications and `SENDREC`, stated with its failure line in
   [`kernel.md`](./kernel.md#a-pending-notification-is-never-the-reply-to-a-sendrec). A `cdev.short
   FAIL rc=4096` is that rule broken, not a console-write bug.
+- **The framebuffer console's seven lines are common, and their numbers are a measurement** (slice
+  6.7). Three are required of every full boot — `[fb] ok w=800 h=600 pitch=3200 r=16 g=8 b=0
+  usable=0`, `[devmap] tty fb va=0x100000000 pages=469` and `[diag tty] fb ok w=800 h=600 cols=100
+  rows=37` — and four are forbidden: `[fb] none`, `[fb] FAIL`, `[diag tty] fb none` and `[diag tty]
+  fb FAIL`. The runner attaches `ramfb` to every boot, so a boot without a screen is a failure
+  whichever side reports it; they are listed as forbidden lines, rather than left to `fb ok` going
+  missing, because after any of the four the console is serial-only and *every other marker still
+  passes*. The geometry is the mode the firmware set, not a constant of this repository
+  ([`build-and-boot.md`](./build-and-boot.md#the-display-and-the-qmp-socket)): a firmware with
+  another default moves **all three expected lines together** — `w`/`h`/`pitch` in the first,
+  `pages=` (`ceil(pitch * h / 4096)`) in the second, `w`/`h`/`cols`/`rows` in the third. Three
+  moving at once is that; one moving alone is a bug. All three are serial evidence that TTY believed
+  it had a screen and that its stores did not fault. That the pixels are right is not theirs to say
+  — it is [the screen check](#the-screen-check)'s. The reboot's pair holds none of the seven.
 - **A new marker goes in the common pair unless it exists because of one backend.** Everything the
   filesystem proves — mount, read, write, create/truncate, the hole probe, exec from the root — is
   common and therefore required of both drivers. A marker moved into a per-backend file stops being
@@ -172,9 +186,9 @@ A few properties of the checker matter when you're reading its output rather tha
   moves by more than the expected-marker count alone. The total is per boot kind, because each adds
   its own pair to the common one (6.4: 165 for each full boot, 7 for the reboot; 6.5 added six
   expected and three forbidden lines to the common pair, so 174 and still 7; 6.6 added nine expected
-  and seven forbidden, so **190** and still 7 — counted from the files as committed: 122 + 55
-  common, 8 + 5 per backend, 3 + 4 for the reboot); count the marker files rather than quoting a
-  number from a plan.
+  and seven forbidden, so 190 and still 7; 6.7 added three expected and four forbidden, so **197**
+  and still 7 — counted from the files as committed: 125 + 59 common, 8 + 5 per backend, 3 + 4 for
+  the reboot); count the marker files rather than quoting a number from a plan.
 - **The fork-cycle markers name slots, and a long-lived child of init moves them.** PM's fork pool
   starts at 19 and init's first forks are its two proof children, so the `read(0)` child holds slot
   19, the `/dev/hvc0` child slot 20, and the rotation's first `worker` runs in **slot 21** — three
@@ -202,7 +216,138 @@ A few properties of the checker matter when you're reading its output rather tha
   prefix is a substring: 6.2's planned `[devmap] vblk va=0x4000` also matched TTY's page at
   `0x40000000`, the exact off-by-one-page mapping it existed to catch. Assert the whole line when
   every field is deterministic. When one field varies by run, print the stable fields first — 6.2
-  moved `pages=` ahead of the firmware-dependent `pa=` so that `pages=16` could be asserted.
+  moved `pages=` ahead of the firmware-dependent `pa=` so that `pages=16` could be asserted. 6.7's
+  two kernel lines were drafted with `pa=` in the middle and were reordered for the same reason:
+  `[fb] ok … usable=0 pa=…` and `[devmap] tty fb va=… pages=469 pa=…` both end in `pa=`, which
+  follows the firmware's memory map, and everything before it is asserted as one prefix. The second
+  line's text is `tty fb va=` and not `tty va=` so that TTY's UART line cannot satisfy it.
+
+## The screen check
+
+The marker files read the serial log, and the serial log cannot say what is on the screen. Since
+slice 6.7 that is checked separately, from the host: `tools/screendump.sh <qemu-log> <out.ppm>` runs
+**beside** a fed full boot, takes a QMP `screendump` of the running guest, and has `minixrs-fbcheck`
+(`tools/fbcheck`) decide whether the picture is that boot's console. CI runs it beside both full
+boots and it blocks ([`ci.md`](./ci.md)); the reboot is not screen-checked. Run it locally beside
+both full boots for any slice that touches what TTY draws, the kernel's framebuffer path, or the
+runner's display arguments. The command form is in the script's header.
+
+### What a pass proves
+
+`fbcheck` applies three steps to a dump and the log of the boot it came from; the first that fails
+is the verdict.
+
+1. **Geometry.** The dump is exactly the `w=` × `h=` of the log's *last* complete `[diag tty] fb ok`
+   line, and the grid the renderer library derives from that size is exactly that line's `cols=` ×
+   `rows=`. TTY's own arithmetic is checked against the library's, on the host.
+2. **Every cell is a glyph.** Each 8×16 cell decodes — all 128 pixels one of the two console
+   colours, forming one printable character — and every pixel outside the grid is background. The
+   decoded text, painted again by the same library, must reproduce the dump pixel for pixel.
+3. **The text is the boot's.** At least 8 rows (`MIN_ROWS`) are non-blank, and every non-blank row,
+   trailing blanks removed, is found in the console's part of the serial log.
+
+Step 3 is what makes this more than the renderer agreeing with itself: the log was written by TTY's
+UART sink, which shares nothing with the renderer but the bytes it was handed. A golden glyph drawn
+by hand in `font`'s host tests covers what is left — a font read wrongly on both sides.
+
+### How a row is looked up
+
+Not with `grep`. The serial line has three writers and the console is one of them, so the log is
+read in two passes (`tools/fbcheck/src/check.rs` has the rule in full):
+
+- **The kernel's lines are taken out first.** A kernel line starts at a `[` followed by one or more
+  of `a`–`z`, `_`, `.`, `-` and then a space or a `]` — `[ipc `, `[ksys `, `[diag tty]`, `[efault `
+  — and runs through the next `\n`. Everything else is kept, in order.
+- **Then the row must be in what is left, with nothing inside it but tick bytes.** Its bytes must
+  appear in order, and between any two of them only *stray* bytes may sit: ASCII letters or `?`, in
+  runs of any length, **at most 32 per row** (`MAX_STRAY`). A digit, a space, punctuation or a line
+  end between two bytes of a row is never forgiven, and no byte of the row may be missing or
+  different. An exact occurrence is preferred and counts as no strays.
+
+### What a pass does not prove
+
+Every one of these is a property of the rule above, stated in the checker's own module docs. Know
+them before citing a passing screen check as evidence.
+
+- **A row that has lost letters still passes.** This is the known false accept, and it is the price
+  of the tick-byte tolerance: `minix.rs it: stdin ok` is found in `minix.rs init: stdin ok`, with
+  `ni` taken for tick bytes. Up to 32 letters per row can go missing that way. A wrong, extra or
+  moved character cannot, nor a missing digit, space or punctuation mark.
+- **Row order is not checked.** Rows are looked up one at a time, and nothing requires them to be in
+  the log in screen order. A scroll that left rows in the wrong order, or a stale row that is still
+  somewhere in the log, passes. The wrap join does not close this: `wraps=` *counts* the rows that
+  fill the last column and whose text runs straight on into the next row's in the log, and refuses
+  nothing — it cannot, because a line of exactly `cols` bytes followed by a newline fills its row
+  and is honestly not continued below.
+- **Console text that looks like a kernel line is falsely refused.** A console line containing
+  `[word]` or `[word ` — lower-case letters, `_`, `.`, `-` — is taken out with the rest of its line
+  in the first pass, and its screen row is then not found. That is a false *failure*, never a false
+  pass, and nothing the default boot prints to the console trips it. A program that does print such
+  text — a shell saying `[done]`, a test harness printing `[ok]` — will fail this check with `screen
+  row N is not in the serial log's console text`, and the fix belongs in the checker's rule or the
+  program's text, not in a retry.
+- **Short rows prove little.** A row holding `$` is in any log.
+- **A tab or an unprintable byte on the console is refused.** The screen draws a tab as a cursor
+  move and an unprintable byte as `?`, so the row is not in the log as drawn. Nothing in the default
+  boot writes one.
+- **Nothing about colour beyond the two it draws.** The console is grey on black, and grey has three
+  equal channels, so channel shifts swapped anywhere between the kernel's reply and TTY's packing
+  put the same pixels on the screen.
+- **One instant, one screenful.** The check sees the rows on the screen when the guest was stopped,
+  and nothing that had scrolled away or had not been written yet.
+
+### The retry, and what it forgives
+
+`screendump.sh` waits for `minix.rs init: stdin ok` in the log — the last line the feeder causes,
+seen on two consecutive polls for the feeder's stale-log reason — and then tries `dump-and-check` up
+to 10 times, 3 seconds apart (`SCREENDUMP_TRIES`, `SCREENDUMP_GAP`). Each try stops the guest,
+dumps, resumes it whatever the dump did, and reads the log only *after* the dump: TTY writes the
+UART before it draws, so everything on a dumped screen is already on the serial line. **The first
+try that passes wins.**
+
+The retries exist because a dump can catch a glyph half-painted — the guest is stopped between two
+pixel stores — or land before the host has the log's newest bytes; such a dump fails step 2 or 3 and
+the next one is of a different instant. The consequence to keep in mind: **a defect that shows on
+only some dumps is forgiven by design.** A screen that is wrong fails every try the same way, and
+each try's reason is on the script's stderr, so read all of them, not just the last line. Because
+the gate is a fed line, the script is for fed boots only: beside an unfed boot it waits out its
+ceiling (`SCREENDUMP_CEILING`, 1300 s) and fails.
+
+### Reading the verdict
+
+```text
+fbcheck: ok <w>x<h> <cols>x<rows> rows=<n> wraps=<n> stray=<n> worst=<n>
+fbcheck: FAIL <reason>
+```
+
+`rows` is the non-blank rows; `wraps` the wrapped lines seen whole; `stray` the rows found only by
+allowing tick bytes inside them; `worst` the most tick bytes any one row needed. **Watch `worst`
+against the 32**: the limit was chosen from one measured boot, in which the two rows that needed
+strays needed 5 and 10 and the longest run of tick bytes inside any console line of the whole log
+was 30. A `worst` near the limit, or a large `stray`, says the tolerance is doing real work — and a
+`row … not in the serial log's console text, even allowing 32 tick bytes inside it` on a healthy
+screen may be a longer run rather than a defect. After a failure `<out.ppm>` is the last dump taken.
+
+### What the serial log really is
+
+Measured on a fed disk boot in slice 6.7 — 54 MB of log, of which 80 KB is console text — and worth
+knowing for anything that reads console lines out of a serial log, not only for this check:
+
+- **The kernel's trace lines are written whole, but they begin in the middle of console lines**,
+  which carry on after them: `…-----[ksys 1412800] caller=17 call=0 result=0\r\n-----…`. About a
+  million kernel lines in that boot.
+- **The kernel's tick bytes arrive in runs as well as singly.** One byte per 10 ms tick while a
+  process runs — the first byte of its name, or `?` (`kernel/src/clock.rs`) — so a console line can
+  read `minix.rs initt: dev.null ok`, and, when nothing else prints between ticks, `minix.rs hello:
+  iov CCCCCCCCCC....`. Runs *before* a line are far longer (4930 bytes in that boot).
+- **A tick byte lands inside roughly one console line in a thousand** (0.09%–0.25% across three 300
+  s boots; the figures are in
+  [the 6.7 spec](../superpowers/specs/2026-11-26-framebuffer-console-design.md#7-corrections-found-in-implementation)).
+
+`check-boot-log.sh` matches with `grep -F` and allows for neither, so a marker that is a *console*
+line — the `minix.rs …` family — is exposed to both in a way a kernel-printed `[diag …]` line is
+not. Slice 6.7 did not measure how often a marker is hit; if one console-line marker is missing with
+its neighbours present, grep the log for its two halves before believing it.
 
 ## A starved boot is not a regression
 
@@ -273,6 +418,12 @@ This runs against an **uncommitted** working tree, so the restore step has real 
   prologue or to when it first blocks needs a default boot through `check-boot-log.sh` (the rule and
   the defect that paid for it are under
   [Prologue ordering](./servers-and-drivers.md#prologue-ordering)).
+- **A mutation of what TTY draws is judged by the screen check, on a fed boot, with every try's
+  message read.** No serial marker moves when a pixel is wrong; run `tools/screendump.sh` beside the
+  mutated boot and record the checker's reason (the cell that did not decode, the row not found)
+  rather than "the check failed" — and read
+  [what a pass does not prove](#what-a-pass-does-not-prove) before predicting that a mutation will
+  be caught: one that only reorders rows will not be.
 - **Feed a receive-path mutation with the standard feeder, never with a `printf` of your own.**
   `tools/feed-console.sh` sends the probe in two chunks; a hand-rolled feed that writes it at once
   delivers one interrupt, and every mutation of what TTY does *after* its first drain then passes.

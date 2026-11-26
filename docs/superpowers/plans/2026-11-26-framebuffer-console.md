@@ -41,7 +41,7 @@ disagree, **the spec wins** and the plan gets corrected.
 
 ```text
 [fb] ok w=<w> h=<h> pitch=<p> r=<n> g=<n> b=<n> usable=0 pa=<…>     kernel
-[fb] none                                                          kernel, no response
+[fb] none                                                          kernel, no response; forbidden
 [fb] FAIL <condition>                                              kernel, forbidden
 [devmap] tty fb va=0x100000000 pages=<n> pa=<…>                    kernel
 [diag tty] fb ok w=<w> h=<h> cols=<c> rows=<r>
@@ -57,13 +57,16 @@ disagree, **the spec wins** and the plan gets corrected.
    allocates between (read `main.rs`; mutation 6 is an honest row).
 3. **Pages mapped** = `ceil(pitch * height / 4096)`, checked, and within the window (mutation 3).
 4. **The two `TTY_PROC_NR` gates agree** — loader arm and `GET_FRAMEBUFFER` (mutation 4).
-5. **TTY re-validates the reply** rather than trusting the kernel: `w * 4 <= pitch`, `pitch * h`
-   within the window, shifts sane (`tty::paint` tests).
+5. **TTY re-validates the reply** rather than trusting the kernel: the VA is `FB_VA`, `w * 4 <=
+   pitch`, `pitch * h` within the window, shifts sane, at least one cell (`tty::reply` tests, over
+   `paint::Format::new`'s).
 6. **No store outside `w × h`**, including a width or height that is not a multiple of the cell
    (`tty::paint` test with an 13×21 surface).
 7. **Deferred wrap** and scroll at the last row (`tty::grid` tests).
 8. **`fbcheck` refuses**: one flipped pixel, wrong geometry, a row absent from the log, too few rows
-   (`fbcheck` tests) — and passes a dump with a wrapped row.
+   (`fbcheck` tests) — and passes a dump with a wrapped row, and a row with a kernel line or a run
+   of tick bytes inside it in the log. Know what it accepts by design: a row that lost letters, and
+   rows in any order (spec F10).
 9. **Tripwires grown, not left:** `callnr.rs`'s selector asserts; `GETINFO_DENIED` users.
 10. **`book/`** read end to end for every chapter touched.
 
@@ -78,35 +81,54 @@ kernel edit is discarded, not committed. F13.2 and F13.3 are measured on the rea
 
 ### Task 1: `kernel-shared` — the window, the selector, `subtract` (F3, F4, F5)
 
-Files: `kernel-shared/src/{uspace,callnr}.rs`, a new `kernel-shared/src/memrange.rs`. Tests first:
-`subtract`'s seven cases; the offsets test; the four-window disjointness test. Commit.
+Files: `kernel-shared/src/{uspace,callnr,lib}.rs`, a new `kernel-shared/src/memrange.rs`. Tests
+first: `subtract`'s cases — sixteen tests: the hole below, above and adjacent on each side, covering
+the region, at the head, at the tail, in the middle, a byte inside each edge, the empty and inverted
+arguments, the extremes of `u64`, and the inside-the-region/outside-the-hole property; the offsets
+test and the pairwise selector sweep; the four-window disjointness test. Commit.
 
-### Task 2: kernel — request, validation, carve, map, `GET_FRAMEBUFFER` (F2–F5)
+### Task 2: kernel — request, validation, carve, map, `GET_FRAMEBUFFER`; the runner (F1–F5)
 
-Files: `kernel/src/arch/aarch64/{limine,userland}.rs`, `kernel/src/mm/frame.rs`,
-`kernel/src/main.rs`, `kernel/src/system/do_getinfo.rs`, `tools/qemu-run.sh` (`-device ramfb`).
-Proof: `[fb] ok` and `[devmap] tty fb` in a stub-free boot. Commit.
+Files: a new `kernel-shared/src/framebuffer.rs` (the pure `validate`, host-tested, with
+`kernel-shared/src/lib.rs`), a new `kernel/src/arch/aarch64/framebuffer.rs` (the accepted record and
+the `[fb]` line) with `kernel/src/arch/aarch64/{limine,mod,userland}.rs`, `kernel/src/mm/frame.rs`,
+`kernel/src/main.rs`, `kernel/src/system/do_getinfo.rs`, `kernel/src/proc/table.rs` (6.6's debt 14,
+the stale boot-module comment), `tools/gen-c-headers/src/callnr_h.rs` (the not-emitted list grown),
+and `tools/qemu-run.sh` — all of F1 here: `-device ramfb`, the QMP socket with its path-length
+check, `MINIXRS_QMP` and `MINIXRS_DISPLAY`. Proof: `[fb] ok` and `[devmap] tty fb` in a stub-free
+boot. Commit.
 
 ### Task 3: TTY lib — `font`, `grid`, `paint` (F6–F8)
 
 Files: `drivers/tty/Cargo.toml`, `drivers/tty/src/{lib,font,grid,paint}.rs`,
-`drivers/tty/font/{spleen-8x16.psfu,LICENSE,README.md}`. Tests first, as the spec's section 3 lists.
-Commit.
+`drivers/tty/font/{spleen-8x16.psfu,LICENSE,README.md}`, and `kernel/build.rs` (the watch on
+`font/`, which is outside the `src` that `build_server` watches). Tests first, as the spec's section
+3 lists. Commit.
 
-### Task 4: TTY bin — `console_write` and the verdict line (F9)
+### Task 4: TTY bin — `console_write`, the reply check and the verdict line (F9)
 
-Files: `drivers/tty/src/main.rs`, the marker files under `tests/`. Proof: `[diag tty] fb ok` in a
-boot and a hand `screendump` that shows text. Commit.
+Files: `drivers/tty/src/main.rs`, a new `drivers/tty/src/reply.rs` (the fourth library module:
+decode and accept-or-refuse, tests first) with `drivers/tty/src/lib.rs`, the marker files under
+`tests/` (three expected, four forbidden), and the two kernel lines reordered to end in `pa=`
+(`kernel/src/arch/aarch64/{framebuffer,userland}.rs`). Proof: `[diag tty] fb ok` in a boot and a
+hand `screendump` that shows text. Commit.
 
-### Task 5: `fbcheck`, `screendump.sh`, QMP and window mode in the runner (F1, F10, F11)
+### Task 5: `fbcheck` and `screendump.sh` (F10, F11)
 
-Files: `tools/fbcheck/` (new workspace member), `tools/screendump.sh`, `tools/qemu-run.sh`. Tests
-first for decode and the refusals. Proof: the check passes on a fed disk boot. Commit.
+Files: `tools/fbcheck/` (new workspace member: `Cargo.toml`, `src/{lib,main,check,ppm,qmp}.rs`), the
+root `Cargo.toml` and `Cargo.lock`, `tools/screendump.sh`. `tools/qemu-run.sh` is **not** edited
+here — Task 2 did all of F1. Tests first for decode and the refusals. Proof: the check passes on a
+fed disk boot. Commit. A fix round followed, in its own commit, when a real log refused an honest
+screen: kernel lines stripped, tick-byte runs tolerated (`tools/fbcheck/src/{check,lib,main}.rs`,
+`tools/screendump.sh`).
 
 ### Task 6: CI and the budget (F11, F13.2, F13.3)
 
-Files: `.github/workflows/ci.yml`. Measure the last marker's position against the merge base; adopt
-changed-cells repaint first if over budget. Commit.
+Files: `.github/workflows/ci.yml` (the pre-build step, the screen check beside both full boots, the
+artifact). Measure the last marker's position against the merge base; adopt changed-cells repaint
+first if over budget — it was, and the repaint is its own commit
+(`drivers/tty/src/{paint,grid,lib,main}.rs`: `paint::Shown`, `paint_cell_diff`, `paint_diff`).
+Commit.
 
 ### Task 7: recorded boots (spec §3)
 

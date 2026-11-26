@@ -187,21 +187,44 @@ relays grants on clients' behalf, see [kernel.md](./kernel.md).
 
 ## `uspace`: the address-only ABI
 
-`kernel-shared/src/uspace.rs` is an **address** ABI, not a message one — the device, ramdisk and DMA
-window bases and sizes, the virtio register page's VA, and the DMA cookie. It is deliberately
-**not** emitted in the generated C headers.
+`kernel-shared/src/uspace.rs` is an **address** ABI, not a message one — the device, ramdisk, DMA
+and framebuffer window bases and sizes, the virtio register page's VA, the framebuffer's VA, and the
+DMA cookie. It is deliberately **not** emitted in the generated C headers.
 
-(slice 5.3 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md))
+(slice 5.3 — see [phase-5-musl-fs.md](../plans/phase-5-musl-fs.md); the framebuffer window is slice
+6.7's)
 
 ## `SYS_GETINFO` selectors held back from C
 
-`GET_WHOAMI` (12) describes any process and is emitted. The three driver-gated selectors —
+`GET_WHOAMI` (12) describes any process and is emitted. The four driver-gated selectors —
 `GET_RAMDISK` (64, `memory` only), `GET_VIRTIO_MMIO` (65) and `GET_DMA` (66) (the four virtio driver
-slots) — are **deliberately not emitted**: a selector a Rust driver alone can call would freeze its
-value under D8 for no reader, so renumbering stays free for as long as no C ever calls one. Each has
-a "deliberately not emitted" test in `tools/gen-c-headers/src/callnr_h.rs`, and their payload
-offsets (`GETINFO_*_OFF`) are named constants with layout asserts in `callnr.rs`. A new selector
-that C could call is a different matter: it is additive but must be emitted and tested.
+slots), and `GET_FRAMEBUFFER` (67, TTY only) — are **deliberately not emitted**: a selector a Rust
+driver alone can call would freeze its value under D8 for no reader, so renumbering stays free for
+as long as no C ever calls one. Each is named in a "deliberately not emitted" test in
+`tools/gen-c-headers/src/callnr_h.rs`, and their payload offsets (`GETINFO_*_OFF`) are named
+constants with layout asserts in `callnr.rs`. A new selector that C could call is a different
+matter: it is additive but must be emitted and tested.
+
+**Adding a driver-gated selector grows three tripwires, in the commit that adds it** — slice 6.7's
+`GET_FRAMEBUFFER` is the worked example, and a tripwire the adding branch does not grow reads as
+coverage without being any:
+
+- `callnr.rs`'s `const _` asserts — the selector is above 31 and unequal to each of the others — and
+  the ordered/disjoint/aligned asserts over its `GETINFO_*_OFF` constants;
+- `callnr.rs`'s `every_getinfo_selector_is_pairwise_distinct`, a table with one row per selector,
+  swept pairwise (new in 6.7, so the next selector is one row rather than a set of `assert_ne!`s),
+  beside a per-selector layout test that walks the reply field by field;
+- the gen-c-headers list in `no_virtio_selectors_are_emitted_yet`, which names the selector **and
+  every one of its offset constants** — nine names for `GET_FRAMEBUFFER`. The test's name is
+  historical: it holds 6.2's virtio selectors and 6.7's framebuffer one.
+
+`GET_FRAMEBUFFER`'s reply is one `u64`, three `u32`s and four `u8`s, 24 bytes with no padding: the
+mapping's VA, width, height, pitch, the three channel shifts as bit offsets, and bits per pixel. No
+mask sizes are on the wire, since only 8-bit channels are accepted. Under D8 it is **additive**
+(phase decision H12): no `Message` layout, call number, endpoint or errno moved, nothing was added
+to the generated headers (the test above is what holds that), and the musl fork did not move. The
+kernel's side of the selector — its two gates — is in
+[`kernel.md`](./kernel.md#the-framebuffer-window).
 
 The four virtio process names and `NR_BOOT_PROCS` (now 15) **are** emitted into `com.h`, which lists
 every boot process; the array length there is computed from `NR_TASKS + NR_BOOT_PROCS`, so the next
@@ -209,7 +232,8 @@ boot slot fails the build until its name is added. That is additive under D8 (no
 moves) — and the musl fork needs only regenerated headers, since generated headers are never
 committed.
 
-(slice 6.2 — see [the design](../superpowers/specs/2026-11-09-driver-rt-design.md))
+(slice 6.2 — see [the design](../superpowers/specs/2026-11-09-driver-rt-design.md); slice 6.7 — see
+[the design](../superpowers/specs/2026-11-26-framebuffer-console-design.md))
 
 ## D8: the ABI freeze
 

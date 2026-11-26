@@ -57,6 +57,13 @@ silently embed a stale server ELF. That list covers *shared* inputs only (`minix
 needs no entry of its own — `build_server` already watches each crate's
 `src`/`user.ld`/`Cargo.toml`/`build.rs`.
 
+**A boot crate that embeds a file from outside its `src` needs a watch of its own.** There is one
+today: TTY's renderer `include_bytes!`s its font from `drivers/tty/font/`, which sits beside `src`
+rather than under it, so `build_boot_image` prints a `rerun-if-changed` for that directory for
+`minixrs-tty` alone (slice 6.7). The nested cargo tracks the font file by itself; the line is what
+makes the *outer* build re-run and re-pack the archive when the font is swapped. Without it a
+changed font builds a new TTY ELF that the kernel never embeds.
+
 ### ELF-only attributes, and why `forbid(unsafe_code)` is unusable
 
 ELF-only attributes on server crates (`#[unsafe(link_section = ".text._start")]`, etc.) must be
@@ -67,7 +74,8 @@ specifiers.
 Relatedly, `#![forbid(unsafe_code)]` is unusable on any freestanding binary crate here — edition
 2024's `unsafe(no_mangle)` / `unsafe(link_section)` on `_start` trip the `unsafe_code` lint — so a
 crate with no `unsafe` *block* (e.g. `drivers/memory`) says so in its crate docs instead of
-asserting it with the attribute.
+asserting it with the attribute. A crate's **library** half has no `_start` and can assert it:
+`drivers/tty/src/lib.rs` does.
 
 ## Verifying server behaviour
 
@@ -503,6 +511,14 @@ that prints nothing `tests/qemu-boot.forbidden` catches, so the failure is still
   load-bearing half is that `Blocks::read(&mut self) -> &[u8; N]` makes "hold a directory block
   across the next fetch" a borrow-check error, and that survived the move from `.bss` to `main`'s
   frame unchanged.
+- **TTY's `main` frame is 21 376 bytes — a third of the stack — and that is the console, not a
+  leak.** The text grid and the shadow of what has been painted (`Grid`, `paint::Shown`) are 10 240
+  bytes each, and both are `main`-frame locals passed down by `&mut`, so that no static and no
+  `unsafe` is needed to reach them (slice 6.7; it was 11 136 bytes with the grid alone). Two things
+  follow. A third array of that size does not go in the same frame without a look at the budget. And
+  **measure this frame by reading its prologue, not with the one-liner**, which reports 4992 for it:
+  a frame this large is a stack-probe loop, the blind spot described beside the recipe in
+  [build-and-boot.md](./build-and-boot.md).
 - **Do not grow a server's stack for a demo.** 64 KiB rather than 256 KiB is deliberate: at 256 KiB
   a server author stops thinking about the stack budget at all, which is the discipline this
   constant exists to enforce.
@@ -665,6 +681,73 @@ Beyond the shared contracts above, the driver-specific rules:
   the one that counts). 6.2's first virtqueue wrote through a pointer taken from a shared borrow:
   every host test passed, and Miri rejected it under both aliasing models. `queue.rs`'s tests are
   what drive `dma.rs` under Miri, so a queue change is a reason to run it as well
+
+### TTY's screen: a library half, and stores only
+
+(slice 6.7 — see [the design](../superpowers/specs/2026-11-26-framebuffer-console-design.md). The
+kernel's half — the window, the mapping, the carve — is in
+[`kernel.md`](./kernel.md#the-framebuffer-window).)
+
+- **`drivers/tty` is a library and a binary, with no feature gate between them.** The library
+  (`minixrs_tty`, `src/lib.rs`) is four pure modules — `font`, `grid`, `paint`, `reply` — under
+  `#![forbid(unsafe_code)]`, all host-tested. The binary (`src/main.rs` with `input`, `irq`,
+  `pl011`) is the driver and the only half that touches a device. Unlike `fs/mfs`
+  ([Crate shape](#crate-shape)) there is no `server` feature, because nothing reaches this library
+  from a build script — so the binary stays visible to every CI job and needs no extra clippy step.
+  `tools/fbcheck` depends on the library, which is the point: a screen dump is decoded by the code
+  that painted it.
+- **The binary uses the library as a dependency, never as modules.** `use minixrs_tty::…`; a `mod
+  grid;` in `main.rs` would compile a second, private copy. And the `[[bin]]`'s `name` must stay
+  equal to the package name: `build_server` looks the ELF up by that basename.
+- **A decision goes in the library; the binary gets a call and a store.** What a byte does to the
+  text (`grid`), which pixels a glyph is (`font`, `paint`), whether the kernel's description of the
+  framebuffer may be believed (`reply`) — each is a pure function with a host test. What is left in
+  `main.rs` is one kernel call, one verdict line and one store. Keep it that way: a branch added to
+  the binary is a branch no host test and, mostly, no boot marker can reach.
+- **The device-store rule: the framebuffer is touched by one aligned volatile `u32` store, and by
+  nothing else.** `Screen::store` — `write_volatile` at `FB_VA + y * pitch + x * 4` — is the only
+  code that names the mapping. No load, ever; no reference or slice over it; no
+  `copy_nonoverlapping`, `copy_within`, `fill` or `memset`. The mapping has Device attributes (phase
+  decision H9), and a bulk operation is exactly where a compiler emits the unaligned, merged or
+  widened accesses device memory does not tolerate. The rule is structural — `paint::Surface` has a
+  `store` and no load — so the way to break it is to add a method to that trait. Do not.
+- **The store checks its own bound, in pixels.** `x < width && y < height` on every call, although
+  `paint` never asks for more: it is the last line before a device. In pixels and not in mapped
+  pages, because the kernel maps `ceil(pitch * height / 4096)` pages and the last of them can run
+  past the framebuffer (0x400 bytes on QEMU) into memory that is not the screen's.
+- **A scroll shifts the grid and repaints only the cells whose byte changed.** With no reads there
+  is no moving pixels; the screen is brought up to date from the grid, against `paint::Shown`, the
+  byte last painted in each cell. Repainting every cell on every scroll was the first cut and cost
+  the console about five sixths of its throughput (473 600 stores per newline on a full 100×37
+  screen; the measurement is in the design's section 7).
+- **Every paint after the start-up clear goes through `paint_cell_diff` or `paint_diff`.** That is
+  what keeps `Shown` true: it starts as what `clear` leaves and is written only in the same step as
+  the stores it records. `paint_cell` and `paint_all` know nothing of it — they are for a host
+  renderer with no shadow (`fbcheck`'s re-render) — and one call to either from the binary leaves
+  stale glyphs behind every later scroll.
+- **One output path: `console_write`, UART first.** The banner and every `CDEV_WRITE` go through it,
+  and it writes the whole buffer to the PL011 before it draws a byte, so no serial marker's timing
+  depends on painting. A new place that emits console bytes calls `console_write`; one that called
+  `pl011::write` directly would put text on the serial line that the screen never shows. Kernel
+  output and `[diag]` lines are not console output and never reach the screen.
+- **TTY re-validates the kernel's reply instead of trusting it**, and prints exactly one `fb` line:
+  `fb ok …`, `fb none rc=…` or `fb FAIL <reason>`. The reply is all that stands between a wrong
+  number and a store through a device mapping. The kernel applied the same conditions first, so `fb
+  FAIL` means the two validators disagree — when one side's conditions change, change the other's
+  (`kernel-shared::framebuffer::validate` and `paint::Format::new` with `reply::accept`).
+- **The console's state is a `main`-frame local, which is why `main` writes the banner.** A SEF
+  callback is a plain `fn` pointer and cannot reach `main`'s locals without a static and the
+  `unsafe` that goes with one, so the banner moved out of `tty_init` (which now only publishes to
+  DS) to straight after `sef_startup` returns. Nothing runs between the two, so the serial log's
+  order did not change. The frame's size is under [The 64 KiB stack](#the-64-kib-stack).
+- **The font is the upstream file, byte for byte, with its licence beside it.**
+  `drivers/tty/font/README.md` records the release, both digests and how to update; `font.rs` checks
+  the file's header at build time and a host test pins the ASCII-identity the renderer's indexing
+  relies on. Spleen is BSD-2-Clause and is not relicensed; a replacement font has to be BSD- or
+  MIT-licensed and vendored the same way. The directory needs its own build watch — see
+  [Watching dependencies](#watching-dependencies).
+- **What proves it.** The serial markers say TTY believed it had a screen; only
+  [the screen check](./testing-and-markers.md#the-screen-check) says the pixels are right.
 
 ### Block drivers
 
