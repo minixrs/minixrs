@@ -1,0 +1,26 @@
+[package]
+name = "minixrs-fbcheck"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+name = "minixrs_fbcheck"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minixrs-fbcheck"
+path = "src/main.rs"
+
+# One path dependency and zero third-party crates, `mkimage`'s shape: `deny.toml`'s
+# allow-list keeps CLI and JSON crates out of this workspace, so argv parsing and the
+# few lines of JSON a QMP exchange needs are hand-rolled.
+#
+# The dependency is the point of the tool (slice 6.7, decision F10): a screen dump is
+# decoded with the code that painted it. Only the TTY crate's library half is built.
+[dependencies]
+minixrs-tty = { path = "../../drivers/tty" }
+
+[lints]
+workspace = true

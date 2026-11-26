@@ -71,6 +71,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "minixrs-fbcheck"
+version = "0.1.0"
+dependencies = [
+ "minixrs-tty",
+]
+
+[[package]]
 name = "minixrs-gen-c-headers"
 version = "0.1.0"
 dependencies = [
