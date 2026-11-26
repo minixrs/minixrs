@@ -20,6 +20,7 @@ pub mod error;
 pub mod execimage;
 pub mod execstack;
 pub mod fcntl;
+pub mod framebuffer;
 pub mod grant;
 pub mod ipc_const;
 pub mod irq;

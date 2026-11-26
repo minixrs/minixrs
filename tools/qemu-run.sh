@@ -11,12 +11,17 @@
 # holds a kernel, so a kernel banner in the log is itself the proof that edk2
 # and Limine read the image (slice 6.4, spec P3/P4).
 #
-# The script attaches ONE other device, on every boot whatever the root backend
-# (slice 6.6, spec C1/C2): a virtio console -- a `virtio-serial-device` on
-# virtio-mmio-bus.8 with a single `virtconsole` port -- which minix.rs's `vcon`
-# driver serves as /dev/hvc0. Its host side is a pair of FIFOs, described at
-# the console block below. (`-M virt`'s own default devices are still there: no
-# -nodefaults.)
+# The script attaches TWO other devices, on every boot whatever the root
+# backend. One is a virtio console (slice 6.6, spec C1/C2) -- a
+# `virtio-serial-device` on virtio-mmio-bus.8 with a single `virtconsole` port
+# -- which minix.rs's `vcon` driver serves as /dev/hvc0. Its host side is a pair
+# of FIFOs, described at the console block below. The other is a display
+# (slice 6.7, spec F1): `ramfb`, the framebuffer the firmware sets a mode on,
+# Limine reports to the kernel and minix.rs's TTY driver draws the console on.
+# It is not on a virtio-mmio bus. Nothing shows it unless MINIXRS_DISPLAY=window
+# is set; a QMP socket, also there on every boot, is how a script takes a
+# `screendump` of it. Both are described at the display block below. (`-M
+# virt`'s own default devices are still there: no -nodefaults.)
 #
 # stdout is the guest's serial log, which callers redirect and grep. Everything
 # the runner itself says -- the nested cargo's output, mkimage's summary, and
@@ -24,13 +29,18 @@
 # The second console's bytes are on neither: they go to and come from the FIFOs.
 #
 # Environment (all optional; see the root-backend block below for the three
-# after the firmware, and the console block for the last):
+# after the firmware, the console block for the fifth, and the display block
+# for the last two):
 #   QEMU_EFI_AARCH64=<fw.fd>        the UEFI firmware, instead of the search below
 #   MINIXRS_ROOT=disk|ramdisk|nodisk
 #   MINIXRS_VBLK_IMAGE=<file>
 #   MINIXRS_VBLK_DRIVE_OPTS=<opts>
 #   MINIXRS_HVC0=<base>             the console's FIFO pair is <base>.in and
 #                                   <base>.out, instead of target/hvc0.{in,out}
+#   MINIXRS_QMP=<socket>            QEMU's QMP socket, instead of target/qmp.sock;
+#                                   its path must be shorter than 104 bytes
+#   MINIXRS_DISPLAY=none|window     `none` (the default) shows nothing; `window`
+#                                   opens QEMU's own display window
 
 set -euo pipefail
 
@@ -62,6 +72,67 @@ esac
 # for buses 16 (input) and 24 (net), inferred from that and not yet measured.
 BUS_VBLK=0
 BUS_VCON=8
+
+# The display (slice 6.7, spec F1): `-device ramfb` on EVERY boot, so that CI
+# and a boot somebody watches run one code path -- a TTY with a framebuffer.
+# No resolution is asked for anywhere; the kernel takes the mode the firmware
+# set (800x600, 32 bpp with Homebrew's edk2 under QEMU 11.0.3: measured, 6.7
+# Task 0). Dropping the device is how to boot the no-framebuffer path by hand:
+# the kernel prints `[fb] none` and TTY is serial-only.
+#
+# MINIXRS_DISPLAY says whether anything SHOWS the display:
+#
+#   none    (default) `-display none`: no window. The framebuffer is still
+#           there and still drawn on; QMP's `screendump` reads it.
+#   window  `-display none` is left off and QEMU picks its default UI (cocoa on
+#           macOS, gtk or sdl elsewhere). The serial console stays on stdio.
+#
+# Anything else is refused: a misspelt `window` would otherwise run as a
+# perfectly good headless boot and look like a display that does not work.
+#
+# QMP is on EVERY boot too: a unix socket QEMU listens on (`server=on`) without
+# waiting for a client (`wait=off`), so a boot nobody connects to runs exactly
+# as before. It is the only way in to a headless display -- `stop`,
+# `screendump`, `cont` -- and what the screen check is built on.
+#
+# MINIXRS_QMP=<socket> moves the socket, so that two boots run at once do not
+# share one -- the MINIXRS_HVC0 pattern. A path of 104 bytes or more is refused
+# here rather than left to QEMU: a unix socket's address holds 104 bytes on
+# macOS including its terminator, QEMU's own message for it does not name the
+# variable to change, and the default lives under the checkout, whose depth is
+# not this script's to choose (measured, 6.7 Task 0). The limit is applied on
+# Linux as well, where the address is 4 bytes longer, so that a path which works
+# in CI works on a laptop.
+#
+# A socket left behind by an earlier boot is removed just before QEMU starts:
+# QEMU unlinks it on a clean exit but not when it is killed, which is how every
+# `timeout` boot ends, and it will not bind over one. Anything else in the
+# socket's place is refused rather than replaced, as for the FIFOs below.
+#
+# All three checks run here, ahead of the root backend's and before the image
+# is built, so a refused boot costs nothing and starts nothing.
+DISPLAY_MODE="${MINIXRS_DISPLAY:-none}"
+case "$DISPLAY_MODE" in
+    none) DISPLAY_ARGS=(-display none) ;;
+    window) DISPLAY_ARGS=() ;;
+    *)
+        echo "error: MINIXRS_DISPLAY must be 'none' or 'window', got '$DISPLAY_MODE'" >&2
+        exit 64
+        ;;
+esac
+
+QMP_SOCK="${MINIXRS_QMP:-$ROOT/target/qmp.sock}"
+# Bytes, not characters: the limit is on the encoded path.
+QMP_SOCK_BYTES=$(($(printf '%s' "$QMP_SOCK" | wc -c)))
+if ((QMP_SOCK_BYTES >= 104)); then
+    echo "error: the QMP socket path is $QMP_SOCK_BYTES bytes; a unix socket path must be shorter than 104: $QMP_SOCK" >&2
+    echo "       set MINIXRS_QMP to a shorter path" >&2
+    exit 64
+fi
+if [[ ! -S "$QMP_SOCK" && (-e "$QMP_SOCK" || -L "$QMP_SOCK") ]]; then
+    echo "error: $QMP_SOCK exists and is not a socket; remove it, or set MINIXRS_QMP" >&2
+    exit 73
+fi
 
 # The root backend (phase decision H5: what is attached selects it; slice 6.4,
 # spec P4: the machine always boots from the disk image, so what differs is
@@ -263,10 +334,23 @@ VCON_ARGS=(
     -device "virtconsole,chardev=hvc0"
 )
 
+# The display and the QMP socket (the display block above has the why). The
+# stale socket goes now, as late as possible, so that a run refused further up
+# leaves an earlier boot's socket alone.
+if [[ -S "$QMP_SOCK" ]]; then
+    rm -f "$QMP_SOCK"
+fi
+mkdir -p "$(dirname "$QMP_SOCK")"
+FB_ARGS=(
+    -device ramfb
+    -qmp "unix:${QMP_SOCK//,/,,},server=on,wait=off"
+)
+
 # `force-legacy=false` makes the mmio transports modern (version 2); the
 # drivers refuse version 1, and edk2 boots from a modern one (measured, 6.4
 # P11.1). "$@" stays last so a later -global can override it for the refusal
-# boots.
+# boots. `DISPLAY_ARGS` is empty for a window boot, hence the `+` expansion:
+# bash before 4.4 treats an empty array as unset under `set -u`.
 QEMU=(
     qemu-system-aarch64
     -M "virt,gic-version=3" -cpu cortex-a72 -m 256M
@@ -274,7 +358,8 @@ QEMU=(
     -global virtio-mmio.force-legacy=false
     "${DISK_ARGS[@]}"
     "${VCON_ARGS[@]}"
-    -display none
+    "${FB_ARGS[@]}"
+    ${DISPLAY_ARGS[@]+"${DISPLAY_ARGS[@]}"}
     -serial stdio
     -no-reboot
     "$@"

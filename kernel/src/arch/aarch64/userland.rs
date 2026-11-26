@@ -48,8 +48,8 @@ use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
 #[cfg(feature = "boot-stubs")]
 use minixrs_kernel_shared::uspace::USER_REGION_LIMIT;
 use minixrs_kernel_shared::uspace::{
-    DMA_RUN_PAGES, DMA_VA, RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA, USER_STACK_BASE,
-    USER_STACK_BYTES, USER_STACK_TOP, VIRTIO_MMIO_PAGE_VA,
+    DMA_RUN_PAGES, DMA_VA, FB_VA, FB_WINDOW_SIZE, RAMDISK_VA, RAMDISK_WINDOW_SIZE, TTY_UART_VA,
+    USER_STACK_BASE, USER_STACK_BYTES, USER_STACK_TOP, VIRTIO_MMIO_PAGE_VA,
 };
 
 use minixrs_kernel_shared::error::{EFAULT, ENOEXEC, ENOMEM};
@@ -586,8 +586,8 @@ fn elf_errno(e: ElfError) -> i32 {
 /// to flush or recycle.
 ///
 /// The `prot.device` guard is unreachable today — every device mapping in the
-/// system (TTY's UART page, a virtio driver's register page) is installed by
-/// [`load_boot_server`] *after* `load_exec_image` has
+/// system (TTY's UART page and framebuffer, a virtio driver's register page) is
+/// installed by [`load_boot_server`] *after* `load_exec_image` has
 /// already returned successfully, so no error path here can see one. It is here
 /// anyway because this is the leaf sweep that gets forgotten, and forgetting it
 /// is a kernel panic (`free_frame` rejects a non-RAM PA), not a leak.
@@ -694,6 +694,62 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
             .irqs
             .try_push(crate::arch::aarch64::uart::PL011_INTID)
             .expect("TTY IRQ allow-list has room");
+
+        // The framebuffer, when the kernel accepted one at boot (slice 6.7, spec
+        // F3): every page of it, `Prot::DEVICE_RW`, at `FB_VA`. The UART page
+        // above answers the standing questions and they apply unchanged — not
+        // in `load_exec_image`, no TLB maintenance. No cache maintenance
+        // either: the kernel never reads or writes these pages, so there is no
+        // second alias to be coherent with.
+        //
+        // **Always device, whatever the memory map calls the range** (phase
+        // decision H9). `map_page_in` asserts a device leaf is not allocator
+        // RAM, and that holds by construction rather than by luck: the range
+        // mapped here is `Framebuffer::range`, the very range
+        // `mm::init_from_limine_memmap` subtracted from every usable entry
+        // before the first frame was handed out. Being device leaves, the pages
+        // are skipped by all five leaf sweeps (`map_page_in` lists them) and so
+        // can never reach `free_frame` — which is right, since they were never
+        // the allocator's. TTY is a boot driver and is never torn down; the
+        // sweeps' device arm is what `device_teardown_selftest` exercises.
+        //
+        // The page count is `ceil(pitch * height / 4096)`, so the last page may
+        // run past the framebuffer's final byte into whatever follows it (on
+        // QEMU, firmware-reserved memory). TTY stores only below `pitch *
+        // height`.
+        //
+        // This gate and `do_getinfo`'s `GET_FRAMEBUFFER` gate must name the
+        // same proc: the reply's VA means something only in the address space
+        // mapped here.
+        //
+        // Every step `.expect()`s, for the ramdisk arm's reason: a non-advancing
+        // loop must panic on `AlreadyMapped` here, not hand TTY one page of
+        // screen.
+        if let Some(fb) = crate::arch::aarch64::framebuffer::accepted() {
+            let window_pages = FB_WINDOW_SIZE / PAGE_SIZE as u64;
+            assert!(
+                fb.pages > 0 && fb.pages <= window_pages,
+                "framebuffer of {} pages does not fit the {window_pages}-page window",
+                fb.pages,
+            );
+            for page in 0..fb.pages {
+                let off = page.checked_mul(PAGE_SIZE as u64).expect("fb offset");
+                map_page_in(
+                    img.ttbr0_pa,
+                    FB_VA.checked_add(off).expect("fb VA"),
+                    fb.pa.checked_add(off).expect("fb PA"),
+                    Prot::DEVICE_RW,
+                )
+                .expect("TTY framebuffer pre-map");
+            }
+            let _ = writeln!(
+                Pl011::new(),
+                "[devmap] tty fb va={:#x} pa={:#x} pages={}",
+                FB_VA,
+                fb.pa,
+                fb.pages,
+            );
+        }
     }
 
     // The `memory` driver gets the boot ramdisk mapped into its address space, in

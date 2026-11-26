@@ -4,6 +4,7 @@ pub mod addrspace;
 pub mod asid;
 pub mod context;
 pub mod exception;
+pub mod framebuffer;
 pub mod gic;
 pub mod irq;
 pub mod limine;
