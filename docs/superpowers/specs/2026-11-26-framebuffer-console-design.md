@@ -133,8 +133,9 @@ Unlike `fs/mfs` there is no `server` feature: nothing reaches the TTY lib from a
 the crate's dependencies already build on the host for `cargo test`.
 
 **Device-memory discipline (H9):** every framebuffer access is one aligned 32-bit volatile store.
-The renderer never reads the framebuffer — scrolling repaints from the grid — so there is no load,
-no `copy_nonoverlapping` and no `memset` the compiler could merge or misalign.
+The renderer never reads the framebuffer — scrolling repaints from the grid, and what is already on
+the screen is known from a shadow array, not from the pixels (F8) — so there is no load, no
+`copy_nonoverlapping` and no `memset` the compiler could merge or misalign.
 
 ### F7 — the font: Spleen 8×16, vendored as the upstream PSF file
 
@@ -169,8 +170,12 @@ the next printable byte arrives, so a line of exactly `cols` bytes followed by `
 not two. Light grey (`0xAAAAAA`) on black; no cursor is drawn, because nothing echoes input until
 6.8.
 
-A scroll shifts the grid and repaints every cell. Whether that fits the boot budget is F13's second
-measurement; the fallback, recorded there, is to repaint only cells whose byte changed.
+A scroll shifts the grid and repaints **only the cells whose byte changed**. `paint` keeps a shadow,
+`Shown` — the byte last painted in each cell, a second `MAX_COLS × MAX_ROWS` array beside the grid —
+and `paint_diff` stores a cell only where the grid disagrees with it; a drawn byte goes through the
+same comparison (`paint_cell_diff`), so rewriting a cell with the byte it already shows costs
+nothing. The framebuffer is still never read. This was the named fallback and F13's second
+measurement adopted it: repainting every cell on every scroll cut console throughput about sixfold.
 
 ### F9 — one `console_write`, UART first
 
@@ -240,7 +245,9 @@ Task 0, before any design-dependent code, on this machine (QEMU 11.0.3, Homebrew
    H9.
 2. **What a repaint costs.** The last required marker's position in a fixed-timeout log, against the
    merge base, with full repaint on scroll. The slice moves no timeout without that figure; over
-   budget, F8's changed-cells-only repaint is tried before any timeout is.
+   budget, F8's changed-cells-only repaint is tried before any timeout is. **Measured, and the
+   changed-cells repaint was adopted** (section 7 has the figures): a full repaint is 3700 cells,
+   473,600 device stores, on every newline once the screen is full.
 3. **Whether `stop`/`screendump`/`cont` disturbs the boot** — the markers and the feeder's exchange
    still pass with the dumper running.
 
@@ -320,7 +327,7 @@ Decisions the phase file did not make. Each is undone by the change in its last 
 | F6  | No `server` feature on the TTY crate                                        | Add the gate as `fs/mfs` has it, plus its extra clippy step in CI               |
 | F7  | Spleen 8×16 as the upstream `.psfu` (PSF1), indexed by byte                 | Swap the file; if the ASCII identity fails, a 95-entry map in `font`            |
 | F8  | Deferred wrap; `?` for unknown bytes; grey on black; no cursor              | `grid` and its tests only; 6.8 will want the cursor anyway                      |
-| F8  | Scroll repaints everything, no framebuffer reads                            | Changed-cells repaint (already the named fallback)                              |
+| F8  | Scroll repaints only changed cells, found from a shadow array; no fb reads  | `paint_all` back in `console_write`, drop `Shown` — at a quarter the throughput |
 | F9  | UART first, then screen; one `fb` verdict line                              | Reorder two calls                                                               |
 | F10 | The proof decodes the dump and matches rows to the serial log; no test card | A test card needs a quiet console, i.e. a change to init's rotation             |
 | F11 | The dumper pauses the guest (`stop`/`cont`) and retries                     | Drop the pause; retries alone still converge, more slowly                       |
@@ -356,3 +363,21 @@ Decisions the phase file did not make. Each is undone by the change in its last 
 - **F9's re-validation is a fourth library module, `reply`**, not part of `paint` (Task 4): decoding
   the `GET_FRAMEBUFFER` payload and the accept/refuse decision, with the refusal tokens `va`,
   `window` and `grid` beside `FormatError`'s five.
+- **F8's full repaint on scroll was replaced by its named fallback, the changed-cells repaint**
+  (Task 6, F13.2). Once the screen is full every newline scrolls, and repainting all 100 × 37 cells
+  is 473,600 device stores — about 37 ms under QEMU TCG. Three 300-second stub-free unfed boots on
+  the same machine, judged by where the log had got to when the timeout fired:
+
+  | Boot                               | final `[ipc N]` | `hello: errno ok` lines | console lines | tick byte inside a line |
+  | ---------------------------------- | --------------- | ----------------------- | ------------- | ----------------------- |
+  | no painting (Task 2's kernel)      | 11,293,900      | 2,794                   | 44,146        | 57 (0.13%)              |
+  | full repaint on scroll (Task 4)    | 1,788,900       | 440                     | 6,836         | 17 (0.25%)              |
+  | changed-cells repaint (this entry) | 7,688,800       | 1,901                   | 30,054        | 26 (0.09%)              |
+
+  The full repaint cost a factor of 6.3 in steady-state console throughput; the changed-cells
+  repaint costs 1.47, and the share of console lines with a kernel tick byte spliced inside them is
+  back at or below the unpainted figure. The mechanism is `paint::Shown`, a second 10,240-byte array
+  in `main`'s frame (now 21,376 bytes of the 64 KiB stack, from 11,136) recording the byte painted
+  in each cell; the framebuffer is still never read. What remains is the 128 stores a drawn
+  character costs and the cells a scroll really does change. A screendump taken 200 seconds into the
+  third boot decoded in every cell, so the diff leaves no stale glyph behind.

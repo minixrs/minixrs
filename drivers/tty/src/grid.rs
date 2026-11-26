@@ -26,9 +26,11 @@
 //! ## Damage
 //!
 //! `put` returns what changed, so the caller paints one cell for one byte and
-//! repaints everything only on a scroll. There is no "shift the pixels up":
-//! the renderer never reads the framebuffer (H9), so a scroll shifts *this*
-//! array and the screen is redrawn from it.
+//! looks at the whole grid only on a scroll. There is no "shift the pixels
+//! up": the renderer never reads the framebuffer (H9), so a scroll shifts
+//! *this* array and the screen is brought up to date from it — by
+//! [`crate::paint::paint_diff`], which stores only the cells whose byte is not
+//! the one already on the screen.
 //!
 //! The grid stores bytes as they will be drawn: an unprintable byte is stored
 //! as `?`, so [`Grid::cell`] never returns anything outside `0x20..=0x7E`.
@@ -55,7 +57,7 @@ pub enum Damage {
     None,
     /// Exactly one cell now holds a different byte.
     Cell { col: usize, row: usize },
-    /// The grid scrolled; every cell may have changed.
+    /// The grid scrolled; any cell may have changed, and most have not.
     All,
 }
 

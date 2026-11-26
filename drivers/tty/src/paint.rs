@@ -6,8 +6,10 @@
 //! pixel, one `u32`, at `(x, y)`. The TTY binary implements it with an aligned
 //! volatile store at `FB_VA + y * pitch + x * 4`; the host tests and
 //! `tools/fbcheck` implement it over a `Vec<u32>`. Nothing here *reads* a
-//! surface — a scroll is repainted from the grid — which is the device-memory
-//! rule (H9) made structural: the trait has no load to call.
+//! surface — a scroll is repainted from the grid, and only where the grid
+//! differs from [`Shown`], the renderer's own record of what it painted — which
+//! is the device-memory rule (H9) made structural: the trait has no load to
+//! call.
 //!
 //! ## Two guarantees the bin relies on
 //!
@@ -31,7 +33,7 @@
 //! glyph is in a cell, pixel-exactly, or that none is.
 
 use crate::font::{CELL_H, CELL_W, FIRST_PRINTABLE, Glyph, LAST_PRINTABLE, glyph};
-use crate::grid::{Grid, MAX_COLS, MAX_ROWS};
+use crate::grid::{BLANK, Grid, MAX_COLS, MAX_ROWS};
 
 /// The console's foreground, light grey, as `(red, green, blue)` (F8).
 pub const FG: (u8, u8, u8) = (0xAA, 0xAA, 0xAA);
@@ -254,6 +256,98 @@ pub fn paint_all<S: Surface + ?Sized>(surface: &mut S, fmt: &Format, grid: &Grid
     for row in 0..grid.rows().min(fmt.rows) {
         for (col, &byte) in grid.row(row).iter().enumerate().take(fmt.cols) {
             paint_cell(surface, fmt, col, row, byte);
+        }
+    }
+}
+
+/// What the screen is showing: the byte whose glyph was last painted in each
+/// cell — the renderer's own memory of the framebuffer, kept because it may
+/// not read the framebuffer itself (H9).
+///
+/// A scroll moves almost every row of the [`Grid`] but changes far fewer
+/// *cells*: console lines are short, alike, and mostly trailing blanks. With a
+/// `Shown` beside the grid, [`paint_diff`] stores only where the two disagree.
+/// Repainting all 3700 cells of the measured 100 × 37 screen on every scroll
+/// was 473,600 device stores a newline, and cut console throughput about
+/// sixfold (spec F13.2).
+///
+/// The invariant, which a property test pins: every cell inside the format's
+/// grid shows the glyph of the byte recorded here. It holds because a
+/// `Shown` starts as what [`clear`] leaves — all blank — and is written only by
+/// [`paint_cell_diff`], in the same step as the stores it records. So one
+/// `Shown` belongs to one surface, from a `clear` onwards, and every paint to
+/// that surface after it must go through the two `_diff` functions:
+/// [`paint_cell`] and [`paint_all`] know nothing of it and would leave it stale.
+///
+/// The same size as a [`Grid`], about 10 KiB: mind a 64 KiB driver stack.
+#[derive(Debug, Clone)]
+pub struct Shown {
+    cells: [[u8; MAX_COLS]; MAX_ROWS],
+}
+
+impl Shown {
+    /// The shadow of a screen that [`clear`] has just blanked.
+    pub const fn new() -> Self {
+        Self {
+            cells: [[BLANK; MAX_COLS]; MAX_ROWS],
+        }
+    }
+
+    /// The byte shown at `(col, row)`; [`BLANK`] outside the array, as for
+    /// [`Grid::cell`].
+    pub fn cell(&self, col: usize, row: usize) -> u8 {
+        self.cells
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .unwrap_or(BLANK)
+    }
+}
+
+impl Default for Shown {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Paint `byte` in cell `(col, row)` unless `shown` says it is there already,
+/// and record it: 128 stores, or none. A cell outside the format's grid is
+/// neither painted nor recorded.
+pub fn paint_cell_diff<S: Surface + ?Sized>(
+    surface: &mut S,
+    fmt: &Format,
+    shown: &mut Shown,
+    col: usize,
+    row: usize,
+    byte: u8,
+) {
+    if col >= fmt.cols || row >= fmt.rows {
+        return;
+    }
+    // Always `Some`: the format's grid is clamped to the array's size.
+    let Some(slot) = shown.cells.get_mut(row).and_then(|r| r.get_mut(col)) else {
+        return;
+    };
+    if *slot == byte {
+        return;
+    }
+    paint_cell(surface, fmt, col, row, byte);
+    *slot = byte;
+}
+
+/// Bring the screen up to date with `grid` after a scroll: paint each cell
+/// that fits the format's grid and whose byte differs from what `shown` says is
+/// on the screen, and record it. Afterwards the screen is what [`clear`] and
+/// [`paint_all`] would have made it, for the stores of the changed cells only.
+pub fn paint_diff<S: Surface + ?Sized>(
+    surface: &mut S,
+    fmt: &Format,
+    grid: &Grid,
+    shown: &mut Shown,
+) {
+    for row in 0..grid.rows().min(fmt.rows) {
+        for (col, &byte) in grid.row(row).iter().enumerate().take(fmt.cols) {
+            paint_cell_diff(surface, fmt, shown, col, row, byte);
         }
     }
 }
@@ -1026,5 +1120,376 @@ mod tests {
                 assert_eq!(img.at(x, y), f.bg());
             }
         }
+    }
+
+    // --- the shadow and the changed-cells repaint (F8, F13.2) --------------------
+
+    /// What the screen should show for `grid`: cleared, then every cell painted.
+    fn from_scratch(f: &Format, grid: &Grid) -> Vec<u32> {
+        let mut img = Image::new(f);
+        clear(&mut img, f);
+        paint_all(&mut img, f, grid);
+        img.pixels
+    }
+
+    /// Feed `bytes` the way the bin does: one `put`, then paint its damage
+    /// through the shadow.
+    fn feed_diff(img: &mut Image, f: &Format, grid: &mut Grid, shown: &mut Shown, bytes: &[u8]) {
+        for &byte in bytes {
+            match grid.put(byte) {
+                Damage::None => {}
+                Damage::Cell { col, row } => {
+                    paint_cell_diff(img, f, shown, col, row, grid.cell(col, row));
+                }
+                Damage::All => paint_diff(img, f, grid, shown),
+            }
+        }
+    }
+
+    /// Cells of the format's grid in which `a` and `b` hold different bytes.
+    fn differing(f: &Format, a: &Grid, b: &Grid) -> usize {
+        let mut n = 0;
+        for row in 0..f.rows() {
+            for col in 0..f.cols() {
+                n += usize::from(a.cell(col, row) != b.cell(col, row));
+            }
+        }
+        n
+    }
+
+    /// The shadow agrees with the grid in every cell the format can show.
+    fn assert_shadow_is(f: &Format, grid: &Grid, shown: &Shown) {
+        for row in 0..f.rows().min(grid.rows()) {
+            for col in 0..f.cols().min(grid.cols()) {
+                assert_eq!(
+                    shown.cell(col, row),
+                    grid.cell(col, row),
+                    "shadow cell ({col}, {row})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_shadow_is_what_clear_leaves() {
+        let shown = Shown::new();
+        for row in 0..MAX_ROWS {
+            for col in 0..MAX_COLS {
+                assert_eq!(shown.cell(col, row), b' ');
+            }
+        }
+        assert_eq!(shown.cell(MAX_COLS, 0), b' ', "blank outside, like Grid");
+        assert_eq!(shown.cell(0, MAX_ROWS), b' ');
+        assert_eq!(shown.cell(usize::MAX, usize::MAX), b' ');
+
+        // And that is the truth about a cleared screen: diffing a blank grid
+        // against it stores nothing, and the screen is already right.
+        let f = measured();
+        let mut img = Image::new(&f);
+        clear(&mut img, &f);
+        let cleared = img.stores;
+        let grid = Grid::new(f.cols(), f.rows());
+        let mut shown = Shown::new();
+        paint_diff(&mut img, &f, &grid, &mut shown);
+        assert_eq!(img.stores, cleared);
+        assert_eq!(img.pixels, from_scratch(&f, &grid));
+    }
+
+    #[test]
+    fn a_changed_cell_is_painted_once_and_remembered() {
+        let f = fmt(64, 64);
+        let mut img = Image::new(&f);
+        let mut shown = Shown::new();
+        paint_cell_diff(&mut img, &f, &mut shown, 3, 2, b'A');
+        assert_eq!(img.stores, 128);
+        assert_eq!(shown.cell(3, 2), b'A');
+        assert_eq!(decode_cell(|x, y| img.at(x, y), &f, 3, 2), Some(b'A'));
+        // The same byte again: the screen already shows it.
+        paint_cell_diff(&mut img, &f, &mut shown, 3, 2, b'A');
+        assert_eq!(img.stores, 128, "no store for a cell that did not change");
+        // A different byte, then back.
+        paint_cell_diff(&mut img, &f, &mut shown, 3, 2, b'B');
+        assert_eq!(img.stores, 2 * 128);
+        assert_eq!(shown.cell(3, 2), b'B');
+        paint_cell_diff(&mut img, &f, &mut shown, 3, 2, b'A');
+        assert_eq!(img.stores, 3 * 128, "the shadow followed the change to B");
+        assert_eq!(decode_cell(|x, y| img.at(x, y), &f, 3, 2), Some(b'A'));
+    }
+
+    #[test]
+    fn a_blank_over_a_cleared_cell_stores_nothing() {
+        let f = fmt(64, 64);
+        let mut img = Image::new(&f);
+        clear(&mut img, &f);
+        let cleared = img.stores;
+        let mut shown = Shown::new();
+        paint_cell_diff(&mut img, &f, &mut shown, 0, 0, b' ');
+        assert_eq!(img.stores, cleared);
+    }
+
+    #[test]
+    fn a_diffed_cell_outside_the_grid_is_neither_painted_nor_remembered() {
+        let f = fmt(13, 21); // one cell
+        let mut img = Image::new(&f);
+        let mut shown = Shown::new();
+        paint_cell_diff(&mut img, &f, &mut shown, 1, 0, b'X');
+        paint_cell_diff(&mut img, &f, &mut shown, 0, 1, b'X');
+        paint_cell_diff(&mut img, &f, &mut shown, MAX_COLS, MAX_ROWS, b'X');
+        paint_cell_diff(&mut img, &f, &mut shown, usize::MAX, usize::MAX, b'X');
+        assert_eq!(img.stores, 0);
+        assert_eq!(shown.cell(1, 0), b' ', "nothing was drawn there");
+        assert_eq!(shown.cell(0, 1), b' ');
+        paint_cell_diff(&mut img, &f, &mut shown, 0, 0, b'X');
+        assert_eq!(img.stores, 128);
+    }
+
+    #[test]
+    fn overwriting_a_cell_with_the_same_byte_stores_nothing() {
+        let f = fmt(80, 48);
+        let mut img = Image::new(&f);
+        clear(&mut img, &f);
+        let (mut grid, mut shown) = (Grid::new(f.cols(), f.rows()), Shown::new());
+        feed_diff(&mut img, &f, &mut grid, &mut shown, b"hello");
+        let before = img.stores;
+        // `\r` and the same text; backspace and the same byte.
+        feed_diff(&mut img, &f, &mut grid, &mut shown, b"\rhello\x08o\x08o");
+        assert_eq!(img.stores, before);
+        feed_diff(&mut img, &f, &mut grid, &mut shown, b"\rjello");
+        assert_eq!(img.stores, before + 128, "one cell differs");
+        assert_eq!(img.pixels, from_scratch(&f, &grid));
+    }
+
+    #[test]
+    fn scrolling_a_blank_screen_stores_nothing() {
+        let f = measured();
+        let mut img = Image::new(&f);
+        clear(&mut img, &f);
+        let cleared = img.stores;
+        let (mut grid, mut shown) = (Grid::new(f.cols(), f.rows()), Shown::new());
+        let mut scrolls = 0;
+        for _ in 0..200 {
+            scrolls += usize::from(grid.put(b'\n') == Damage::All);
+            paint_diff(&mut img, &f, &grid, &mut shown);
+        }
+        assert!(scrolls > 100);
+        assert_eq!(img.stores, cleared);
+    }
+
+    /// Identical rows shifted up by one are the same rows: the only cells a
+    /// scroll changes are the old last row's, which becomes blank.
+    #[test]
+    fn scrolling_identical_rows_repaints_only_the_row_that_goes_blank() {
+        let f = measured();
+        let mut img = Image::new(&f);
+        clear(&mut img, &f);
+        let (mut grid, mut shown) = (Grid::new(f.cols(), f.rows()), Shown::new());
+        // Every row "same line", the cursor at the end of the last one.
+        for row in 0..f.rows() {
+            if row > 0 {
+                feed_diff(&mut img, &f, &mut grid, &mut shown, b"\n");
+            }
+            feed_diff(&mut img, &f, &mut grid, &mut shown, b"same line");
+        }
+        assert_eq!(grid.cursor(), (9, f.rows() - 1));
+        let before = img.stores;
+        assert_eq!(grid.put(b'\n'), Damage::All);
+        paint_diff(&mut img, &f, &grid, &mut shown);
+        // "same line" has eight inked cells and one space; the rows above the
+        // last cost nothing at all.
+        assert_eq!(img.stores - before, 8 * 128);
+        assert_eq!(img.pixels, from_scratch(&f, &grid));
+
+        // The steady state of a console printing one line for ever: the line's
+        // cells drawn, then the same cells blanked by the scroll — where a full
+        // repaint is 3700 cells every time.
+        let before = img.stores;
+        feed_diff(&mut img, &f, &mut grid, &mut shown, b"same line\n");
+        assert_eq!(img.stores - before, 2 * 8 * 128);
+        assert_eq!(img.pixels, from_scratch(&f, &grid));
+    }
+
+    #[test]
+    fn scrolling_text_repaints_exactly_the_cells_that_differ() {
+        let f = measured();
+        let mut img = Image::new(&f);
+        clear(&mut img, &f);
+        let (mut grid, mut shown) = (Grid::new(f.cols(), f.rows()), Shown::new());
+        // Console-like output: a few line shapes, in rotation, until the
+        // screen is full and scrolling.
+        let shapes: [&[u8]; 4] = [
+            b"minix.rs hello: errno ok",
+            b"minix.rs init: child 7 exited 0",
+            b"bigprog ok 4096",
+            b"minix.rs worker: fork ok pid=12",
+        ];
+        for i in 0..f.rows() + 5 {
+            feed_diff(&mut img, &f, &mut grid, &mut shown, shapes[i % 4]);
+            feed_diff(&mut img, &f, &mut grid, &mut shown, b"\n");
+        }
+        let mut total = 0;
+        for i in 0..40 {
+            feed_diff(&mut img, &f, &mut grid, &mut shown, shapes[(i + 1) % 4]);
+            let was = grid.clone();
+            let before = img.stores;
+            assert_eq!(grid.put(b'\n'), Damage::All);
+            paint_diff(&mut img, &f, &grid, &mut shown);
+            let cells = differing(&f, &was, &grid);
+            assert_eq!(img.stores - before, cells * 128, "scroll {i}");
+            assert!(cells > 0, "these rows do differ");
+            total += cells;
+            assert_eq!(img.pixels, from_scratch(&f, &grid), "scroll {i}");
+            assert_shadow_is(&f, &grid, &shown);
+        }
+        // Against 3700 cells a scroll for the full repaint.
+        assert!(
+            total * 4 < 40 * f.cols() * f.rows(),
+            "{total} cells over 40 scrolls is not a saving"
+        );
+    }
+
+    #[test]
+    fn a_diff_never_stores_outside_a_13_by_21_surface() {
+        let f = fmt(13, 21);
+        let mut img = Image::new(&f); // panics on any out-of-bounds store
+        clear(&mut img, &f);
+        // A grid far bigger than the screen, full of ink, scrolled.
+        let (mut grid, mut shown) = (Grid::new(MAX_COLS, MAX_ROWS), Shown::new());
+        let mut text = vec![b'#'; MAX_COLS * MAX_ROWS];
+        text.extend_from_slice(b"\nabc\n\n");
+        feed_diff(&mut img, &f, &mut grid, &mut shown, &text);
+        paint_diff(&mut img, &f, &grid, &mut shown);
+        assert_eq!(img.pixels, from_scratch(&f, &grid));
+        for y in 0..21 {
+            for x in 0..13 {
+                if x >= 8 || y >= 16 {
+                    assert_eq!(img.hits_at(x, y), 1, "margin pixel ({x}, {y})");
+                }
+            }
+        }
+        assert_eq!(shown.cell(1, 0), b' ', "a cell off the screen is not shown");
+    }
+
+    /// The invariant the bin rests on: however the bytes arrive, painting by
+    /// damage through the shadow leaves the screen pixel-identical to clearing
+    /// it and painting the final grid — no stale cell, ever — and the shadow
+    /// says exactly what is there.
+    #[test]
+    fn painting_by_diff_matches_painting_from_scratch_for_any_bytes() {
+        // (width, height): the measured screen; tiny ones that wrap and scroll
+        // on almost every byte; one with margins; one cell; one column.
+        let screens = [
+            (800, 600),
+            (16, 16),
+            (24, 32),
+            (40, 48),
+            (61, 53),
+            (8, 16),
+            (8, 64),
+            (64, 16),
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            // xorshift64
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut scrolls = 0usize;
+        let mut same_byte = 0usize;
+        for (si, &(w, h)) in screens.iter().enumerate() {
+            let f = fmt(w, h);
+            let runs = if si == 0 { 2 } else { 10 };
+            for run in 0..runs {
+                let mut img = Image::new(&f);
+                clear(&mut img, &f);
+                let (mut grid, mut shown) = (Grid::new(f.cols(), f.rows()), Shown::new());
+                let len = if si == 0 { 8_000 } else { 600 };
+                for i in 0..len {
+                    let r = next();
+                    let pick = (r >> 8) % 100;
+                    let byte = match pick {
+                        // A small alphabet, so that a cell is often rewritten
+                        // with the byte it already holds.
+                        0..=54 => b"ab "[(r >> 20) as usize % 3],
+                        55..=69 => 0x20 + ((r >> 20) % 95) as u8,
+                        70..=79 => b'\n',
+                        80..=85 => b'\r',
+                        86..=90 => b'\t',
+                        91..=95 => 0x08,
+                        _ => (r >> 20) as u8, // anything, unprintables included
+                    };
+                    let stores = img.stores;
+                    let was = grid.clone();
+                    let damage = grid.put(byte);
+                    feed_painted(&mut img, &f, &grid, &mut shown, damage);
+                    scrolls += usize::from(damage == Damage::All);
+                    // Exactly the cells that changed were stored, 128 each.
+                    let changed = match damage {
+                        Damage::None => 0,
+                        Damage::Cell { col, row } => {
+                            let same = was.cell(col, row) == grid.cell(col, row);
+                            same_byte += usize::from(same);
+                            usize::from(!same)
+                        }
+                        Damage::All => differing(&f, &was, &grid),
+                    };
+                    assert_eq!(
+                        img.stores - stores,
+                        changed * 128,
+                        "screen {w}x{h} run {run} byte {i} ({byte:#04x})"
+                    );
+                    // Small screens: check the whole picture after every byte.
+                    if si != 0 || i % 997 == 0 {
+                        assert_eq!(
+                            img.pixels,
+                            from_scratch(&f, &grid),
+                            "screen {w}x{h} run {run} byte {i} ({byte:#04x})"
+                        );
+                        assert_shadow_is(&f, &grid, &shown);
+                    }
+                }
+                assert_eq!(
+                    img.pixels,
+                    from_scratch(&f, &grid),
+                    "screen {w}x{h} run {run}"
+                );
+                assert_shadow_is(&f, &grid, &shown);
+            }
+        }
+        assert!(scrolls > 2_000, "the sequences scroll: {scrolls}");
+        assert!(same_byte > 2_000, "and rewrite cells in place: {same_byte}");
+    }
+
+    /// One byte's damage, painted through the shadow.
+    fn feed_painted(img: &mut Image, f: &Format, grid: &Grid, shown: &mut Shown, damage: Damage) {
+        match damage {
+            Damage::None => {}
+            Damage::Cell { col, row } => {
+                paint_cell_diff(img, f, shown, col, row, grid.cell(col, row));
+            }
+            Damage::All => paint_diff(img, f, grid, shown),
+        }
+    }
+
+    /// The shadow is a statement about the screen, so it must not move when
+    /// nothing was stored: a diff on a format smaller than the grid leaves the
+    /// cells it could not paint as they were.
+    #[test]
+    fn the_diff_and_the_full_repaint_agree_on_a_grid_larger_than_the_screen() {
+        let f = fmt(24, 32); // 3 x 2 cells
+        let mut grid = Grid::new(10, 6);
+        for &b in b"abcdefghij0123456789" {
+            grid.put(b);
+        }
+        let mut img = Image::new(&f);
+        clear(&mut img, &f);
+        let mut shown = Shown::new();
+        paint_diff(&mut img, &f, &grid, &mut shown);
+        assert_eq!(img.stores, 24 * 32 + 6 * 128);
+        assert_eq!(img.pixels, from_scratch(&f, &grid));
+        assert_eq!(shown.cell(2, 1), b'2');
+        assert_eq!(shown.cell(3, 0), b' ', "column 3 is off the screen");
+        assert_eq!(shown.cell(0, 2), b' ', "row 2 is off the screen");
     }
 }

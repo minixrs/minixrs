@@ -25,7 +25,9 @@
 //! **Device-memory discipline (H9).** Nothing here reads a pixel back. A scroll
 //! shifts the grid and the caller repaints from it, so the renderer needs no
 //! load, no `copy_nonoverlapping` and no `memset` — nothing the compiler could
-//! merge, widen or misalign on a device mapping.
+//! merge, widen or misalign on a device mapping. What keeps that affordable is
+//! [`paint::Shown`], an ordinary array recording the byte painted in each cell:
+//! a scroll stores only the cells where the grid now disagrees with it.
 //!
 //! Unlike `fs/mfs` there is no feature gate between the two halves: nothing
 //! reaches this library from a build script, and the crate's dependencies

@@ -39,7 +39,8 @@
 //! ([`Screen`]'s `Surface::store`) — a single aligned volatile `u32` write. The
 //! framebuffer is never read, never viewed through a slice, and never copied or
 //! filled in bulk: a scroll shifts the grid and repaints from it (phase decision
-//! H9).
+//! H9) — only the cells whose byte changed, found by comparing the grid with
+//! `paint::Shown`, TTY's own record of what it painted.
 //!
 //! Start-up asks `GET_FRAMEBUFFER` once and prints exactly one of
 //! `[diag tty] fb ok w=… h=… cols=… rows=…`, `fb none rc=…` (no framebuffer:
@@ -112,7 +113,7 @@ mod pl011;
 // The renderer is the crate's library half, used as a dependency — never
 // `mod`-included a second time, which would compile a private copy of it.
 use minixrs_tty::grid::{Damage, Grid};
-use minixrs_tty::paint::{self, Format, Surface};
+use minixrs_tty::paint::{self, Format, Shown, Surface};
 use minixrs_tty::reply::{self, Reply};
 
 use minixrs_driver_rt::cdev;
@@ -227,15 +228,21 @@ impl Surface for Screen {
 /// Everything [`console_write`] needs: the text on the screen and, when a
 /// framebuffer was accepted, the screen itself.
 ///
-/// Lives in `main`'s frame for the life of the driver — the grid is about
-/// 10 KiB of the 64 KiB stack, the largest local TTY has — and is passed down
-/// by `&mut`, so there is no static and no `unsafe` to reach it.
+/// Lives in `main`'s frame for the life of the driver — the grid and its
+/// shadow are about 10 KiB each of the 64 KiB stack, the largest locals TTY
+/// has — and is passed down by `&mut`, so there is no static and no `unsafe`
+/// to reach it.
 #[cfg_attr(test, allow(dead_code))]
 struct Console {
     /// `None`: serial-only (no framebuffer, or one TTY refused).
     screen: Option<Screen>,
     /// The screen's text; `0 × 0`, and never written, when `screen` is `None`.
     grid: Grid,
+    /// What has been painted, cell by cell — so that a scroll stores only the
+    /// cells that changed, without reading the framebuffer to find out. Every
+    /// paint after [`fb_bring_up`]'s `clear` goes through it ([`console_write`]
+    /// is the only painter), which is what keeps it true.
+    shown: Shown,
 }
 
 /// Ask the kernel for the framebuffer once, decide whether to draw on it, and
@@ -286,8 +293,12 @@ fn fb_bring_up() -> Option<Screen> {
 ///
 /// UART first and whole, so the serial log never waits on a repaint. Then each
 /// byte goes through [`Grid::put`], and what it reports changed is painted: one
-/// cell for a drawn byte, every cell after a scroll (nothing is read back from
-/// the framebuffer to shift it). Serial-only, the second half does nothing.
+/// cell for a drawn byte and, after a scroll, each cell whose byte is no longer
+/// the one on the screen. Nothing is read back from the framebuffer to shift it
+/// or to compare with — `console.shown` is the record of what is there — and a
+/// cell that already shows its byte costs no store at all. Repainting every
+/// cell on every scroll, which this replaced, cut console throughput about
+/// sixfold (spec F13.2). Serial-only, the second half does nothing.
 #[cfg_attr(test, allow(dead_code))]
 fn console_write(console: &mut Console, bytes: &[u8]) {
     pl011::write(bytes);
@@ -299,9 +310,10 @@ fn console_write(console: &mut Console, bytes: &[u8]) {
         match console.grid.put(byte) {
             Damage::None => {}
             Damage::Cell { col, row } => {
-                paint::paint_cell(screen, &fmt, col, row, console.grid.cell(col, row));
+                let byte = console.grid.cell(col, row);
+                paint::paint_cell_diff(screen, &fmt, &mut console.shown, col, row, byte);
             }
-            Damage::All => paint::paint_all(screen, &fmt, &console.grid),
+            Damage::All => paint::paint_diff(screen, &fmt, &console.grid, &mut console.shown),
         }
     }
 }
@@ -339,6 +351,8 @@ fn main() -> ! {
     // the framebuffer, validate the answer, clear it, print the verdict. The
     // grid is sized to the accepted format, or `0 × 0` when serial-only, and
     // lives in this frame — which never returns — like the staging buffer below.
+    // The shadow starts all blank, which is what `fb_bring_up` just made the
+    // screen.
     let screen = fb_bring_up();
     let (cols, rows) = screen
         .as_ref()
@@ -346,6 +360,7 @@ fn main() -> ! {
     let mut console = Console {
         screen,
         grid: Grid::new(cols, rows),
+        shown: Shown::new(),
     };
 
     // The banner: TTY's first console output, and so the screen's first line.
