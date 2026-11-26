@@ -171,7 +171,7 @@ impl Format {
 
     /// The framebuffer's size in bytes, `pitch * height`. Two `u32`s cannot
     /// overflow a `u64`, so this is exact for every `Format`; comparing it with
-    /// the mapped window is the bin's check.
+    /// the mapped window is `reply::accept`'s check.
     pub const fn byte_len(&self) -> u64 {
         // Lossless widening; `u64::from` is not callable in a `const fn`.
         self.pitch as u64 * self.height as u64

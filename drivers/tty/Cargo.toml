@@ -5,7 +5,7 @@ edition = "2024"
 license = "BSD-3-Clause"
 publish = false
 
-# The renderer (slice 6.7, F6): `font`, `grid` and `paint` — pure, `unsafe`-free and
+# The renderer (slice 6.7, F6): `font`, `grid`, `paint` and `reply` — pure, `unsafe`-free and
 # host-tested. There is deliberately **no feature gate** between the two halves, unlike
 # `fs/mfs`: nothing reaches this library from a build script, so the bin stays visible to
 # every CI job. `tools/fbcheck` depends on it to decode a screen dump with the code that

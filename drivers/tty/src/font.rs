@@ -10,7 +10,7 @@
 //!
 //! ## The file is PSF version 1
 //!
-//! The spec calls it PSF2; it is not. Upstream's `bdf2psf` writes version 2 for
+//! The spec's first draft called it PSF2; it is not. Upstream's `bdf2psf` writes version 2 for
 //! the wider faces and version 1 for this one, the only face exactly eight
 //! pixels wide. The layout:
 //!
@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(parse_psf1(&[]), Err(FontError::TooShort));
         assert_eq!(parse_psf1(&[0x36, 0x04, 0x03]), Err(FontError::TooShort));
 
-        // A PSF2 header: the format the spec expected and the file is not.
+        // A PSF2 header: the format the spec's first draft expected and the file is not.
         let mut psf2 = vec![0x72, 0xb5, 0x4a, 0x86];
         psf2.resize(32 + 256 * 16, 0);
         assert_eq!(parse_psf1(&psf2), Err(FontError::Magic));

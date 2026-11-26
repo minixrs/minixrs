@@ -63,8 +63,9 @@ pub enum Damage {
 
 /// The screen's text: `cols × rows` bytes and a cursor.
 ///
-/// About 10 KiB — keep it in a `static`, not on a 64 KiB driver stack; `new` is
-/// `const` for that.
+/// About 10 KiB. TTY keeps it in `main`'s frame, beside the equally large
+/// `paint::Shown`, so mind the 64 KiB driver stack; `new` is `const` should it
+/// ever have to move to a `static`.
 #[derive(Debug, Clone)]
 pub struct Grid {
     cells: [[u8; MAX_COLS]; MAX_ROWS],

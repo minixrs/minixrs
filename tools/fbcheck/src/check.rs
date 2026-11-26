@@ -112,7 +112,7 @@
 //! that is in the log is in the log. The same goes for a top row that is the
 //! tail of a line whose head has scrolled away.
 //!
-//! The spec words this step as "a row exactly `cols` wide is joined with the
+//! The spec's first text worded this step as "a row exactly `cols` wide is joined with the
 //! row below it before the search". Requiring the join would refuse an honest
 //! screen: a line of exactly `cols` bytes followed by a newline fills its row
 //! and is *not* continued below (F8's deferred wrap), so joined to the next

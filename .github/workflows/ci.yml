@@ -263,8 +263,8 @@ jobs:
           rustup show
           rustup component add miri
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # `minixrs-tty` qualifies despite owning volatile MMIO: its only `unsafe`
-      # lives in `pl011.rs`, which no test reaches — the measured logic is its
+      # `minixrs-tty` qualifies despite owning volatile MMIO: its `unsafe` lives
+      # in `pl011.rs` and one framebuffer store in `main.rs`, which no test reaches — the measured logic is its
       # pure line and interrupt state. `minixrs-driver-rt` is here for the
       # opposite reason: its tests drive the virtqueue's `unsafe` ring accesses,
       # which is where Miri caught a write through a shared-borrow pointer (and
@@ -425,6 +425,13 @@ jobs:
       # Built here, the nested cargo finds it fresh and only runs it.
       - name: Build the disk-image tool (host)
         run: cargo build --locked --release -p minixrs-mkimage
+      # tools/fbcheck is the HOST tool behind the screen check (slice 6.7):
+      # tools/screendump.sh takes a QMP screendump of each full boot and
+      # fbcheck decodes it and looks for its text in that boot's serial log.
+      # Built here for mkimage's reason, and handed to the script through
+      # MINIXRS_FBCHECK so no cargo runs beside the boot at all.
+      - name: Build the screen-check tool (host)
+        run: cargo build --locked --release -p minixrs-fbcheck
       # Three boots (slice 6.4; two since 6.3). The machine always boots from ONE
       # disk now: a GPT image written by tools/mkimage, attached as a modern
       # virtio-blk device on virtio-mmio, which the firmware reads the kernel
@@ -601,11 +608,42 @@ jobs:
           # capped so a boot that never parks does not leave a poller behind
           # for long. The
           # reboot is NOT fed: its reader stays parked for the whole boot.
+          #
+          # The two full boots are also SCREEN-CHECKED (slice 6.7):
+          # tools/screendump.sh runs beside each one, waits for `stdin ok` in
+          # the boot's log, then pauses the guest over QMP (target/qmp.sock,
+          # made by tools/qemu-run.sh), dumps the ramfb screen and has
+          # fbcheck decode it against the same log, retrying until one dump
+          # passes. It must have finished by the time the boot's `timeout`
+          # kills QEMU: one still running then never saw its gate line or
+          # never got a passing dump, and is killed and counted as failed
+          # (the script cannot see QEMU die). Its verdict goes to
+          # fb-<boot>.rc for the check step, so all three boots still run.
+          # The reboot is not screen-checked.
+          #
+          # $1 names the boot, $2 is the script's pid.
+          finish_screen() {
+            if kill -0 "$2" 2>/dev/null; then
+              kill "$2" 2>/dev/null || true
+              wait "$2" 2>/dev/null || true
+              echo "screendump.sh was still running when the $1 boot ended" >> "fb-$1.verdict"
+              echo 1 > "fb-$1.rc"
+            else
+              rc=0
+              wait "$2" || rc=$?
+              echo "$rc" > "fb-$1.rc"
+            fi
+          }
+
+          MINIXRS_FBCHECK=target/release/minixrs-fbcheck \
+            tools/screendump.sh qemu-disk.log fb-disk.ppm > fb-disk.verdict 2>&1 &
+          screen_pid=$!
           status=0
           MINIXRS_ROOT=disk timeout 1200 cargo run -p minixrs-kernel \
             --target aarch64-unknown-none --release \
             < <(FEED_CONSOLE_CEILING=1300 tools/feed-console.sh qemu-disk.log) \
             > qemu-disk.log 2>&1 || status=$?
+          finish_screen disk "$screen_pid"
           expect_timeout disk "$status"
 
           # The image the disk boot left behind, attached as-is: the runner
@@ -619,11 +657,15 @@ jobs:
             > qemu-reboot.log 2>&1 || status=$?
           expect_timeout reboot "$status"
 
+          MINIXRS_FBCHECK=target/release/minixrs-fbcheck \
+            tools/screendump.sh qemu-ramdisk.log fb-ramdisk.ppm > fb-ramdisk.verdict 2>&1 &
+          screen_pid=$!
           status=0
           MINIXRS_ROOT=ramdisk timeout 1200 cargo run -p minixrs-kernel \
             --target aarch64-unknown-none --release \
             < <(FEED_CONSOLE_CEILING=1300 tools/feed-console.sh qemu-ramdisk.log) \
             > qemu-ramdisk.log 2>&1 || status=$?
+          finish_screen ramdisk "$screen_pid"
           expect_timeout ramdisk "$status"
       # All three logs are checked even if an earlier one fails, so one run
       # shows the whole story; the step fails if any does. `reboot` is checked
@@ -634,6 +676,14 @@ jobs:
           tools/check-boot-log.sh disk qemu-disk.log || rc=1
           tools/check-boot-log.sh reboot qemu-reboot.log || rc=1
           tools/check-boot-log.sh ramdisk qemu-ramdisk.log || rc=1
+          # The screen check's verdicts (slice 6.7), one per full boot.
+          for boot in disk ramdisk; do
+            cat "fb-$boot.verdict" || true
+            if [ "$(cat "fb-$boot.rc" 2>/dev/null)" != 0 ]; then
+              echo "::error::$boot boot: the screen check failed — see fb-$boot.ppm in the qemu-boot-log artifact"
+              rc=1
+            fi
+          done
           exit "$rc"
       - name: Compare the two backends
         run: |
@@ -648,6 +698,8 @@ jobs:
             qemu-disk.log
             qemu-reboot.log
             qemu-ramdisk.log
+            fb-*.ppm
+            fb-*.verdict
           if-no-files-found: error
 
   coverage:
