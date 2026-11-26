@@ -13,11 +13,12 @@
 //!   a glyph, decoded with the TTY library that painted it (`minixrs-tty`'s
 //!   `paint::decode_cell`); and the text decoded is in the serial log, which
 //!   `pl011` wrote and the renderer never touched. That last step is what
-//!   makes this more than the renderer agreeing with itself. The search
-//!   forgives up to [`check::MAX_STRAY`] stray single bytes inside a row's
-//!   text — the kernel's per-tick byte shares the serial line and can land
-//!   in the middle of a console line — and nothing else; [`check`]'s module
-//!   docs give the rule exactly.
+//!   makes this more than the renderer agreeing with itself. The serial
+//!   line has other writers, so the log is read as it really is: the
+//!   kernel's own lines are taken out first, and a row may then have the
+//!   kernel's per-tick bytes — letters, singly or in runs, up to
+//!   [`check::MAX_STRAY`] a row — inside it and nothing else. [`check`]'s
+//!   module docs give the rule exactly, and what it costs.
 //! * [`qmp`] takes the dump from a running QEMU: `stop`, `screendump`, `cont`.
 //!
 //! The two functions here join them for the binary, which is argv and
@@ -95,7 +96,10 @@ mod tests {
         let dump = scratch.path("screen.ppm");
         std::fs::write(&dump, screen(TEXT)).unwrap();
         let report = check_files(&dump, &log_file(&scratch, TEXT)).unwrap();
-        assert_eq!(report.to_string(), "ok 80x160 10x10 rows=8 wraps=0 stray=0");
+        assert_eq!(
+            report.to_string(),
+            "ok 80x160 10x10 rows=8 wraps=0 stray=0 worst=0"
+        );
     }
 
     #[test]
@@ -121,7 +125,7 @@ mod tests {
         let err = check_files(&dump, &log_file(&scratch, b"another boot\n")).unwrap_err();
         assert_eq!(
             err,
-            "screen row 0 is not in the serial log, even allowing 2 stray bytes inside it: \"one 1\""
+            "screen row 0 is not in the serial log's console text, even allowing 32 tick bytes inside it: \"one 1\""
         );
     }
 
@@ -151,7 +155,7 @@ mod tests {
         let err = dump_and_check(&sock, &out, &log, SHORT).unwrap_err();
         assert_eq!(
             err,
-            "screen row 2 is not in the serial log, even allowing 2 stray bytes inside it: \"three 3\""
+            "screen row 2 is not in the serial log's console text, even allowing 32 tick bytes inside it: \"three 3\""
         );
         assert_eq!(std::fs::read(&out).unwrap(), image, "the dump is kept");
         // The guest was let go before the check ran.

@@ -14,10 +14,11 @@
 //! * `dump-and-check` does both, reading the log after the dump.
 //!
 //! One line of verdict: `fbcheck: ok <w>x<h> <cols>x<rows> rows=<non-blank>
-//! wraps=<n> stray=<n>` on stdout, or `fbcheck: FAIL <reason>` on stderr.
-//! `rows` is the screen's non-blank rows, `wraps` the wrapped lines seen
-//! whole, and `stray` the rows found in the log only by forgiving a stray
-//! byte or two inside them.
+//! wraps=<n> stray=<n> worst=<n>` on stdout, or `fbcheck: FAIL <reason>` on
+//! stderr. `rows` is the screen's non-blank rows, `wraps` the wrapped lines
+//! seen whole, `stray` the rows found in the log only by allowing the
+//! kernel's tick bytes inside them, and `worst` the most tick bytes one row
+//! needed (the cap is `check::MAX_STRAY`).
 //!
 //! Exit status: 0 passed (or dumped); 1 failed; 64 usage.
 //!

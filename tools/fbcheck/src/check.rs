@@ -13,8 +13,9 @@
 //! used: a log holds one per TTY start, and the last TTY to start is the one
 //! whose screen can be dumped. The line must be complete — all four numbers,
 //! nothing after them, and a line end (`\n` or `\r`) — or the check fails
-//! rather than read half a number from a line still being written. It is read
-//! with step 3's tolerance for stray bytes.
+//! rather than read half a number from a line still being written. It is
+//! looked for in the log as written, before step 3 takes the kernel's lines
+//! out (it is one of them), and may itself hold a tick byte or two.
 //!
 //! The dump must be exactly `w × h`, and the grid [`Format::new`] derives from
 //! that size must be exactly `c × r`. So TTY's own arithmetic is checked
@@ -38,37 +39,70 @@
 //! ## 3. The text is the boot's
 //!
 //! At least [`MIN_ROWS`] rows must be non-blank, and **every non-blank row,
-//! with its trailing blanks removed, must be found in the serial log.** The
-//! log is searched as bytes, as `grep -a -F` would: it need not be UTF-8, and
-//! whatever surrounds the row's text there — a line end of either kind, a
-//! kernel line, a raw byte from another writer — does not matter.
+//! with its trailing blanks removed, must be found in the console's part of
+//! the serial log.** The log is bytes, as `grep -a` reads it: it need not be
+//! UTF-8.
 //!
-//! ### Stray bytes inside a line
+//! ### What the serial log really is
 //!
-//! "Found" is not quite "occurs as a contiguous run of bytes", because the
-//! serial line has a second writer. The kernel puts one identifying byte on
-//! the UART per 10 ms timer tick (`kernel/src/clock.rs`), and it can land
-//! *inside* a console line: a boot's log held `minix.rs initt: dev.null ok
-//! n=35` for the screen row `minix.rs init: dev.null ok n=35` (measured,
-//! slice 6.7). So a row's text is found if the log holds its bytes, in
-//! order, with **at most [`MAX_STRAY`] extra bytes inserted among them**,
-//! where:
+//! Measured on a fed disk boot (slice 6.7; 54 MB of log, of which 80 KB is
+//! console): the serial line has three writers, and only one is the console.
 //!
-//! * each extra byte stands alone — between two consecutive bytes of the
-//!   text there is at most one, never a run of two;
-//! * an extra byte is never a `\n` or a `\r` — text on either side of a
-//!   line end was two lines, not one line with a stray in it;
-//! * nothing else is forgiven: no byte of the text may be missing from the
+//! * **TTY**, writing the console's bytes; its lines end `\r\n`.
+//! * **The kernel, a line at a time.** `[ipc 1414500] caller=17 …\r\n`,
+//!   `[ksys SYS_FORK] …`, `[diag vfs] …`, `[pf …`, `[as …`, `[devmap …` and
+//!   the rest. Each is written whole — nothing lands inside one — but it can
+//!   begin **in the middle of a console line**, which carries on after it:
+//!   `…-----[ksys 1412800] caller=17 call=0 result=0\r\n-----…`. A million of
+//!   them in that boot.
+//! * **The kernel, a byte at a time.** One byte per 10 ms timer tick while a
+//!   process is running: the first byte of its name (`kernel/src/clock.rs`).
+//!   They come singly (`minix.rs initt: dev.null ok`) and, when nothing else
+//!   prints between ticks, in **runs** (`minix.rs hello: iov CCCCCCCCCC....`),
+//!   anywhere, including inside a console line.
+//!
+//! So the log is read in two steps.
+//!
+//! **First the kernel's lines are taken out** ([`console_stream`]). A kernel
+//! line starts at a `[` followed by one or more of `a`–`z`, `_`, `.`, `-` and
+//! then a space or a `]` — `[ipc `, `[ksys `, `[diag tty]`, `[efault ` — and
+//! runs through the next `\n`, or to the end of the log if it has none yet.
+//! Everything else is kept, in order. Console text that itself contained such
+//! a prefix would be taken out with the rest of its line, and its row then
+//! not found: a false failure, never a false pass. Nothing the boot prints to
+//! the console does.
+//!
+//! **Then each row is looked for in what is left**, allowing tick bytes
+//! inside it. A row's text is found if the stream holds its bytes, in order,
+//! with nothing between them but **stray bytes**, where:
+//!
+//! * a stray byte is an ASCII letter or `?` (what a tick prints: a name's
+//!   first byte, or `?` for a process with none) — never a digit, a space,
+//!   punctuation, or a `\r` or `\n`, so text on either side of a line end is
+//!   never one row;
+//! * strays may come in runs of any length, in any number of places, but a
+//!   row's strays total at most [`MAX_STRAY`];
+//! * nothing else is forgiven: no byte of the row may be missing from the
 //!   log or differ in it.
 //!
-//! An exact occurrence is looked for first and counts as no strays. The
-//! tolerant search tries every position where the text's first byte occurs
-//! and follows every placement of the strays at once, so it cannot miss a
-//! match by committing early (`aab` is found in `axab`). [`Report::stray`]
-//! counts the rows that needed the tolerance. The budget is per row.
+//! An exact occurrence is looked for first and counts as no strays.
+//! Otherwise every position where the row's first byte occurs is tried, and
+//! from each one every placement of the strays is followed at once, so a
+//! match cannot be missed by committing early; the row's count is the fewest
+//! strays any occurrence needs. [`Report::stray`] is the number of rows that
+//! needed any, and [`Report::worst`] the most one row needed — the figure to
+//! watch against [`MAX_STRAY`].
 //!
-//! What this costs: a row is also accepted against a log line that really
-//! did hold one or two extra bytes there. `hotel 8` is found in `hotel  8`.
+//! [`MAX_STRAY`] is 32, from that boot: the two rows that needed strays
+//! needed 5 and 10, and the longest run inside any console line of the whole
+//! log was 30. Runs *before* a line are far longer (4930 there) and do not
+//! count: they are not between two bytes of a row.
+//!
+//! **What the tolerance costs.** A screen row that has *lost* letters still
+//! passes: `minix.rs it: stdin ok` is found in `minix.rs init: stdin ok`,
+//! with `ni` taken for tick bytes. Up to [`MAX_STRAY`] letters per row can
+//! go missing that way. A wrong, extra, or moved character cannot, nor a
+//! missing digit, space or punctuation mark.
 //!
 //! ### Wrapped lines
 //!
@@ -100,8 +134,8 @@
 //! * **Order.** Rows are looked up one at a time; nothing requires them to be
 //!   in the log in screen order.
 //! * **Short rows prove little.** A row holding `$` is in any log.
-//! * **Insertions.** As above: up to [`MAX_STRAY`] bytes the log has and the
-//!   row does not are forgiven, whoever wrote them.
+//! * **Lost letters.** As above: up to [`MAX_STRAY`] letters the log has and
+//!   the row does not are forgiven, whoever wrote them.
 //! * **Bytes the screen draws differently.** A tab is drawn as a move of the
 //!   cursor and an unprintable byte as `?` (F8), so a row made from either is
 //!   not in the log as drawn and is refused. Nothing in the default boot
@@ -120,9 +154,17 @@ use crate::ppm::{self, Ppm};
 /// The fewest non-blank rows a passing screen has (F10, step 3).
 pub const MIN_ROWS: usize = 8;
 
-/// The most stray bytes tolerated inside one row's text in the log (and
-/// inside the `fb ok` line). See the module docs.
-pub const MAX_STRAY: usize = 2;
+/// The most stray bytes — the kernel's tick bytes — tolerated inside one
+/// row's text in the log. Chosen from a measured boot; see the module docs.
+pub const MAX_STRAY: usize = 32;
+
+// The matcher keeps one bit per stray count in a `u64`.
+const _: () = assert!(MAX_STRAY < 64);
+
+/// The most stray bytes tolerated among the numbers of the `fb ok` line. It
+/// is short and printed once, so a run of ticks inside it is not expected;
+/// one or two are.
+const GEOMETRY_STRAY: usize = 2;
 
 /// Where red sits in the pixels this module packs a dump into. A PPM has no
 /// shifts of its own; these three are the checker's choice.
@@ -163,19 +205,28 @@ pub struct Report {
     /// Rows found in the log only by allowing stray bytes inside them.
     /// Informational; a large number says the tolerance is doing real work.
     pub stray: usize,
+    /// The most stray bytes any one row needed; at most [`MAX_STRAY`].
+    pub worst: usize,
     /// Every row's text, top to bottom, trailing blanks removed.
     pub text: Vec<String>,
 }
 
 impl fmt::Display for Report {
     /// The one-line verdict:
-    /// `ok 800x600 100x37 rows=<non-blank> wraps=<n> stray=<n>`.
+    /// `ok 800x600 100x37 rows=<non-blank> wraps=<n> stray=<n> worst=<n>`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let g = &self.geometry;
         write!(
             f,
-            "ok {}x{} {}x{} rows={} wraps={} stray={}",
-            g.width, g.height, g.cols, g.rows, self.non_blank_rows, self.wraps, self.stray
+            "ok {}x{} {}x{} rows={} wraps={} stray={} worst={}",
+            g.width,
+            g.height,
+            g.cols,
+            g.rows,
+            self.non_blank_rows,
+            self.wraps,
+            self.stray,
+            self.worst
         )
     }
 }
@@ -291,7 +342,7 @@ impl fmt::Display for CheckError {
             Self::RowNotInLog { row, text } => {
                 write!(
                     f,
-                    "screen row {row} is not in the serial log, even allowing {MAX_STRAY} stray bytes inside it: {text:?}"
+                    "screen row {row} is not in the serial log's console text, even allowing {MAX_STRAY} tick bytes inside it: {text:?}"
                 )
             }
         }
@@ -421,22 +472,24 @@ pub fn check(image: &Ppm, log: &[u8]) -> Result<Report, CheckError> {
     let rows = decode(&canvas, &fmt)?;
 
     // Step 3.
-    let (non_blank_rows, wraps, stray) = rows_in_log(&rows, log)?;
+    let found = rows_in_log(&rows, &console_stream(log))?;
     Ok(Report {
         geometry,
-        non_blank_rows,
-        wraps,
-        stray,
+        non_blank_rows: found.non_blank,
+        wraps: found.wraps,
+        stray: found.stray,
+        worst: found.worst,
         text: rows.iter().map(|row| lossy(trimmed(row))).collect(),
     })
 }
 
 /// Step 1's reading of the log: the last line holding `[diag tty] fb ok`.
 ///
-/// Lines end at a `\n` or a `\r`. The line is read with the same tolerance as
-/// a row of the screen (see the module docs): up to [`MAX_STRAY`] stray bytes
-/// may sit inside it, because the kernel's tick byte can land in this line as
-/// in any other. An exact reading is preferred to a tolerant one.
+/// Read from the log **as written** — this is one of the kernel's lines, and
+/// [`console_stream`] would take it out. Lines end at a `\n` or a `\r`. A
+/// tick byte can land in this line as in any other, so the marker is looked
+/// for with step 3's tolerance and up to [`GEOMETRY_STRAY`] stray bytes may
+/// sit among the numbers. An exact reading is preferred to a tolerant one.
 pub fn geometry_from_log(log: &[u8]) -> Result<Geometry, CheckError> {
     let mut lines = log.split(|&b| b == b'\n' || b == b'\r');
     // What follows the last line end has none of its own yet.
@@ -450,16 +503,19 @@ pub fn geometry_from_log(log: &[u8]) -> Result<Geometry, CheckError> {
         .find_map(|line| Some((line, find_stray(line, FB_OK)?)))
         .ok_or(CheckError::NoGeometryLine)?;
     let rest = line.get(found.end..).unwrap_or(&[]);
-    parse_geometry(rest, MAX_STRAY.saturating_sub(found.strays))
-        .ok_or_else(|| CheckError::BadGeometryLine(lossy(line)))
+    parse_geometry(rest).ok_or_else(|| CheckError::BadGeometryLine(lossy(line)))
 }
 
 /// ` w=<w> h=<h> cols=<c> rows=<r>` and nothing after it — exactly, or else
-/// with up to `strays` single bytes, no two of them adjacent, taken out.
-fn parse_geometry(rest: &[u8], strays: usize) -> Option<Geometry> {
+/// with one or two ([`GEOMETRY_STRAY`]) stray bytes taken out. Only a byte
+/// that can be a stray is ever taken out: never a digit.
+fn parse_geometry(rest: &[u8]) -> Option<Geometry> {
     if let Some(geometry) = parse_geometry_exact(rest) {
         return Some(geometry);
     }
+    let strays: Vec<usize> = (0..rest.len())
+        .filter(|&i| rest.get(i).copied().is_some_and(may_be_stray))
+        .collect();
     let without = |skip: &[usize]| -> Vec<u8> {
         rest.iter()
             .enumerate()
@@ -467,17 +523,12 @@ fn parse_geometry(rest: &[u8], strays: usize) -> Option<Geometry> {
             .map(|(_, &b)| b)
             .collect()
     };
-    if strays >= 1 {
-        for i in 0..rest.len() {
-            if let Some(geometry) = parse_geometry_exact(&without(&[i])) {
-                return Some(geometry);
-            }
+    for (n, &i) in strays.iter().enumerate() {
+        if let Some(geometry) = parse_geometry_exact(&without(&[i])) {
+            return Some(geometry);
         }
-    }
-    if strays >= 2 {
-        for i in 0..rest.len() {
-            // `i + 1` would be a run of two at one place.
-            for j in i + 2..rest.len() {
+        if GEOMETRY_STRAY >= 2 {
+            for &j in strays.iter().skip(n + 1) {
                 if let Some(geometry) = parse_geometry_exact(&without(&[i, j])) {
                     return Some(geometry);
                 }
@@ -624,28 +675,82 @@ fn cell_fault(
     CellFault::Shape(shape)
 }
 
-/// Step 3: every non-blank row is in the log, and there are enough of them.
-/// Returns the count of non-blank rows, of wrapped lines seen whole, and of
-/// rows found only by allowing stray bytes.
-fn rows_in_log(rows: &[Vec<u8>], log: &[u8]) -> Result<(usize, usize, usize), CheckError> {
-    let mut non_blank = 0;
-    let mut wraps = 0;
-    let mut stray = 0;
+/// The console's part of a serial log: `log` with every kernel line taken
+/// out, from its `[name ` or `[name]` through its line end. See the module
+/// docs for what that is and why.
+pub fn console_stream(log: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    // `log[kept..]` has not been copied or dropped yet; `at` is where the
+    // search for the next `[` resumes.
+    let (mut kept, mut at) = (0, 0);
+    while let Some(open) = log
+        .get(at..)
+        .and_then(|rest| rest.iter().position(|&b| b == b'['))
+        .map(|offset| at + offset)
+    {
+        let line = log.get(open..).unwrap_or(&[]);
+        if !starts_kernel_line(line) {
+            at = open + 1;
+            continue;
+        }
+        out.extend_from_slice(log.get(kept..open).unwrap_or(&[]));
+        // Through the line end; a line with none yet is still being written
+        // and goes too.
+        at = line
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(log.len(), |end| open + end + 1);
+        kept = at;
+    }
+    out.extend_from_slice(log.get(kept..).unwrap_or(&[]));
+    out
+}
+
+/// Does `text` begin like a kernel line: `[`, a name of `a`–`z`, `_`, `.`,
+/// `-`, then a space or `]`?
+fn starts_kernel_line(text: &[u8]) -> bool {
+    let Some((b'[', rest)) = text.split_first() else {
+        return false;
+    };
+    let name = rest
+        .iter()
+        .take_while(|&&b| b.is_ascii_lowercase() || matches!(b, b'_' | b'.' | b'-'))
+        .count();
+    name > 0 && matches!(rest.get(name), Some(b' ' | b']'))
+}
+
+/// What step 3 counted.
+struct RowsFound {
+    non_blank: usize,
+    wraps: usize,
+    stray: usize,
+    worst: usize,
+}
+
+/// Step 3: every non-blank row is in the console stream, and there are
+/// enough of them.
+fn rows_in_log(rows: &[Vec<u8>], console: &[u8]) -> Result<RowsFound, CheckError> {
+    let mut found = RowsFound {
+        non_blank: 0,
+        wraps: 0,
+        stray: 0,
+        worst: 0,
+    };
     for (r, row) in rows.iter().enumerate() {
         let text = trimmed(row);
         if text.is_empty() {
             continue;
         }
-        non_blank += 1;
-        match find_stray(log, text) {
-            Some(found) if found.strays == 0 => {}
-            Some(_) => stray += 1,
-            None => {
-                return Err(CheckError::RowNotInLog {
-                    row: r,
-                    text: lossy(text),
-                });
-            }
+        found.non_blank += 1;
+        let Some(at) = find_stray(console, text) else {
+            return Err(CheckError::RowNotInLog {
+                row: r,
+                text: lossy(text),
+            });
+        };
+        if at.strays > 0 {
+            found.stray += 1;
+            found.worst = found.worst.max(at.strays);
         }
         // A row that ends in the last column may be a line that wrapped. If
         // its text runs straight on into the next row's in the log, it was.
@@ -653,15 +758,17 @@ fn rows_in_log(rows: &[Vec<u8>], log: &[u8]) -> Result<(usize, usize, usize), Ch
         let below = rows.get(r + 1).map_or(&[][..], |next| trimmed(next));
         if row.last().is_some_and(|&b| b != BLANK) && !below.is_empty() {
             let joined = [row.as_slice(), below].concat();
-            if find_stray(log, &joined).is_some() {
-                wraps += 1;
+            if find_stray(console, &joined).is_some() {
+                found.wraps += 1;
             }
         }
     }
-    if non_blank < MIN_ROWS {
-        return Err(CheckError::TooFewRows { found: non_blank });
+    if found.non_blank < MIN_ROWS {
+        return Err(CheckError::TooFewRows {
+            found: found.non_blank,
+        });
     }
-    Ok((non_blank, wraps, stray))
+    Ok(found)
 }
 
 /// `row` without its trailing blanks.
@@ -700,17 +807,16 @@ struct Found {
     strays: usize,
 }
 
-/// May `byte` be a stray inside a line? Anything but a line end: a tick byte
-/// is a letter, and a line end between two pieces of text means they were
-/// two lines.
+/// May `byte` be one of the kernel's tick bytes? A letter — the first byte of
+/// a process's name — or the `?` printed for a process without one.
 const fn may_be_stray(byte: u8) -> bool {
-    !matches!(byte, b'\n' | b'\r')
+    byte.is_ascii_alphabetic() || byte == b'?'
 }
 
-/// Find `needle` in `hay`, allowing up to [`MAX_STRAY`] stray bytes inside it
-/// (the module docs give the rule). An exact occurrence anywhere is preferred
-/// to a tolerant one; failing that, the leftmost start that works, with the
-/// fewest strays that start needs.
+/// Find `needle` in `hay`, allowing runs of stray bytes between its bytes,
+/// [`MAX_STRAY`] in total (the module docs give the rule). An exact
+/// occurrence anywhere is preferred; failing that, the occurrence needing the
+/// fewest strays, and of those the leftmost.
 fn find_stray(hay: &[u8], needle: &[u8]) -> Option<Found> {
     if let Some(start) = find(hay, needle) {
         return Some(Found {
@@ -720,48 +826,60 @@ fn find_stray(hay: &[u8], needle: &[u8]) -> Option<Found> {
         });
     }
     let (&first, tail) = needle.split_first()?;
+    let mut best: Option<Found> = None;
     for (start, _) in hay.iter().enumerate().filter(|&(_, &b)| b == first) {
-        // Bit `k` of `reach`: the needle's bytes so far can be laid on `hay`
-        // from `start` with exactly `k` strays among them, so the latest sits
-        // at `start + j + k`. Every way of placing the strays is followed at
-        // once, which a matcher that commits to the first byte that fits
-        // cannot do.
-        let mut reach: u32 = 1;
-        for (j, &want) in (1..).zip(tail) {
-            let mut next = 0;
-            for k in 0..=MAX_STRAY {
-                if reach & (1 << k) == 0 {
-                    continue;
-                }
-                // The byte directly after the previous one.
-                let at = start + j + k;
-                if hay.get(at) == Some(&want) {
-                    next |= 1 << k;
-                }
-                // Or one stray, and then it. Never two strays in a row: the
-                // only other step from here is the direct one.
-                if k < MAX_STRAY
-                    && hay.get(at).copied().is_some_and(may_be_stray)
-                    && hay.get(at + 1) == Some(&want)
-                {
-                    next |= 1 << (k + 1);
-                }
-            }
-            reach = next;
-            if reach == 0 {
-                break;
-            }
-        }
-        if reach != 0 {
-            let strays = reach.trailing_zeros() as usize;
-            return Some(Found {
+        // Only an occurrence better than the best so far is of interest. No
+        // occurrence is exact, so one stray cannot be bettered.
+        let limit = match best {
+            Some(Found { strays: 1, .. }) => break,
+            Some(found) => found.strays - 1,
+            None => MAX_STRAY,
+        };
+        if let Some(strays) = strays_from(hay, start, tail, limit) {
+            best = Some(Found {
                 start,
                 end: start + needle.len() + strays,
                 strays,
             });
         }
     }
-    None
+    best
+}
+
+/// The fewest stray bytes, at most `limit`, with which `tail` follows the
+/// byte at `hay[start]`; `None` if it does not.
+///
+/// Bit `k` of `reach`: the needle's bytes so far can be laid on `hay` from
+/// `start` with exactly `k` strays among them, the latest at `start + j + k`.
+/// Every way of placing the strays is followed at once, which a matcher that
+/// commits to the first byte that fits cannot do.
+fn strays_from(hay: &[u8], start: usize, tail: &[u8], limit: usize) -> Option<usize> {
+    let mut reach: u64 = 1;
+    for (j, &want) in (1..).zip(tail) {
+        let mut next: u64 = 0;
+        let mut from = reach;
+        while from != 0 {
+            let k = from.trailing_zeros() as usize;
+            from &= from - 1;
+            // Walk forward from the byte after the previous one: each byte
+            // may be the one wanted, and may be skipped only as a stray.
+            let mut strays = k;
+            while let Some(&byte) = hay.get(start + j + strays) {
+                if byte == want {
+                    next |= 1 << strays;
+                }
+                if strays == limit || !may_be_stray(byte) {
+                    break;
+                }
+                strays += 1;
+            }
+        }
+        reach = next;
+        if reach == 0 {
+            return None;
+        }
+    }
+    Some(reach.trailing_zeros() as usize)
 }
 
 #[cfg(test)]
@@ -864,7 +982,10 @@ mod tests {
                 ""
             ]
         );
-        assert_eq!(report.to_string(), "ok 85x168 10x10 rows=8 wraps=0 stray=0");
+        assert_eq!(
+            report.to_string(),
+            "ok 85x168 10x10 rows=8 wraps=0 stray=0 worst=0"
+        );
     }
 
     #[test]
@@ -906,7 +1027,7 @@ mod tests {
         assert_eq!(report.text[35], "minix.rs init: rotation line 49");
         assert_eq!(
             report.to_string(),
-            "ok 800x600 100x37 rows=36 wraps=0 stray=0"
+            "ok 800x600 100x37 rows=36 wraps=0 stray=0 worst=0"
         );
     }
 
@@ -956,10 +1077,14 @@ mod tests {
             b"[diag tty] fb ok w=x h=168 cols=10 rows=10\n",
             b"[diag tty] fb ok h=168 w=85 cols=10 rows=10\n",
             b"[diag tty] fb ok w=850000000000 h=168 cols=10 rows=10\n",
-            // Three stray bytes, and a run of two: past the tolerance.
+            // Three stray bytes among the numbers: past the tolerance there.
             b"[diag tty] fb ok w=8x5 h=1x68 cols=1x0 rows=10\n",
-            b"[diag tty] fb ok w=85 h=168 coxyls=10 rows=10\n",
-            b"[diag ttxy] fb oxk w=85 h=168 cols=10 rowxs=10\n",
+            b"[diag tty] fb ok w=85 h=168 cxolxs=10 rxows=10\n",
+            // A stray is a letter or `?`: not a space, a sign or a digit.
+            b"[diag tty] fb ok w=85 h=168 cols=10 rows=10 \n",
+            b"[diag tty] fb ok w=-85 h=168 cols=10 rows=10\n",
+            b"[diag tty] fb ok w=85  h=168 cols=10 rows=10\n",
+            b"[diag tty] fb ok w=85 h=168 cols=10 rows=10.\n",
             // A byte missing or changed is never forgiven.
             b"[diag tty] fb ok w=85 h=168 cols=10 rws=10\n",
             b"[diag tty] fb ok w=85 h=168 cols=10 rowz=10\n",
@@ -1198,7 +1323,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "screen row 3 is not in the serial log, even allowing 2 stray bytes inside it: \"delta\""
+            "screen row 3 is not in the serial log's console text, even allowing 32 tick bytes inside it: \"delta\""
         );
 
         // One byte different is absent too, in the first row and in the last.
@@ -1429,10 +1554,11 @@ mod tests {
         let report = check(&dump(w, h, &text), &log(w, h, &body)).unwrap();
         assert_eq!(report.text[0], "minix.rs init: dev.null ok n=35");
         assert_eq!(report.stray, 1, "one row needed the tolerance");
+        assert_eq!(report.worst, 1);
         assert_eq!(report.non_blank_rows, 9);
         assert_eq!(
             report.to_string(),
-            "ok 320x160 40x10 rows=9 wraps=0 stray=1"
+            "ok 320x160 40x10 rows=9 wraps=0 stray=1 worst=1"
         );
 
         // Two strays in one row, and strays in two rows.
@@ -1445,36 +1571,108 @@ mod tests {
     }
 
     #[test]
-    fn three_stray_bytes_in_one_row_are_refused() {
-        let body = EIGHT.replace(b"charlie 3", b"cxharxlie x3");
-        let err = check(&dump(W, H, EIGHT), &log(W, H, &body)).unwrap_err();
-        assert_eq!(
-            err,
-            CheckError::RowNotInLog {
-                row: 2,
-                text: "charlie 3".into()
-            }
-        );
-        assert!(err.to_string().contains("allowing 2 stray bytes"), "{err}");
-        // Two of the three are fine.
-        let body = EIGHT.replace(b"charlie 3", b"cxharxlie 3");
-        assert_eq!(
-            check(&dump(W, H, EIGHT), &log(W, H, &body)).unwrap().stray,
-            1
-        );
-        assert_eq!(MAX_STRAY, 2);
+    fn a_run_of_tick_bytes_inside_a_row_is_tolerated() {
+        // Measured, slice 6.7: "minix.rs hello: iov CCCCCCCCCC......" in the
+        // log for a row without the Cs.
+        let text = [b"hello: iov ..........ok\n".as_slice(), EIGHT].concat();
+        let body = text.replace(b"iov ...", b"iov CCCCCCCCCC...");
+        let (w, h) = (320, 160);
+        let report = check(&dump(w, h, &text), &log(w, h, &body)).unwrap();
+        assert_eq!(report.text[0], "hello: iov ..........ok");
+        assert_eq!((report.stray, report.worst), (1, 10));
+
+        // A later row that needs fewer does not lower the worst.
+        let two = body.replace(b"charlie 3", b"chaVrlie 3");
+        let report = check(&dump(w, h, &text), &log(w, h, &two)).unwrap();
+        assert_eq!((report.stray, report.worst), (2, 10));
+
+        // Runs in several places of one row add up; mixed letters and `?`.
+        let body = body.replace(b"hello:", b"htCello?:");
+        let report = check(&dump(w, h, &text), &log(w, h, &body)).unwrap();
+        assert_eq!((report.stray, report.worst), (1, 13));
+
+        // A run BEFORE the row's first byte or after its last is not in it.
+        let body = [
+            b"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC".as_slice(),
+            &text,
+            b"tttt",
+        ]
+        .concat();
+        let report = check(&dump(w, h, &text), &log(w, h, &body)).unwrap();
+        assert_eq!((report.stray, report.worst), (0, 0));
     }
 
     #[test]
-    fn a_run_of_two_stray_bytes_at_one_place_is_refused() {
-        let body = EIGHT.replace(b"charlie 3", b"charxylie 3");
+    fn more_tick_bytes_than_the_cap_in_one_row_are_refused() {
+        assert_eq!(MAX_STRAY, 32);
+        let text = [b"hello: iov ...ok\n".as_slice(), EIGHT].concat();
+        let (w, h) = (320, 160);
+        let image = dump(w, h, &text);
+        let with_run = |n: usize| {
+            let run = [b"iov ".as_slice(), &vec![b'C'; n], b"..."].concat();
+            log(w, h, &text.replace(b"iov ...", &run))
+        };
+        // Exactly the cap passes, and says so.
+        let report = check(&image, &with_run(MAX_STRAY)).unwrap();
+        assert_eq!((report.stray, report.worst), (1, 32));
+        // One more does not.
         assert_eq!(
-            check(&dump(W, H, EIGHT), &log(W, H, &body)),
+            check(&image, &with_run(MAX_STRAY + 1)),
             Err(CheckError::RowNotInLog {
-                row: 2,
-                text: "charlie 3".into()
+                row: 0,
+                text: "hello: iov ...ok".into()
             })
         );
+        // Nor does the cap spread over two places with one more somewhere.
+        let body = with_run(MAX_STRAY).replace(b"hello:", b"hetllo:");
+        assert!(matches!(
+            check(&image, &body),
+            Err(CheckError::RowNotInLog { row: 0, .. })
+        ));
+        // The row is found where ANY occurrence is within the cap: the fewest
+        // strays over the whole log is the row's count.
+        let body = [
+            with_run(MAX_STRAY + 5),
+            text.replace(b"iov ...", b"iov CCC..."),
+        ]
+        .concat();
+        let report = check(&image, &body).unwrap();
+        assert_eq!((report.stray, report.worst), (1, 3));
+    }
+
+    #[test]
+    fn only_a_letter_or_a_question_mark_can_be_a_tick_byte() {
+        let text = [b"abcd\n".as_slice(), EIGHT].concat();
+        let image = dump(W, H, &text);
+        for stray in *b"xCZa?" {
+            let body = [b"ab".as_slice(), &[stray], b"cd\n", EIGHT].concat();
+            let report = check(&image, &log(W, H, &body)).unwrap();
+            assert_eq!(
+                (report.stray, report.worst),
+                (1, 1),
+                "{:?}",
+                char::from(stray)
+            );
+        }
+        // A digit, a space, punctuation, a control or a high byte between
+        // them, and "ab" and "cd" are not the row "abcd".
+        for stray in [
+            b'7', b'0', b' ', b'.', b'-', b'[', b'@', b'`', b'{', b'\t', 0x00, 0x1B, 0x7F, 0x80,
+            0xFF,
+        ] {
+            let body = [b"ab".as_slice(), &[stray], b"cd\n", EIGHT].concat();
+            assert_eq!(
+                check(&image, &log(W, H, &body)),
+                Err(CheckError::RowNotInLog {
+                    row: 0,
+                    text: "abcd".into()
+                }),
+                "{stray:#04x}"
+            );
+            // Not even with real tick bytes around it.
+            let body = [b"abC".as_slice(), &[stray], b"Ccd\n", EIGHT].concat();
+            assert!(check(&image, &log(W, H, &body)).is_err(), "{stray:#04x}");
+        }
     }
 
     #[test]
@@ -1501,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_end_is_never_a_stray_byte() {
+    fn text_on_either_side_of_a_line_end_is_never_one_row() {
         // "ab" and "cd" on two log lines are not the row "abcd", with either
         // kind of line end between them.
         let text = [b"abcd\n".as_slice(), EIGHT].concat();
@@ -1515,14 +1713,9 @@ mod tests {
                 })
             );
         }
-        // Any other byte is one, printable or not.
-        for stray in [b'x', b' ', 0x00, 0xFF, b'\t'] {
-            let body = [b"ab".as_slice(), &[stray], b"cd\n", EIGHT].concat();
-            assert_eq!(
-                check(&dump(W, H, &text), &log(W, H, &body)).unwrap().stray,
-                1
-            );
-        }
+        // Nor with tick bytes on both sides of the line end.
+        let body = [b"abC\r\nCcd\n".as_slice(), EIGHT].concat();
+        assert!(check(&dump(W, H, &text), &log(W, H, &body)).is_err());
     }
 
     #[test]
@@ -1578,44 +1771,35 @@ mod tests {
 
     #[test]
     fn the_tolerant_search_is_not_greedy() {
-        // Cases where taking the first byte that fits, or the first start
-        // that begins to fit, loses the match.
-        assert_eq!(strays(b"aaxb", b"aab"), Some(1));
-        assert_eq!(strays(b"axab", b"aab"), Some(1));
+        // `-` is never a stray, so these have one reading each. Cases where
+        // taking the first byte that fits, or the first start that begins to
+        // fit, loses the match.
+        assert_eq!(strays(b"aax-", b"aa-"), Some(1));
+        assert_eq!(strays(b"axa-", b"aa-"), Some(1));
         assert_eq!(
-            strays(b"aaxab", b"aab"),
+            strays(b"a-axa-", b"aa-"),
             Some(1),
             "the second start, not the first"
         );
-        assert_eq!(strays(b"abxbb", b"abb"), Some(1));
-        // Not a-b-(b)-?: the first `b` is the stray, then `x` is another.
-        assert_eq!(strays(b"abbxa", b"aba"), Some(2));
-        assert_eq!(strays(b"abbxxa", b"aba"), None);
-        assert_eq!(strays(b"abba", b"aba"), Some(1));
-        assert_eq!(strays(b"aabab", b"abab"), Some(0));
-        assert_eq!(strays(b"aaxaab", b"aaab"), Some(2));
-        assert_eq!(strays(b"axaxab", b"aaab"), Some(2));
-        assert_eq!(strays(b"axaxaxb", b"aaab"), None, "three strays");
-        assert_eq!(strays(b"axxab", b"aab"), None, "a run of two");
+        assert_eq!(strays(b"-a-xx-b", b"-ab"), None);
         assert_eq!(strays(b"initt:", b"init:"), Some(1));
-        // The fewest strays for the leftmost start that works.
+        assert_eq!(strays(b"iov CCCCCCCCCC...", b"iov ..."), Some(10));
+        // A needle byte that is itself a letter may be the stray or the
+        // match: `a(b)b(xx)a`, not `ab` and then no `a`.
+        assert_eq!(strays(b"abbxxa", b"aba"), Some(3));
+        assert_eq!(strays(b"abb-a", b"aba"), None, "`-` is in the way");
+        // Strays before the first byte or after the last are not inside it.
+        assert_eq!(strays(b"xxxa-bxxx", b"a-b"), Some(0));
+        // The fewest strays of any occurrence, and of those the leftmost.
         assert_eq!(
-            find_stray(b"axbxc abxc", b"abc"),
+            find_stray(b"-xxxa -xa -ya", b"-a"),
             Some(Found {
-                start: 0,
-                end: 5,
-                strays: 2
-            })
-        );
-        // ... when that start works with one stray or with two.
-        assert_eq!(
-            find_stray(b"abxabb", b"abab"),
-            Some(Found {
-                start: 0,
-                end: 5,
+                start: 6,
+                end: 9,
                 strays: 1
             })
         );
+        // ... including when one start works with fewer or with more.
         assert_eq!(
             find_stray(b"axbbbb", b"abbb"),
             Some(Found {
@@ -1624,16 +1808,16 @@ mod tests {
                 strays: 1
             })
         );
-        // Strays before the first byte or after the last are not inside it.
-        assert_eq!(strays(b"xxxabxxx", b"ab"), Some(0));
     }
 
     #[test]
-    fn the_tolerant_search_agrees_with_trying_every_insertion() {
-        // The rule, spelled out the slow way: `needle` with up to MAX_STRAY
-        // single bytes put into distinct gaps between its bytes occurs in
-        // `hay` exactly. Checked for every needle of up to 4 bytes over
-        // {a, b} against every haystack of up to 6 bytes over {a, b, x}.
+    fn the_tolerant_search_agrees_with_trying_every_deletion() {
+        // The rule, spelled out the slow way: some stretch of `hay` starts
+        // and ends with the needle's first and last bytes and becomes the
+        // needle when some of its inner letters — at most `limit` — are
+        // taken out. Checked for every needle of up to 4 bytes over {a, -}
+        // against every haystack of up to 6 bytes over {a, x, -}, at every
+        // limit that can matter, from every start.
         fn strings(alphabet: &[u8], max: usize) -> Vec<Vec<u8>> {
             let mut all = vec![vec![]];
             let mut from = 0;
@@ -1650,77 +1834,347 @@ mod tests {
             }
             all
         }
-        fn slow(hay: &[u8], needle: &[u8]) -> bool {
-            let gaps = needle.len() - 1;
-            // Each gap holds nothing (0) or one of a, b, x (1..=3).
-            let mut fill = vec![0usize; gaps];
-            loop {
-                if fill.iter().filter(|&&f| f != 0).count() <= MAX_STRAY {
-                    let mut text = vec![needle[0]];
-                    for (g, &f) in fill.iter().enumerate() {
-                        if f != 0 {
-                            text.push(b"abx"[f - 1]);
+        /// The fewest deletions that turn a stretch starting at `start` into
+        /// the needle.
+        fn slow(hay: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
+            let mut best = None;
+            for end in start + needle.len()..=hay.len() {
+                let stretch = &hay[start..end];
+                let inner = stretch.len().saturating_sub(2);
+                for mask in 0u32..1 << inner {
+                    let mut kept = Vec::new();
+                    let mut legal = true;
+                    for (i, &b) in stretch.iter().enumerate() {
+                        let out = i >= 1 && i <= inner && mask & (1 << (i - 1)) != 0;
+                        if out {
+                            legal &= b.is_ascii_alphabetic() || b == b'?';
+                        } else {
+                            kept.push(b);
                         }
-                        text.push(needle[g + 1]);
                     }
-                    if find(hay, &text).is_some() {
-                        return true;
+                    let n = mask.count_ones() as usize;
+                    if legal && kept == needle && best.is_none_or(|b| n < b) {
+                        best = Some(n);
                     }
                 }
-                // Count up in base 4.
-                let Some(g) = fill.iter().position(|&f| f < 3) else {
-                    return false;
-                };
-                fill[g] += 1;
-                fill[..g].fill(0);
             }
+            best
         }
-        let hays = strings(b"abx", 6);
-        let mut tolerant_only = 0;
-        for needle in strings(b"ab", 4).iter().filter(|n| !n.is_empty()) {
+        let hays = strings(b"ax-", 6);
+        let mut tolerant = 0;
+        for needle in strings(b"a-", 4).iter().filter(|n| !n.is_empty()) {
             for hay in &hays {
-                let fast = find_stray(hay, needle);
+                let mut overall: Option<usize> = None;
+                for start in 0..hay.len() {
+                    if hay[start] != needle[0] {
+                        continue;
+                    }
+                    let want = slow(hay, start, needle);
+                    for limit in 0..=5 {
+                        assert_eq!(
+                            strays_from(hay, start, &needle[1..], limit),
+                            want.filter(|&n| n <= limit),
+                            "needle {:?} in {:?} from {start}, limit {limit}",
+                            String::from_utf8_lossy(needle),
+                            String::from_utf8_lossy(hay)
+                        );
+                    }
+                    if let Some(n) = want {
+                        overall = Some(overall.map_or(n, |o| o.min(n)));
+                    }
+                }
                 assert_eq!(
-                    fast.is_some(),
-                    slow(hay, needle),
+                    find_stray(hay, needle).map(|f| f.strays),
+                    overall,
                     "needle {:?} in {:?}",
                     String::from_utf8_lossy(needle),
                     String::from_utf8_lossy(hay)
                 );
-                if let Some(found) = fast {
-                    assert_eq!(found.strays == 0, find(hay, needle).is_some());
-                    assert_eq!(found.end - found.start, needle.len() + found.strays);
-                    tolerant_only += usize::from(found.strays > 0);
-                }
+                tolerant += usize::from(overall.is_some_and(|n| n > 0));
             }
         }
         assert!(
-            tolerant_only > 1000,
-            "the comparison exercised the tolerance"
+            tolerant > 500,
+            "the comparison exercised the tolerance: {tolerant}"
+        );
+    }
+
+    // --- the log as it really is: fixtures cut from a measured boot -------------
+
+    /// The kernel lines of the measured log, verbatim.
+    const IPC: &[u8] = b"[ipc 1414400] caller=17 call=3 target=0x7ffe result=0\r\n";
+    const KSYS: &[u8] = b"[ksys 1412800] caller=17 call=0 result=0\r\n";
+    const FORK: &[u8] = b"[ksys SYS_FORK] parent=i nr=10 child_nr=19 child_e=0x8013 pages=23\r\n";
+
+    #[test]
+    fn kernel_lines_are_taken_out_of_the_console_stream() {
+        // Verbatim shapes: a kernel line beginning mid console line, several
+        // in a row, and the console line carrying on after them.
+        let raw = [
+            b"Cminix.rs init: vfs long write -----".as_slice(),
+            KSYS,
+            IPC,
+            b"-----",
+            IPC,
+            b"C--vfs-loop-end\r\n",
+            IPC,
+            KSYS,
+            b"Cminix.rs hello: iov ",
+            FORK,
+            IPC,
+            b"CCCCCCCCCC....ok match=1\r\nminix.rs hello: errno ok\r\nt",
+            b"[ksys SYS_EXIT] target=b nr=19 freed=531 devs=0 result=0\r\n",
+        ]
+        .concat();
+        assert_eq!(
+            console_stream(&raw),
+            b"Cminix.rs init: vfs long write ----------C--vfs-loop-end\r\n\
+              Cminix.rs hello: iov CCCCCCCCCC....ok match=1\r\nminix.rs hello: errno ok\r\nt"
         );
     }
 
     #[test]
-    fn a_row_drawn_from_a_tab_or_an_unprintable_byte_is_not_in_the_log_as_drawn() {
-        // F8: a tab moves the cursor, anything unprintable is drawn as `?`.
-        // The log holds the bytes written, so neither row is found. Pinned so
-        // that whoever makes the console print one learns it here.
-        let text = [b"a\tb\n".as_slice(), EIGHT].concat();
+    fn every_kernel_prefix_of_the_measured_boot_is_recognised() {
+        for line in [
+            &b"[ipc 100] caller=17 call=3 target=0x7ffe result=0\r\n"[..],
+            b"[ksys 100] caller=17 call=0 result=0\r\n",
+            b"[ksys SYS_EXEC] target=19 name=bigprog src=name entry=0x101000\r\n",
+            b"[pf va=0x1000]\r\n",
+            b"[diag vm] something\r\n",
+            b"[diag tty] fb ok w=800 h=600 cols=100 rows=37\r\n",
+            b"[as new]\r\n",
+            b"[alarm 3]\r\n",
+            b"[noq x]\r\n",
+            b"[exec x]\r\n",
+            b"[devmap] tty fb va=0x100000000 pa=0x4c7a0000 pages=469\r\n",
+            b"[virtio x]\r\n",
+            b"[dma x]\r\n",
+            b"[efault deliver] x\r\n",
+            b"[fb] ok pa=0x4c7a0000 w=800 h=600\r\n",
+            b"[mair x]\r\n",
+            b"[ramdisk x]\r\n",
+            // A line end of the other kind, and none at all yet.
+            b"[ipc 100] caller=17\n",
+            b"[ipc 100] call",
+        ] {
+            let raw = [b"before ".as_slice(), line, b"after"].concat();
+            let expect: &[u8] = if line.ends_with(b"\n") {
+                b"before after"
+            } else {
+                b"before "
+            };
+            assert_eq!(
+                console_stream(&raw),
+                expect,
+                "{:?}",
+                String::from_utf8_lossy(line)
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_kernel_prefix_is_kept() {
+        for text in [
+            // The firmware's escape sequences, from the measured log.
+            &b"\x1b[2J\x1b[01;01H\x1b[=3h\x1b[01;02Hi\r\n"[..],
+            // No name, an upper-case name, a digit, no space or bracket after.
+            b"a[] b\r\n",
+            b"a[ ] b\r\n",
+            b"a[OK] b\r\n",
+            b"a[Ipc 1] b\r\n",
+            b"a[1] b[12 3]\r\n",
+            b"a[ipc1] b\r\n",
+            b"a[ipc\r\n",
+            b"a[ipc",
+            b"a[",
+            b"x = y[I] + [z, w]\r\n",
+            b"no bracket at all\r\n",
+            b"",
+        ] {
+            assert_eq!(
+                console_stream(text),
+                text,
+                "{:?}",
+                String::from_utf8_lossy(text)
+            );
+        }
+    }
+
+    #[test]
+    fn console_text_that_looks_like_a_kernel_line_is_lost_and_its_row_refused() {
+        // The price of the recogniser, pinned: a console line holding
+        // `[word]` or `[word ` is taken out from there to its end, so its row
+        // is not found. A false FAILURE, never a false pass.
         assert_eq!(
-            check_text(&text),
+            console_stream(b"x = y[i] + 1\r\nnext\r\n"),
+            b"x = ynext\r\n"
+        );
+        assert_eq!(
+            console_stream(b"sh: [ok] done\r\nnext\r\n"),
+            b"sh: next\r\n"
+        );
+        let text = [b"sh: [ok] done\n".as_slice(), EIGHT].concat();
+        let (w, h) = (320, 160);
+        assert_eq!(
+            check(&dump(w, h, &text), &log(w, h, &text)),
             Err(CheckError::RowNotInLog {
                 row: 0,
-                text: "a       b".into()
+                text: "sh: [ok] done".into()
             })
         );
-        let text = [b"a\x1Bb\n".as_slice(), EIGHT].concat();
-        assert_eq!(
-            check_text(&text),
-            Err(CheckError::RowNotInLog {
-                row: 0,
-                text: "a?b".into()
-            })
+    }
+
+    /// A log in the measured shape: kernel lines between every console line
+    /// and wherever `|` stands in `body`, and a tick run before each line.
+    fn noisy(w: u32, h: u32, body: &[u8]) -> Vec<u8> {
+        let mut out = b"UEFI firmware\r\n\x1b[2J\x1b[01;01H[fb] ok w=800\r\n".to_vec();
+        out.extend_from_slice(IPC);
+        out.extend_from_slice(&fb_ok(w, h));
+        for line in body.split_inclusive(|&b| b == b'\n') {
+            out.extend_from_slice(b"tCCCCC");
+            for piece in line.split_inclusive(|&b| b == b'|') {
+                let (text, cut) = match piece.split_last() {
+                    Some((b'|', text)) => (text, true),
+                    _ => (piece, false),
+                };
+                // TTY's line end is CR LF.
+                match text.split_last() {
+                    Some((b'\n', text)) => {
+                        out.extend_from_slice(text);
+                        out.extend_from_slice(b"\r\n");
+                    }
+                    _ => out.extend_from_slice(text),
+                }
+                if cut {
+                    out.extend_from_slice(KSYS);
+                    out.extend_from_slice(IPC);
+                }
+            }
+            out.extend_from_slice(IPC);
+            out.extend_from_slice(KSYS);
+        }
+        out
+    }
+
+    #[test]
+    fn a_console_line_interrupted_by_kernel_lines_is_found() {
+        let text = [
+            b"minix.rs init: vfs long write ----------vfs-loop-end\n".as_slice(),
+            EIGHT,
+        ]
+        .concat();
+        let (w, h) = (160, 320);
+        let image = dump(w, h, &text);
+        // Uninterrupted, but with kernel lines and tick runs between lines.
+        let report = check(&image, &noisy(w, h, &text)).unwrap();
+        assert_eq!(report.text[0], "minix.rs init: vfs l");
+        assert_eq!(report.text[2], "vfs-loop-end");
+        assert_eq!((report.wraps, report.stray, report.worst), (2, 0, 0));
+
+        // Kernel lines in the middle of a row, at a row boundary, and twice
+        // in one row: the row is split across two kernel lines.
+        for cut in [
+            &b"minix.rs init: vfs long wr|ite ----------vfs-loop-end\n"[..],
+            b"minix.rs init: vfs l|ong write ----------vfs-loop-end\n",
+            b"minix.rs i|nit: v|fs long write -----|-----vfs-loop|-end\n",
+            b"|minix.rs init: vfs long write ----------vfs-loop-end|\n",
+        ] {
+            let body = [cut, EIGHT].concat();
+            let report = check(&image, &noisy(w, h, &body)).unwrap();
+            assert_eq!(
+                (report.non_blank_rows, report.wraps, report.stray),
+                (11, 2, 0),
+                "{:?}",
+                String::from_utf8_lossy(cut)
+            );
+        }
+        // Without the stripping none of that would be found.
+        let body = [
+            &b"minix.rs init: vfs long wr|ite ----------vfs-loop-end\n"[..],
+            EIGHT,
+        ]
+        .concat();
+        assert!(find_stray(&noisy(w, h, &body), b"minix.rs init: vfs l").is_some());
+        assert!(find_stray(&noisy(w, h, &body), b"ong write ----------").is_none());
+    }
+
+    #[test]
+    fn tick_runs_after_a_kernel_line_inside_a_row_are_tolerated() {
+        // Measured: "…-----[ksys …]\r\n[ipc …]\r\nCCCCC-----…vfs-loop-end".
+        let text = [b"write ----------vfs-loop-end\n".as_slice(), EIGHT].concat();
+        let (w, h) = (320, 160);
+        let raw = noisy(w, h, &text).replace(
+            b"write -----",
+            &[b"write -----".as_slice(), KSYS, IPC, b"CCCCC"].concat(),
         );
+        let report = check(&dump(w, h, &text), &raw).unwrap();
+        assert_eq!((report.stray, report.worst), (1, 5));
+    }
+
+    #[test]
+    fn the_refusals_hold_in_a_noisy_log() {
+        let text = [b"minix.rs init: dev.null ok n=35\n".as_slice(), EIGHT].concat();
+        let (w, h) = (320, 160);
+        let image = dump(w, h, &text);
+        assert!(check(&image, &noisy(w, h, &text)).is_ok());
+        let refused = Err(CheckError::RowNotInLog {
+            row: 0,
+            text: "minix.rs init: dev.null ok n=35".into(),
+        });
+        for changed in [
+            // A substituted byte, a missing one, a missing row.
+            &b"minix.rs init: dev.null ok n=36\n"[..],
+            b"minix.rs init: dev.nul ok n=35\n",
+            b"minix.rs inis: dev.null ok n=35\n",
+            b"",
+            // A stray digit, space, or punctuation mark.
+            b"minix.rs init: dev.null ok n=335\n",
+            b"minix.rs init: dev.null  ok n=35\n",
+            b"minix.rs init:: dev.null ok n=35\n",
+            // A line end inside it.
+            b"minix.rs init: dev\n.null ok n=35\n",
+        ] {
+            let body = [changed, EIGHT].concat();
+            assert_eq!(
+                check(&image, &noisy(w, h, &body)),
+                refused,
+                "{:?}",
+                String::from_utf8_lossy(changed)
+            );
+        }
+        // The text only ever existed inside a kernel line: not console text.
+        let body = [
+            b"[diag vfs] minix.rs init: dev.null ok n=35\n".as_slice(),
+            EIGHT,
+        ]
+        .concat();
+        assert_eq!(check(&image, &noisy(w, h, &body)), refused);
+    }
+
+    #[test]
+    fn a_row_that_lost_letters_still_passes_which_is_the_cost_of_the_tolerance() {
+        // Pinned, not wanted: the log's `ni` is taken for two tick bytes.
+        let shown = [b"minix.rs it: stdin ok\n".as_slice(), EIGHT].concat();
+        let written = [b"minix.rs init: stdin ok\n".as_slice(), EIGHT].concat();
+        let (w, h) = (320, 160);
+        let report = check(&dump(w, h, &shown), &noisy(w, h, &written)).unwrap();
+        assert_eq!((report.stray, report.worst), (1, 2));
+    }
+
+    #[test]
+    fn the_fb_ok_line_is_read_from_the_raw_log_wherever_it_starts() {
+        // It is a kernel line: it can begin mid console line, and it is gone
+        // from the console stream.
+        let raw = [
+            b"alpha".as_slice(),
+            &fb_ok(W, H),
+            b" 1\r\n",
+            IPC,
+            &EIGHT[8..],
+        ]
+        .concat();
+        assert!(find(&console_stream(&raw), FB_OK).is_none());
+        assert_eq!(check(&dump(W, H, EIGHT), &raw).unwrap().non_blank_rows, 8);
     }
 
     // --- helpers -----------------------------------------------------------------

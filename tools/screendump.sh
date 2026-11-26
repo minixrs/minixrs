@@ -13,15 +13,27 @@
 # character cell with the renderer that painted it and looks each row of text
 # up in the serial log -- which the renderer never wrote.
 #
-# "Looks up" allows for the serial line's second writer. The kernel puts one
-# identifying byte on the UART per 10 ms timer tick (kernel/src/clock.rs) and
-# it can land INSIDE a console line: a boot's log held `minix.rs initt:
-# dev.null ok n=35` for the screen row `minix.rs init: dev.null ok n=35`
-# (measured, slice 6.7). So a row is found if the log holds its bytes in order
-# with at most 2 extra bytes among them, each alone (never two together) and
-# neither a line end; a missing or a different byte is never forgiven. The
-# verdict's `stray=<n>` counts the rows that needed that. The rule in full,
-# and everything else about what passes, is in tools/fbcheck/src/check.rs.
+# "Looks up" is not grep. The serial line has three writers and the console
+# is one of them (measured, slice 6.7: 54 MB of log for 80 KB of console):
+#
+#   * the kernel writes whole lines -- `[ipc 1414500] caller=17 ...`,
+#     `[ksys ...`, `[diag vfs] ...`, `[pf ...` -- which can begin in the
+#     MIDDLE of a console line, the console line carrying on after them;
+#   * the kernel also writes one byte per 10 ms timer tick, the first letter
+#     of the running process's name (kernel/src/clock.rs), singly or in runs,
+#     anywhere: the log held `minix.rs hello: iov CCCCCCCCCC......` for the
+#     screen row `minix.rs hello: iov ......`.
+#
+# So the checker first takes every kernel line out of the log -- from a `[`,
+# a lower-case name and a space or `]`, through the line end -- and then finds
+# a row if what is left holds its bytes in order with nothing between them
+# but tick bytes: ASCII letters or `?`, in runs of any length, at most 32 per
+# row. A digit, a space, punctuation or a line end between two bytes of a row
+# is never forgiven, nor a missing or different byte. The verdict's
+# `stray=<n>` counts the rows that needed tick bytes allowed and `worst=<n>`
+# is the most one row needed -- watch it against the 32. The price: a row
+# that has LOST up to 32 letters still passes. The rule in full, and
+# everything else about what passes, is in tools/fbcheck/src/check.rs.
 #
 # It runs BESIDE a boot, as a background job pointed at the log the same boot
 # is writing, and is waited for after the boot's timeout:
