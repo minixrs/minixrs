@@ -5,6 +5,17 @@ edition = "2024"
 license = "BSD-3-Clause"
 publish = false
 
+# The renderer (slice 6.7, F6): `font`, `grid` and `paint` — pure, `unsafe`-free and
+# host-tested. There is deliberately **no feature gate** between the two halves, unlike
+# `fs/mfs`: nothing reaches this library from a build script, so the bin stays visible to
+# every CI job. `tools/fbcheck` depends on it to decode a screen dump with the code that
+# painted it.
+[lib]
+name = "minixrs_tty"
+path = "src/lib.rs"
+
+# `name` must equal the package name: `build_server` in `kernel/build.rs` looks the ELF up
+# by that basename.
 [[bin]]
 name = "minixrs-tty"
 path = "src/main.rs"

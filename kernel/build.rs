@@ -295,6 +295,17 @@ fn build_boot_image(out_dir: &std::path::Path, stubs: bool, idle_probe: bool) {
             "minixrs-init" if idle_probe => &["--features", "idle-probe"],
             _ => &[],
         };
+        // TTY's renderer embeds its font with `include_bytes!` from `font/`,
+        // beside `src` rather than under it (slice 6.7, F7), so `build_server`'s
+        // watch on `src` does not cover it. The nested cargo tracks the file
+        // itself; this line is what makes the *outer* build re-run and re-pack
+        // when the font is swapped.
+        if *crate_name == "minixrs-tty" {
+            println!(
+                "cargo:rerun-if-changed={}",
+                crate_dir.join("font").display()
+            );
+        }
         let elf = build_server(crate_name, crate_dir, workspace, extra);
         let bytes = std::fs::read(&elf)
             .unwrap_or_else(|e| panic!("reading {crate_name} ELF {}: {e}", elf.display()));
