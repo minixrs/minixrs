@@ -3,7 +3,7 @@
 //! The TTY driver's renderer — the pure half of `drivers/tty` (slice 6.7,
 //! decision F6).
 //!
-//! Three modules, none of which knows what a framebuffer *is*:
+//! Four modules, none of which touches a framebuffer:
 //!
 //!   * [`font`] — glyph lookup over the vendored Spleen 8×16 font (F7).
 //!   * [`grid`] — the text model: a fixed array of bytes, a cursor, and
@@ -11,10 +11,13 @@
 //!   * [`paint`] — turns grid cells into pixel stores through the
 //!     [`paint::Surface`] trait, and back again for the host-side screen check
 //!     (F10).
+//!   * [`reply`] — the kernel's `GET_FRAMEBUFFER` answer, decoded and then
+//!     accepted or refused (F9): TTY re-validates it rather than trusting it.
 //!
-//! The binary (`src/main.rs`) is the only file that touches a device. It
-//! implements [`paint::Surface`] with one aligned volatile `u32` store into the
-//! mapping the kernel gave it; the host tests implement it over a `Vec<u32>`.
+//! The binary (`src/main.rs`) is the only file that touches a device. It asks
+//! the kernel where the framebuffer is, hands the answer to [`reply::accept`],
+//! and implements [`paint::Surface`] with one aligned volatile `u32` store into
+//! the mapping the kernel gave it; the host tests implement it over a `Vec<u32>`.
 //! That is the whole seam, and it is why this half has **no `unsafe`** — asserted
 //! below, which the bin cannot do for itself (its `_start` needs
 //! `unsafe(no_mangle)`).
@@ -34,3 +37,4 @@
 pub mod font;
 pub mod grid;
 pub mod paint;
+pub mod reply;

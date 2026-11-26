@@ -1274,3 +1274,47 @@ minix.rs init: persist gen=0
 # kernel/build.rs the lookup still succeeded (slice 6.6, mutation 10), since
 # it is VFS's fourth blocking call and vcon has published by then.
 [diag vfs] vcon.ds ok ep=
+
+# ---------------------------------------------------------------------------
+# Slice 6.7: the framebuffer console -- Limine's framebuffer, mapped into TTY.
+# ---------------------------------------------------------------------------
+
+# tools/qemu-run.sh attaches `-device ramfb` to EVERY boot (spec F1), so these
+# three lines are common. The geometry in them is NOT a constant of this
+# repository: it is the mode the firmware set and Limine reported -- no
+# `resolution:` is requested (spec F13) -- which under QEMU's ramfb is 800x600,
+# 32 bpp, pitch 3200, as measured in 6.7 Task 0 (QEMU 11.0.3, edk2). A firmware
+# that picks another default mode moves all three lines TOGETHER: w/h/pitch
+# here, pages= in the second (ceil(pitch * h / 4096)), w/h/cols/rows in the
+# third. Three lines moving at once is that; one moving alone is a bug.
+#
+# The kernel validated the response (32 bpp RGB, 8-bit channels at byte-aligned
+# shifts, pitch >= w * 4, an HHDM address, the whole of it inside the 16 MiB
+# window) before seeding the frame allocator. r=16 g=8 b=0 is XRGB8888.
+# usable=0 says no MEMMAP_USABLE entry overlapped the range, so nothing had to
+# be carved out of the allocator: QEMU's memory map reports the framebuffer as
+# its own kind. The line ends `pa=0x...`, which follows the firmware's memory
+# map and is last so that everything before it can be asserted. `[fb] none`
+# (no response) and `[fb] FAIL <condition>` are forbidden.
+[fb] ok w=800 h=600 pitch=3200 r=16 g=8 b=0 usable=0
+
+# The framebuffer's pages mapped into TTY's address space, Device attributes,
+# at uspace::FB_VA -- 4 GiB, the fourth kernel-owned window. pages=469 is
+# ceil(3200 * 600 / 4096): 1 920 000 bytes is 468.75 pages, so the last page
+# runs 0x400 bytes past the framebuffer and TTY must never store there (it
+# bounds every store by w x h, not by pages). Map one page fewer and TTY
+# faults painting the bottom of the screen. Ends `pa=0x...`, unasserted, as
+# above. Note the prefix cannot be satisfied by TTY's UART line
+# (`[devmap] tty va=`): `tty fb va=` is its own text.
+[devmap] tty fb va=0x100000000 pages=469
+
+# TTY's verdict (spec F9), printed once, after it has asked GET_FRAMEBUFFER,
+# re-validated the reply without trusting it (drivers/tty/src/reply.rs: the VA
+# is FB_VA, the format is one it can paint, pitch * h fits the window, at least
+# one cell fits) and CLEARED the screen -- so this line means a full screen of
+# stores through the mapping did not fault. It precedes the console banner,
+# which is therefore the screen's first line. cols=100 rows=37 are 800 / 8 and
+# 600 / 16 rounded down (an 8x16 font; the bottom 8 pixels are margin).
+# Everything here is serial evidence only: that the pixels are RIGHT is the
+# screen check's job (tools/fbcheck), not this file's.
+[diag tty] fb ok w=800 h=600 cols=100 rows=37

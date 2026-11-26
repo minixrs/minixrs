@@ -237,3 +237,26 @@ vcon.ds FAIL
 # a process died before VFS sent. VFS sends before its DS lookups to stay ahead
 # of that (slice 6.6).
 [diag vfs] grant.test FAIL
+# Slice 6.7: the framebuffer console. Every checked boot has `-device ramfb`
+# (tools/qemu-run.sh attaches it unconditionally), so a boot without a screen
+# is a failure, whichever side says so.
+#
+# The kernel's two: `[fb] none` -- Limine answered the framebuffer request with
+# no framebuffer (the device is missing, or the firmware set no mode) -- and
+# `[fb] FAIL <condition>` -- it reported one the kernel will not map, naming
+# the first condition that failed. After either, GET_FRAMEBUFFER answers
+# ENOENT and nothing is mapped.
+#
+# TTY's two: `fb none rc=<rc>` -- the kernel gave it no framebuffer (rc=-2,
+# ENOENT, follows either kernel line above; rc=-1, EPERM, is the kernel's
+# GET_FRAMEBUFFER gate naming a different process from the one its loader
+# mapped the screen into) -- and `fb FAIL <reason>` -- a reply TTY would not
+# draw on: `va`, `bpp`, `shift`, `shifts-overlap`, `zero-size`, `pitch`,
+# `window` or `grid`. The kernel applied the same conditions before replying,
+# so this one means the two validators disagree. After any of the four the
+# console is serial-only, and every other marker still passes -- which is why
+# they are listed here rather than left to `fb ok` going missing.
+[fb] none
+[fb] FAIL
+[diag tty] fb none
+[diag tty] fb FAIL

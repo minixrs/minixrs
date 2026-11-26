@@ -744,10 +744,10 @@ unsafe fn load_boot_server(nr: ProcNr, elf: &[u8]) {
             }
             let _ = writeln!(
                 Pl011::new(),
-                "[devmap] tty fb va={:#x} pa={:#x} pages={}",
+                "[devmap] tty fb va={:#x} pages={} pa={:#x}",
                 FB_VA,
-                fb.pa,
                 fb.pages,
+                fb.pa,
             );
         }
     }

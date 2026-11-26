@@ -76,8 +76,7 @@ pub fn report(out: &mut impl Write, verdict: &Verdict, carved: u64) {
     let _ = match verdict {
         Ok(Some(fb)) => writeln!(
             out,
-            "[fb] ok pa={:#x} w={} h={} pitch={} r={} g={} b={} usable={}",
-            fb.pa,
+            "[fb] ok w={} h={} pitch={} r={} g={} b={} usable={} pa={:#x}",
             fb.width,
             fb.height,
             fb.pitch,
@@ -85,6 +84,7 @@ pub fn report(out: &mut impl Write, verdict: &Verdict, carved: u64) {
             fb.green_shift,
             fb.blue_shift,
             carved,
+            fb.pa,
         ),
         Ok(None) => writeln!(out, "[fb] none"),
         Err(condition) => writeln!(out, "[fb] FAIL {condition}"),

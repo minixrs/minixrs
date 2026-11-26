@@ -65,8 +65,9 @@ line naming the failed condition and carries on with no framebuffer:
 - `address` is an HHDM address and its physical address is page-aligned;
 - `pitch * height`, rounded up to pages, fits `FB_WINDOW_SIZE` (all products `checked_`).
 
-The accepted line is `[fb] ok pa=… w=… h=… pitch=… r=… g=… b=… usable=<pages>` where `usable` counts
-the pages F5 had to carve (expected 0). A missing response prints `[fb] none`.
+The accepted line is `[fb] ok w=… h=… pitch=… r=… g=… b=… usable=<pages> pa=…` where `usable` counts
+the pages F5 had to carve (expected 0) and the firmware-dependent `pa=` comes last, so that the
+stable fields before it can be asserted as one prefix. A missing response prints `[fb] none`.
 
 *Rejected:* supporting 24 bpp or 16 bpp (unaligned or merged stores, which H9 forbids on a device
 mapping, or a second paint path with no machine to test it on).
@@ -76,9 +77,9 @@ mapping, or a second paint path with no machine to test it on).
 `FB_WINDOW_BASE = 0x1_0000_0000`, `FB_WINDOW_SIZE = 0x0100_0000`, `FB_VA = FB_WINDOW_BASE`: one L1
 slot above the DMA window, so `USER_REGION_LIMIT` does not move and VM needs no edit (the property
 `uspace` already documents). 16 MiB holds 1920×1080×32 (8.3 MiB). `load_boot_server`'s TTY arm maps
-`ceil(pitch * height / 4096)` pages `Prot::DEVICE_RW` and prints one `[devmap] tty fb va=… pa=…
-pages=…` line. Compile-time asserts pin the window against the other three and against
-`USER_VA_TOP`.
+`ceil(pitch * height / 4096)` pages `Prot::DEVICE_RW` and prints one `[devmap] tty fb va=… pages=…
+pa=…` line (`pa=` last, as in F2). Compile-time asserts pin the window against the other three and
+against `USER_VA_TOP`.
 
 ### F4 — `GET_FRAMEBUFFER` (67): one reply, gated to TTY
 
@@ -135,14 +136,16 @@ the crate's dependencies already build on the host for `cargo test`.
 The renderer never reads the framebuffer — scrolling repaints from the grid — so there is no load,
 no `copy_nonoverlapping` and no `memset` the compiler could merge or misalign.
 
-### F7 — the font: Spleen 8×16, vendored as the upstream PSF2 file
+### F7 — the font: Spleen 8×16, vendored as the upstream PSF file
 
 `drivers/tty/font/spleen-8x16.psfu` is the upstream release file, byte for byte, embedded with
 `include_bytes!`; beside it sit the upstream `LICENSE` (BSD-2-Clause) and a `README.md` recording
-the upstream URL, release tag and the file's SHA-256. `font` validates the PSF2 header in a `const`
-context (magic, 8×16, at least 256 glyphs) so a wrong file fails the build. A host test walks the
-PSF2 Unicode table and pins that glyph `n` is U+00`n` for `0x20..=0x7E`, which is what lets the
-renderer index by byte.
+the upstream URL, release tag and the file's SHA-256. In release 2.3.0 the 8×16 face is **PSF
+version 1** (magic `36 04`, 512 glyphs with a Unicode table) — the other faces are version 2 — so
+`font` validates the PSF1 header in a `const` context (magic, a 16-byte glyph, the Unicode-table
+bit, the glyph data all present) and a wrong file fails the build. A host test walks the PSF1
+Unicode table and pins that glyph `n` is U+00`n` for `0x20..=0x7E`, which is what lets the renderer
+index by byte.
 
 Bytes outside `0x20..=0x7E` that are not controls (F8) draw glyph `0x3F` (`?`). The repository's
 licence stays BSD-3-Clause; BSD-2-Clause is compatible and the note says so.
@@ -315,7 +318,7 @@ Decisions the phase file did not make. Each is undone by the change in its last 
 | F4  | Selector 67, shifts as bytes, no mask sizes on the wire                     | Not emitted to C, so a repack is one Rust edit on both sides                    |
 | F5  | Overlap arithmetic lives in `kernel-shared`, applied at allocator seed time | Move the function; the boot order change (fb before allocator) is the real cost |
 | F6  | No `server` feature on the TTY crate                                        | Add the gate as `fs/mfs` has it, plus its extra clippy step in CI               |
-| F7  | Spleen 8×16 as the upstream `.psfu`, indexed by byte                        | Swap the file; if the ASCII identity fails, a 95-entry map in `font`            |
+| F7  | Spleen 8×16 as the upstream `.psfu` (PSF1), indexed by byte                 | Swap the file; if the ASCII identity fails, a 95-entry map in `font`            |
 | F8  | Deferred wrap; `?` for unknown bytes; grey on black; no cursor              | `grid` and its tests only; 6.8 will want the cursor anyway                      |
 | F8  | Scroll repaints everything, no framebuffer reads                            | Changed-cells repaint (already the named fallback)                              |
 | F9  | UART first, then screen; one `fb` verdict line                              | Reorder two calls                                                               |
@@ -334,3 +337,22 @@ Decisions the phase file did not make. Each is undone by the change in its last 
 - Kernel or `[diag]` output on the screen (H9).
 - Unmapping or resizing the framebuffer; a second framebuffer.
 - A framebuffer for the reboot boot's check, or any x86_64 path.
+
+---
+
+## 7. Corrections found in implementation
+
+- **F7 said PSF2; the upstream 8×16 file is PSF1** (Task 3). The decision text above was rewritten;
+  the file is still vendored unconverted.
+- **F2 and F3 put `pa=` in the middle of their lines; it is last** (Task 4).
+  [`testing-and-markers.md`](../../conventions/testing-and-markers.md#markers) requires the stable
+  fields first so that they can be asserted as one prefix, and `pa=` follows the firmware's memory
+  map. The two decisions above were reworded.
+- **F9 names "the banner in `tty_init`"; the banner is written by `main`** (Task 4), immediately
+  after `sef_startup` returns and after the framebuffer's verdict. `console_write`'s state — the
+  grid and the accepted format — is a local of `main`'s frame, which a SEF callback (a plain `fn`
+  pointer) cannot reach without a static and the `unsafe` that goes with one. Nothing runs between
+  the callback returning and the banner, so the serial log's order is unchanged.
+- **F9's re-validation is a fourth library module, `reply`**, not part of `paint` (Task 4): decoding
+  the `GET_FRAMEBUFFER` payload and the accept/refuse decision, with the refusal tokens `va`,
+  `window` and `grid` beside `FormatError`'s five.

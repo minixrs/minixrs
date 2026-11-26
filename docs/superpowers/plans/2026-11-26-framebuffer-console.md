@@ -40,10 +40,10 @@ disagree, **the spec wins** and the plan gets corrected.
 ## Marker text (the kernel's values are read from Task 0's boot, not derived)
 
 ```text
-[fb] ok pa=<…> w=<w> h=<h> pitch=<p> r=<n> g=<n> b=<n> usable=0     kernel
+[fb] ok w=<w> h=<h> pitch=<p> r=<n> g=<n> b=<n> usable=0 pa=<…>     kernel
 [fb] none                                                          kernel, no response
 [fb] FAIL <condition>                                              kernel, forbidden
-[devmap] tty fb va=0x100000000 pa=<…> pages=<n>                    kernel
+[devmap] tty fb va=0x100000000 pages=<n> pa=<…>                    kernel
 [diag tty] fb ok w=<w> h=<h> cols=<c> rows=<r>
 [diag tty] fb none rc=<rc>                                         forbidden (ramfb is on every boot)
 [diag tty] fb FAIL <reason>                                        forbidden
@@ -124,3 +124,20 @@ Then the fresh review of `git diff origin/main...HEAD`.
 ## Ledger
 
 One entry per task: its commit, what was verified, and every ruling made in it.
+
+- **Task 0 (2026-11-26; no commit — the probe was a throwaway kernel edit, discarded, and the
+  devices went through `qemu-run.sh`'s pass-through arguments).** One stub-free boot, QEMU 11.0.3,
+  Homebrew's edk2, macOS on Apple Silicon. **F13.1 holds:** Limine answers the request with one
+  framebuffer, `pa=0x4c7a0000 w=800 h=600 pitch=3200 bpp=32`, memory model 1 (RGB), masks 8 bits at
+  shifts `r=16 g=8 b=0`; a 200×100 block stored through the HHDM after `ExitBootServices` is in a
+  `stop` / `screendump` / `cont` PPM (800×600, `ff0000` inside the block, `000000` outside). The
+  memmap reports the range as kind 7 (`FRAMEBUFFER`), `base=0x4c7a0000 len=0x1d4c00` — exactly
+  `pitch * height`, **not a page multiple** — followed at `0x4c974c00` by a kind-1 (reserved) entry.
+  No usable region overlaps it, so F5's carve does not run here, as the spec expected. The screen is
+  100 × 37 cells with an 8-pixel bottom margin. **Findings:** (a) the last mapped page (469 of 469)
+  extends `0x400` bytes past the framebuffer into firmware-reserved memory; F3's `ceil` maps it
+  anyway, device, and TTY never stores past `pitch * height`. *If wrong:* map `floor` pages and
+  shorten the drawable height by a row. (b) **A QMP socket path over 104 bytes is refused by QEMU**
+  on macOS; `target/qmp.sock` under a deep checkout could hit it, so `qemu-run.sh` checks the length
+  and says so (Task 5). (c) F13.2 and F13.3 are measured on the real code at Task 6, not with the
+  probe.
