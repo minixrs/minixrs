@@ -721,7 +721,8 @@ mod tests {
     /// The 6.2 virtio selectors follow `GET_RAMDISK`'s rule: gated to Rust driver
     /// proc numbers, so no C can call them, and emitting them would freeze their
     /// values under D8 for no reader. Emit when a C caller exists and delete this
-    /// test in the same commit.
+    /// test in the same commit. Slice 6.7's `GET_FRAMEBUFFER`, gated to the Rust
+    /// TTY driver, is held back by the same rule and listed here with them.
     #[test]
     fn no_virtio_selectors_are_emitted_yet() {
         let text = render();
@@ -734,6 +735,15 @@ mod tests {
             "GETINFO_DMA_VA_OFF",
             "GETINFO_DMA_PA_OFF",
             "GETINFO_DMA_LEN_OFF",
+            "GET_FRAMEBUFFER",
+            "GETINFO_FB_VA_OFF",
+            "GETINFO_FB_WIDTH_OFF",
+            "GETINFO_FB_HEIGHT_OFF",
+            "GETINFO_FB_PITCH_OFF",
+            "GETINFO_FB_RED_SHIFT_OFF",
+            "GETINFO_FB_GREEN_SHIFT_OFF",
+            "GETINFO_FB_BLUE_SHIFT_OFF",
+            "GETINFO_FB_BPP_OFF",
         ] {
             assert_eq!(
                 builder::define_value(&text, name),

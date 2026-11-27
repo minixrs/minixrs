@@ -7,17 +7,18 @@ SEF receive loop exactly like [a server](../servers/overview.md). Its privilege 
 boot driver's image row carries the same full kernel-call mask every boot server gets, so what
 confines it is its address space and its interrupt allow-list, not a narrower set of kernel calls.
 
-What separates a driver from a server is one page in its address space that no other process has:
-the device's memory-mapped registers. Everything interesting about this chapter follows from that
-page.
+What separates a driver from a server is memory in its address space that no other process has: a
+page of the device's memory-mapped registers and, for TTY since slice 6.7, the screen's framebuffer
+as well. Everything interesting about this chapter follows from those mappings.
 
-There are four drivers with an ELF today: **TTY** (`drivers/tty/`), the serial console; **`memory`**
-(`drivers/memory/`), the boot ramdisk plus, since slice 5.11, the
-[`/dev/null` and `/dev/zero` character minors](#the-character-minors); since slice 6.2,
-**`virtio-blk`** (`drivers/virtio-blk/`), which [brings a virtio disk up](#virtio-drivers) and,
-since slice 6.3, [serves it as a block device](#virtio-blk) — since slice 6.4 the machine's GPT boot
-disk, whose partitions it serves as minors when the disk carries a minix.rs root partition, and none
-at all when it does not; and, since slice 6.6, **`virtio-console`** (`drivers/virtio-console/`), a
+There are four drivers with an ELF today: **TTY** (`drivers/tty/`), the console — the serial line
+and, since slice 6.7, [a screen](#the-screen); **`memory`** (`drivers/memory/`), the boot ramdisk
+plus, since slice 5.11, the [`/dev/null` and `/dev/zero` character minors](#the-character-minors);
+since slice 6.2, **`virtio-blk`** (`drivers/virtio-blk/`), which
+[brings a virtio disk up](#virtio-drivers) and, since slice 6.3,
+[serves it as a block device](#virtio-blk) — since slice 6.4 the machine's GPT boot disk, whose
+partitions it serves as minors when the disk carries a minix.rs root partition, and none at all when
+it does not; and, since slice 6.6, **`virtio-console`** (`drivers/virtio-console/`), a
 [second character device](#virtio-console) behind `/dev/hvc0`. Two more slots (`vinput`, `vnet`) are
 wired in the kernel but hold no ELF, and `drivers/virtio-net` is still an empty placeholder.
 `drivers/driver-rt` is the runtime the drivers share: the interrupt-line helper, the virtio
@@ -98,6 +99,12 @@ are fixed constants and the boot-log checker asserts both; `<n>` is whichever MA
 below settled on, which depends on what the bootloader programmed, so it is deliberately *not*
 asserted.
 
+Since slice 6.7 the same arm installs TTY's second device mapping, when there is one to install: the
+framebuffer the bootloader reported, in
+[a window of its own](../memory/overview.md#the-framebuffer-window) rather than in this one. Both
+placement details above apply to it unchanged. What TTY does with it is under
+[The screen](#the-screen).
+
 ## Device memory: read the MAIR, never write it
 
 An MMIO mapping must be **Device** memory, not the Normal write-back the rest of user space uses:
@@ -176,7 +183,7 @@ one payload:
 
 | Field    | Payload offset | Meaning                                                                    |
 | -------- | -------------- | -------------------------------------------------------------------------- |
-| minor    | `0..4` (i32)   | which of the driver's devices; `CDEV_MINOR_CONSOLE = 0` is TTY's UART      |
+| minor    | `0..4` (i32)   | which of the driver's devices; `CDEV_MINOR_CONSOLE = 0` is TTY's console   |
 | grant id | `4..8` (i32)   | names the client's buffer (`CPF_READ` for a write, `CPF_WRITE` for a read) |
 | length   | `8..12` (i32)  | bytes requested                                                            |
 | offset   | `16..24` (u64) | where in the granted range to start                                        |
@@ -1093,29 +1100,46 @@ guard firing.
 
 ## TTY
 
-`drivers/tty/` is four files. (Until slice 6.6 there was a fifth, `cdev.rs`: the request validator,
-`read_plan` and `Waiter`. They are [`driver-rt`'s `cdev` module](#driver-rt) now, shared with
-`virtio-console`, and TTY passes `CDEV_MINOR_CONSOLE` as its one minor.)
+`drivers/tty/` is one crate in two halves since slice 6.7: a binary, which is the driver, and a
+library, which is [the screen's renderer](#the-screen). The binary is four files. (Until slice 6.6
+there was a fifth, `cdev.rs`: the request validator, `read_plan` and `Waiter`. They are
+[`driver-rt`'s `cdev` module](#driver-rt) now, shared with `virtio-console`, and TTY passes
+`CDEV_MINOR_CONSOLE` as its one minor.)
 
 - **`input.rs`** — the input ring, also pure and host-tested: received bytes waiting to be read.
 - **`irq.rs`** — the interrupt line: the claim, its denial battery, the delivery proof, and the
   receive service.
-- **`pl011.rs`** — the crate's only `unsafe`: volatile accesses to the UART's registers at
-  `TTY_UART_VA`. Transmit polls `FR.TXFF` before each `DR` store and translates LF to CRLF; receive
-  is `getc` (one byte out of the FIFO, or "empty" when `FR.RXFE` is set), `set_rx_masks` and
-  `ack_rx`. The register offsets are deliberately duplicated from the kernel's own PL011 writer;
-  they cannot be shared, because the kernel crate is bare-metal-only and pinned by `forced-target`,
-  so it can never be a user-space dependency — and a register layout is a hardware fact, not a
-  shared ABI.
-- **`main.rs`** — the SEF loop and the two handlers.
+- **`pl011.rs`** — volatile accesses to the UART's registers at `TTY_UART_VA`, and all of the
+  crate's `unsafe` but one store (the other is the framebuffer's, in `main.rs`). Transmit polls
+  `FR.TXFF` before each `DR` store and translates LF to CRLF; receive is `getc` (one byte out of the
+  FIFO, or "empty" when `FR.RXFE` is set), `set_rx_masks` and `ack_rx`. The register offsets are
+  deliberately duplicated from the kernel's own PL011 writer; they cannot be shared, because the
+  kernel crate is bare-metal-only and pinned by `forced-target`, so it can never be a user-space
+  dependency — and a register layout is a hardware fact, not a shared ABI.
+- **`main.rs`** — the SEF loop, the two handlers, and `console_write`, the one path every console
+  byte takes out of the driver.
+
+The library half is `lib.rs` and four modules — `font`, `grid`, `paint` and `reply` — described
+under [The screen](#the-screen).
 
 ### Transmit
 
 The write handler captures `m_source` **first** (it is both the reply target and the granter),
 validates, pulls the bytes across with `SYS_SAFECOPY(SAFECOPY_FROM, caller, gid, offset, staging,
-n)`, transmits, and replies `n`. A negative `SYS_SAFECOPY` result is relayed **verbatim**: `EPERM`
-("your grant does not authorize this") and `EFAULT` ("your buffer is not mapped") are different bugs
-on the client's side. Transmission is polled; no interrupt is involved in it.
+n)`, hands them to `console_write`, and replies `n`. A negative `SYS_SAFECOPY` result is relayed
+**verbatim**: `EPERM` ("your grant does not authorize this") and `EFAULT` ("your buffer is not
+mapped") are different bugs on the client's side. Transmission is polled; no interrupt is involved
+in it.
+
+`console_write` has **two sinks, and the UART comes first**. It writes the whole buffer to the
+PL011, and only then, when TTY has a screen, draws the same bytes on it. The order means that no
+byte reaches the serial line later for being painted first, and adding the screen changed the text
+of no serial marker. (The boot as a whole does run slower for the painting done between writes;
+[the cost is measured below](#a-scroll-repaints-only-what-changed).) The banner goes through the
+same function, so there is one output path and not two. What does *not* go through it is everything
+the kernel prints — its own trace lines and the `[diag …]` lines servers print through `SYS_DIAGCTL`
+— because the kernel writes the UART itself. Those stay on the serial line only: the screen shows
+what user space writes to the console, and nothing else.
 
 Two departures from the server template are worth naming. The staging buffer lives in `main`'s
 frame, never in the init callback's — the kernel reads and writes it while TTY is blocked inside the
@@ -1137,6 +1161,188 @@ the collision the kernel rule in
 [IPC](../ipc/overview.md#a-notification-is-never-the-reply-to-a-sendrec) is about, made to happen on
 every boot instead of once in a while, and [the boot log](#what-the-boot-log-proves) shows its
 outcome. To VFS it is one spurious "ask again", which the read contract already allows.
+
+### The screen
+
+Since slice 6.7 TTY draws the console as well as transmitting it. The framebuffer is the one the
+firmware set a mode on and
+[Limine reported to the kernel](../boot/overview.md#the-boot-framebuffer). The kernel validated it,
+kept its pages out of the frame allocator and mapped them into TTY — and into nothing else — at
+`FB_VA`, the base of [the framebuffer window](../memory/overview.md#the-framebuffer-window), as
+device memory. TTY draws text on it in an 8×16 bitmap font: light grey (`0xAAAAAA`) on black,
+wrapping and scrolling. There is no cursor, no colour and no escape-sequence terminal, and nothing
+echoes input yet.
+
+#### Asking for it
+
+TTY cannot see the bootloader's description of the screen, so it asks the kernel: one
+[`SYS_GETINFO(GET_FRAMEBUFFER)`](../reference/syscalls.md#sys_getinfo-selectors), made once, in
+`main`, as soon as `sef_startup` has returned and before the banner. It then prints exactly one of
+three lines:
+
+```text
+[diag tty] fb ok w=800 h=600 cols=100 rows=37
+[diag tty] fb none rc=-2
+[diag tty] fb FAIL <reason>
+```
+
+`fb none` is the kernel declining. `rc=-2` (`ENOENT`) means the kernel accepted no framebuffer,
+which is the ordinary answer on a machine without a display; any other value is a defect — `rc=-1`
+(`EPERM`) would mean the kernel's gate on the selector and the loader that mapped the screen name
+two different processes.
+
+`fb FAIL` is a reply TTY will not draw on. The reply is the only thing between a wrong number and a
+store through a device mapping, so TTY **validates it again rather than trusting it**
+(`reply::accept`). The checks run in this order and the first that fails is the `<reason>`:
+
+| `<reason>`       | What was wrong                                                         |
+| ---------------- | ---------------------------------------------------------------------- |
+| `va`             | the reported address is not `FB_VA`, the one address TTY stores at     |
+| `bpp`            | not 32 bits per pixel                                                  |
+| `shift`          | a colour channel's shift is not 0, 8, 16 or 24                         |
+| `shifts-overlap` | two channels share a shift                                             |
+| `zero-size`      | the width or the height is zero                                        |
+| `pitch`          | the pitch is not a multiple of 4, or is less than `width * 4`          |
+| `window`         | `pitch * height` is more than the framebuffer window could hold mapped |
+| `grid`           | the screen is smaller than one 8×16 cell                               |
+
+The kernel applied the format conditions to Limine's answer before it mapped anything, and it wrote
+the address and bounded the size by the same window, so an `fb FAIL` for any of the first seven
+reasons means the kernel's validator and TTY's disagree. `grid` is the exception, and an honest
+refusal: the kernel accepts any screen with a non-zero width and height, including one smaller than
+a character cell, and it is TTY that has no use for it. After `fb none` or `fb FAIL` TTY is
+**serial-only** for the rest of the boot: the screen half of `console_write` does nothing, and every
+serial marker still passes. The runner gives every boot a display, so both lines are forbidden
+markers.
+
+On acceptance TTY stores the background colour in every pixel of the screen, and only then prints
+`fb ok` — so that line also says that a whole screen of stores through the mapping did not fault —
+and only then writes the banner, which is therefore the screen's first line.
+
+`cols` and `rows` are the width divided by 8 and the height by 16, rounded down, and capped at 160
+and 64. QEMU's `ramfb` comes up at 800×600 under edk2, which is 100 columns by 37 rows with eight
+rows of pixels left over at the bottom; a margin like that is cleared once and never drawn on again.
+A screen larger than 160×64 cells is used that far from its top-left corner and the rest stays
+background.
+
+#### The library half
+
+Everything that can be decided without touching a device is in the crate's library (`minixrs_tty`,
+`src/lib.rs`), which is pure, host-tested, and declares `#![forbid(unsafe_code)]` — something the
+binary cannot say for itself, since its `_start` needs `unsafe(no_mangle)`:
+
+- **`font`** — glyph lookup over [the vendored font](#the-font): `glyph(byte)` returns sixteen
+  bytes, one per pixel row, bit 7 leftmost.
+- **`grid`** — the text model: a fixed 160×64 array of bytes, a cursor, and one operation,
+  `Grid::put(byte)`, which is the whole of [what a byte does](#what-a-byte-does). `put` returns the
+  *damage* — nothing visible, one cell, or "the grid scrolled" — so the caller knows what to paint.
+- **`paint`** — turns grid cells into pixel stores, through a trait with a single method,
+  `Surface::store(x, y, pixel)`. It also holds `Format`, the validated description of a framebuffer
+  (geometry, channel shifts, and the grid that fits), and `decode_cell`, the inverse of painting,
+  which [the screen check](../build.md#the-screen-check) uses on the host.
+- **`reply`** — the `GET_FRAMEBUFFER` reply, decoded, and the accept-or-refuse decision in the table
+  above.
+
+Unlike [MFS](../servers/overview.md), whose library and binary are separated by a cargo feature,
+there is no feature gate between the two halves: nothing reaches this library from a build script.
+`tools/fbcheck` depends on it, so a screen dump is decoded by the code that painted it.
+
+What is left in `main.rs` is one kernel call, the verdict line, and `Screen` — the binary's
+implementation of `Surface`, and the only place the driver touches the framebuffer. The grid and the
+record of what has been painted (below) are locals of `main`, passed down by `&mut`; at 10 240 bytes
+each they are the largest things on TTY's stack, and `main`'s frame is 21 376 bytes of the 64 KiB a
+driver gets.
+
+#### What a byte does
+
+`console_write` feeds each byte to `Grid::put`:
+
+| Byte          | Effect                                                        |
+| ------------- | ------------------------------------------------------------- |
+| `0x20..=0x7E` | draw at the cursor and advance; at the last column, see below |
+| `\n`          | column 0 of the next row; past the last row, scroll one row   |
+| `\r`          | column 0                                                      |
+| `\t`          | advance to the next multiple of 8, clamped to the last column |
+| `\b`          | back one column unless already at column 0; erases nothing    |
+| anything else | drawn as `?` — `ESC` included                                 |
+
+**The wrap is deferred.** Writing in the last column does not move the cursor to the next row; it
+leaves it where it is with a wrap *pending*, and the wrap happens when the next drawn byte arrives.
+A line of exactly as many bytes as the screen has columns, followed by `\n`, therefore takes one row
+and not two: the `\n` uses up the pending wrap instead of adding to it. `\n`, `\r` and `\b` cancel a
+pending wrap; `\t`, which at the last column has nowhere to go, leaves it.
+
+The grid stores bytes as they are drawn, so an unprintable byte is stored as `?` and a tab stores
+nothing at all — it only moves the cursor. (The UART sink is separate and unaffected: it transmits
+the bytes as given, with LF translated to CRLF.)
+
+#### Stores only, never a read
+
+The framebuffer is a **device** mapping, like the UART's page, and TTY touches it in exactly one
+way: an aligned, volatile, 32-bit store of one pixel.
+
+```text
+write_volatile((FB_VA + y * pitch + x * 4) as *mut u32, pixel)
+```
+
+It never reads a pixel back, never views the mapping through a slice, and never copies or fills it
+in bulk — no `copy_nonoverlapping`, no `memset` — because those are the operations a compiler is
+free to turn into unaligned, merged or widened accesses, which device memory faults on or
+mishandles. `volatile` keeps the one store that remains from being merged or elided. The rule is
+structural rather than a habit: `Surface` has a `store` and no load, so the renderer has nothing to
+call that would read.
+
+`Screen::store` re-checks its bound on every call, `x < width` and `y < height`, although the
+renderer never asks for a pixel outside them: it is the last line before the device, and a renderer
+bug should cost a missing pixel, not a store somewhere else. The bound is in pixels, not in mapped
+pages, and the difference is real — the kernel maps whole pages, 800×600 at 32 bits is 468.75 of
+them, and the last quarter-page of the 469th belongs to whatever follows the framebuffer in physical
+memory.
+
+A drawn character is 128 stores: every pixel of its 8×16 cell, foreground or background.
+
+#### A scroll repaints only what changed
+
+With no reads there is no "move the pixels up one row". A scroll shifts the *grid*, and the screen
+is brought up to date from it. Repainting every cell would do that, and on a full screen every
+newline scrolls: 3700 cells, 473 600 device stores, for each line of output. Measured in slice 6.7,
+that cut the console's throughput about sixfold.
+
+So `paint` keeps a shadow, `Shown`: the byte last painted in each cell, a second array the size of
+the grid, in ordinary memory. `paint_diff` walks the grid after a scroll and stores a cell only
+where the grid and the shadow disagree — and console output is mostly short lines that look alike,
+so most cells do not. A single drawn byte goes through the same comparison (`paint_cell_diff`), so
+rewriting a cell with what it already shows costs nothing. By the same measurement the screen now
+costs about a third of the throughput of a console that does not paint at all, where the full
+repaint cost five sixths of it.
+
+The shadow is only true if every paint goes through it. It starts as all blanks, which is what the
+start-up clear left on the screen, and from then on `console_write` is the only painter and uses
+only the two `_diff` functions. A host test in `paint` holds the invariant: it drives generated byte
+streams through screens of several sizes and requires the result to be pixel-identical to clearing
+the screen and painting the final grid, with the shadow agreeing cell for cell.
+
+#### The font
+
+The font is [Spleen](https://github.com/fcambus/spleen) 8×16, by Frederic Cambus, vendored as
+`drivers/tty/font/spleen-8x16.psfu`: the file from the upstream 2.3.0 release, byte for byte, with
+the upstream `LICENSE` beside it and a `README.md` recording the release, the tarball it came from
+and the SHA-256 of both. Spleen is **BSD-2-Clause**. minix.rs is BSD-3-Clause and the two are
+compatible; the font keeps its own licence and is not relicensed.
+
+The file is a PC Screen Font, **version 1** — upstream writes version 2 for its wider faces and
+version 1 for this one — with 512 glyphs and a Unicode table. `font.rs` embeds it with
+`include_bytes!` and checks its header in a `const` context (the magic, sixteen rows per glyph, a
+Unicode table present, the glyph data all there), so a wrong or truncated file fails the *build*.
+The 95 printable glyphs are copied into a table at build time and the rest never reach the driver's
+image.
+
+The renderer indexes that table by byte, which is sound only because this font happens to put U+0020
+to U+007E at glyphs `0x20` to `0x7E`. A PSF file's glyph order is its own business — the Unicode
+table is what says which glyph draws which character — so a host test walks the table and pins
+exactly that, and a second pins one glyph against a bitmap written out by hand, so that a font read
+wrongly cannot agree with itself. The glyphs below `0x20` are symbols, not controls, which is the
+other reason every byte outside the printable range draws `?`.
 
 ### The interrupt line: a proof, then receive
 
@@ -1237,7 +1443,8 @@ held by host tests.
 
 ## What the boot log proves
 
-TTY writes its own banner straight to the UART once its mapping is in place:
+TTY writes its own banner as its first console output, once its mappings are in place — to the UART,
+and then to the screen, of which it is the first line:
 
 ```
 minix.rs console: tty online (EL0)
@@ -1321,6 +1528,31 @@ failed copy from consuming bytes **in TTY**: `peek` and `consume` are each teste
 refuses a console copy with bytes waiting, so their order in TTY's read handler is checked by
 reading it. (`virtio-console` has the same step and does prove it, with a read into an unmapped
 buffer.)
+
+Since slice 6.7 three more lines, required of every full boot, say that the console has a screen:
+
+```text
+[fb] ok w=800 h=600 pitch=3200 r=16 g=8 b=0 usable=0 pa=0x...
+[devmap] tty fb va=0x100000000 pages=469 pa=0x...
+[diag tty] fb ok w=800 h=600 cols=100 rows=37
+```
+
+The first is the kernel accepting
+[the bootloader's framebuffer](../boot/overview.md#the-boot-framebuffer), the second the loader
+mapping it into TTY, the third [TTY's own verdict](#asking-for-it). The two kernel lines end in the
+one field that follows the firmware's memory map, `pa=`, so that everything before it can be
+asserted; TTY's line has no such field and is asserted whole. None of the numbers is a constant of
+this repository: they are the mode the firmware set, so a firmware with another default moves all
+three lines together — the size in the first, `pages=` in the second, and the size and the grid in
+the third.
+
+Those lines are serial evidence, and the most they can say is that TTY believed it had a screen and
+that its stores did not fault. **That the right pixels arrived is not something a driver can print
+about itself.** It is proved from the host: [the screen check](../build.md#the-screen-check) takes a
+dump of the running guest's display once the console has scrolled, decodes every character cell with
+the renderer's own `decode_cell`, and requires the screen, read top to bottom, to be one unbroken
+stretch of the console's text in the boot's serial log — which the UART sink wrote, not the
+renderer.
 
 ## The BDEV protocol and the `memory` ramdisk
 

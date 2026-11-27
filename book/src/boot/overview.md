@@ -15,8 +15,10 @@ translation tables already set up, all physical memory mapped through a Higher-H
 The kernel communicates with Limine through request structs placed in a `.limine_requests` ELF
 section. Limine scans the kernel binary for these (identified by magic IDs), fills in response
 pointers, and jumps to the entry point. The kernel consumes, among others, the **memory-map**
-request (usable / reserved regions, which seed the frame allocator) and the **HHDM** request (the
-direct-map base offset). Limine support lives in `kernel/src/arch/aarch64/limine.rs`.
+request (usable / reserved regions, which seed the frame allocator), the **HHDM** request (the
+direct-map base offset) and, since slice 6.7, the **framebuffer** request (the screen, if the
+machine has one — see [The boot framebuffer](#the-boot-framebuffer)). Limine support lives in
+`kernel/src/arch/aarch64/limine.rs`.
 
 ## Boot flow (aarch64)
 
@@ -36,10 +38,12 @@ kmain()  (kernel/src/main.rs)
   │  1. resolve the PL011 UART base through the HHDM; arch::init()
   │  2. print "minix.rs booting on aarch64" and the HHDM offset
   │  3. proc::init() — clear the process/privilege tables; dump them
-  │  4. mm::set_hhdm_offset() + mm::init_from_limine_memmap() — seed the frame allocator
-  │  5. gic::init() + enable the virtual-timer PPI + timer::init(100 Hz)
-  │  6. arch::userland_bootstrap() — probe virtio-mmio, load the boot image, install the demo stubs
-  │  7. proc::sched::run() — first ERET into EL0
+  │  4. framebuffer::init() — read and validate Limine's framebuffer; allocates nothing
+  │  5. mm::set_hhdm_offset() + mm::init_from_limine_memmap(hole) — seed the frame allocator
+  │     around the framebuffer; then print the one [fb] line
+  │  6. gic::init() + enable the virtual-timer PPI + timer::init(100 Hz)
+  │  7. arch::userland_bootstrap() — probe virtio-mmio, load the boot image, install the demo stubs
+  │  8. proc::sched::run() — first ERET into EL0
   ▼
 User processes run  (scheduler picks the highest-priority runnable proc)
 ```
@@ -60,6 +64,81 @@ When Limine branches to `_start` on aarch64:
 - Interrupts **masked** (all `DAIF` bits set).
 - `SP` points to a valid Limine-allocated stack.
 - All physical memory is reachable at `phys + hhdm_offset`.
+
+## The boot framebuffer
+
+Since slice 6.7 the kernel asks Limine for a framebuffer (the framebuffer request, revision 0) and,
+if it likes the answer, gives the screen to the TTY driver. The kernel never draws on it. It decides
+once, at boot, and three later steps act on the one record of that decision
+(`kernel/src/arch/aarch64/framebuffer.rs`): the frame allocator's seed, which keeps the
+framebuffer's pages out of the allocator; the boot loader's TTY arm, which maps them into TTY; and
+`SYS_GETINFO(GET_FRAMEBUFFER)`, which tells TTY the geometry. Because all three read one copy, the
+range kept out, the range mapped and the geometry reported cannot disagree.
+
+No resolution is requested, in the kernel or in `limine.conf`: the kernel takes whatever mode the
+firmware set. Under QEMU that is `ramfb`'s default with edk2 — 800×600, 32 bits per pixel — as
+measured on QEMU 11.0.3. Only the **first** framebuffer Limine lists is looked at.
+
+### What the kernel accepts
+
+`limine::framebuffer()` copies the fields out of Limine's response and hands them to a pure
+function, `kernel-shared::framebuffer::validate`, which is host-tested because the kernel crate
+cannot be. The conditions are checked in this order and the first that fails names the refusal:
+
+| Token       | Condition                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------- |
+| `bpp`       | 32 bits per pixel                                                                            |
+| `model`     | the RGB memory model                                                                         |
+| `mask-size` | each of the three colour masks is 8 bits wide                                                |
+| `shift`     | each mask's shift is 0, 8, 16 or 24, and the three are distinct                              |
+| `size`      | width and height are non-zero                                                                |
+| `pitch`     | the pitch is at least `width * 4` and a multiple of 4                                        |
+| `address`   | the address lies in the higher-half direct map, and its page-rounded end does not pass 2^48  |
+| `align`     | the physical address is page-aligned                                                         |
+| `window`    | `pitch * height` fits [the framebuffer window](../memory/overview.md#the-framebuffer-window) |
+
+Every product and sum is checked for overflow. The 2^48 bound (`PA_LIMIT`) is the reach of a page
+descriptor: it holds 48 bits of physical address and the kernel's mapper masks the rest away, so a
+framebuffer page above that would be mapped at a different address with no assert firing. Two more
+tokens belong to the reading rather than the judging: `pointer`, when a non-empty response carries a
+null array or a null first entry, and `address` again when there is no HHDM response to tell a
+direct-map address by. One pixel format is accepted because one is all the renderer has: 24 or 16
+bits per pixel would need unaligned or merged stores, which a device mapping does not tolerate.
+
+The kernel prints exactly one line:
+
+```text
+[fb] ok w=800 h=600 pitch=3200 r=16 g=8 b=0 usable=0 pa=0x...
+[fb] none
+[fb] FAIL <token>
+```
+
+`r=`, `g=` and `b=` are the channel shifts (16, 8, 0 is XRGB8888). `usable=` is the number of pages
+that had to be
+[carved out of the frame allocator](../memory/overview.md#carving-the-framebuffer-out-of-the-allocator)
+— zero wherever the firmware's memory map reports the framebuffer as its own kind, as QEMU's does.
+`pa=` is last because it follows the firmware's memory map, so the boot-marker file can assert
+everything before it. `[fb] none` is Limine answering with no framebuffer, or not answering; `[fb]
+FAIL` is one it reported and the kernel refused. After either there is no screen: nothing is mapped,
+`GET_FRAMEBUFFER` answers `ENOENT`, and TTY runs
+[serial-only](../drivers/overview.md#asking-for-it). The runner attaches a display to every boot, so
+both lines are forbidden markers.
+
+### Why it comes before the allocator
+
+The framebuffer is read and validated **before** the frame allocator is seeded, and nothing between
+the two allocates — the read only follows Limine's pointers and records the result. The allocator is
+then seeded *around* the accepted range. Done in the other order, a frame already handed out could
+turn out to be part of the screen. The `[fb]` line is printed after the seed rather than at the
+decision, because it reports how many pages the seed removed.
+
+The mapping itself happens later, when `userland_bootstrap` loads TTY, and prints its own line:
+
+```text
+[devmap] tty fb va=0x100000000 pages=469 pa=0x...
+```
+
+`pages=` is `ceil(pitch * height / 4096)`: 1 920 000 bytes is 468.75 pages.
 
 ## The embedded boot image (MXBI)
 
@@ -149,9 +228,9 @@ partition; the cargo runner (`tools/qemu-run.sh`) builds that image on every run
 a single virtio-blk device. The firmware reads the kernel from it, and minix.rs's
 [`virtio-blk` driver](../drivers/overview.md#virtio-blk) then brings the same device up and serves
 the root partition from it. Nothing else on the machine holds a kernel, so a kernel banner in the
-log is itself the proof that edk2 and Limine read the image. The runner attaches one other device,
+log is itself the proof that edk2 and Limine read the image. The runner attaches two other devices,
 on every boot: a virtio console, which is [a second character device](#the-second-console) and has
-nothing to boot from.
+nothing to boot from, and [a display](#the-display).
 
 ### The disk image
 
@@ -271,6 +350,8 @@ qemu-system-aarch64 \
     -chardev pipe,id=hvc0,path=target/hvc0 \
     -device virtio-serial-device,bus=virtio-mmio-bus.8 \
     -device virtconsole,chardev=hvc0 \
+    -device ramfb \
+    -qmp unix:target/qmp.sock,server=on,wait=off \
     -display none -serial stdio -no-reboot
 ```
 
@@ -278,11 +359,13 @@ The one drive is a virtio-blk-**mmio** device pinned to transport slot 0, which 
 [boot probe](#the-virtio-probe) finds and hands to `virtio-blk`. `force-legacy=false` makes every
 mmio transport modern (version 2), the only version the drivers accept, and edk2 boots from a modern
 one; a later `-global` on the command line overrides it, which is how the version-refusal boot is
-produced. The last three device lines are [the second console](#the-second-console). There is no
-directory-as-FAT drive, and on this default command line the runner attaches no PCI device of its
-own (the `nodisk` backend below is the one case where it does). The machine is not PCI-free for all
-that: `-M virt` still creates its default devices, a `virtio-net-pci` network card among them,
-because the runner does not pass `-nodefaults`. Nothing in minix.rs sees it.
+produced. The `hvc0` chardev and the two device lines after it are
+[the second console](#the-second-console); `ramfb`, the QMP socket and `-display none` are
+[the display](#the-display). There is no directory-as-FAT drive, and on this default command line
+the runner attaches no PCI device of its own (the `nodisk` backend below is the one case where it
+does). The machine is not PCI-free for all that: `-M virt` still creates its default devices, a
+`virtio-net-pci` network card among them, because the runner does not pass `-nodefaults`. Nothing in
+minix.rs sees it.
 
 ### The second console
 
@@ -315,6 +398,44 @@ output. And the pipe is not reliably emptied when QEMU exits: on macOS the bytes
 were still in `target/hvc0.out` afterwards with no process holding it, which is why
 [the feeder](../build.md#feeding-the-console) discards whatever it finds there before it starts
 looking, and why unread boots with no fed boot between them accumulate.
+
+### The display
+
+Since slice 6.7 every boot also has a display: `-device ramfb`, a plain framebuffer the firmware
+sets a mode on, Limine [reports to the kernel](#the-boot-framebuffer) and TTY draws the console on.
+It is not a virtio device and sits on no virtio-mmio bus. It is attached to **every** boot for the
+second console's reason — one machine shape, not two — so that CI and a boot somebody watches run
+the same code: a TTY with a screen. Dropping the device by hand is the way to see the other path,
+where the kernel prints `[fb] none` and TTY is serial-only.
+
+Whether anything *shows* the display is separate, and is chosen by `MINIXRS_DISPLAY`:
+
+| `MINIXRS_DISPLAY` | What the runner does                                                           |
+| ----------------- | ------------------------------------------------------------------------------ |
+| `none` (default)  | passes `-display none`: no window. The framebuffer is still there and drawn on |
+| `window`          | passes `-display cocoa,zoom-to-fit=on` (gtk where there is no cocoa): a window |
+
+The window scales the guest's 800×600 screen to whatever size it is dragged to; the guest draws the
+same pixels either way, so no marker and no screendump depends on it. A QEMU built with neither UI
+gets no `-display` argument at all and opens its default, unscaled.
+
+Any other value is refused (exit 64): a misspelt `window` would otherwise run as a perfectly good
+headless boot and look like a display that does not work. The serial console stays on stdio either
+way.
+
+A display nobody can see still has to be inspectable, so every boot also gets a **QMP socket**:
+`-qmp unix:<socket>,server=on,wait=off`. QEMU listens without waiting for a client, so a boot nobody
+connects to runs exactly as before. Through it a script can stop the guest, ask for a `screendump`
+and let it run again, which is what [the screen check](../build.md#the-screen-check) is built on.
+
+The socket is `target/qmp.sock`; `MINIXRS_QMP=<socket>` moves it, so that two boots run at once do
+not share one. The runner refuses a path of 104 bytes or more (exit 64): that is all a unix socket's
+address holds on macOS, the default lives under the checkout — whose depth is not the runner's to
+choose — and QEMU's own error does not name the variable to change. The limit is applied on Linux
+too, so that a path which works in CI works on a laptop. A socket left behind by an earlier boot is
+removed just before QEMU starts, because QEMU does not unlink it when it is killed and will not bind
+over one; anything else at that path is refused (exit 73) rather than replaced. All three checks run
+before the disk image is built, so a refused boot costs nothing.
 
 ### The root backend
 

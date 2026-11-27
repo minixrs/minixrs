@@ -18,8 +18,15 @@
 //! The memmap / paging-mode / stack-size requests are present so the
 //! responses are available when later phases need them, without requiring
 //! us to revisit the linker script.
+//!
+//! Slice 6.7 adds the framebuffer request. [`framebuffer`] reads the first
+//! framebuffer of the response and hands its fields to the host-tested
+//! `kernel-shared::framebuffer::validate`; this module holds only the
+//! `repr(C)` layout and the pointer reads.
 
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use minixrs_kernel_shared::framebuffer::{Framebuffer, RawFramebuffer, validate};
 
 // --- Markers -------------------------------------------------------------
 
@@ -184,6 +191,136 @@ impl Iterator for MemmapIter {
         self.idx += 1;
         Some(entry)
     }
+}
+
+// --- Framebuffer ---------------------------------------------------------
+//
+// Slice 6.7 (spec F2). With `-device ramfb` the firmware sets a mode and Limine
+// reports it here; the kernel asks for no particular resolution and takes the
+// mode as found. Only the first framebuffer is read.
+
+/// `struct limine_framebuffer`, response revision 0 — the fields up to and
+/// including `edid`. Revision 1 appends a mode list this kernel does not read,
+/// so the struct is only ever read through a pointer, never by size.
+#[repr(C)]
+struct LimineFramebuffer {
+    address: u64,
+    width: u64,
+    height: u64,
+    pitch: u64,
+    bpp: u16,
+    memory_model: u8,
+    red_mask_size: u8,
+    red_mask_shift: u8,
+    green_mask_size: u8,
+    green_mask_shift: u8,
+    blue_mask_size: u8,
+    blue_mask_shift: u8,
+    unused: [u8; 7],
+    edid_size: u64,
+    edid: u64,
+}
+
+// The layout is Limine's, not ours: pin it against `limine.h` so a reordered or
+// retyped field fails the build instead of reading a neighbour.
+const _: () = assert!(core::mem::offset_of!(LimineFramebuffer, pitch) == 24);
+const _: () = assert!(core::mem::offset_of!(LimineFramebuffer, bpp) == 32);
+const _: () = assert!(core::mem::offset_of!(LimineFramebuffer, memory_model) == 34);
+const _: () = assert!(core::mem::offset_of!(LimineFramebuffer, red_mask_size) == 35);
+const _: () = assert!(core::mem::offset_of!(LimineFramebuffer, blue_mask_shift) == 40);
+const _: () = assert!(core::mem::offset_of!(LimineFramebuffer, edid_size) == 48);
+const _: () = assert!(core::mem::size_of::<LimineFramebuffer>() == 64);
+
+#[repr(C)]
+struct FramebufferResponse {
+    revision: u64,
+    framebuffer_count: u64,
+    /// Pointer to an array of `framebuffer_count` pointers, each to a
+    /// [`LimineFramebuffer`].
+    framebuffers: *const *const LimineFramebuffer,
+}
+
+#[repr(C)]
+struct FramebufferRequest {
+    id: [u64; 4],
+    revision: u64,
+    response: AtomicU64,
+}
+
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest {
+    id: [
+        0xc7b1dd30df4c8b88,
+        0x0a82e883a194f07b,
+        0x9d5827dcd881dd75,
+        0xa3148604f6fab11b,
+    ],
+    revision: 0,
+    response: AtomicU64::new(0),
+};
+
+/// The first framebuffer Limine reported, validated (slice 6.7, spec F2).
+///
+/// - `Ok(None)` — Limine did not answer the request, or answered with zero
+///   framebuffers: there is no display (`[fb] none`).
+/// - `Ok(Some(fb))` — a framebuffer the kernel will map into TTY.
+/// - `Err(token)` — one was reported and refused; `token` is the one-word
+///   condition the kernel prints after `[fb] FAIL `. It is
+///   `kernel-shared::framebuffer::Reject::token` for a condition of F2, or one
+///   of two that only this function can see: `pointer` when a non-empty
+///   response carries a null array or a null first entry, and `address` when
+///   there is no HHDM response to tell a direct-map address by.
+///
+/// Reads Limine's memory only; allocates nothing and touches no kernel state,
+/// so it may run before the frame allocator is seeded — and must, because the
+/// allocator is seeded around the result (spec F5).
+pub fn framebuffer() -> Result<Option<Framebuffer>, &'static str> {
+    let p = FRAMEBUFFER_REQUEST.response.load(Ordering::Relaxed) as *const FramebufferResponse;
+    if p.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: Limine filled `response` with a pointer to a valid
+    // FramebufferResponse in our address space before jumping to `_start` and
+    // does not mutate it afterward.
+    let (list, count) = unsafe { ((*p).framebuffers, (*p).framebuffer_count) };
+    if count == 0 {
+        return Ok(None);
+    }
+    if list.is_null() {
+        return Err("pointer");
+    }
+    // SAFETY: `count >= 1` and `list` is non-null, so entry 0 of Limine's
+    // pointer array is readable.
+    let first = unsafe { *list };
+    if first.is_null() {
+        return Err("pointer");
+    }
+    // SAFETY: a non-null entry of the array points at a `limine_framebuffer`
+    // that lives, unmodified, for the kernel's lifetime (bootloader-reclaimable
+    // memory this kernel never reclaims). Every field read is within response
+    // revision 0's layout, which every revision begins with.
+    let fb = unsafe { &*first };
+    let raw = RawFramebuffer {
+        address: fb.address,
+        width: fb.width,
+        height: fb.height,
+        pitch: fb.pitch,
+        bpp: fb.bpp,
+        memory_model: fb.memory_model,
+        red_mask_size: fb.red_mask_size,
+        red_mask_shift: fb.red_mask_shift,
+        green_mask_size: fb.green_mask_size,
+        green_mask_shift: fb.green_mask_shift,
+        blue_mask_size: fb.blue_mask_size,
+        blue_mask_shift: fb.blue_mask_shift,
+    };
+    // Without the HHDM offset "is a direct-map address" cannot be judged, and
+    // `validate` given zero would pass every address.
+    let Some(hhdm) = hhdm_offset() else {
+        return Err("address");
+    };
+    validate(&raw, hhdm).map(Some).map_err(|r| r.token())
 }
 
 // --- Paging mode (request only) -----------------------------------------

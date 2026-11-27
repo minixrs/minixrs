@@ -66,13 +66,38 @@ The selector is the first four bytes of the payload. Any other value is `EINVAL`
 | `GET_RAMDISK`     |    64 | `memory`       | `0..8` ramdisk VA (u64), `8..16` length in bytes (u64)                            |
 | `GET_VIRTIO_MMIO` |    65 | virtio drivers | `0..8` register base VA (u64), `8..12` INTID (u32), `12..16` transport slot (u32) |
 | `GET_DMA`         |    66 | virtio drivers | `0..8` run VA (u64), `8..16` run PA (u64), `16..24` run length in bytes (u64)     |
+| `GET_FRAMEBUFFER` |    67 | TTY            | the framebuffer's mapping, geometry and pixel format — table below                |
 
 A selector gated to a caller answers `EPERM` to anyone else, because the addresses mean nothing in
-another address space. `GET_RAMDISK`, `GET_VIRTIO_MMIO` and `GET_DMA` answer `ENOENT` to a permitted
-caller that has nothing to report (no ramdisk module; no assigned device). "Virtio drivers" means
-the four proc numbers 11–14. None of `GET_RAMDISK`, `GET_VIRTIO_MMIO` or `GET_DMA` is emitted into
-the generated C headers: a selector that only a Rust driver can call would freeze a value under the
-ABI freeze for no reader.
+another address space. `GET_RAMDISK`, `GET_VIRTIO_MMIO`, `GET_DMA` and `GET_FRAMEBUFFER` answer
+`ENOENT` to a permitted caller that has nothing to report (no ramdisk module; no assigned device; no
+framebuffer the kernel accepted). "Virtio drivers" means the four proc numbers 11–14. None of those
+four selectors is emitted into the generated C headers: a selector that only a Rust driver can call
+would freeze a value under the ABI freeze for no reader.
+
+`GET_FRAMEBUFFER` (slice 6.7) is how the TTY driver learns about
+[the screen the kernel mapped into it](../drivers/overview.md#the-screen). Its reply, with
+`m_type == OK`, is 24 bytes with no padding:
+
+| Offset   | Type | Meaning                                                       |
+| -------- | ---- | ------------------------------------------------------------- |
+| `0..8`   | u64  | the mapping's VA — always `uspace::FB_VA`                     |
+| `8..12`  | u32  | width in pixels                                               |
+| `12..16` | u32  | height in pixels                                              |
+| `16..20` | u32  | pitch: bytes from one row's first pixel to the next row's     |
+| `20..21` | u8   | the red channel's bit offset within a pixel                   |
+| `21..22` | u8   | the green channel's bit offset                                |
+| `22..23` | u8   | the blue channel's bit offset                                 |
+| `23..24` | u8   | bits per pixel — always 32, the one format the kernel accepts |
+
+It has two gates. A caller that is not `TTY_PROC_NR` gets `EPERM`: the framebuffer is mapped into
+exactly one address space, by the boot loader's TTY arm, and the gate and that arm must name the
+same process. And TTY itself gets `ENOENT` when the kernel
+[accepted no framebuffer](../boot/overview.md#the-boot-framebuffer), which is how it learns it is
+serial-only and is not an error. No mask sizes are on the wire, because only 8-bit channels are
+accepted; and the values come from the record the mapping was made from, so the geometry reported
+never describes more than was mapped. The offsets are the `GETINFO_FB_*_OFF` constants in
+`callnr.rs`.
 
 ### The `SYS_EXEC` initial stack
 

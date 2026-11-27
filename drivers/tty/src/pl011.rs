@@ -38,7 +38,7 @@
 //! `kernel-shared` was considered and rejected — a PL011 register layout is not a shared *ABI*, it is a hardware fact that two
 //! independent drivers happen to both know. The duplication is noted in both files.
 //!
-//! ## Why this is the crate's only `unsafe`
+//! ## Why the crate's `unsafe` is here (and in one framebuffer store in `main.rs`)
 //!
 //! Everything else in the driver is message parsing (`driver-rt`'s `cdev`) or IPC through
 //! `minixrs-ipc`. The volatile register accesses here are what

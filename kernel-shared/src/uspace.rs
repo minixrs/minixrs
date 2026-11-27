@@ -32,6 +32,7 @@
 //! | `0x4000_0000` | **the device window**, and [the stack's top](USER_STACK_TOP) |
 //! | `0x8000_0000` | [the ramdisk window](RAMDISK_WINDOW_BASE) (slice 5.7) |
 //! | `0xC000_0000` | [the DMA window](DMA_WINDOW_BASE) (slice 6.2) |
+//! | `0x1_0000_0000` | [the framebuffer window](FB_WINDOW_BASE) (slice 6.7) |
 //!
 //! Two of those entries *grow* on request — VM's heap (`brk` raises its end) and
 //! VM's mmap arena (a bump cursor that never reuses addresses) — so
@@ -75,6 +76,27 @@
 //! [`VIRTIO_MMIO_PAGE_VA`] is page 1 of the device window (page 0 stays TTY's
 //! UART by convention): every virtio driver has its own address space, so one
 //! constant serves all four.
+//!
+//! ## The framebuffer window
+//!
+//! [`FB_WINDOW_BASE`] is the fourth kernel-owned window: one L1 slot above the
+//! DMA window, so [`USER_REGION_LIMIT`] does not move and VM needs no edit. When
+//! Limine reports a framebuffer the kernel accepts, the kernel maps its
+//! `ceil(pitch * height / 4096)` pages at [`FB_VA`] in the TTY driver's address
+//! space while building it, and TTY draws the console there.
+//!
+//! Like the device window and unlike the other two, this one is a **device**
+//! mapping (`Prot::DEVICE_RW`), always — whatever the memory map calls the
+//! range, the frames are the display's and never return to the frame allocator.
+//! A framebuffer that overlaps a usable memory-map entry is carved out of the
+//! allocator before any frame is handed out (see [`crate::memrange::subtract`]).
+//! Device attributes are also why TTY touches the mapping only with aligned
+//! 32-bit volatile stores and never reads it back.
+//!
+//! The geometry and pixel format are not constants — they are whatever the
+//! firmware set — so they travel by `SYS_GETINFO(GET_FRAMEBUFFER)`, which is
+//! gated to TTY and answers `ENOENT` when there is no framebuffer. [`FB_VA`] is
+//! then mapped to nothing, and TTY is serial-only.
 //!
 //! These constants are deliberately **not** emitted into the generated C headers:
 //! no Phase 5 C touches them (musl's `write()` goes to VFS, not to a driver's
@@ -146,6 +168,19 @@ pub const DMA_RUN_BYTES: u64 = DMA_RUN_PAGES * USER_PAGE_SIZE;
 /// The kernel writes `pa ^ DMA_COOKIE` into the run's first eight bytes; the
 /// driver checks it against the PA `GET_DMA` reported, then zeroes it.
 pub const DMA_COOKIE: u64 = 0x444D_415F_6D78_7273;
+
+/// Base of the framebuffer window: one whole L1 slot at 4 GiB (slice 6.7).
+pub const FB_WINDOW_BASE: u64 = 0x1_0000_0000;
+
+/// Size of the framebuffer window: 16 MiB, i.e. 4096 pages — room for
+/// 1920×1080 at 32 bits per pixel (8.3 MiB). The kernel refuses a framebuffer
+/// whose `pitch * height`, rounded up to pages, does not fit.
+pub const FB_WINDOW_SIZE: u64 = 0x0100_0000;
+
+/// VA at which the kernel maps the boot framebuffer into the TTY driver's
+/// address space: page 0 of the window. Reported to TTY alone via
+/// `SYS_GETINFO(GET_FRAMEBUFFER)`.
+pub const FB_VA: u64 = FB_WINDOW_BASE;
 
 /// Top of the initial user stack: the highest VA a process may name, and the
 /// value the kernel points `SP_EL0` at before `eret`.
@@ -260,6 +295,71 @@ const _: () = assert!(RAMDISK_WINDOW_BASE + RAMDISK_WINDOW_SIZE <= DMA_WINDOW_BA
 const _: () = assert!(DMA_RUN_PAGES * USER_PAGE_SIZE <= DMA_WINDOW_SIZE);
 const _: () = assert!(DMA_RUN_PAGES > 0);
 
+// The framebuffer window's geometry, mirroring the DMA window's.
+const _: () = assert!(FB_WINDOW_BASE.is_multiple_of(L1_SLOT_SIZE));
+const _: () = assert!(FB_WINDOW_SIZE <= L1_SLOT_SIZE);
+const _: () = assert!(FB_WINDOW_SIZE > 0);
+const _: () = assert!(FB_WINDOW_SIZE.is_multiple_of(USER_PAGE_SIZE));
+const _: () = assert!(FB_WINDOW_BASE + FB_WINDOW_SIZE <= USER_VA_TOP);
+const _: () = assert!(FB_VA.is_multiple_of(USER_PAGE_SIZE));
+const _: () = assert!(FB_VA >= FB_WINDOW_BASE);
+const _: () = assert!(FB_VA < FB_WINDOW_BASE + FB_WINDOW_SIZE);
+const _: () = assert!(DMA_WINDOW_BASE + DMA_WINDOW_SIZE <= FB_WINDOW_BASE);
+
+/// Whether two half-open windows `[base, base + size)` share no address.
+const fn windows_disjoint(a_base: u64, a_size: u64, b_base: u64, b_size: u64) -> bool {
+    a_base + a_size <= b_base || b_base + b_size <= a_base
+}
+
+// The four kernel-owned windows, pairwise — all six pairs, not only each
+// window against its neighbour. The ascending chain above already implies
+// this; it is spelled out so that a fifth window placed *between* two others
+// cannot pass by satisfying one neighbour's assert.
+const _: () = assert!(windows_disjoint(
+    USER_DEVICE_WINDOW_BASE,
+    USER_DEVICE_WINDOW_SIZE,
+    RAMDISK_WINDOW_BASE,
+    RAMDISK_WINDOW_SIZE
+));
+const _: () = assert!(windows_disjoint(
+    USER_DEVICE_WINDOW_BASE,
+    USER_DEVICE_WINDOW_SIZE,
+    DMA_WINDOW_BASE,
+    DMA_WINDOW_SIZE
+));
+const _: () = assert!(windows_disjoint(
+    USER_DEVICE_WINDOW_BASE,
+    USER_DEVICE_WINDOW_SIZE,
+    FB_WINDOW_BASE,
+    FB_WINDOW_SIZE
+));
+const _: () = assert!(windows_disjoint(
+    RAMDISK_WINDOW_BASE,
+    RAMDISK_WINDOW_SIZE,
+    DMA_WINDOW_BASE,
+    DMA_WINDOW_SIZE
+));
+const _: () = assert!(windows_disjoint(
+    RAMDISK_WINDOW_BASE,
+    RAMDISK_WINDOW_SIZE,
+    FB_WINDOW_BASE,
+    FB_WINDOW_SIZE
+));
+const _: () = assert!(windows_disjoint(
+    DMA_WINDOW_BASE,
+    DMA_WINDOW_SIZE,
+    FB_WINDOW_BASE,
+    FB_WINDOW_SIZE
+));
+
+// No window is below the device window, so `USER_REGION_LIMIT` — derived from
+// the device window's base alone — still bounds every process region beneath
+// all four, and adding the framebuffer window did not move it.
+const _: () = assert!(RAMDISK_WINDOW_BASE >= USER_DEVICE_WINDOW_BASE);
+const _: () = assert!(DMA_WINDOW_BASE >= USER_DEVICE_WINDOW_BASE);
+const _: () = assert!(FB_WINDOW_BASE >= USER_DEVICE_WINDOW_BASE);
+const _: () = assert!(USER_REGION_LIMIT == 0x3FFE_F000);
+
 // The virtio register page: inside the device window, and not TTY's page.
 const _: () = assert!(VIRTIO_MMIO_PAGE_VA != TTY_UART_VA);
 const _: () = assert!(VIRTIO_MMIO_PAGE_VA.is_multiple_of(USER_PAGE_SIZE));
@@ -299,6 +399,7 @@ const _: () = assert!(USER_REGION_LIMIT < USER_STACK_BASE);
 const _: () = assert!(USER_STACK_TOP <= USER_DEVICE_WINDOW_BASE);
 const _: () = assert!(USER_STACK_TOP <= RAMDISK_WINDOW_BASE);
 const _: () = assert!(USER_STACK_TOP <= DMA_WINDOW_BASE);
+const _: () = assert!(USER_STACK_TOP <= FB_WINDOW_BASE);
 
 #[cfg(test)]
 mod tests {
@@ -329,6 +430,57 @@ mod tests {
             DMA_WINDOW_BASE.min(USER_DEVICE_WINDOW_BASE),
             USER_DEVICE_WINDOW_BASE
         );
+    }
+
+    #[test]
+    fn the_framebuffer_window_is_the_fourth_window() {
+        assert_eq!(FB_WINDOW_BASE, 0x1_0000_0000);
+        assert_eq!(FB_WINDOW_BASE, 4 * L1_SLOT_SIZE);
+        assert_eq!(FB_WINDOW_SIZE, 16 * 1024 * 1024);
+        assert_eq!(FB_WINDOW_SIZE / USER_PAGE_SIZE, 4096);
+        assert_eq!(FB_VA, FB_WINDOW_BASE);
+        assert_eq!(FB_VA % USER_PAGE_SIZE, 0);
+        // F3's sizing claim: 1920x1080 at 32 bpp fits.
+        let full_hd = 1920_u64 * 1080 * 4;
+        assert_eq!(full_hd.min(FB_WINDOW_SIZE), full_hd);
+        // One L1 slot above the DMA window, and the DMA window ends below it.
+        assert_eq!(FB_WINDOW_BASE, DMA_WINDOW_BASE + L1_SLOT_SIZE);
+        let dma_end = DMA_WINDOW_BASE + DMA_WINDOW_SIZE;
+        assert_eq!(dma_end.min(FB_WINDOW_BASE), dma_end);
+    }
+
+    #[test]
+    fn the_four_kernel_windows_are_pairwise_disjoint_below_the_va_top() {
+        // Every kernel-owned window, as a half-open `[base, end)`. A fifth window
+        // gets a row here and a set of `const _` asserts above; the pairwise
+        // sweep then covers it against all the others, not only its neighbour.
+        let windows = [
+            ("device", USER_DEVICE_WINDOW_BASE, USER_DEVICE_WINDOW_SIZE),
+            ("ramdisk", RAMDISK_WINDOW_BASE, RAMDISK_WINDOW_SIZE),
+            ("dma", DMA_WINDOW_BASE, DMA_WINDOW_SIZE),
+            ("framebuffer", FB_WINDOW_BASE, FB_WINDOW_SIZE),
+        ];
+        for (i, &(a, a_base, a_size)) in windows.iter().enumerate() {
+            let a_end = a_base.checked_add(a_size).expect("window end overflows");
+            assert!(a_size > 0, "the {a} window is empty");
+            assert!(a_end <= USER_VA_TOP, "the {a} window runs past USER_VA_TOP");
+            // The device window stays the lowest: `USER_REGION_LIMIT` is derived
+            // from its base and nothing else.
+            assert!(
+                a_base >= USER_DEVICE_WINDOW_BASE,
+                "the {a} window is below the device window"
+            );
+            for &(b, b_base, b_size) in &windows[i + 1..] {
+                let b_end = b_base.checked_add(b_size).expect("window end overflows");
+                assert!(
+                    a_end <= b_base || b_end <= a_base,
+                    "the {a} and {b} windows overlap"
+                );
+            }
+        }
+        // Adding the fourth window moved nothing a process can see.
+        assert_eq!(USER_REGION_LIMIT, 0x3FFE_F000);
+        assert_eq!(USER_STACK_TOP, USER_DEVICE_WINDOW_BASE);
     }
 
     #[test]

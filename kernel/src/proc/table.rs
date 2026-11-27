@@ -299,10 +299,10 @@ static IMAGE: [BootEntry; N_IMAGE] = [
         runnable: false,
     },
     // --- virtio drivers (slice 6.2) ---------------------------------------
-    // Appended after init. Only `vblk` has a boot module; the other three have
-    // none, so they are never loaded and stay blocked on RTS_NO_PRIV, like
-    // `pfs`. Their priv ids are their IMAGE indices (16..=19), which is why the
-    // stub priv ids sit above `USER_PRIV_ID`.
+    // Appended after init. `vblk` (slice 6.2) and `vcon` (slice 6.6) have boot
+    // modules; `vinput` and `vnet` have none, so they are never loaded and stay
+    // blocked on RTS_NO_PRIV, like `pfs`. Their priv ids are their IMAGE indices
+    // (16..=19), which is why the stub priv ids sit above `USER_PRIV_ID`.
     BootEntry {
         nr: VBLK_PROC_NR,
         name: b"vblk",

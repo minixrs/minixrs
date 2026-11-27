@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2025-2026 Kevin Barnard and minix.rs Contributors
 //! minix.rs TTY driver — the console: transmit since slice 5.3 (decision D1),
-//! receive since slice 6.5.
+//! receive since slice 6.5, a screen as well as the serial line since slice 6.7.
 //!
 //! The first user-space *driver* in minix.rs, and the first EL0-originated text on
 //! the serial line. Everything before it either came from the kernel's own PL011
@@ -18,9 +18,35 @@
 //!
 //! Built as a freestanding aarch64 ELF (`drivers/tty/user.ld`, a byte copy of the
 //! servers'), packed into the MXBI archive by `kernel/build.rs`, and loaded into
-//! its own address space at boot — plus one extra page the other boot processes do
-//! not get: the UART's MMIO registers at `TTY_UART_VA`, pre-mapped by the kernel
-//! with Device attributes. See `pl011.rs`.
+//! its own address space at boot — plus two device mappings the other boot
+//! processes do not get, both pre-mapped by the kernel with Device attributes: the
+//! UART's MMIO registers, one page at `TTY_UART_VA` (see `pl011.rs`), and, when the
+//! bootloader reported one, the framebuffer at `FB_VA` (slice 6.7; see below).
+//!
+//! ## Two sinks, one `console_write`
+//!
+//! Every console byte — the banner and each `CDEV_WRITE` — goes through
+//! [`console_write`]: the UART first, so that no serial marker's timing depends
+//! on painting, then the screen (slice 6.7, spec F9). Kernel and `[diag]` output
+//! is not console output and stays serial-only.
+//!
+//! This file is the **bin** half of the crate and the only one that touches a
+//! device. What a byte does to the text grid, which pixels a glyph is, and
+//! whether the kernel's description of the framebuffer may be believed are all
+//! decided in the library half (`minixrs_tty`: `grid`, `font`, `paint`,
+//! `reply`), which is pure, `unsafe`-free and host-tested. What is left here is
+//! one kernel call ([`fb_bring_up`]), one verdict line, and one store
+//! ([`Screen`]'s `Surface::store`) — a single aligned volatile `u32` write. The
+//! framebuffer is never read, never viewed through a slice, and never copied or
+//! filled in bulk: a scroll shifts the grid and repaints from it (phase decision
+//! H9) — only the cells whose byte changed, found by comparing the grid with
+//! `paint::Shown`, TTY's own record of what it painted.
+//!
+//! Start-up asks `GET_FRAMEBUFFER` once and prints exactly one of
+//! `[diag tty] fb ok w=… h=… cols=… rows=…`, `fb none rc=…` (no framebuffer:
+//! serial-only) or `fb FAIL <reason>` (a reply TTY will not draw on:
+//! serial-only). The screen is cleared before the banner is written, so the
+//! banner is its first line.
 //!
 //! ## Four things that differ from a server
 //!
@@ -84,17 +110,24 @@ mod input;
 mod irq;
 mod pl011;
 
+// The renderer is the crate's library half, used as a dependency — never
+// `mod`-included a second time, which would compile a private copy of it.
+use minixrs_tty::grid::{Damage, Grid};
+use minixrs_tty::paint::{self, Format, Shown, Surface};
+use minixrs_tty::reply::{self, Reply};
+
 use minixrs_driver_rt::cdev;
 use minixrs_ipc::{ipc_notify, ipc_send};
 use minixrs_kernel_shared::Message;
 use minixrs_kernel_shared::callnr::{
-    CDEV_MAX_IO, CDEV_MINOR_CONSOLE, CDEV_READ, CDEV_WRITE, GET_DMA, GET_VIRTIO_MMIO,
-    NOTIFY_IRQ_PENDING_OFF, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
+    CDEV_MAX_IO, CDEV_MINOR_CONSOLE, CDEV_READ, CDEV_WRITE, GET_DMA, GET_FRAMEBUFFER,
+    GET_VIRTIO_MMIO, NOTIFY_IRQ_PENDING_OFF, SAFECOPY_FROM, SAFECOPY_TO, SYS_GETINFO_NAME_LEN,
 };
 use minixrs_kernel_shared::com::{HARDWARE, boot_endpoint};
 use minixrs_kernel_shared::endpoint::Endpoint;
 use minixrs_kernel_shared::error::{EAGAIN, EIO, ENOSYS, EPERM, OK};
 use minixrs_kernel_shared::ipc_const::NOTIFY_MESSAGE;
+use minixrs_kernel_shared::uspace::{FB_VA, FB_WINDOW_SIZE};
 use minixrs_server_rt::{
     SefConfig, buf_addr, diag_fmt, rd_i32, sef_publish_to_ds, sef_startup, sys_getinfo,
     sys_safecopy,
@@ -122,8 +155,8 @@ fn getinfo_deny_probe() {
     diag_fmt(format_args!("getinfo.deny ok n={}", GETINFO_DENIED.len()));
 }
 
-/// The banner TTY writes straight to the UART once its device mapping is proven
-/// usable from EL0.
+/// The banner TTY writes to the console — the UART, and the screen when there
+/// is one — as its first console output.
 ///
 /// This line is the slice's milestone, and it is recognizable in the boot log for a
 /// specific reason: it carries **no kernel trace prefix**. Every other line in the
@@ -131,6 +164,159 @@ fn getinfo_deny_probe() {
 /// composed at EL0 and reached the wire through a user-space store to a device
 /// register.
 const BANNER: &str = "minix.rs console: tty online (EL0)\n";
+
+/// The framebuffer as a [`Surface`]: the one place in the driver that touches
+/// it, and the only `unsafe` the screen adds (slice 6.7, spec F6).
+///
+/// Built by [`fb_bring_up`] alone, and only from a [`Format`] that
+/// [`reply::accept`] returned — which is what the `SAFETY` argument in `store`
+/// rests on.
+#[cfg_attr(test, allow(dead_code))]
+struct Screen {
+    fmt: Format,
+}
+
+impl Surface for Screen {
+    /// One aligned 32-bit volatile store at `FB_VA + y * pitch + x * 4`.
+    ///
+    /// The bound is re-checked **here**, per store, although `paint` promises
+    /// never to call outside `width × height`: this is the last line before a
+    /// device mapping, and a renderer bug must cost a missing pixel, not a
+    /// store somewhere else. It is a bound in pixels, never in mapped pages —
+    /// the kernel maps `ceil(pitch * height / 4096)` pages, and on QEMU the
+    /// last of them runs `0x400` bytes past the framebuffer into
+    /// firmware-reserved memory (6.7 Task 0), which no store may reach.
+    fn store(&mut self, x: u32, y: u32, pixel: u32) {
+        if x >= self.fmt.width() || y >= self.fmt.height() {
+            return;
+        }
+        // In `u64` neither product can wrap, and the sum is below
+        // `pitch * height` (see SAFETY), so the `checked_` forms never fail;
+        // they are there so that this stays true if the bound above is edited.
+        let Some(off) = u64::from(y)
+            .checked_mul(u64::from(self.fmt.pitch()))
+            .and_then(|row| {
+                row.checked_add(u64::from(x).checked_mul(u64::from(paint::BYTES_PER_PIXEL))?)
+            })
+        else {
+            return;
+        };
+        let Some(addr) = FB_VA.checked_add(off) else {
+            return;
+        };
+        // SAFETY:
+        // * **Mapped.** `self.fmt` came from `reply::accept(_, FB_VA,
+        //   FB_WINDOW_SIZE)`: the kernel reported this framebuffer at `FB_VA`,
+        //   where its loader mapped `ceil(pitch * height / 4096)` pages
+        //   read-write with Device attributes before TTY's first instruction
+        //   (`load_boot_server`'s TTY arm), and never unmaps them.
+        // * **In bounds.** `x < width` and `y < height` were checked above, and
+        //   `accept` established `width * 4 <= pitch`. So `off = y * pitch +
+        //   x * 4 <= (height - 1) * pitch + pitch - 4`, and the four bytes
+        //   written end at or before `pitch * height` — inside the framebuffer
+        //   itself, not merely inside its last mapped page.
+        // * **Aligned.** `FB_VA` is page-aligned, `pitch` is a multiple of 4
+        //   (`accept`) and `x * 4` is, so `addr` is 4-aligned for a `u32`.
+        // * **Unaliased.** No reference or slice to this memory exists anywhere
+        //   in the driver; it is written only here and never read. `volatile`
+        //   keeps the compiler from merging, widening or eliding the store,
+        //   which a device mapping does not tolerate (H9).
+        unsafe { core::ptr::write_volatile(addr as *mut u32, pixel) };
+    }
+}
+
+/// Everything [`console_write`] needs: the text on the screen and, when a
+/// framebuffer was accepted, the screen itself.
+///
+/// Lives in `main`'s frame for the life of the driver — the grid and its
+/// shadow are about 10 KiB each of the 64 KiB stack, the largest locals TTY
+/// has — and is passed down by `&mut`, so there is no static and no `unsafe`
+/// to reach it.
+#[cfg_attr(test, allow(dead_code))]
+struct Console {
+    /// `None`: serial-only (no framebuffer, or one TTY refused).
+    screen: Option<Screen>,
+    /// The screen's text; `0 × 0`, and never written, when `screen` is `None`.
+    grid: Grid,
+    /// What has been painted, cell by cell — so that a scroll stores only the
+    /// cells that changed, without reading the framebuffer to find out. Every
+    /// paint after [`fb_bring_up`]'s `clear` goes through it ([`console_write`]
+    /// is the only painter), which is what keeps it true.
+    shown: Shown,
+}
+
+/// Ask the kernel for the framebuffer once, decide whether to draw on it, and
+/// print the one `[diag tty] fb …` line (slice 6.7, spec F9).
+///
+/// The decision is `reply::accept`'s (host-tested); this function makes the
+/// call and prints. On acceptance the screen is cleared to background **before**
+/// the verdict is printed and before anything is written to the console, so the
+/// banner is the first thing on it.
+#[cfg_attr(test, allow(dead_code))]
+fn fb_bring_up() -> Option<Screen> {
+    let mut m = Message {
+        m_source: 0,
+        m_type: 0,
+        payload: [0u8; 96],
+    };
+    let rc = sys_getinfo(GET_FRAMEBUFFER, &mut m);
+    if rc != OK {
+        // `ENOENT` is the kernel saying it accepted no framebuffer — the
+        // ordinary serial-only boot. Any other answer is a defect (`EPERM`: the
+        // kernel's gate and its loader disagree about who TTY is), and either
+        // way there is nothing to draw on.
+        diag_fmt(format_args!("fb none rc={rc}"));
+        return None;
+    }
+    let fmt = match reply::accept(&Reply::decode(&m.payload), FB_VA, FB_WINDOW_SIZE) {
+        Ok(fmt) => fmt,
+        Err(why) => {
+            diag_fmt(format_args!("fb FAIL {}", why.as_str()));
+            return None;
+        }
+    };
+    let mut screen = Screen { fmt };
+    paint::clear(&mut screen, &fmt);
+    diag_fmt(format_args!(
+        "fb ok w={} h={} cols={} rows={}",
+        fmt.width(),
+        fmt.height(),
+        fmt.cols(),
+        fmt.rows()
+    ));
+    Some(screen)
+}
+
+/// Write console bytes to both sinks: the UART, then the screen (slice 6.7,
+/// spec F9). The one output path — the banner and every `CDEV_WRITE` come
+/// through here.
+///
+/// UART first and whole, so the serial log never waits on a repaint. Then each
+/// byte goes through [`Grid::put`], and what it reports changed is painted: one
+/// cell for a drawn byte and, after a scroll, each cell whose byte is no longer
+/// the one on the screen. Nothing is read back from the framebuffer to shift it
+/// or to compare with — `console.shown` is the record of what is there — and a
+/// cell that already shows its byte costs no store at all. Repainting every
+/// cell on every scroll, which this replaced, cut console throughput about
+/// sixfold (spec F13.2). Serial-only, the second half does nothing.
+#[cfg_attr(test, allow(dead_code))]
+fn console_write(console: &mut Console, bytes: &[u8]) {
+    pl011::write(bytes);
+    let Some(screen) = console.screen.as_mut() else {
+        return;
+    };
+    let fmt = screen.fmt;
+    for &byte in bytes {
+        match console.grid.put(byte) {
+            Damage::None => {}
+            Damage::Cell { col, row } => {
+                let byte = console.grid.cell(col, row);
+                paint::paint_cell_diff(screen, &fmt, &mut console.shown, col, row, byte);
+            }
+            Damage::All => paint::paint_diff(screen, &fmt, &console.grid, &mut console.shown),
+        }
+    }
+}
 
 /// ELF entry point. The kernel primes `SP_EL0` before `eret`, so `_start` can dive
 /// straight into Rust without setting up a stack itself.
@@ -160,6 +346,37 @@ fn main() -> ! {
             core::hint::spin_loop()
         }
     });
+
+    // The screen, before the first console byte (slice 6.7, spec F9): ask for
+    // the framebuffer, validate the answer, clear it, print the verdict. The
+    // grid is sized to the accepted format, or `0 × 0` when serial-only, and
+    // lives in this frame — which never returns — like the staging buffer below.
+    // The shadow starts all blank, which is what `fb_bring_up` just made the
+    // screen.
+    let screen = fb_bring_up();
+    let (cols, rows) = screen
+        .as_ref()
+        .map_or((0, 0), |s| (s.fmt.cols(), s.fmt.rows()));
+    let mut console = Console {
+        screen,
+        grid: Grid::new(cols, rows),
+        shown: Shown::new(),
+    };
+
+    // The banner: TTY's first console output, and so the screen's first line.
+    // It is written here rather than in `tty_init` because the console state it
+    // goes through is a local of this frame, which a SEF callback (a plain `fn`
+    // pointer) cannot reach without a static. Nothing runs between `tty_init`
+    // returning and this line, so the serial log's order is what it was: `sef
+    // ready`, the DS publish, the banner. A failed publish still means no
+    // banner — `sef_startup` returned `Err` above.
+    //
+    // If the UART's *device mapping* were broken this never returns: the store
+    // faults, and TTY has no `ipc_to` edge to VM's fault handler for a device
+    // VA, so the process dies on an EL0 data abort that
+    // `tests/qemu-boot.forbidden` catches. The same goes for the framebuffer's
+    // mapping, one step earlier, at the clear.
+    console_write(&mut console, BANNER.as_bytes());
 
     getinfo_deny_probe();
 
@@ -279,7 +496,7 @@ fn main() -> ! {
         }
         match msg.m_type {
             CDEV_WRITE => {
-                let rc = do_write(caller_e, &msg, &mut staging);
+                let rc = do_write(caller_e, &msg, &mut staging, &mut console);
                 reply(caller_e, &mut msg, rc);
             }
             // Always replied to, and at once: with nothing buffered the answer
@@ -304,34 +521,35 @@ fn main() -> ! {
     }
 }
 
-/// SEF fresh-init callback: publish to DS, then prove the device mapping.
+/// SEF fresh-init callback: publish to DS.
 ///
 /// Order matters for the boot log. `sef_startup` has already emitted
 /// `[diag tty] sef ready` through the kernel debug channel, so by the time the
-/// banner appears the two independent output paths — debug channel and real
-/// console — have each been exercised once, and a failure in either is
+/// banner appears — `main` writes it as soon as this returns `OK`, after the
+/// framebuffer's verdict — the two independent output paths, debug channel and
+/// real console, have each been exercised once, and a failure in either is
 /// distinguishable from a failure in the other.
 ///
-/// If the *device mapping* were broken this never returns: the store faults, and
-/// TTY has no `ipc_to` edge to VM's fault handler for a device VA, so the process
-/// dies on an EL0 data abort that `tests/qemu-boot.forbidden` catches.
+/// Until slice 6.7 the banner was written here. It moved to `main` with
+/// [`console_write`], whose state is a `main`-frame local.
 #[cfg_attr(test, allow(dead_code))]
 fn tty_init(_endpoint: Endpoint, name: &[u8; SYS_GETINFO_NAME_LEN]) -> i32 {
-    let rc = sef_publish_to_ds(name);
-    if rc != OK {
-        return rc;
-    }
-    pl011::write(BANNER.as_bytes());
-    OK
+    sef_publish_to_ds(name)
 }
 
 /// Serve one `CDEV_WRITE`. Returns the reply `m_type`: the byte count written
 /// (`>= 0`), or a negative errno.
 ///
 /// `staging` is the caller's buffer, passed in rather than declared here so it
-/// lives in `main`'s frame (see the comment at its declaration).
+/// lives in `main`'s frame (see the comment at its declaration). `console` is
+/// where the bytes go: the UART and, when there is one, the screen.
 #[cfg_attr(test, allow(dead_code))]
-fn do_write(caller_e: Endpoint, msg: &Message, staging: &mut [u8; CDEV_MAX_IO]) -> i32 {
+fn do_write(
+    caller_e: Endpoint,
+    msg: &Message,
+    staging: &mut [u8; CDEV_MAX_IO],
+    console: &mut Console,
+) -> i32 {
     let req = minixrs_server_rt::cdev::parse(msg);
     let n = match cdev::validate_write(req, CDEV_MINOR_CONSOLE) {
         Ok(n) => n,
@@ -358,7 +576,7 @@ fn do_write(caller_e: Endpoint, msg: &Message, staging: &mut [u8; CDEV_MAX_IO]) 
         return rc;
     }
 
-    pl011::write(&staging[..n]);
+    console_write(console, &staging[..n]);
     // The count actually moved, which is `CDEV_MAX_IO` for an over-long request.
     // Replying `OK` here instead would tell a client its whole buffer went out.
     n as i32

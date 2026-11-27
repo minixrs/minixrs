@@ -3,23 +3,31 @@
 //! `SYS_GETINFO` — kernel-state introspection.
 //!
 //! The request sub-type lives in the first 4 bytes of the message payload
-//! (mirrors MINIX 3 `mess_lsys_krn_sys_getinfo.request`). Four sub-types are
-//! implemented: `GET_WHOAMI` (Phase 2), `GET_RAMDISK` (slice 5.7), and
-//! `GET_VIRTIO_MMIO` / `GET_DMA` (slice 6.2). Every other
+//! (mirrors MINIX 3 `mess_lsys_krn_sys_getinfo.request`). Five sub-types are
+//! implemented: `GET_WHOAMI` (Phase 2), `GET_RAMDISK` (slice 5.7),
+//! `GET_VIRTIO_MMIO` / `GET_DMA` (slice 6.2), and `GET_FRAMEBUFFER` (slice
+//! 6.7). Every other
 //! sub-type returns `EINVAL` so a caller that sends an unsupported request gets a
 //! recognizable error rather than a silently-zeroed reply.
 
 use minixrs_kernel_shared::callnr::{
-    GET_DMA, GET_RAMDISK, GET_VIRTIO_MMIO, GET_WHOAMI, GETINFO_DMA_LEN_OFF, GETINFO_DMA_PA_OFF,
-    GETINFO_DMA_VA_OFF, GETINFO_RAMDISK_LEN_OFF, GETINFO_RAMDISK_VA_OFF, GETINFO_VIRTIO_INTID_OFF,
-    GETINFO_VIRTIO_SLOT_OFF, GETINFO_VIRTIO_VA_OFF, SYS_GETINFO_NAME_LEN,
+    GET_DMA, GET_FRAMEBUFFER, GET_RAMDISK, GET_VIRTIO_MMIO, GET_WHOAMI, GETINFO_DMA_LEN_OFF,
+    GETINFO_DMA_PA_OFF, GETINFO_DMA_VA_OFF, GETINFO_FB_BLUE_SHIFT_OFF, GETINFO_FB_BPP_OFF,
+    GETINFO_FB_GREEN_SHIFT_OFF, GETINFO_FB_HEIGHT_OFF, GETINFO_FB_PITCH_OFF,
+    GETINFO_FB_RED_SHIFT_OFF, GETINFO_FB_VA_OFF, GETINFO_FB_WIDTH_OFF, GETINFO_RAMDISK_LEN_OFF,
+    GETINFO_RAMDISK_VA_OFF, GETINFO_VIRTIO_INTID_OFF, GETINFO_VIRTIO_SLOT_OFF,
+    GETINFO_VIRTIO_VA_OFF, SYS_GETINFO_NAME_LEN,
 };
-use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME};
+use minixrs_kernel_shared::com::{MEM_PROC_NR, ROOTFS_MODULE_NAME, TTY_PROC_NR};
 use minixrs_kernel_shared::error::{EINVAL, ENOENT, EPERM, OK};
+use minixrs_kernel_shared::framebuffer::FB_BPP;
 use minixrs_kernel_shared::message::Message;
-use minixrs_kernel_shared::uspace::{DMA_RUN_BYTES, DMA_VA, RAMDISK_VA, VIRTIO_MMIO_PAGE_VA};
+use minixrs_kernel_shared::uspace::{
+    DMA_RUN_BYTES, DMA_VA, FB_VA, RAMDISK_VA, VIRTIO_MMIO_PAGE_VA,
+};
 use minixrs_kernel_shared::virtio::virtio_driver_index;
 
+use crate::arch::aarch64::framebuffer;
 use crate::arch::aarch64::virtio_mmio::assignment;
 use crate::proc::proc_struct::PROC_NAME_LEN;
 use crate::proc::{Priv, Proc};
@@ -42,6 +50,7 @@ pub(super) fn do_getinfo(caller: &mut Proc, caller_priv: &Priv, msg: &mut Messag
         GET_RAMDISK => fill_ramdisk(caller, msg),
         GET_VIRTIO_MMIO => fill_virtio_mmio(caller, msg),
         GET_DMA => fill_dma(caller, msg),
+        GET_FRAMEBUFFER => fill_framebuffer(caller, msg),
         _ => EINVAL,
     }
 }
@@ -150,5 +159,57 @@ fn fill_dma(caller: &Proc, msg: &mut Message) -> i32 {
         .copy_from_slice(&dev.dma_pa.to_ne_bytes());
     msg.payload[GETINFO_DMA_LEN_OFF..GETINFO_DMA_LEN_OFF + 8]
         .copy_from_slice(&DMA_RUN_BYTES.to_ne_bytes());
+    OK
+}
+
+/// `GET_FRAMEBUFFER` reply (slice 6.7, spec F4) — where the boot framebuffer is
+/// mapped in the caller, its geometry and its pixel format:
+///
+/// | offset   | type | meaning                              |
+/// |----------|------|--------------------------------------|
+/// |   0..8   | u64  | `uspace::FB_VA`                      |
+/// |   8..12  | u32  | width in pixels                      |
+/// |  12..16  | u32  | height in pixels                     |
+/// |  16..20  | u32  | pitch: bytes per row                 |
+/// |  20..21  | u8   | red channel's bit offset in a pixel  |
+/// |  21..22  | u8   | green channel's bit offset           |
+/// |  22..23  | u8   | blue channel's bit offset            |
+/// |  23..24  | u8   | bits per pixel (always 32)           |
+///
+/// **Gated on the caller being the TTY driver.** The framebuffer is pre-mapped
+/// into exactly one address space — `arch::aarch64::userland::load_boot_server`
+/// installs it under its `nr == TTY_PROC_NR` arm — so the VA is meaningless in
+/// any other, hence `EPERM`. The two `TTY_PROC_NR` tests must agree, the rule
+/// [`fill_ramdisk`] states for `MEM_PROC_NR`: a gate naming another proc than
+/// the loader's arm either leaves TTY serial-only beside a mapped screen (too
+/// narrow) or aims a driver at an unmapped VA (too wide).
+///
+/// `ENOENT` when the kernel accepted no framebuffer — Limine reported none, or
+/// reported one `kernel-shared::framebuffer::validate` refused. That is how TTY
+/// learns it is serial-only, not an error path.
+///
+/// The values are the ones recorded once at boot in
+/// `arch::aarch64::framebuffer`, the same record the loader's arm maps from, so
+/// the geometry reported cannot describe more than was mapped: `validate`
+/// bounded `pitch * height` by the page count the arm maps. No mask sizes are
+/// on the wire because only 8-bit channels are accepted.
+fn fill_framebuffer(caller: &Proc, msg: &mut Message) -> i32 {
+    if caller.nr != TTY_PROC_NR {
+        return EPERM;
+    }
+    let Some(fb) = framebuffer::accepted() else {
+        return ENOENT;
+    };
+    msg.payload[GETINFO_FB_VA_OFF..GETINFO_FB_VA_OFF + 8].copy_from_slice(&FB_VA.to_ne_bytes());
+    msg.payload[GETINFO_FB_WIDTH_OFF..GETINFO_FB_WIDTH_OFF + 4]
+        .copy_from_slice(&fb.width.to_ne_bytes());
+    msg.payload[GETINFO_FB_HEIGHT_OFF..GETINFO_FB_HEIGHT_OFF + 4]
+        .copy_from_slice(&fb.height.to_ne_bytes());
+    msg.payload[GETINFO_FB_PITCH_OFF..GETINFO_FB_PITCH_OFF + 4]
+        .copy_from_slice(&fb.pitch.to_ne_bytes());
+    msg.payload[GETINFO_FB_RED_SHIFT_OFF] = fb.red_shift;
+    msg.payload[GETINFO_FB_GREEN_SHIFT_OFF] = fb.green_shift;
+    msg.payload[GETINFO_FB_BLUE_SHIFT_OFF] = fb.blue_shift;
+    msg.payload[GETINFO_FB_BPP_OFF] = FB_BPP;
     OK
 }

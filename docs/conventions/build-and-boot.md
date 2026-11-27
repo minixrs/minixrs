@@ -143,16 +143,19 @@ tools/check-boot-log.sh reboot reboot.log
 # The runner's QEMU command line: one `-drive file=<image>,format=raw,if=none,id=vblk0`
 # plus `-device virtio-blk-device,drive=vblk0,bus=virtio-mmio-bus.0` (for `nodisk`,
 # one `-drive ...,if=virtio` instead), and `-global virtio-mmio.force-legacy=false`.
-# The runner attaches ONE other device, on every boot whatever the root backend
-# (slice 6.6): `-chardev pipe,id=hvc0,path=<base>` with
+# The runner attaches TWO other devices, on every boot whatever the root backend.
+# The second is the display, `-device ramfb`, with a QMP socket beside it
+# (slice 6.7; "The display and the QMP socket" below). The first is the second
+# console (slice 6.6): `-chardev pipe,id=hvc0,path=<base>` with
 # `-device virtio-serial-device,bus=virtio-mmio-bus.8` and
 # `-device virtconsole,chardev=hvc0` -- the second console, /dev/hvc0, whose host
 # side is the FIFO pair <base>.in / <base>.out (target/hvc0 unless MINIXRS_HVC0
 # is set; see "Fed boots" below). Every boot therefore also prints
 # `[virtio] slot=8 pa=0xa001000 id=3 ver=2 drv=vcon` and
-# `[diag vcon] virtio ok features=0x100000000 rxq=8 txq=8 slot=8`. Nothing else
-# is attached (`-M virt` still creates its default devices, a virtio-net-pci card
-# among them: the runner passes no `-nodefaults`). The
+# `[diag vcon] virtio ok features=0x100000000 rxq=8 txq=8 slot=8`, and, for the
+# display, `[fb] ok ...`, `[devmap] tty fb ...` and `[diag tty] fb ok ...`. Nothing
+# else is attached (`-M virt` still creates its default devices, a virtio-net-pci
+# card among them: the runner passes no `-nodefaults`). The
 # runner prints the exact argv on stderr as one
 # `qemu-run: ...` line (and `qemu-run: attaching <file> as-is ...` when it built
 # nothing) -- the first thing to read when a boot surprises. Extra arguments are
@@ -225,11 +228,40 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
                              print max, who }'
 # -> 9440 <_RNvCs..._11minixrs_mfs4main>   (the symbol hash varies per build)
 #
-# Two caveats the one-liner cannot express. It counts `sub sp, sp` only, so the
+# Three caveats the one-liner cannot express. It counts `sub sp, sp` only, so the
 # callee-save pre-index (`stp x29, x30, [sp, #-0x60]!`) is a further 96 bytes on
 # top -- read the prologue directly when a frame is close enough to 64 KiB for
 # that to matter. And `hx` decodes hex by hand because `strtonum` is a gawk
 # extension that macOS's awk does not have.
+#
+# The third is a BLIND SPOT, and it is on the largest frames of all. For a frame
+# of several pages LLVM stops emitting a run of subtractions and emits a
+# STACK-PROBE LOOP instead: it computes the target in a scratch register, then
+# steps `sp` down one page at a time, touching each page, until it gets there.
+# The one-liner sees the loop's body ONCE -- one page -- and does not see the
+# scratch register's subtraction at all, because that is `sub x9, sp`, not
+# `sub sp, sp`. minixrs-tty's `main` (slice 6.7: the text grid and its shadow,
+# 10 240 bytes each) is the case in point:
+#
+#     stp  x29, x30, [sp, #-0x60]!
+#     ...
+#     sub  x9, sp, #0x5, lsl #12      <- the real size of the loop: 5 pages
+#     sub  sp, sp, #0x1, lsl #12      <- the loop body: one page per turn
+#     ldr  xzr, [sp]                  <- the probe
+#     cmp  sp, x9
+#     b.ne <the `sub sp` above>
+#     sub  sp, sp, #0x380             <- the remainder
+#
+# The frame is 0x5000 + 0x380 = 21 376 bytes (plus the 96 of the pre-index); the
+# one-liner reports 4992 (0x1000 + 0x380) and names the right function with the
+# wrong number -- a 4.3x under-report. So after running it, look for probe loops
+# and read each one by hand: the frame is N pages from `sub x9, sp, #N, lsl #12`
+# plus the `sub sp, sp, #imm` that FOLLOWS the loop's `b.ne`.
+"$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objdump -d \
+  target/minixrs-user/aarch64-unknown-minixrs/release/minixrs-tty \
+  | grep -B7 -A6 -E 'sub[[:space:]]+x[0-9]+, sp, #0x[0-9a-f]+, lsl #12'
+# No output means no probe loop, and the one-liner's figure stands. The scratch
+# register is x9 in every case seen so far; the pattern does not assume it.
 
 # Verify a captured boot log against the standard acceptance markers. The first
 # argument names the boot the log came from and is REQUIRED:
@@ -254,6 +286,8 @@ timeout 60 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
 cargo test -p minixrs-kernel-shared
 cargo test -p minixrs-gen-c-headers
 cargo test -p minixrs-mkimage   # the disk-image writer, read back by independent readers
+cargo test -p minixrs-tty       # TTY's renderer library (font, grid, paint, reply) and its bin's pure parts
+cargo test -p minixrs-fbcheck   # the screen check: decode, the refusals, the QMP exchange against a mock
 
 # Regenerate the C ABI headers for the musl fork (slice 5.0). Output is a build
 # artifact under target/ and is NEVER committed; `--stdout` dumps it instead.
@@ -449,6 +483,49 @@ log and 36.46% of the ramdisk one, against 54.91% for the merge base's disk boot
 Take the baseline that way — the merge base checked out **in the main checkout**, the same day. A
 `git worktree` build silently packed the fallback `worker` in place of the C programs, and a figure
 recorded by an earlier slice drifted eight points with no code change.
+
+## The display and the QMP socket
+
+Since slice 6.7 `tools/qemu-run.sh` gives **every** boot a display and a way to look at it — fed or
+unfed, whatever the root backend, the reboot included. The runner's header and its display block
+hold the detail; the rules:
+
+- **`-device ramfb` is unconditional.** CI and a boot somebody watches run one code path, a TTY with
+  a framebuffer. `ramfb` is not a virtio device and is on no virtio-mmio bus. No resolution is
+  requested anywhere — not by the kernel, not in `tools/limine.conf` — so the mode is whatever the
+  firmware sets: 800×600 at 32 bpp with Homebrew's edk2 under QEMU 11.0.3 (measured, 6.7 Task 0).
+  **The geometry in the marker files is therefore a measurement, not a constant**; what moves when
+  it changes is under [Markers](./testing-and-markers.md#markers).
+- **The no-framebuffer path is reached only by hand**, by booting without the device: the kernel
+  prints `[fb] none`, `GET_FRAMEBUFFER` answers `ENOENT`, and TTY prints `fb none rc=-2` and is
+  serial-only. All of those are forbidden markers, so such a boot fails `check-boot-log.sh` by
+  design. There is no runner switch for it.
+- **`MINIXRS_DISPLAY=none|window`** says whether anything *shows* the display. `none`, the default,
+  passes `-display none`; the framebuffer is still there and still drawn on. `window` passes
+  `-display cocoa,zoom-to-fit=on` (gtk where QEMU has no cocoa; no `-display` at all where it has
+  neither), so the window scales the guest's 800×600 screen to the size it is dragged to — the guest
+  draws the same pixels, and the serial console is still on stdio. Any other value is refused, exit
+  64 — a misspelt `window` would otherwise be a healthy headless boot that looks like a broken
+  display.
+- **A QMP socket is unconditional too**: `-qmp unix:<socket>,server=on,wait=off`, at
+  `target/qmp.sock`. QEMU listens and does not wait for a client, so a boot nobody connects to is
+  unchanged. It is the only way in to a display nobody shows, and the screen check
+  ([`testing-and-markers.md`](./testing-and-markers.md#the-screen-check)) is built on it.
+- **`MINIXRS_QMP=<socket>`** moves the socket — the `MINIXRS_HVC0` pattern, and for the same reason:
+  two boots at once must not share one. `tools/screendump.sh` reads the same variable.
+- **The socket path must be shorter than 104 bytes, and the runner refuses a longer one (exit 64)
+  rather than leaving it to QEMU.** A unix socket's address holds 104 bytes on macOS including the
+  terminator; the default path lives under the checkout, whose depth is nobody's choice; and QEMU's
+  own message does not name the variable to change (measured, 6.7 Task 0). The limit is applied on
+  Linux as well, where the address is a few bytes longer, so that a path which works in CI works on
+  a laptop. A deep checkout or worktree is the usual way to hit it: set `MINIXRS_QMP` to something
+  short.
+- **A stale socket is removed just before QEMU starts; anything else at the path is refused (exit
+  73).** QEMU unlinks its socket on a clean exit but not when it is killed, which is how every
+  `timeout` boot ends, and it will not bind over one. The removal is as late as possible so that a
+  run refused for another reason leaves an earlier boot's socket alone.
+- **All three checks — the mode, the path's length, what is at the path — run before the image is
+  built**, so a refused boot costs nothing and starts nothing.
 
 ## Feature toggles and dependency claims
 

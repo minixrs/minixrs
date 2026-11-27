@@ -31,6 +31,12 @@
 //! reports more, `init_from_limine_memmap` panics with a clear message
 //! pointing at this constant.
 //!
+//! One range is kept out of the allocator even where the memory map calls it
+//! usable: the boot framebuffer (slice 6.7, spec F5). Its pages are the
+//! display's, mapped into TTY as device memory, so `init_from_limine_memmap`
+//! subtracts them from every USABLE entry before the first frame can be handed
+//! out, and [`is_usable_pa`] answers `false` for them from then on.
+//!
 //! Concurrency: single-threaded boot. The allocator is wrapped in an
 //! `UnsafeCell` newtype with `unsafe impl Sync`, matching the convention
 //! documented on [`crate::proc::table`]. Phase 3.2+'s page-fault flow runs
@@ -41,6 +47,8 @@
 
 use core::cell::UnsafeCell;
 use core::ptr;
+
+use minixrs_kernel_shared::memrange::{self, Range};
 
 use crate::arch::aarch64::limine::{MEMMAP_USABLE, memmap_entries};
 
@@ -125,18 +133,45 @@ static ALLOC: AllocatorCell = AllocatorCell(UnsafeCell::new(Allocator {
 /// Populate the allocator from Limine's memmap. Must be called once during
 /// boot, before any [`alloc_frame`] / [`free_frame`] call.
 ///
-/// `hhdm_offset` is Limine's HHDM offset (also passed to
-/// [`crate::mm::set_hhdm_offset`] separately so the allocator can dereference
-/// freed-frame pointers into a kernel VA).
+/// `hole` is a physical range to keep out of the allocator whatever the memory
+/// map says about it — the accepted boot framebuffer's page-rounded range
+/// (`kernel-shared::framebuffer::Framebuffer::range`), or `None` when there is
+/// no framebuffer. It is subtracted from every `MEMMAP_USABLE` entry with
+/// `kernel-shared::memrange::subtract` (host-tested; this crate has no tests),
+/// so one entry becomes zero, one or two regions. Returns the number of pages
+/// removed that way: 0 when the range overlaps no usable entry, which is the
+/// case wherever the firmware reports the framebuffer as its own memory-map
+/// kind.
+///
+/// The Limine HHDM offset is passed separately, to
+/// [`crate::mm::set_hhdm_offset`], so the allocator can dereference freed-frame
+/// pointers through a kernel VA.
 ///
 /// SAFETY: must be called exactly once, single-threaded, after
 /// [`crate::mm::set_hhdm_offset`].
-pub unsafe fn init_from_limine_memmap() {
+pub unsafe fn init_from_limine_memmap(hole: Option<Range>) -> u64 {
     let entries = memmap_entries().expect("Limine did not populate the memmap response");
+
+    // `subtract` treats an inverted or empty hole as "remove nothing", which
+    // would silently hand the framebuffer's frames out. A hole is a real,
+    // page-aligned range or it is a bug in the caller.
+    if let Some((hole_base, hole_end)) = hole {
+        assert!(
+            hole_base < hole_end,
+            "allocator hole {hole_base:#x}..{hole_end:#x} is empty or inverted"
+        );
+        assert!(
+            hole_base & (FRAME_SIZE as u64 - 1) == 0 && hole_end & (FRAME_SIZE as u64 - 1) == 0,
+            "allocator hole {hole_base:#x}..{hole_end:#x} is not 4 KiB-aligned"
+        );
+    }
+    // With no hole, subtract the empty range: every entry comes back whole.
+    let hole = hole.unwrap_or((0, 0));
 
     // SAFETY: single-threaded boot, single writer.
     let a = unsafe { &mut *ALLOC.0.get() };
 
+    let mut carved_bytes: u64 = 0;
     for entry in entries {
         if entry.kind != MEMMAP_USABLE {
             continue;
@@ -156,23 +191,39 @@ pub unsafe fn init_from_limine_memmap() {
         if len == 0 {
             continue;
         }
-        assert!(
-            a.region_count < MAX_REGIONS,
-            "Limine reported more than MAX_REGIONS={MAX_REGIONS} usable regions; \
-             grow the constant in mm::frame"
-        );
-        a.regions[a.region_count] = Region {
-            base_pa: base,
-            next_free_pa: base,
-            end_pa: base.checked_add(len).expect("USABLE region overflows u64"),
-        };
-        a.region_count += 1;
+        let end = base.checked_add(len).expect("USABLE region overflows u64");
+
+        // What is left of this entry outside the hole: the part below it and
+        // the part above it, either of which may be absent. Both slots are
+        // visited — which one holds an untouched entry depends on which side
+        // of it the hole lies. The entry and the hole are both 4 KiB-aligned,
+        // so every piece is too.
+        let mut kept_bytes: u64 = 0;
+        for (piece_base, piece_end) in memrange::subtract((base, end), hole).into_iter().flatten() {
+            assert!(
+                a.region_count < MAX_REGIONS,
+                "Limine reported more than MAX_REGIONS={MAX_REGIONS} usable regions; \
+                 grow the constant in mm::frame"
+            );
+            a.regions[a.region_count] = Region {
+                base_pa: piece_base,
+                next_free_pa: piece_base,
+                end_pa: piece_end,
+            };
+            a.region_count += 1;
+            // `subtract` returns non-empty pieces inside the entry, so neither
+            // the difference nor the sum can leave `0..=len`.
+            kept_bytes += piece_end - piece_base;
+        }
+        carved_bytes += len - kept_bytes;
     }
 
     assert!(
         a.region_count > 0,
         "Limine memmap contains no MEMMAP_USABLE regions"
     );
+
+    carved_bytes / FRAME_SIZE as u64
 }
 
 /// Allocate one 4 KiB frame. Returns `None` if no physical memory remains

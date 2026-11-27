@@ -635,7 +635,8 @@ tool; and a framebuffer console plus a keyboard driver inside the milestone bar.
 - [x] **6.4** `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
 - [x] **6.5** TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
 - [x] **6.6** `virtio-console` as a second CDEV backend: `/dev/hvc0` + a VFS retry walk per driver
-- [ ] **6.7** framebuffer console: Limine framebuffer → TTY
+- [x] **6.7** framebuffer console: Limine framebuffer → TTY; a QMP screendump decoded against the
+      serial log
 - [ ] **6.8** `virtio-input` keyboard driver — **sub-milestone: non-headless boot**
 - [ ] **6.9** `virtio-net`, packet I/O only — **milestone; Phase 6 complete**
 - [ ] **6.10** stretch: `virtio-gpu` under the same TTY renderer

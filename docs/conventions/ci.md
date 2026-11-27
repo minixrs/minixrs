@@ -95,9 +95,10 @@ whole-project picture.
   against the common marker files plus their backend's own pair, the reboot against its own pair
   only — and all three are checked even if an earlier one fails, so one run shows the whole story. A
   third step runs `tools/diff-backends.sh --self-test` followed by the comparison of the two
-  full-boot logs. All three logs are uploaded in the `qemu-boot-log` artifact. **Blocking** as of
-  phase-5-prep chunk 7. The marker-file contract itself — which file a marker belongs in, what the
-  scripts match, and why expectations must be first-occurrence-only — lives in
+  full-boot logs. All three logs are uploaded in the `qemu-boot-log` artifact, with the screen
+  check's files beside them (below). **Blocking** as of phase-5-prep chunk 7. The marker-file
+  contract itself — which file a marker belongs in, what the scripts match, and why expectations
+  must be first-occurrence-only — lives in
   [`testing-and-markers.md`](./testing-and-markers.md#markers)
 - **The two full boots are fed their console input, on both consoles; the reboot is not** (slices
   6.5 and 6.6). Each full boot's stdin is `< <(FEED_CONSOLE_CEILING=1300 tools/feed-console.sh <its
@@ -121,6 +122,43 @@ whole-project picture.
   holds — is unmeasured until the branch's first CI run. `cons.other ok`, `hvc0 ok` and `stdin ok`
   all missing there with `cons.beside ok` present is the feeder path or the FIFOs, not a driver,
   until shown otherwise: the feeder's stderr says which stage it reached
+- **Both full boots are screen-checked, and the check blocks** (slice 6.7). It is steps inside
+  `qemu-smoke`, not a job, so the gate count does not move. Before each full boot the boot step
+  starts `MINIXRS_FBCHECK=target/release/minixrs-fbcheck tools/screendump.sh qemu-<boot>.log
+  fb-<boot>.ppm > fb-<boot>.verdict 2>&1 &` in the background, runs the boot as before, and then
+  settles the script with a small shell function, `finish_screen`: a script that has exited leaves
+  its exit status in `fb-<boot>.rc`; **one still running when the boot's `timeout` has fired is
+  killed and counted as failed** (`1` in the `.rc`, and a line saying so appended to the
+  `.verdict`), because the script cannot see QEMU die and one that is still looking never saw its
+  gate line, never saw the screen scroll, or never got a scrolled dump to pass. **A pass in CI is a
+  pass of a scrolled screen**: the script asks `fbcheck` for one and keeps looking, every 10 s,
+  through any number of `early` verdicts — the first cut took the first dump that passed, which in
+  the default boot is an unscrolled one, and let a TTY whose scroll painted nothing through. Nothing
+  fails there — all three boots still run. The check step then prints each `fb-<boot>.verdict` and
+  fails, with an `::error::` naming the `.ppm`, unless the `.rc` holds `0`; it does so after the
+  three `check-boot-log.sh` calls and whatever they said, so one run still shows the whole story.
+  **The reboot is not screen-checked.** What the check proves, what it forgives and how to read its
+  verdict line are under [The screen check](./testing-and-markers.md#the-screen-check)
+- **The artifact carries the dumps.** `qemu-boot-log` uploads `fb-*.ppm` and `fb-*.verdict` with the
+  three logs, on every run (`if: always()`), pass or fail. Each `.ppm` is the **last** dump its
+  script took — the passing one on a pass, the last one looked at otherwise — and each `.verdict`
+  holds the script's whole stderr: an `early … (not scrolled yet)` line per change in the number of
+  rows on the screen, every failed look's reason, and the final `ok … scrolled=yes`. `early` lines
+  in a passing verdict are normal. `fb-*.rc` is the step's own bookkeeping and is not uploaded. A
+  boot whose script never reached a dump (no gate line, no socket) has a `.verdict` and no `.ppm`
+- **`qemu-smoke` builds `tools/fbcheck` in a step of its own before the first boot**, for
+  `mkimage`'s reason below and one more: handed to the script through `MINIXRS_FBCHECK`, the
+  pre-built binary means **no cargo runs beside a boot at all**. Left to build it itself the script
+  would start a `cargo build` at the same moment as the boot's `cargo run`, the two would contend
+  for `target/`'s lock, and whichever the boot lost would come out of its timeout
+- **The screen check uses the default QMP socket, `target/qmp.sock`, for both boots** — safe for the
+  reason the default FIFO pair is: the boots run one after the other. A job that ran two at once
+  would give each its own `MINIXRS_QMP` as well as its own `MINIXRS_HVC0`. Like the feeder, **none
+  of this has run on CI**: `ramfb` under the runner's QEMU and `qemu-efi-aarch64` firmware — whether
+  Limine reports a framebuffer there at all, in what mode, and whether `screendump` over a unix QMP
+  socket behaves as on macOS — is unmeasured until the branch's first CI run. A different default
+  mode moves three expected markers together ([Markers](./testing-and-markers.md#markers)); `[fb]
+  none` on both boots is the firmware or the device, not the driver
 - **The boots run in sequence in one job, not as a matrix.** A matrix would rename the required
   "QEMU boot smoke" check, which needs a branch-protection edit, and two QEMUs on one runner would
   starve each other. The price is the job's `timeout-minutes`, **90** since slice 6.4 (50 before
@@ -131,6 +169,13 @@ whole-project picture.
   builds the disk image through a nested `cargo run --release -p minixrs-mkimage`, which happens
   *inside* the boot's `timeout`; on a cold cache that compile would be charged to the first boot and
   skew the fraction the budget is derived from. Pre-built, the nested cargo only runs it
+- **`fbcheck`'s and the TTY renderer's host tests run in `coverage`**, like `mkimage`'s, since
+  `coverage` runs every host test in the workspace. `minixrs-tty` was already on the advisory `miri`
+  job's `-p` list, so the renderer's tests now run under Miri as well, although the library half is
+  `#![forbid(unsafe_code)]` and gives Miri nothing new to find; several of them paint whole 800×600
+  images, and **how long that takes under Miri is unmeasured** — the job is advisory, so a slow run
+  cannot fail a PR, but look at its duration on the branch's first CI run. `minixrs-fbcheck` is not
+  on the list: it has no `unsafe` either, and its tests open unix sockets
 - **`mkimage`'s host tests run in `coverage`, and nowhere else.** There is no `cargo test` job:
   `coverage` runs `cargo llvm-cov --workspace --exclude minixrs-kernel`, which executes every host
   test in the workspace, the image writer's included. `minixrs-mkimage` is deliberately not in the
@@ -219,6 +264,10 @@ whole-project picture.
   **configuration-dependent** file is the usual culprit: prefer `/etc/pattern` (40 KiB in every
   config, so its count is assertable too) over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB
   with in-tree musl, and ~15 KB in the sysroot-absent fallback
+- **Check the host before believing a budget fraction.** The fraction is a byte position in a log
+  whose length follows host speed. Compare the run's final `[ipc N]` with an earlier run of the same
+  length: 6.7's second recorded run ended at 6.6 M against 54 M and read 74% where a quiet host read
+  65%.
 - Before pushing, the blocking gates must be green: `cargo fmt --all --check`, `cargo clippy
   --workspace --all-targets -- -D warnings` (locally this lints the kernel too), `cargo clippy -p
   minixrs-mfs --features server --all-targets -- -D warnings` (nothing else lints MFS's `[[bin]]`,

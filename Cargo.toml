@@ -32,6 +32,7 @@ members = [
     "tools/gen-c-headers",
     "tools/mkfs-mfs",
     "tools/mkimage",
+    "tools/fbcheck",
 ]
 
 # NOTE: there is deliberately no `default-members` here. `minixrs-kernel` pins

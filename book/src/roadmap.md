@@ -89,7 +89,8 @@ restarts it. They talk to the kernel (interrupts, I/O) and to VFS (device protoc
   `/dev/null` and `/dev/zero` in slice 5.11 — so Phase 6's new driver processes are all VirtIO:
   `virtio-blk`, `virtio-console`, `virtio-input` (the keyboard) and `virtio-net`. The existing TTY
   driver also grows in Phase 6: PL011 receive (landed in slice 6.5), and a text console on the
-  bootloader-provided framebuffer.
+  bootloader-provided framebuffer (landed in slice 6.7 — see
+  [The screen](drivers/overview.md#the-screen)).
 - The `driver-rt` crate already provides the interrupt-line helper, the VirtIO transport (a trait
   with the MMIO implementation) and the split virtqueue (slice 6.2), typed DMA handles (slice 6.3) a
   GPT parser for block drivers (slice 6.4) and the pure half of the character-driver read contract

@@ -5,8 +5,10 @@
 //!
 //! Everything in this crate is `#![no_std]` and must remain so. Behaviour
 //! belongs in the kernel or in `minixrs-ipc` / `server-rt`, not here — the one
-//! carve-out is a pure predicate over an ABI shape defined in this crate (e.g.
-//! [`message::user_va_ok`]), which lives here so it stays host-testable.
+//! carve-out is pure logic the kernel cannot host-test: a predicate over an ABI
+//! shape defined in this crate (e.g. [`message::user_va_ok`]), or arithmetic the
+//! kernel applies at boot ([`memrange`], [`framebuffer`]), which lives here so
+//! it stays host-testable.
 //! Values are pinned to MINIX 3's ABI where possible (see per-module docs for
 //! the specific reference header).
 
@@ -20,9 +22,11 @@ pub mod error;
 pub mod execimage;
 pub mod execstack;
 pub mod fcntl;
+pub mod framebuffer;
 pub mod grant;
 pub mod ipc_const;
 pub mod irq;
+pub mod memrange;
 pub mod message;
 pub mod rootfs;
 pub mod signal;

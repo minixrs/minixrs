@@ -65,12 +65,23 @@ extern "C" fn kmain() -> ! {
     // address-space API (`arch::aarch64::addrspace::AddrSpace`) — which
     // slice 3.1b's `userland_bootstrap` now drives in earnest, one
     // AddrSpace per EL0 stub.
+    //
+    // Slice 6.7 (spec F5): the boot framebuffer is read and validated *first*,
+    // and the allocator is seeded around it, so no frame that was ever handed
+    // out can be part of the screen. Nothing between the two calls allocates —
+    // `framebuffer::init` only reads Limine's response. The `[fb]` line waits
+    // for the seed because it reports how many pages had to be carved.
+    // SAFETY: single-threaded boot; the only call of `framebuffer::init`, and
+    // nothing has read `framebuffer::accepted` yet.
+    let fb_verdict = unsafe { arch::aarch64::framebuffer::init() };
+    let fb_hole = arch::aarch64::framebuffer::accepted().map(|fb| fb.range());
     // SAFETY: single-threaded boot; this is the only writer of HHDM_OFFSET
     // and the only initializer of the allocator.
-    unsafe {
+    let fb_carved = unsafe {
         mm::set_hhdm_offset(hhdm);
-        mm::init_from_limine_memmap();
-    }
+        mm::init_from_limine_memmap(fb_hole)
+    };
+    arch::aarch64::framebuffer::report(&mut con, &fb_verdict, fb_carved);
 
     // Slice 2.4: bring up the interrupt controller and timer, populate two
     // EL0 stub tasks, enqueue them, and hand control to the scheduler.
