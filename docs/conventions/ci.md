@@ -264,6 +264,10 @@ whole-project picture.
   **configuration-dependent** file is the usual culprit: prefer `/etc/pattern` (40 KiB in every
   config, so its count is assertable too) over `/bin/hello`, which is ~46 KB with the SDK, ~200 KB
   with in-tree musl, and ~15 KB in the sysroot-absent fallback
+- **Check the host before believing a budget fraction.** The fraction is a byte position in a log
+  whose length follows host speed. Compare the run's final `[ipc N]` with an earlier run of the same
+  length: 6.7's second recorded run ended at 6.6 M against 54 M and read 74% where a quiet host read
+  65%.
 - Before pushing, the blocking gates must be green: `cargo fmt --all --check`, `cargo clippy
   --workspace --all-targets -- -D warnings` (locally this lints the kernel too), `cargo clippy -p
   minixrs-mfs --features server --all-targets -- -D warnings` (nothing else lints MFS's `[[bin]]`,

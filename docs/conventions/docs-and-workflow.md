@@ -85,6 +85,12 @@ account — a handback can describe prose the agent did not write and cite a rep
 created. This is also why work dispatched in parallel needs a dedupe pass: two agents given
 overlapping source will each write the shared rules, and the duplicates drift immediately.
 
+**Agents sharing one worktree need three rules.** Each commits with an explicit pathspec (`git
+commit -- <paths>`), never `git add -A`. Only one agent boots at a time, and nobody edits a `.rs`
+file while a boot run is in progress — `cargo run` rebuilds from whatever is on disk. And nothing
+else is edited while a mutation run is live: it reverts with `git checkout -- <file>`, which takes a
+concurrent edit with it.
+
 For the mutation-testing discipline (how a mutation is applied, observed, and reverted; the
 boot-marker gotchas; the cases with no available proof), see
 [`testing-and-markers.md`](./testing-and-markers.md).
@@ -124,6 +130,8 @@ are actually carried out.
      `check-boot-log.sh` with their backend — the default `disk` boot and a `MINIXRS_ROOT=ramdisk`
      one — with `tools/diff-backends.sh` clean across the pair, and the reboot of the disk boot's
      image passes `check-boot-log.sh reboot` (see [Markers](./testing-and-markers.md#markers));
+   - both full boots pass the screen check with `scrolled=yes` (`tools/screendump.sh` beside the
+     boot; see [The screen check](./testing-and-markers.md#the-screen-check));
    - the stale-claim sweep and the `book/` sweep from [Documentation](#documentation) are done;
    - the slice's box is checked in `docs/plan.md` and its phase file, as
      [`git-and-prs.md`](./git-and-prs.md) requires.
