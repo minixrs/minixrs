@@ -142,6 +142,14 @@ const fn shift_ok(shift: u8) -> bool {
     matches!(shift, 0 | 8 | 16 | 24)
 }
 
+/// One past the highest physical address a page descriptor can name: 48 bits.
+///
+/// The kernel's mapper masks a physical address to those bits when it writes a
+/// leaf, so a framebuffer page above this would be mapped at a different
+/// address without any assert firing. [`validate`] refuses a range that ends
+/// past it.
+pub const PA_LIMIT: u64 = 1 << 48;
+
 /// Decides whether the kernel uses `raw`, the first framebuffer the bootloader
 /// reported, given the direct map's offset.
 ///
@@ -158,8 +166,8 @@ const fn shift_ok(shift: u8) -> bool {
 ///    [`FB_WINDOW_SIZE`](crate::uspace::FB_WINDOW_SIZE).
 ///
 /// Every product and sum is checked. Two consequences are checked rather than
-/// assumed: the page-rounded end `pa + pages * 4096` must not overflow
-/// ([`Reject::Address`]), and width, height and pitch must fit the reply's
+/// assumed: the page-rounded end `pa + pages * 4096` must not overflow or pass
+/// [`PA_LIMIT`] ([`Reject::Address`]), and width, height and pitch must fit the reply's
 /// `u32` fields (implied by 2 and 4, since a non-zero height bounds the pitch
 /// by the window and the pitch bounds the width; [`Reject::Window`] if not).
 ///
@@ -211,8 +219,9 @@ pub fn validate(raw: &RawFramebuffer, hhdm_offset: u64) -> Result<Framebuffer, R
     }
     let pages = bytes.div_ceil(USER_PAGE_SIZE);
     let len = pages.checked_mul(USER_PAGE_SIZE).ok_or(Reject::Window)?;
-    if pa.checked_add(len).is_none() {
-        return Err(Reject::Address);
+    match pa.checked_add(len) {
+        Some(end) if end <= PA_LIMIT => {}
+        _ => return Err(Reject::Address),
     }
 
     Ok(Framebuffer {
@@ -554,6 +563,31 @@ mod tests {
             ..MEASURED
         };
         assert_eq!(validate(&one_page, 0), Err(Reject::Address));
+    }
+
+    #[test]
+    fn an_end_past_the_page_tables_physical_reach_is_refused() {
+        // A page descriptor holds 48 bits of physical address and the mapper
+        // masks the rest away, so a page past 2^48 would be mapped somewhere
+        // else. 469 pages ending exactly at the limit are the last accepted.
+        let last = PA_LIMIT - 469 * USER_PAGE_SIZE;
+        let fits = RawFramebuffer {
+            address: last,
+            ..MEASURED
+        };
+        assert_eq!(validate(&fits, 0).map(|fb| fb.pa), Ok(last));
+        let crosses = RawFramebuffer {
+            address: last + USER_PAGE_SIZE,
+            ..MEASURED
+        };
+        assert_eq!(validate(&crosses, 0), Err(Reject::Address));
+        // A kernel-half address under the measured direct-map offset: the
+        // physical address is 1 MiB below the limit and 469 pages are longer.
+        let wrapped = RawFramebuffer {
+            address: 0xFFFF_FFFF_FFF0_0000,
+            ..MEASURED
+        };
+        assert_eq!(validate(&wrapped, HHDM), Err(Reject::Address));
     }
 
     #[test]
