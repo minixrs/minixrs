@@ -15,10 +15,12 @@
 //!   `pl011` wrote and the renderer never touched. That last step is what
 //!   makes this more than the renderer agreeing with itself. The serial
 //!   line has other writers, so the log is read as it really is: the
-//!   kernel's own lines are taken out first, and a row may then have the
-//!   kernel's per-tick bytes — letters, singly or in runs, up to
-//!   [`check::MAX_STRAY`] a row — inside it and nothing else. [`check`]'s
-//!   module docs give the rule exactly, and what it costs.
+//!   kernel's own lines are taken out, and the screen must then be one
+//!   unbroken stretch of what is left — every row where the row above leaves
+//!   off — with nothing in it but the kernel's per-tick bytes. The check
+//!   also says whether the screen has scrolled yet ([`outcome`]): only a
+//!   scrolled screen proves the scroll path. [`check`]'s module docs give
+//!   the rule exactly, and what it does not see.
 //! * [`qmp`] takes the dump from a running QEMU: `stop`, `screendump`, `cont`.
 //!
 //! The two functions here join them for the binary, which is argv and
@@ -39,6 +41,31 @@ use std::path::Path;
 use std::time::Duration;
 
 pub use check::{CheckError, MIN_ROWS, Report};
+
+/// What a screen that is the boot's amounts to, given what was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// A pass. The line is `ok <fields> scrolled=yes|no`.
+    Pass(String),
+    /// Right so far, but a scrolled screen was asked for and this one has
+    /// not scrolled yet. Neither a pass nor a failure: look again later. The
+    /// line is `early <fields> (not scrolled yet)`.
+    Early(String),
+}
+
+/// Judge a report: with `want_scrolled`, only a scrolled screen passes.
+///
+/// Until a screen has scrolled, nothing has exercised the scroll path — the
+/// grid shifting and the screen being repainted from it — so a caller that
+/// wants the console proved asks for a scrolled one and keeps looking while
+/// it gets `Early`.
+pub fn outcome(report: &Report, want_scrolled: bool) -> Outcome {
+    if want_scrolled && !report.scrolled {
+        Outcome::Early(format!("early {} (not scrolled yet)", report.fields()))
+    } else {
+        Outcome::Pass(report.to_string())
+    }
+}
 
 /// Apply the check to a dump file and a serial-log file.
 pub fn check_files(dump: &Path, log: &Path) -> Result<Report, String> {
@@ -98,8 +125,45 @@ mod tests {
         let report = check_files(&dump, &log_file(&scratch, TEXT)).unwrap();
         assert_eq!(
             report.to_string(),
-            "ok 80x160 10x10 rows=8 wraps=0 stray=0 worst=0"
+            "ok 80x160 10x10 rows=8 wraps=0 stray=0 worst=0 scrolled=no"
         );
+    }
+
+    #[test]
+    fn only_a_scrolled_screen_passes_when_one_is_asked_for() {
+        let scratch = Scratch::new();
+        let dump = scratch.path("screen.ppm");
+
+        // Eight lines on ten rows: right, and not scrolled.
+        std::fs::write(&dump, screen(TEXT)).unwrap();
+        let report = check_files(&dump, &log_file(&scratch, TEXT)).unwrap();
+        assert!(!report.scrolled);
+        assert_eq!(
+            outcome(&report, false),
+            Outcome::Pass("ok 80x160 10x10 rows=8 wraps=0 stray=0 worst=0 scrolled=no".into())
+        );
+        assert_eq!(
+            outcome(&report, true),
+            Outcome::Early(
+                "early 80x160 10x10 rows=8 wraps=0 stray=0 worst=0 (not scrolled yet)".into()
+            )
+        );
+
+        // Three more lines and it has scrolled: a pass either way.
+        let more = [
+            TEXT,
+            b"nine 9
+ten 10
+eleven 11
+",
+        ]
+        .concat();
+        std::fs::write(&dump, screen(&more)).unwrap();
+        let report = check_files(&dump, &log_file(&scratch, &more)).unwrap();
+        assert!(report.scrolled);
+        let line = "ok 80x160 10x10 rows=9 wraps=0 stray=0 worst=0 scrolled=yes";
+        assert_eq!(outcome(&report, true), Outcome::Pass(line.into()));
+        assert_eq!(outcome(&report, false), Outcome::Pass(line.into()));
     }
 
     #[test]
@@ -125,7 +189,7 @@ mod tests {
         let err = check_files(&dump, &log_file(&scratch, b"another boot\n")).unwrap_err();
         assert_eq!(
             err,
-            "screen row 0 is not in the serial log's console text, even allowing 32 tick bytes inside it: \"one 1\""
+            "screen row 0 is not in the serial log's console text, even allowing 120 tick bytes inside it: \"one 1\""
         );
     }
 
@@ -155,7 +219,7 @@ mod tests {
         let err = dump_and_check(&sock, &out, &log, SHORT).unwrap_err();
         assert_eq!(
             err,
-            "screen row 2 is not in the serial log's console text, even allowing 32 tick bytes inside it: \"three 3\""
+            "screen row 2 is not in the serial log's console text, even allowing 120 tick bytes inside it: \"three 3\""
         );
         assert_eq!(std::fs::read(&out).unwrap(), image, "the dump is kept");
         // The guest was let go before the check ran.

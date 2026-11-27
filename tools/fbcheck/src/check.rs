@@ -9,13 +9,17 @@
 //! ## 1. Geometry
 //!
 //! TTY prints `[diag tty] fb ok w=<w> h=<h> cols=<c> rows=<r>` once when it
-//! finds its framebuffer. The **last** line of the log holding it is the one
-//! used: a log holds one per TTY start, and the last TTY to start is the one
-//! whose screen can be dumped. The line must be complete — all four numbers,
+//! finds its framebuffer. The **last** occurrence in the log is the one used:
+//! a log holds one per TTY start, and the last TTY to start is the one whose
+//! screen can be dumped. The line must be complete — all four numbers,
 //! nothing after them, and a line end (`\n` or `\r`) — or the check fails
-//! rather than read half a number from a line still being written. It is
-//! looked for in the log as written, before step 3 takes the kernel's lines
-//! out (it is one of them), and may itself hold a tick byte or two.
+//! rather than read half a number from a line still being written.
+//!
+//! It is read exactly, with no allowance for stray bytes, because none can be
+//! in it: the kernel writes the whole of a `[diag …]` line inside one kernel
+//! call (`diag_print` in `kernel/src/system/do_diagctl.rs` — the prefix, the
+//! text and the line end, with nothing able to run in between), like every
+//! other kernel line.
 //!
 //! The dump must be exactly `w × h`, and the grid [`Format::new`] derives from
 //! that size must be exactly `c × r`. So TTY's own arithmetic is checked
@@ -36,111 +40,157 @@
 //! of `paint_cell`; it is there so that the day they stop agreeing, this
 //! check says so instead of passing on the decoder's word alone.
 //!
-//! ## 3. The text is the boot's
+//! ## 3. The text is the boot's, and it is where the boot put it
 //!
-//! At least [`MIN_ROWS`] rows must be non-blank, and **every non-blank row,
-//! with its trailing blanks removed, must be found in the console's part of
-//! the serial log.** The log is bytes, as `grep -a` reads it: it need not be
-//! UTF-8.
+//! At least [`MIN_ROWS`] rows must be non-blank, and **the screen, read top
+//! to bottom, must be one unbroken stretch of what the console wrote**: every
+//! row where the row above it leaves off, a line ending where the row ends
+//! short of the last column, a line wrapping where it does not.
 //!
 //! ### What the serial log really is
 //!
-//! Measured on a fed disk boot (slice 6.7; 54 MB of log, of which 80 KB is
-//! console): the serial line has three writers, and only one is the console.
+//! Measured on fed boots (slice 6.7; 54 MB of log for a default disk boot, of
+//! which some 60 KB is this console): the serial line has three writers, and
+//! only one is the console.
 //!
-//! * **TTY**, writing the console's bytes; its lines end `\r\n`.
+//! * **TTY**, writing the console's bytes; its lines end `\r\n`. TTY writes
+//!   each byte to the UART before it draws it (F9), and its first bytes come
+//!   after its own `fb ok` line.
 //! * **The kernel, a line at a time.** `[ipc 1414500] caller=17 …\r\n`,
 //!   `[ksys SYS_FORK] …`, `[diag vfs] …`, `[pf …`, `[as …`, `[devmap …` and
 //!   the rest. Each is written whole — nothing lands inside one — but it can
 //!   begin **in the middle of a console line**, which carries on after it:
 //!   `…-----[ksys 1412800] caller=17 call=0 result=0\r\n-----…`. A million of
 //!   them in that boot.
-//! * **The kernel, a byte at a time.** One byte per 10 ms timer tick while a
-//!   process is running: the first byte of its name (`kernel/src/clock.rs`).
-//!   They come singly (`minix.rs initt: dev.null ok`) and, when nothing else
-//!   prints between ticks, in **runs** (`minix.rs hello: iov CCCCCCCCCC....`),
-//!   anywhere, including inside a console line.
+//! * **The kernel, a byte at a time.** One byte per 10 ms of guest time while
+//!   a process is running: the first byte of its name
+//!   (`kernel/src/clock.rs`). They come singly (`minix.rs initt: dev.null
+//!   ok`) and, when nothing else prints between ticks, in **runs**
+//!   (`minix.rs hello: iov CCCCCCCCCC....`), anywhere: inside a console line,
+//!   and — thousands at a time — between two of them.
 //!
-//! So the log is read in two steps.
+//! ### The console stream
 //!
-//! **First the kernel's lines are taken out** ([`console_stream`]). A kernel
-//! line starts at a `[` followed by one or more of `a`–`z`, `_`, `.`, `-` and
-//! then a space or a `]` — `[ipc `, `[ksys `, `[diag tty]`, `[efault ` — and
-//! runs through the next `\n`, or to the end of the log if it has none yet.
-//! Everything else is kept, in order. Console text that itself contained such
-//! a prefix would be taken out with the rest of its line, and its row then
-//! not found: a false failure, never a false pass. Nothing the boot prints to
-//! the console does.
+//! The log is cut at the `fb ok` line step 1 used — nothing before it was
+//! ever drawn by this TTY — and **the kernel's lines are taken out of the
+//! rest** ([`console_stream`]). A kernel line starts at a `[` followed by one
+//! or more of `a`–`z`, `_`, `.`, `-` and then a space or a `]` — `[ipc `,
+//! `[ksys `, `[diag tty]`, `[efault ` — and runs through the next `\n`, or to
+//! the end of the log if it has none yet. Everything else is kept, in order.
+//! What is left is the console's bytes with the tick bytes still among them.
 //!
-//! **Then each row is looked for in what is left**, allowing tick bytes
-//! inside it. A row's text is found if the stream holds its bytes, in order,
-//! with nothing between them but **stray bytes**, where:
+//! A **stray byte** is what a tick prints: an ASCII letter, or the `?` the
+//! kernel prints for a process without a name. Never a digit, a space,
+//! punctuation or a line end.
 //!
-//! * a stray byte is an ASCII letter or `?` (what a tick prints: a name's
-//!   first byte, or `?` for a process with none) — never a digit, a space,
-//!   punctuation, or a `\r` or `\n`, so text on either side of a line end is
-//!   never one row;
-//! * strays may come in runs of any length, in any number of places, but a
-//!   row's strays total at most [`MAX_STRAY`];
-//! * nothing else is forgiven: no byte of the row may be missing from the
-//!   log or differ in it.
+//! ### The rule
 //!
-//! An exact occurrence is looked for first and counts as no strays.
-//! Otherwise every position where the row's first byte occurs is tried, and
-//! from each one every placement of the strays is followed at once, so a
-//! match cannot be missed by committing early; the row's count is the fewest
-//! strays any occurrence needs. [`Report::stray`] is the number of rows that
-//! needed any, and [`Report::worst`] the most one row needed — the figure to
-//! watch against [`MAX_STRAY`].
+//! Each row is taken as its text — its cells with the trailing blanks
+//! removed. Walking the rows from the top down to the last non-blank one, the
+//! stream must hold, in this order and with nothing else between:
 //!
-//! [`MAX_STRAY`] is 32, from that boot: the two rows that needed strays
-//! needed 5 and 10, and the longest run inside any console line of the whole
-//! log was 30. Runs *before* a line are far longer (4930 there) and do not
-//! count: they are not between two bytes of a row.
+//! * **the row's text**, byte for byte, with stray bytes allowed between two
+//!   of its bytes, in runs of any length, [`MAX_STRAY`] in total for the row;
+//! * then **up to the row's width in blanks**, one directly after another —
+//!   a line may really end in spaces, which a screen cannot show;
+//! * then **a line end** (`\n`, or `\r` and `\n`), after which the next row
+//!   starts a new line — or, only if the text and blanks reached the last
+//!   column, **nothing**: the line wrapped, and the next row's text carries
+//!   straight on. (A line of exactly the screen's width followed by a newline
+//!   takes one row, not two — F8's deferred wrap — so a full row may be
+//!   followed by either.)
 //!
-//! **What the tolerance costs.** A screen row that has *lost* letters still
-//! passes: `minix.rs it: stdin ok` is found in `minix.rs init: stdin ok`,
-//! with `ni` taken for tick bytes. Up to [`MAX_STRAY`] letters per row can
-//! go missing that way. A wrong, extra, or moved character cannot, nor a
-//! missing digit, space or punctuation mark.
+//! A blank row between two others is thus an empty line (or one of blanks).
+//! Stray bytes may also sit, in any number, *between* those pieces: before a
+//! row's first byte, after its last, and between a line end's `\r` and
+//! `\n`. Those are not counted against [`MAX_STRAY`], which is about what is
+//! inside a row; the runs between lines reach thousands. They are bounded by
+//! what they are: a run ends at the first byte that is not a letter or `?`.
+//! The one place between pieces where none is allowed is after a trailing
+//! blank: a blank is followed by another blank or by the line end, or else a
+//! word lost after a space (`errno` for `errno ok`) would read as a blank and
+//! two tick bytes. No console line of the measured boots ends in a blank.
 //!
-//! ### Wrapped lines
+//! Two rows are treated specially, and only these two:
 //!
-//! A line longer than the screen is wide takes several rows, each but the
-//! last filled to the last column. Its rows need no special treatment to be
-//! found: each is a piece of one line of the log, and a piece of something
-//! that is in the log is in the log. The same goes for a top row that is the
-//! tail of a line whose head has scrolled away.
+//! * **The last non-blank row** needs only its text to be there. It may be
+//!   the cursor's row, a line still being written — and the log is read after
+//!   the dump is taken, so the log may hold more of that line, and more
+//!   lines, than the screen did. What follows its text is not looked at.
+//! * **The top row** decides whether the screen has scrolled, below.
 //!
-//! The spec's first text worded this step as "a row exactly `cols` wide is joined with the
-//! row below it before the search". Requiring the join would refuse an honest
-//! screen: a line of exactly `cols` bytes followed by a newline fills its row
-//! and is *not* continued below (F8's deferred wrap), so joined to the next
-//! row it is text nobody wrote. So the join is accepted when it is found and
-//! the row alone is accepted when it is not — and since the joined text can
-//! only be found (strays or no strays) where both rows are found, that rule
-//! accepts exactly the screens the row-by-row rule above accepts. The
-//! row-by-row rule is what is implemented, for chains of full-width rows as
-//! for one.
+//! Every way of reading the stream is followed at once — which byte is the
+//! row's and which a stray, whether a full row wrapped or ended — so a match
+//! cannot be missed by committing early.
 //!
-//! The join is still *looked for*, and counted: [`Report::wraps`] is the
-//! number of rows that end in the last column and whose text, followed
-//! directly by the next row's, is in the log. It refuses nothing. It is there
-//! so a reader of the verdict can see that long lines were on the screen and
-//! came out in order.
+//! ### Scrolled, or not yet
+//!
+//! * **Not scrolled:** the top row begins at the very start of the console
+//!   stream. Row 0 is the first thing TTY wrote (its banner), and everything
+//!   since is on the screen in order. [`Report::scrolled`] is `false`.
+//! * **Scrolled:** the walk works from somewhere later in the stream — the
+//!   top row begins another line, or is the tail of a line whose head has
+//!   scrolled away — **and** the screen is full: its last non-blank row is
+//!   the last row or the one above it (after a scroll the cursor is on the
+//!   last row, and every row above it has been written). A screen that
+//!   starts later in the stream and is *not* full is refused: that is what a
+//!   scroll that cleared the screen instead of moving it would look like.
+//!
+//! The first reading is tried first, so a screen that could be read either
+//! way is reported as not scrolled. Neither needs TTY's cooperation, and a
+//! screen cannot fake the second by not drawing its first rows: with the
+//! first line missing, row 0 would have to be a line of the stream, and what
+//! the stream has there is the line that was not drawn.
+//!
+//! Why it matters: until the screen scrolls, nothing has exercised the scroll
+//! path — the grid shifting and the screen being repainted from it. A caller
+//! that wants that proved asks for a scrolled screen (`--scrolled`).
+//!
+//! ### The cap on strays, and what it costs
+//!
+//! [`MAX_STRAY`] is 120. The longest run measured *inside* a console line was
+//! 30, on a fast host under hardware acceleration; ticks are counted in guest
+//! time, so a slower host — CI's — writes proportionally more of them into
+//! the same pause, and a cap near the measurement would refuse an honest
+//! screen there. [`Report::stray`] is the number of rows that needed any and
+//! [`Report::worst`] the most one row needed — the figure to watch.
+//!
+//! The price of allowing them at all: **a row that has lost letters still
+//! passes.** `minix.rs it: stdin ok` is accepted for the log's `minix.rs
+//! init: stdin ok`, with `ni` taken for tick bytes — up to [`MAX_STRAY`]
+//! letters inside a row, and any number of letters at the very start of a
+//! line (`x.rs init: …`, with `mini` taken for a run before the line) or at
+//! its very end (`… stdio o` for `… stdio ok`) — so a line made of nothing
+//! but letters can be shown as a blank row. Measured runs before a line are
+//! of any letters in any order (`vp`, `tCCCCC`), so no shape tells them from
+//! text.
 //!
 //! ### What step 3 does not see
 //!
-//! * **Order.** Rows are looked up one at a time; nothing requires them to be
-//!   in the log in screen order.
-//! * **Short rows prove little.** A row holding `$` is in any log.
-//! * **Lost letters.** As above: up to [`MAX_STRAY`] letters the log has and
-//!   the row does not are forgiven, whoever wrote them.
+//! * **Lost letters**, as above. A lost digit, space or punctuation mark is
+//!   seen; so is any wrong, extra or moved character.
+//! * **The end of the last non-blank row.** It is matched as a prefix, so a
+//!   last row cut short passes.
+//! * **The head of a scrolled screen's top row.** It may begin anywhere in a
+//!   line, so a top row that has lost its first characters passes — and so
+//!   does a wrapped line that begins there and has lost characters anywhere
+//!   along it, since the whole of it can be read as starting later.
+//! * **A frozen screen.** A screen that stopped being drawn some time ago is
+//!   still an unbroken stretch of the stream. Nothing here compares the
+//!   screen's last row with the stream's end.
+//! * **Console text that looks like a kernel line.** A console line holding
+//!   `[word]` or `[word ` is taken out from there to its end, and the screen
+//!   showing it is refused: a false failure, never a false pass. Nothing the
+//!   boot prints to the console does.
 //! * **Bytes the screen draws differently.** A tab is drawn as a move of the
-//!   cursor and an unprintable byte as `?` (F8), so a row made from either is
-//!   not in the log as drawn and is refused. Nothing in the default boot
-//!   writes one to the console.
+//!   cursor, an unprintable byte as `?` (F8), and a `\r` not followed by a
+//!   `\n` returns to the start of the row; a screen made from any of them is
+//!   refused. Nothing in the boot writes one to the console.
+//!
+//! Row order, a repeated row, a row cut short and a row shifted left are all
+//! seen: each breaks the stretch.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use minixrs_tty::font::{CELL_H, CELL_W};
@@ -155,16 +205,12 @@ use crate::ppm::{self, Ppm};
 pub const MIN_ROWS: usize = 8;
 
 /// The most stray bytes — the kernel's tick bytes — tolerated inside one
-/// row's text in the log. Chosen from a measured boot; see the module docs.
-pub const MAX_STRAY: usize = 32;
+/// row's text in the log. Four times the longest run measured on a fast
+/// host; see the module docs.
+pub const MAX_STRAY: usize = 120;
 
-// The matcher keeps one bit per stray count in a `u64`.
-const _: () = assert!(MAX_STRAY < 64);
-
-/// The most stray bytes tolerated among the numbers of the `fb ok` line. It
-/// is short and printed once, so a run of ticks inside it is not expected;
-/// one or two are.
-const GEOMETRY_STRAY: usize = 2;
+// The matcher keeps one bit per stray count in a `u128`.
+const _: () = assert!(MAX_STRAY < 128);
 
 /// Where red sits in the pixels this module packs a dump into. A PPM has no
 /// shifts of its own; these three are the checker's choice.
@@ -192,18 +238,20 @@ pub struct Geometry {
     pub rows: usize,
 }
 
-/// A passing screen.
+/// A screen that is the boot's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     /// The geometry the log and the dump agree on.
     pub geometry: Geometry,
     /// Rows holding something other than blanks.
     pub non_blank_rows: usize,
-    /// Rows ending in the last column whose text runs on into the next row's
-    /// in the log: wrapped lines seen whole. Informational.
+    /// Has the screen scrolled? `false`: its top row is the first thing the
+    /// console wrote. `true`: it begins later, and the screen is full.
+    pub scrolled: bool,
+    /// Rows that reached the last column and whose line carried straight on
+    /// in the row below: wrapped lines.
     pub wraps: usize,
-    /// Rows found in the log only by allowing stray bytes inside them.
-    /// Informational; a large number says the tolerance is doing real work.
+    /// Rows that matched only by allowing stray bytes inside them.
     pub stray: usize,
     /// The most stray bytes any one row needed; at most [`MAX_STRAY`].
     pub worst: usize,
@@ -211,14 +259,13 @@ pub struct Report {
     pub text: Vec<String>,
 }
 
-impl fmt::Display for Report {
-    /// The one-line verdict:
-    /// `ok 800x600 100x37 rows=<non-blank> wraps=<n> stray=<n> worst=<n>`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Report {
+    /// The verdict's fields, without its first word:
+    /// `800x600 100x37 rows=<non-blank> wraps=<n> stray=<n> worst=<n>`.
+    pub fn fields(&self) -> String {
         let g = &self.geometry;
-        write!(
-            f,
-            "ok {}x{} {}x{} rows={} wraps={} stray={} worst={}",
+        format!(
+            "{}x{} {}x{} rows={} wraps={} stray={} worst={}",
             g.width,
             g.height,
             g.cols,
@@ -228,6 +275,14 @@ impl fmt::Display for Report {
             self.stray,
             self.worst
         )
+    }
+}
+
+impl fmt::Display for Report {
+    /// The one-line verdict: `ok <fields> scrolled=yes` or `… scrolled=no`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let scrolled = if self.scrolled { "yes" } else { "no" };
+        write!(f, "ok {} scrolled={scrolled}", self.fields())
     }
 }
 
@@ -276,9 +331,20 @@ pub enum CheckError {
     },
     /// Step 3: fewer than [`MIN_ROWS`] rows hold text.
     TooFewRows { found: usize },
-    /// Step 3: a row's text is nowhere in the serial log, stray bytes allowed
-    /// for.
+    /// Step 3: a row's text is nowhere in the console stream, stray bytes
+    /// allowed for.
     RowNotInLog { row: usize, text: String },
+    /// Step 3: a row's text is in the console stream, but not where the
+    /// screen has it: not after the row above it.
+    RowMisplaced { row: usize, text: String },
+    /// Step 3: a row's text is where the screen has it, but what follows it
+    /// in the stream is neither the end of its line nor a wrap into the next
+    /// row.
+    RowEndsEarly { row: usize, text: String },
+    /// Step 3: the screen reads as a later stretch of the stream — it has
+    /// lost the console's first line — but is not full. `last` is its last
+    /// non-blank row.
+    NotFull { last: usize, rows: usize },
 }
 
 impl fmt::Display for CheckError {
@@ -339,12 +405,29 @@ impl fmt::Display for CheckError {
                 f,
                 "only {found} non-blank rows on the screen; at least {MIN_ROWS} are needed"
             ),
-            Self::RowNotInLog { row, text } => {
-                write!(
-                    f,
-                    "screen row {row} is not in the serial log's console text, even allowing {MAX_STRAY} tick bytes inside it: {text:?}"
-                )
-            }
+            Self::RowNotInLog { row, text } => write!(
+                f,
+                "screen row {row} is not in the serial log's console text, even allowing \
+                 {MAX_STRAY} tick bytes inside it: {text:?}"
+            ),
+            Self::RowMisplaced { row, text } => write!(
+                f,
+                "screen row {row} is in the serial log's console text, but not where the screen \
+                 has it — it does not follow the row above it there (shifted, repeated, out of \
+                 order, or left over from before a scroll): {text:?}"
+            ),
+            Self::RowEndsEarly { row, text } => write!(
+                f,
+                "screen row {row} stops where the serial log's console text goes on — neither \
+                 the end of a line nor a wrap into the next row follows it there (cut short, or \
+                 the row below is not its continuation): {text:?}"
+            ),
+            Self::NotFull { last, rows } => write!(
+                f,
+                "the screen does not begin with the console's first line, yet it is not full: \
+                 its last non-blank row is {last} of {rows} (a scrolled screen is written down \
+                 to its last rows)"
+            ),
         }
     }
 }
@@ -449,9 +532,12 @@ pub fn render(fmt: &Format, grid: &Grid) -> Canvas {
 }
 
 /// Apply F10 to a dump and the serial log of the boot it was taken from.
+///
+/// `Ok` is a screen that is the boot's; whether it has scrolled yet is
+/// [`Report::scrolled`], and a caller that needs a scrolled one checks it.
 pub fn check(image: &Ppm, log: &[u8]) -> Result<Report, CheckError> {
     // Step 1.
-    let geometry = geometry_from_log(log)?;
+    let (geometry, at) = fb_ok_line(log)?;
     let dump = (image.width(), image.height());
     if dump != (geometry.width, geometry.height) {
         return Err(CheckError::SizeMismatch {
@@ -471,71 +557,46 @@ pub fn check(image: &Ppm, log: &[u8]) -> Result<Report, CheckError> {
     let canvas = Canvas::from_ppm(image, &fmt);
     let rows = decode(&canvas, &fmt)?;
 
-    // Step 3.
-    let found = rows_in_log(&rows, &console_stream(log))?;
+    // Step 3. The stream starts AT the `fb ok` line, which `console_stream`
+    // then takes out with the other kernel lines: what is left is what this
+    // TTY wrote, from its first byte.
+    let console = console_stream(log.get(at..).unwrap_or(&[]));
+    let placed = place(&console, &rows, fmt.cols())?;
     Ok(Report {
         geometry,
-        non_blank_rows: found.non_blank,
-        wraps: found.wraps,
-        stray: found.stray,
-        worst: found.worst,
+        non_blank_rows: placed.non_blank,
+        scrolled: placed.scrolled,
+        wraps: placed.tally.wraps,
+        stray: placed.tally.stray,
+        worst: placed.tally.worst,
         text: rows.iter().map(|row| lossy(trimmed(row))).collect(),
     })
 }
 
-/// Step 1's reading of the log: the last line holding `[diag tty] fb ok`.
-///
-/// Read from the log **as written** — this is one of the kernel's lines, and
-/// [`console_stream`] would take it out. Lines end at a `\n` or a `\r`. A
-/// tick byte can land in this line as in any other, so the marker is looked
-/// for with step 3's tolerance and up to [`GEOMETRY_STRAY`] stray bytes may
-/// sit among the numbers. An exact reading is preferred to a tolerant one.
+/// Step 1's reading of the log: the last `[diag tty] fb ok` line.
 pub fn geometry_from_log(log: &[u8]) -> Result<Geometry, CheckError> {
-    let mut lines = log.split(|&b| b == b'\n' || b == b'\r');
-    // What follows the last line end has none of its own yet.
-    let unended = lines.next_back().unwrap_or(&[]);
-    if find_stray(unended, FB_OK).is_some() {
-        // Still being written: "rows=10" may be the start of "rows=100".
-        return Err(CheckError::BadGeometryLine(lossy(unended)));
-    }
-    let (line, found) = lines
-        .rev()
-        .find_map(|line| Some((line, find_stray(line, FB_OK)?)))
-        .ok_or(CheckError::NoGeometryLine)?;
-    let rest = line.get(found.end..).unwrap_or(&[]);
-    parse_geometry(rest).ok_or_else(|| CheckError::BadGeometryLine(lossy(line)))
+    fb_ok_line(log).map(|(geometry, _)| geometry)
 }
 
-/// ` w=<w> h=<h> cols=<c> rows=<r>` and nothing after it — exactly, or else
-/// with one or two ([`GEOMETRY_STRAY`]) stray bytes taken out. Only a byte
-/// that can be a stray is ever taken out: never a digit.
-fn parse_geometry(rest: &[u8]) -> Option<Geometry> {
-    if let Some(geometry) = parse_geometry_exact(rest) {
-        return Some(geometry);
-    }
-    let strays: Vec<usize> = (0..rest.len())
-        .filter(|&i| rest.get(i).copied().is_some_and(may_be_stray))
-        .collect();
-    let without = |skip: &[usize]| -> Vec<u8> {
-        rest.iter()
-            .enumerate()
-            .filter(|(i, _)| !skip.contains(i))
-            .map(|(_, &b)| b)
-            .collect()
-    };
-    for (n, &i) in strays.iter().enumerate() {
-        if let Some(geometry) = parse_geometry_exact(&without(&[i])) {
-            return Some(geometry);
-        }
-        if GEOMETRY_STRAY >= 2 {
-            for &j in strays.iter().skip(n + 1) {
-                if let Some(geometry) = parse_geometry_exact(&without(&[i, j])) {
-                    return Some(geometry);
-                }
-            }
-        }
-    }
-    None
+/// The last `[diag tty] fb ok` line: what it says, and where in `log` it
+/// starts.
+///
+/// Read exactly. It is a kernel line, written whole inside one kernel call
+/// (the module docs say where), so no tick byte can be in it and none is
+/// allowed for. It must have its line end (`\n` or `\r`): without one it may
+/// still be being written, and "rows=10" the start of "rows=100".
+fn fb_ok_line(log: &[u8]) -> Result<(Geometry, usize), CheckError> {
+    let at = rfind(log, FB_OK).ok_or(CheckError::NoGeometryLine)?;
+    let from = log.get(at..).unwrap_or(&[]);
+    let end = from.iter().position(|&b| b == b'\n' || b == b'\r');
+    let line = end.and_then(|end| from.get(..end));
+    let bad = || CheckError::BadGeometryLine(lossy(line.unwrap_or(from)));
+    let line = line.ok_or_else(bad)?;
+    let geometry = line
+        .strip_prefix(FB_OK)
+        .and_then(parse_geometry)
+        .ok_or_else(bad)?;
+    Ok((geometry, at))
 }
 
 /// Take `label` and the decimal number after it off the front of `rest`.
@@ -555,7 +616,8 @@ fn number(rest: &mut &[u8], label: &[u8]) -> Option<u32> {
     )
 }
 
-fn parse_geometry_exact(mut rest: &[u8]) -> Option<Geometry> {
+/// ` w=<w> h=<h> cols=<c> rows=<r>`, and nothing after it.
+fn parse_geometry(mut rest: &[u8]) -> Option<Geometry> {
     let width = number(&mut rest, b" w=")?;
     let height = number(&mut rest, b" h=")?;
     let cols = number(&mut rest, b" cols=")?;
@@ -719,56 +781,323 @@ fn starts_kernel_line(text: &[u8]) -> bool {
     name > 0 && matches!(rest.get(name), Some(b' ' | b']'))
 }
 
-/// What step 3 counted.
-struct RowsFound {
-    non_blank: usize,
-    wraps: usize,
-    stray: usize,
-    worst: usize,
+/// May `byte` be one of the kernel's tick bytes? A letter — the first byte of
+/// a process's name — or the `?` printed for a process without one.
+const fn may_be_stray(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'?'
 }
 
-/// Step 3: every non-blank row is in the console stream, and there are
-/// enough of them.
-fn rows_in_log(rows: &[Vec<u8>], console: &[u8]) -> Result<RowsFound, CheckError> {
-    let mut found = RowsFound {
-        non_blank: 0,
-        wraps: 0,
-        stray: 0,
-        worst: 0,
+/// What one reading of the screen cost. Ordered so that the smallest is the
+/// reading to report: the fewest strays in its worst row first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Tally {
+    /// The most stray bytes inside any one row.
+    worst: usize,
+    /// Rows with any stray byte inside them.
+    stray: usize,
+    /// Rows whose line carried on in the row below.
+    wraps: usize,
+}
+
+/// How the screen sits in the console stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placed {
+    non_blank: usize,
+    scrolled: bool,
+    tally: Tally,
+}
+
+/// Where a walk down the screen stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// This row's text is not where the row above left off.
+    Text(usize),
+    /// This row's text is there, but neither a line end nor a wrap follows.
+    End(usize),
+}
+
+impl Stop {
+    /// How far the walk got: later rows first, and at one row, having found
+    /// its text counts for more than not.
+    const fn progress(self) -> (usize, u8) {
+        match self {
+            Self::Text(row) => (row, 0),
+            Self::End(row) => (row, 1),
+        }
+    }
+}
+
+/// Where the top row may begin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Top {
+    /// At the start of the stream: the screen has not scrolled.
+    Start,
+    /// Anywhere after that.
+    Later,
+}
+
+/// Positions in the stream reached so far, each with the cheapest way there.
+type Reached = BTreeMap<usize, Tally>;
+
+fn reach_cheapest(reached: &mut Reached, at: usize, tally: Tally) {
+    reached
+        .entry(at)
+        .and_modify(|known| *known = (*known).min(tally))
+        .or_insert(tally);
+}
+
+/// The console stream, and for each position where the run of stray bytes
+/// starting there ends.
+struct Stream<'a> {
+    bytes: &'a [u8],
+    /// `run_end[p]`: the first position at or after `p` that does not hold a
+    /// stray byte (`bytes.len()` if there is none).
+    run_end: Vec<usize>,
+}
+
+impl<'a> Stream<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        let mut run_end = vec![bytes.len(); bytes.len() + 1];
+        for (p, &byte) in bytes.iter().enumerate().rev() {
+            if !may_be_stray(byte) {
+                run_end[p] = p;
+            } else if let Some(&next) = run_end.get(p + 1) {
+                run_end[p] = next;
+            }
+        }
+        Self { bytes, run_end }
+    }
+
+    /// The first position at or after `at` that is not a stray byte.
+    fn past_strays(&self, at: usize) -> usize {
+        self.run_end.get(at).copied().unwrap_or(self.bytes.len())
+    }
+
+    /// If, strays aside, `byte` is next at `at`: the position after it.
+    fn then(&self, at: usize, byte: u8) -> Option<usize> {
+        let at = self.past_strays(at);
+        (self.bytes.get(at) == Some(&byte)).then_some(at + 1)
+    }
+
+    /// If, strays aside, a line end is next at `at` — `\n`, or `\r` and
+    /// `\n` — the position after it.
+    fn line_end(&self, at: usize) -> Option<usize> {
+        self.then(at, b'\n')
+            .or_else(|| self.then(self.then(at, b'\r')?, b'\n'))
+    }
+
+    /// If `byte` is at `at` itself, no strays allowed: the position after it.
+    fn here(&self, at: usize, byte: u8) -> Option<usize> {
+        (self.bytes.get(at) == Some(&byte)).then_some(at + 1)
+    }
+
+    /// If a line end is at `at` itself: the position after it. (Strays may
+    /// still sit between its `\r` and its `\n`.)
+    fn line_end_here(&self, at: usize) -> Option<usize> {
+        self.here(at, b'\n')
+            .or_else(|| self.then(self.here(at, b'\r')?, b'\n'))
+    }
+
+    /// Where a row's text beginning with `first` may start, given that the
+    /// row above left off at `at`: `first` itself, after any strays.
+    fn starts(&self, at: usize, first: u8) -> impl Iterator<Item = usize> + '_ {
+        // A first byte that could itself be a stray may be any one of a run
+        // of them; one that could not is the byte the run ends at.
+        let end = self.past_strays(at);
+        let from = if may_be_stray(first) { at } else { end };
+        (from..=end).filter(move |&p| self.bytes.get(p) == Some(&first))
+    }
+}
+
+/// Walk the rows `texts` (trailing blanks removed; the last one non-blank)
+/// down the stream and return the cheapest reading, or where every reading
+/// stopped.
+fn walk(stream: &Stream, texts: &[&[u8]], cols: usize, top: Top) -> Result<Tally, Stop> {
+    // Where the row about to be read may begin, strays aside.
+    let mut gaps = Reached::new();
+    let first_row = texts.first().copied().unwrap_or(&[]);
+    // The start of the stream, and the strays that may precede its first
+    // line: where a screen that has not scrolled begins.
+    let head = stream.past_strays(0);
+    match (top, first_row.first()) {
+        (Top::Start, _) => {
+            gaps.insert(0, Tally::default());
+        }
+        // A blank top row of a scrolled screen is an empty line: it begins
+        // where some line begins.
+        (Top::Later, None) => {
+            for (p, _) in stream
+                .bytes
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| b == b'\n')
+            {
+                gaps.insert(p + 1, Tally::default());
+            }
+        }
+        // Any other may begin anywhere — it may be the tail of a line whose
+        // head has scrolled away — except at the stream's start.
+        (Top::Later, Some(_)) => {}
+    }
+
+    for (row, &text) in texts.iter().enumerate() {
+        // The row's text.
+        let mut ends = Reached::new();
+        match text.split_first() {
+            None => ends = std::mem::take(&mut gaps),
+            Some((&first, tail)) => {
+                let mut from: Vec<(usize, Tally)> = Vec::new();
+                if row == 0 && top == Top::Later {
+                    from.extend(
+                        (head + 1..stream.bytes.len())
+                            .filter(|&p| stream.bytes.get(p) == Some(&first))
+                            .map(|p| (p, Tally::default())),
+                    );
+                } else {
+                    for (&at, &tally) in &gaps {
+                        from.extend(stream.starts(at, first).map(|p| (p, tally)));
+                    }
+                }
+                for (start, tally) in from {
+                    let mut ways = reach(stream.bytes, start, tail, MAX_STRAY);
+                    while ways != 0 {
+                        let strays = ways.trailing_zeros() as usize;
+                        ways &= ways - 1;
+                        let tally = Tally {
+                            worst: tally.worst.max(strays),
+                            stray: tally.stray + usize::from(strays > 0),
+                            wraps: tally.wraps,
+                        };
+                        reach_cheapest(&mut ends, start + text.len() + strays, tally);
+                    }
+                }
+            }
+        }
+        if ends.is_empty() {
+            return Err(Stop::Text(row));
+        }
+        // The last non-blank row: its text is all that is asked of it.
+        if row + 1 == texts.len() {
+            return ends.values().copied().min().ok_or(Stop::Text(row));
+        }
+
+        // What follows it: blanks up to the last column, then a line end —
+        // or, at the last column only, the next row straight away. Strays
+        // may follow the text; once a blank has been read, only blanks and
+        // the line end may, with nothing between — or a word lost after a
+        // space ("errno" for "errno ok") would read as a blank and a run of
+        // tick bytes.
+        let blanks = cols.saturating_sub(text.len());
+        gaps = Reached::new();
+        for (&end, &tally) in &ends {
+            let mut at = end;
+            for seen in 0..=blanks {
+                let line_end = if seen == 0 {
+                    stream.line_end(at)
+                } else {
+                    stream.line_end_here(at)
+                };
+                if let Some(next) = line_end {
+                    reach_cheapest(&mut gaps, next, tally);
+                }
+                if seen == blanks {
+                    let wrapped = Tally {
+                        wraps: tally.wraps + 1,
+                        ..tally
+                    };
+                    reach_cheapest(&mut gaps, at, wrapped);
+                    break;
+                }
+                let blank = if seen == 0 {
+                    stream.then(at, BLANK)
+                } else {
+                    stream.here(at, BLANK)
+                };
+                match blank {
+                    Some(next) => at = next,
+                    None => break,
+                }
+            }
+        }
+        if gaps.is_empty() {
+            return Err(Stop::End(row));
+        }
+    }
+    // `texts` is never empty; an empty walk reads nothing.
+    Err(Stop::Text(0))
+}
+
+/// Step 3: place the screen in the console stream.
+fn place(console: &[u8], rows: &[Vec<u8>], cols: usize) -> Result<Placed, CheckError> {
+    let texts: Vec<&[u8]> = rows.iter().map(|row| trimmed(row)).collect();
+    let non_blank = texts.iter().filter(|text| !text.is_empty()).count();
+    let Some(last) = texts.iter().rposition(|text| !text.is_empty()) else {
+        return Err(CheckError::TooFewRows { found: 0 });
     };
-    for (r, row) in rows.iter().enumerate() {
-        let text = trimmed(row);
-        if text.is_empty() {
-            continue;
-        }
-        found.non_blank += 1;
-        let Some(at) = find_stray(console, text) else {
-            return Err(CheckError::RowNotInLog {
-                row: r,
-                text: lossy(text),
-            });
-        };
-        if at.strays > 0 {
-            found.stray += 1;
-            found.worst = found.worst.max(at.strays);
-        }
-        // A row that ends in the last column may be a line that wrapped. If
-        // its text runs straight on into the next row's in the log, it was.
-        // Not finding that refuses nothing: see the module docs.
-        let below = rows.get(r + 1).map_or(&[][..], |next| trimmed(next));
-        if row.last().is_some_and(|&b| b != BLANK) && !below.is_empty() {
-            let joined = [row.as_slice(), below].concat();
-            if find_stray(console, &joined).is_some() {
-                found.wraps += 1;
+    let shown = texts.get(..=last).unwrap_or(&texts);
+    let stream = Stream::new(console);
+
+    let placed = match walk(&stream, shown, cols, Top::Start) {
+        Ok(tally) => Placed {
+            non_blank,
+            scrolled: false,
+            tally,
+        },
+        Err(from_start) => match walk(&stream, shown, cols, Top::Later) {
+            // After a scroll the cursor is on the last row and every row
+            // above it has been written.
+            Ok(_) if last + 2 < rows.len() => {
+                return Err(CheckError::NotFull {
+                    last,
+                    rows: rows.len(),
+                });
+            }
+            Ok(tally) => Placed {
+                non_blank,
+                scrolled: true,
+                tally,
+            },
+            Err(later) => {
+                // Say where the reading that got furthest stopped.
+                let stop = if later.progress() >= from_start.progress() {
+                    later
+                } else {
+                    from_start
+                };
+                return Err(refusal(console, &texts, stop));
+            }
+        },
+    };
+    if non_blank < MIN_ROWS {
+        return Err(CheckError::TooFewRows { found: non_blank });
+    }
+    Ok(placed)
+}
+
+/// Turn where a walk stopped into what to tell a person.
+fn refusal(console: &[u8], texts: &[&[u8]], stop: Stop) -> CheckError {
+    let text_of = |row: usize| lossy(texts.get(row).copied().unwrap_or(&[]));
+    match stop {
+        Stop::End(row) => CheckError::RowEndsEarly {
+            row,
+            text: text_of(row),
+        },
+        Stop::Text(row) => {
+            let text = texts.get(row).copied().unwrap_or(&[]);
+            // A blank row "is" anywhere; only its place can be wrong.
+            if text.is_empty() || find_stray(console, text).is_some() {
+                CheckError::RowMisplaced {
+                    row,
+                    text: text_of(row),
+                }
+            } else {
+                CheckError::RowNotInLog {
+                    row,
+                    text: text_of(row),
+                }
             }
         }
     }
-    if found.non_blank < MIN_ROWS {
-        return Err(CheckError::TooFewRows {
-            found: found.non_blank,
-        });
-    }
-    Ok(found)
 }
 
 /// `row` without its trailing blanks.
@@ -796,6 +1125,14 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     }
 }
 
+/// Where `needle` last occurs in `hay`.
+fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    hay.windows(needle.len()).rposition(|w| w == needle)
+}
+
 /// Where a tolerant search found its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Found {
@@ -807,16 +1144,12 @@ struct Found {
     strays: usize,
 }
 
-/// May `byte` be one of the kernel's tick bytes? A letter — the first byte of
-/// a process's name — or the `?` printed for a process without one.
-const fn may_be_stray(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || byte == b'?'
-}
-
-/// Find `needle` in `hay`, allowing runs of stray bytes between its bytes,
-/// [`MAX_STRAY`] in total (the module docs give the rule). An exact
-/// occurrence anywhere is preferred; failing that, the occurrence needing the
-/// fewest strays, and of those the leftmost.
+/// Find `needle` anywhere in `hay`, allowing runs of stray bytes between its
+/// bytes, [`MAX_STRAY`] in total. An exact occurrence is preferred; failing
+/// that, the occurrence needing the fewest strays, and of those the leftmost.
+///
+/// Used only to word a refusal: is a row's text nowhere, or merely not where
+/// the screen has it?
 fn find_stray(hay: &[u8], needle: &[u8]) -> Option<Found> {
     if let Some(start) = find(hay, needle) {
         return Some(Found {
@@ -835,7 +1168,9 @@ fn find_stray(hay: &[u8], needle: &[u8]) -> Option<Found> {
             Some(found) => found.strays - 1,
             None => MAX_STRAY,
         };
-        if let Some(strays) = strays_from(hay, start, tail, limit) {
+        let ways = reach(hay, start, tail, limit);
+        if ways != 0 {
+            let strays = ways.trailing_zeros() as usize;
             best = Some(Found {
                 start,
                 end: start + needle.len() + strays,
@@ -846,18 +1181,18 @@ fn find_stray(hay: &[u8], needle: &[u8]) -> Option<Found> {
     best
 }
 
-/// The fewest stray bytes, at most `limit`, with which `tail` follows the
-/// byte at `hay[start]`; `None` if it does not.
+/// Every number of stray bytes, up to `limit`, with which `tail` can follow
+/// the byte at `hay[start]`: bit `k` is set if it can with exactly `k`.
 ///
-/// Bit `k` of `reach`: the needle's bytes so far can be laid on `hay` from
-/// `start` with exactly `k` strays among them, the latest at `start + j + k`.
-/// Every way of placing the strays is followed at once, which a matcher that
-/// commits to the first byte that fits cannot do.
-fn strays_from(hay: &[u8], start: usize, tail: &[u8], limit: usize) -> Option<usize> {
-    let mut reach: u64 = 1;
+/// While reading, bit `k` of `ways` says the needle's bytes so far can be
+/// laid on `hay` from `start` with exactly `k` strays among them, the latest
+/// at `start + j + k`. Every way of placing the strays is followed at once,
+/// which a matcher that commits to the first byte that fits cannot do.
+fn reach(hay: &[u8], start: usize, tail: &[u8], limit: usize) -> u128 {
+    let mut ways: u128 = 1;
     for (j, &want) in (1..).zip(tail) {
-        let mut next: u64 = 0;
-        let mut from = reach;
+        let mut next: u128 = 0;
+        let mut from = ways;
         while from != 0 {
             let k = from.trailing_zeros() as usize;
             from &= from - 1;
@@ -868,18 +1203,18 @@ fn strays_from(hay: &[u8], start: usize, tail: &[u8], limit: usize) -> Option<us
                 if byte == want {
                     next |= 1 << strays;
                 }
-                if strays == limit || !may_be_stray(byte) {
+                if strays >= limit || !may_be_stray(byte) {
                     break;
                 }
                 strays += 1;
             }
         }
-        reach = next;
-        if reach == 0 {
-            return None;
+        ways = next;
+        if ways == 0 {
+            break;
         }
     }
-    Some(reach.trailing_zeros() as usize)
+    ways
 }
 
 #[cfg(test)]
@@ -984,7 +1319,7 @@ mod tests {
         );
         assert_eq!(
             report.to_string(),
-            "ok 85x168 10x10 rows=8 wraps=0 stray=0 worst=0"
+            "ok 85x168 10x10 rows=8 wraps=0 stray=0 worst=0 scrolled=no"
         );
     }
 
@@ -1027,7 +1362,7 @@ mod tests {
         assert_eq!(report.text[35], "minix.rs init: rotation line 49");
         assert_eq!(
             report.to_string(),
-            "ok 800x600 100x37 rows=36 wraps=0 stray=0 worst=0"
+            "ok 800x600 100x37 rows=36 wraps=0 stray=0 worst=0 scrolled=yes"
         );
     }
 
@@ -1323,7 +1658,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "screen row 3 is not in the serial log's console text, even allowing 32 tick bytes inside it: \"delta\""
+            "screen row 3 is not in the serial log's console text, even allowing 120 tick bytes inside it: \"delta\""
         );
 
         // One byte different is absent too, in the first row and in the last.
@@ -1528,19 +1863,29 @@ mod tests {
     // --- step 3: the log is bytes ----------------------------------------------
 
     #[test]
-    fn stray_bytes_and_other_writers_around_the_lines_do_not_matter() {
-        // Not UTF-8, NULs, CR LF line ends, kernel lines between and beside
-        // the console's, and a raw byte directly before and after a line.
-        let mut bytes = b"\xFF\xFE\x00[kernel] boot\r\n".to_vec();
+    fn what_came_before_the_fb_ok_line_does_not_matter_and_what_comes_after_does() {
+        // Before it: firmware text, not UTF-8, NULs, and console-looking text
+        // of an earlier TTY. None of it was drawn by this one.
+        let mut bytes = b"\xFF\xFE\x00UEFI firmware\r\n\x1b[2Jalpha 0\r\nzulu\r\n".to_vec();
         bytes.extend_from_slice(b"[diag tty] fb ok w=85 h=168 cols=10 rows=10\r\n");
-        for line in EIGHT.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
-            bytes.extend_from_slice(b"\x80[ipc 12]\x00\n\xC3");
-            bytes.extend_from_slice(line);
-            bytes.extend_from_slice(b"\xFF\r\n[diag vfs] something else\r\n");
-        }
+        bytes.extend_from_slice(&EIGHT.replace(b"\n", b"\r\n"));
         assert!(std::str::from_utf8(&bytes).is_err());
         let report = check(&dump(W, H, EIGHT), &bytes).unwrap();
-        assert_eq!(report.non_blank_rows, 8);
+        assert_eq!((report.non_blank_rows, report.scrolled), (8, false));
+
+        // After it, a byte that is neither console text nor a tick byte
+        // breaks the stretch: the row after it does not follow the row above.
+        for junk in [&b"\xFF"[..], b"\x00", b"7", b"-", b"zulu 9\n"] {
+            let body = EIGHT.replace(b"charlie 3", &[junk, b"charlie 3"].concat());
+            assert_eq!(
+                check(&dump(W, H, EIGHT), &log(W, H, &body)),
+                Err(CheckError::RowMisplaced {
+                    row: 2,
+                    text: "charlie 3".into()
+                }),
+                "{junk:?}"
+            );
+        }
     }
 
     #[test]
@@ -1558,7 +1903,7 @@ mod tests {
         assert_eq!(report.non_blank_rows, 9);
         assert_eq!(
             report.to_string(),
-            "ok 320x160 40x10 rows=9 wraps=0 stray=1 worst=1"
+            "ok 320x160 40x10 rows=9 wraps=0 stray=1 worst=1 scrolled=no"
         );
 
         // Two strays in one row, and strays in two rows.
@@ -1604,7 +1949,7 @@ mod tests {
 
     #[test]
     fn more_tick_bytes_than_the_cap_in_one_row_are_refused() {
-        assert_eq!(MAX_STRAY, 32);
+        assert_eq!(MAX_STRAY, 120);
         let text = [b"hello: iov ...ok\n".as_slice(), EIGHT].concat();
         let (w, h) = (320, 160);
         let image = dump(w, h, &text);
@@ -1614,7 +1959,7 @@ mod tests {
         };
         // Exactly the cap passes, and says so.
         let report = check(&image, &with_run(MAX_STRAY)).unwrap();
-        assert_eq!((report.stray, report.worst), (1, 32));
+        assert_eq!((report.stray, report.worst), (1, MAX_STRAY));
         // One more does not.
         assert_eq!(
             check(&image, &with_run(MAX_STRAY + 1)),
@@ -1629,15 +1974,11 @@ mod tests {
             check(&image, &body),
             Err(CheckError::RowNotInLog { row: 0, .. })
         ));
-        // The row is found where ANY occurrence is within the cap: the fewest
-        // strays over the whole log is the row's count.
-        let body = [
-            with_run(MAX_STRAY + 5),
-            text.replace(b"iov ...", b"iov CCC..."),
-        ]
-        .concat();
-        let report = check(&image, &body).unwrap();
-        assert_eq!((report.stray, report.worst), (1, 3));
+        // The cap is on what is INSIDE a row. A run before the row, however
+        // long, is not.
+        let body = [vec![b'C'; 40 * MAX_STRAY], text.clone()].concat();
+        let report = check(&image, &log(w, h, &body)).unwrap();
+        assert_eq!((report.stray, report.worst), (0, 0));
     }
 
     #[test]
@@ -1719,25 +2060,36 @@ mod tests {
     }
 
     #[test]
-    fn the_fb_ok_line_tolerates_stray_bytes_too() {
+    fn no_tick_byte_is_allowed_for_in_the_fb_ok_line() {
+        // The kernel writes the line inside one kernel call; nothing can land
+        // in it, so a line with something in it is not the line.
         let image = dump(W, H, EIGHT);
         for line in [
             &b"[diag tty] fb ok w=85 h=1T68 cols=10 rows=10\n"[..],
-            b"[diag ttyy] fb ok w=85 h=168 cols=10 rows=10\n",
             b"[diag tty] fb okk w=85 h=168 cols=10 rows=10\n",
             b"[diag tty] fb ok w=85 h=168 cols=10 rows=10V\n",
-            b"[diag ttSy] fb ok w=85 h=168 cols=1V0 rows=10\n",
-            b"[diag tty] fb ok w=85 h=168 cSols=10 rVows=10\r\n",
-            b"S[diag tty] fb ok w=85 h=168 cols=10 rows=10\n",
+            b"[diag tty] fb ok w=85 h=168 cSols=10 rows=10\r\n",
         ] {
-            let bytes = [line, EIGHT].concat();
-            let result = check(&image, &bytes);
+            let result = check(&image, &[line, EIGHT].concat());
             assert!(
-                result.is_ok(),
+                matches!(result, Err(CheckError::BadGeometryLine(_))),
                 "{:?} gave {result:?}",
                 String::from_utf8_lossy(line)
             );
         }
+        // Inside the marker itself, it is not found at all.
+        for line in [
+            &b"[diag ttyy] fb ok w=85 h=168 cols=10 rows=10\n"[..],
+            b"[diag tty] fbC ok w=85 h=168 cols=10 rows=10\n",
+        ] {
+            assert_eq!(
+                check(&image, &[line, EIGHT].concat()),
+                Err(CheckError::NoGeometryLine)
+            );
+        }
+        // Before the line is not in it.
+        let line = b"S[diag tty] fb ok w=85 h=168 cols=10 rows=10\n";
+        assert!(check(&image, &[&line[..], EIGHT].concat()).is_ok());
     }
 
     // --- the tolerant matcher ------------------------------------------------------
@@ -1834,10 +2186,10 @@ mod tests {
             }
             all
         }
-        /// The fewest deletions that turn a stretch starting at `start` into
-        /// the needle.
-        fn slow(hay: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
-            let mut best = None;
+        /// Every number of deletions that turns a stretch starting at
+        /// `start` into the needle, as a bitmask.
+        fn slow(hay: &[u8], start: usize, needle: &[u8]) -> u128 {
+            let mut ways = 0;
             for end in start + needle.len()..=hay.len() {
                 let stretch = &hay[start..end];
                 let inner = stretch.len().saturating_sub(2);
@@ -1852,13 +2204,12 @@ mod tests {
                             kept.push(b);
                         }
                     }
-                    let n = mask.count_ones() as usize;
-                    if legal && kept == needle && best.is_none_or(|b| n < b) {
-                        best = Some(n);
+                    if legal && kept == needle {
+                        ways |= 1 << mask.count_ones();
                     }
                 }
             }
-            best
+            ways
         }
         let hays = strings(b"ax-", 6);
         let mut tolerant = 0;
@@ -1872,14 +2223,15 @@ mod tests {
                     let want = slow(hay, start, needle);
                     for limit in 0..=5 {
                         assert_eq!(
-                            strays_from(hay, start, &needle[1..], limit),
-                            want.filter(|&n| n <= limit),
+                            reach(hay, start, &needle[1..], limit),
+                            want & ((1 << (limit + 1)) - 1),
                             "needle {:?} in {:?} from {start}, limit {limit}",
                             String::from_utf8_lossy(needle),
                             String::from_utf8_lossy(hay)
                         );
                     }
-                    if let Some(n) = want {
+                    if want != 0 {
+                        let n = want.trailing_zeros() as usize;
                         overall = Some(overall.map_or(n, |o| o.min(n)));
                     }
                 }
@@ -2162,19 +2514,396 @@ mod tests {
     }
 
     #[test]
-    fn the_fb_ok_line_is_read_from_the_raw_log_wherever_it_starts() {
-        // It is a kernel line: it can begin mid console line, and it is gone
-        // from the console stream.
-        let raw = [
-            b"alpha".as_slice(),
-            &fb_ok(W, H),
-            b" 1\r\n",
-            IPC,
-            &EIGHT[8..],
-        ]
-        .concat();
+    fn the_console_stream_starts_at_the_fb_ok_line() {
+        // The line is a kernel line: it can begin anywhere, and it is not
+        // itself in the stream.
+        let raw = [b"firmware\x1b[2J".as_slice(), &fb_ok(W, H), IPC, EIGHT].concat();
         assert!(find(&console_stream(&raw), FB_OK).is_none());
-        assert_eq!(check(&dump(W, H, EIGHT), &raw).unwrap().non_blank_rows, 8);
+        let report = check(&dump(W, H, EIGHT), &raw).unwrap();
+        assert_eq!((report.non_blank_rows, report.scrolled), (8, false));
+
+        // Text written before it was not drawn by this TTY: a screen showing
+        // it is showing something this console never wrote.
+        let raw = [b"alpha 1\n".as_slice(), &fb_ok(W, H), &EIGHT[8..]].concat();
+        assert_eq!(
+            check(&dump(W, H, EIGHT), &raw),
+            Err(CheckError::RowNotInLog {
+                row: 0,
+                text: "alpha 1".into()
+            })
+        );
+    }
+
+    // --- scrolled, or not yet -----------------------------------------------------
+
+    /// A 10 × 10 screen showing exactly `rows`, whatever a console would have
+    /// drawn: for screens no honest TTY produces.
+    fn dump_rows(rows: &[&[u8]]) -> Ppm {
+        let f = fmt(W, H);
+        let mut grid = Grid::new(f.cols(), f.rows());
+        for r in 0..f.rows() {
+            let text = rows.get(r).copied().unwrap_or(b"");
+            assert!(text.len() <= COLS);
+            for c in 0..f.cols() {
+                grid.put(text.get(c).copied().unwrap_or(b' '));
+            }
+        }
+        dump_of(&render(&f, &grid))
+    }
+
+    /// Twelve numbered lines, `"1: one\n"` to `"12: twelve\n"`.
+    const TWELVE: &[u8] = b"1: one\n2: two\n3: three\n4: four\n5: five\n6: six\n7: seven\n8: eight\n9: nine\n10: ten\n11: eleven\n12: twelve\n";
+
+    fn lines(text: &[u8]) -> Vec<&[u8]> {
+        text.split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn a_screen_that_begins_with_the_consoles_first_line_has_not_scrolled() {
+        assert!(!check_text(EIGHT).unwrap().scrolled);
+        // Nine lines: the cursor is on the last row, and nothing has moved.
+        let nine = &TWELVE[..TWELVE.len() - 32];
+        assert_eq!(lines(nine).len(), 9);
+        let report = check_text(nine).unwrap();
+        assert_eq!((report.non_blank_rows, report.scrolled), (9, false));
+        // Ten lines and no newline after the tenth: every row is written and
+        // still nothing has scrolled. Full is not scrolled.
+        let ten = &TWELVE[..TWELVE.len() - 23];
+        assert!(ten.ends_with(b"10: ten"));
+        let report = check_text(ten).unwrap();
+        assert_eq!((report.non_blank_rows, report.scrolled), (10, false));
+        assert!(report.to_string().ends_with(" scrolled=no"));
+    }
+
+    #[test]
+    fn a_screen_whose_first_line_has_scrolled_away_is_scrolled() {
+        // The newline after the tenth line scrolls once.
+        let ten = &TWELVE[..TWELVE.len() - 22];
+        assert!(ten.ends_with(b"10: ten\n"));
+        let report = check_text(ten).unwrap();
+        assert_eq!(report.text[0], "2: two");
+        assert_eq!(report.text[8], "10: ten");
+        assert_eq!(report.text[9], "", "the cursor's row");
+        assert!(report.scrolled);
+        assert!(report.to_string().ends_with(" scrolled=yes"));
+        // And on: twelve lines, three scrolls.
+        let report = check_text(TWELVE).unwrap();
+        assert_eq!(report.text[0], "4: four");
+        assert!(report.scrolled);
+        // A line still being written on the last row of a scrolled screen.
+        let text = [TWELVE, b"13: thir"].concat();
+        let report = check_text(&text).unwrap();
+        assert_eq!(
+            (report.text[9].as_str(), report.scrolled),
+            ("13: thir", true)
+        );
+    }
+
+    #[test]
+    fn a_screen_that_reads_both_ways_is_reported_as_not_scrolled() {
+        // The console wrote the same ten lines twice; the screen shows the
+        // second ten, having scrolled, and cannot be told from the first.
+        let ten = &TWELVE[..TWELVE.len() - 23];
+        let twice = [ten, b"\n", ten].concat();
+        let report = check(&dump(W, H, &twice), &log(W, H, &twice)).unwrap();
+        assert_eq!(report.text[0], "1: one");
+        assert!(!report.scrolled, "the cautious answer");
+    }
+
+    #[test]
+    fn a_screen_that_never_drew_its_first_rows_cannot_pass_as_scrolled() {
+        let all = lines(TWELVE);
+        let honest: Vec<&[u8]> = all[..10].to_vec();
+        let body = &TWELVE[..TWELVE.len() - 23];
+        assert!(
+            !check(&dump_rows(&honest), &log(W, H, body))
+                .unwrap()
+                .scrolled
+        );
+
+        // Row 0 never drawn: rows 1.. are the console's lines 2.., and row 0
+        // is no line of the stream at that place.
+        let mut rows = honest.clone();
+        rows[0] = b"";
+        assert_eq!(
+            check(&dump_rows(&rows), &log(W, H, body)),
+            Err(CheckError::RowEndsEarly {
+                row: 0,
+                text: String::new()
+            })
+        );
+        // Rows 0 and 1 never drawn.
+        rows[1] = b"";
+        assert!(check(&dump_rows(&rows), &log(W, H, body)).is_err());
+        // The first line drawn on row 0, but it is the console's second.
+        let mut rows = honest.clone();
+        rows.remove(0);
+        // Nine rows from line 2: a later stretch, and not a full screen...
+        rows.pop();
+        assert_eq!(
+            check(&dump_rows(&rows), &log(W, H, body)),
+            Err(CheckError::NotFull { last: 7, rows: 10 })
+        );
+    }
+
+    #[test]
+    fn a_later_stretch_on_a_screen_that_is_not_full_is_refused() {
+        // What a "scroll" that cleared the screen and went back to the top
+        // would leave: the newest lines, in order, from row 0, and blank
+        // rows below them.
+        let all = lines(TWELVE);
+        for shown in 1..=8 {
+            let rows: Vec<&[u8]> = all[3..3 + shown].to_vec();
+            assert_eq!(
+                check(&dump_rows(&rows), &log(W, H, TWELVE)),
+                Err(CheckError::NotFull {
+                    last: shown - 1,
+                    rows: 10
+                }),
+                "{shown} rows"
+            );
+        }
+        // Written down to the last row but one: that is a scrolled screen.
+        let rows: Vec<&[u8]> = all[3..12].to_vec();
+        let report = check(&dump_rows(&rows), &log(W, H, TWELVE)).unwrap();
+        assert_eq!((report.non_blank_rows, report.scrolled), (9, true));
+        let err = CheckError::NotFull { last: 3, rows: 10 }.to_string();
+        assert!(err.contains("3 of 10") && err.contains("not full"), "{err}");
+    }
+
+    // --- every row where the row above leaves off ---------------------------------
+
+    /// The honest unscrolled screen of the first ten of [`TWELVE`], with
+    /// `change` applied to its rows.
+    fn doctored(change: impl Fn(&mut Vec<&[u8]>)) -> Result<Report, CheckError> {
+        let mut rows: Vec<&[u8]> = lines(TWELVE)[..10].to_vec();
+        change(&mut rows);
+        check(&dump_rows(&rows), &log(W, H, &TWELVE[..TWELVE.len() - 23]))
+    }
+
+    #[test]
+    fn a_row_cut_short_is_refused() {
+        assert!(doctored(|_| {}).is_ok());
+        for cut in [&b"3: "[..], b"3:", b"3"] {
+            assert_eq!(
+                doctored(|rows| rows[2] = cut),
+                Err(CheckError::RowEndsEarly {
+                    row: 2,
+                    text: lossy(trimmed(cut))
+                }),
+                "{:?}",
+                String::from_utf8_lossy(cut)
+            );
+        }
+        // Letters lost from the END of a line are not seen: they read as tick
+        // bytes before the line end. Pinned, not wanted.
+        assert!(doctored(|rows| rows[2] = b"3: thr").is_ok());
+        // A word lost after a space, a digit lost, punctuation lost.
+        let body = b"errno ok\nn=15\ndone.\n4\n5\n6\n7\n8\n9\n";
+        let shown = |rows: &[&[u8]]| check(&dump_rows(rows), &log(W, H, body));
+        let honest: Vec<&[u8]> = lines(body);
+        assert!(shown(&honest).is_ok());
+        for (row, cut) in [(0, &b"errno"[..]), (1, b"n=1"), (2, b"done")] {
+            let mut rows = honest.clone();
+            rows[row] = cut;
+            assert_eq!(
+                shown(&rows),
+                Err(CheckError::RowEndsEarly {
+                    row,
+                    text: lossy(cut)
+                })
+            );
+        }
+        let text = CheckError::RowEndsEarly {
+            row: 2,
+            text: "3: thr".into(),
+        }
+        .to_string();
+        assert!(
+            text.contains("screen row 2") && text.contains("\"3: thr\""),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn overflow_that_was_dropped_instead_of_wrapped_is_refused() {
+        // Fourteen bytes on ten columns must take two rows.
+        let body = b"0123456789-=+!\n2\n3\n4\n5\n6\n7\n8\n";
+        assert_eq!(check_text(body).unwrap().wraps, 1);
+        let rows: Vec<&[u8]> = vec![b"0123456789", b"2", b"3", b"4", b"5", b"6", b"7", b"8"];
+        assert_eq!(
+            check(&dump_rows(&rows), &log(W, H, body)),
+            Err(CheckError::RowMisplaced {
+                row: 1,
+                text: "2".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_row_shifted_left_is_refused_when_it_lost_more_than_letters() {
+        for shifted in [&b" three"[..], b"three"] {
+            assert_eq!(
+                doctored(|rows| rows[2] = shifted),
+                Err(CheckError::RowMisplaced {
+                    row: 2,
+                    text: lossy(shifted)
+                })
+            );
+        }
+        // Having lost only letters from its front, it is not: they read as a
+        // run of tick bytes before the line. Pinned, not wanted.
+        let body = b"alpha 1\nbravo 22\ncharlie 3\ndelta\necho 5\nfoxtrot\ngolf\nhotel 8\n";
+        let mut rows = lines(body);
+        rows[2] = b"lie 3";
+        let report = check(&dump_rows(&rows), &log(W, H, body)).unwrap();
+        assert_eq!(report.stray, 0, "a run between rows is not inside one");
+    }
+
+    #[test]
+    fn a_repeated_row_and_rows_out_of_order_are_refused() {
+        // Row 2 replaced by a copy of row 4's line.
+        assert_eq!(
+            doctored(|rows| rows[2] = rows[4]),
+            Err(CheckError::RowMisplaced {
+                row: 2,
+                text: "5: five".into()
+            })
+        );
+        // Two rows exchanged.
+        assert_eq!(
+            doctored(|rows| rows.swap(2, 3)),
+            Err(CheckError::RowMisplaced {
+                row: 2,
+                text: "4: four".into()
+            })
+        );
+        // A row missing, the rest moved up.
+        assert_eq!(
+            doctored(|rows| {
+                rows.remove(2);
+            }),
+            Err(CheckError::RowMisplaced {
+                row: 2,
+                text: "4: four".into()
+            })
+        );
+        // A blank row where a line should be, and a line where the console
+        // wrote none.
+        assert!(matches!(
+            doctored(|rows| rows[2] = b""),
+            Err(CheckError::RowEndsEarly { row: 2, .. })
+        ));
+        assert!(matches!(
+            doctored(|rows| rows.insert(2, b"")),
+            Err(CheckError::RowEndsEarly { row: 2, .. })
+        ));
+        let text = CheckError::RowMisplaced {
+            row: 2,
+            text: "4: four".into(),
+        }
+        .to_string();
+        assert!(
+            text.contains("screen row 2") && text.contains("\"4: four\""),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn rows_left_over_from_before_a_scroll_are_refused() {
+        // Mutation 7's screen: the grid scrolled, nothing was repainted but
+        // the newest line. Rows 0..=8 still show lines 1..=9; row 9 shows
+        // line 11 over the cursor's row.
+        let all = lines(TWELVE);
+        let mut rows: Vec<&[u8]> = all[..9].to_vec();
+        rows.push(all[10]);
+        assert_eq!(
+            check(&dump_rows(&rows), &log(W, H, TWELVE)),
+            Err(CheckError::RowMisplaced {
+                row: 9,
+                text: "11: eleven".into()
+            })
+        );
+    }
+
+    #[test]
+    fn the_last_non_blank_row_is_matched_as_a_prefix() {
+        // A line still being written when the dump was taken; by the time the
+        // log was read it had been finished and more had followed.
+        let shown = [EIGHT, b"nine: par"].concat();
+        let written = [EIGHT, b"nine: partial, then finished\nten\neleven\n"].concat();
+        let report = check(&dump(W, H, &shown), &log(W, H, &written)).unwrap();
+        assert_eq!(report.text[8], "nine: par");
+        // The same exemption lets a last row that was cut short through.
+        // Pinned, not wanted.
+        assert!(doctored(|rows| rows[9] = b"10: t").is_ok());
+        // It is still its text that must be there.
+        assert_eq!(
+            doctored(|rows| rows[9] = b"10: tan"),
+            Err(CheckError::RowNotInLog {
+                row: 9,
+                text: "10: tan".into()
+            })
+        );
+        // Blank rows below it ask for nothing.
+        assert!(check_text(EIGHT).is_ok());
+    }
+
+    #[test]
+    fn blank_lines_blanks_at_a_lines_end_and_a_wrap_at_a_blank_are_read_as_drawn() {
+        // An empty line is a blank row between two others. (Twenty rows, so
+        // that eight of them can hold text.)
+        let text = b"one\n\nthree\n\n\nsix\n7\n8\n9\n10\n11\n";
+        let report = check(&dump(80, 320, text), &log(80, 320, text)).unwrap();
+        assert_eq!(&report.text[..6], ["one", "", "three", "", "", "six"]);
+        assert_eq!(report.non_blank_rows, 8, "blank rows are not counted");
+        // The log without one of the empty lines is another screen.
+        let body = text.replace(b"three\n\n\n", b"three\n\n");
+        assert!(check(&dump(80, 320, text), &log(80, 320, &body)).is_err());
+
+        // A line of blanks, and a line ending in them.
+        let text = b"one\n   \nthree  \n4\n5\n6\n7\n8\n9\n";
+        assert_eq!(check_text(text).unwrap().non_blank_rows, 8);
+
+        // A line that wraps where it has blanks: the row looks short and its
+        // line carries on below all the same.
+        let text = b"abcdefgh  ij\n2\n3\n4\n5\n6\n7\n8\n";
+        let report = check_text(text).unwrap();
+        assert_eq!(&report.text[..2], ["abcdefgh", "ij"]);
+        assert_eq!(report.wraps, 1);
+        // One blank fewer in the log and the row no longer reaches the last
+        // column: "ij" cannot be its continuation.
+        let body = text.replace(b"gh  ij", b"gh ij");
+        assert!(check(&dump(W, H, text), &log(W, H, &body)).is_err());
+    }
+
+    #[test]
+    fn tick_bytes_are_allowed_after_a_rows_text_but_not_after_a_trailing_blank() {
+        let honest = lines(EIGHT);
+        // After the text, before the line end; between `\r` and `\n`.
+        for end in [&b"CCCCC\r\n"[..], b"t\n", b"\rv\n", b"C\rC\n"] {
+            let body = EIGHT.replace(b"delta\n", &[b"delta".as_slice(), end].concat());
+            assert!(
+                check(&dump_rows(&honest), &log(W, H, &body)).is_ok(),
+                "{end:?}"
+            );
+        }
+        // After a blank, they would be a lost word.
+        let body = EIGHT.replace(b"delta\n", b"delta ok\n");
+        assert_eq!(
+            check(&dump_rows(&honest), &log(W, H, &body)),
+            Err(CheckError::RowEndsEarly {
+                row: 3,
+                text: "delta".into()
+            })
+        );
+        let body = EIGHT.replace(b"delta\n", b"delta  C\n");
+        assert!(check(&dump_rows(&honest), &log(W, H, &body)).is_err());
+        // Nor between two blanks.
+        let body = EIGHT.replace(b"delta\n", b"delta C \n");
+        assert!(check(&dump_rows(&honest), &log(W, H, &body)).is_err());
     }
 
     // --- helpers -----------------------------------------------------------------
