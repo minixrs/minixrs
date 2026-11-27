@@ -29,7 +29,7 @@ milestone bar rather than after it.
 - [x] **6.4** — `tools/mkimage`: one GPT disk, partitions as minors — **sub-milestone: disk root**
 - [x] **6.5** — TTY RX: PL011 receive interrupt + `CDEV_READ` + a VFS that does not block on it
 - [x] **6.6** — `virtio-console` as a second CDEV backend
-- [ ] **6.7** — framebuffer console: Limine framebuffer → TTY
+- [x] **6.7** — framebuffer console: Limine framebuffer → TTY
 - [ ] **6.8** — `virtio-input` keyboard driver — **sub-milestone: non-headless boot**
 - [ ] **6.9** — `virtio-net`, packet I/O only — **milestone; Phase 6 complete**
 - [ ] **6.10** — *stretch:* `virtio-gpu` under the same TTY renderer
@@ -1346,7 +1346,8 @@ marker TTY prints about itself.
 [`2026-11-26-framebuffer-console-design.md`](../superpowers/specs/2026-11-26-framebuffer-console-design.md),
 decisions `F1…F13`. **Plan:**
 [`2026-11-26-framebuffer-console.md`](../superpowers/plans/2026-11-26-framebuffer-console.md), whose
-ledger records every ruling made during the run.
+ledger records every ruling made during the run. **Status: done** (checked in the Status list
+above).
 
 **Unverified fact 3: it holds** (measured 2026-11-26, QEMU 11.0.3, Homebrew's edk2, before any
 design-dependent code). Limine reports one framebuffer — 800×600, pitch 3200, 32 bpp, RGB, 8-bit

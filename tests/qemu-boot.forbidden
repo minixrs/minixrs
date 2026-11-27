@@ -253,7 +253,9 @@ vcon.ds FAIL
 # mapped the screen into) -- and `fb FAIL <reason>` -- a reply TTY would not
 # draw on: `va`, `bpp`, `shift`, `shifts-overlap`, `zero-size`, `pitch`,
 # `window` or `grid`. The kernel applied the same conditions before replying,
-# so this one means the two validators disagree. After any of the four the
+# so any reason but `grid` means the two validators disagree; `grid` is a
+# screen smaller than one 8x16 cell, which the kernel accepts and TTY
+# refuses. After any of the four the
 # console is serial-only, and every other marker still passes -- which is why
 # they are listed here rather than left to `fb ok` going missing.
 [fb] none

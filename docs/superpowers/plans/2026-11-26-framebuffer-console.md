@@ -260,7 +260,27 @@ One entry per task: its commit, what was verified, and every ruling made in it.
   they run in sequence. *If wrong:* a second concurrent boot takes the socket. (g) The budget
   comparison is against a figure recorded by an earlier slice, not a same-day baseline. *If wrong:*
   the two-point rise (63.20% → 65.02%) is partly host drift; no timeout depends on it.
-- **Task 7 (recorded boots): TO BE FILLED BY THE COORDINATOR.**
+- **Task 7 (2026-11-26; no commit of its own — boots only).** The three boots as CI runs them, 600 s
+  per full boot locally, musl flavour (`MINIXRS_SDK=/nonexistent`), fed, with `tools/screendump.sh`
+  beside each full boot, run **twice**. *First run*, at `297b544`, quiet host: disk 197/197, reboot
+  7/7, ramdisk 197/197, `diff-backends.sh` clean; the screen check (as it then was) passed on its
+  first try on both, `rows=22` — an unscrolled screen, which Task 8 showed proves nothing about a
+  scroll. The budget figures recorded under Task 6 (65.02% / 41.53%) are this run's. *Second run*,
+  at `d923ea8` (the 2^48 bound and the rebuilt check): disk 197/197, reboot 7/7, ramdisk 197/197,
+  `diff-backends.sh` clean; the screen check reported `early` while the screen filled and passed at
+  255 s (disk) and 188 s (ramdisk) with `fbcheck: ok 800x600 100x37 rows=36 wraps=12 stray=5
+  worst=10 scrolled=yes`. **The second run's host was slow**: its logs are an eighth the size (final
+  `[ipc]` 6.6 M against 54 M) and the last required marker sits at 74.39% (disk) and 46.65%
+  (ramdisk) of the log. A control pair of 200 s boots straight after says it was the host and not
+  the dumper: 2.13 M IPC with no dump, 2.06 M with a `stop` / `screendump` / `cont` every 10 s (3.5%
+  less). **Rulings:** (a) **no timeout moves** on either set of figures. *If wrong:* the first CI
+  run shows the disk boot's markers or the scrolled screen arriving too close to 1200 s, and the
+  three timeouts and `timeout-minutes` rise in one edit. (b) **The merge base was not re-booted back
+  to back**; the comparison is with 6.5's recorded 63.20% / 41.41%. *If wrong:* a regression of a
+  few points hides in host drift. (c) **The screen check now needs the boot to live until its screen
+  scrolls** — 255 s of 600 on a slow host here. *If wrong:* on a much slower runner the script is
+  still `early` when `timeout` kills QEMU and CI counts it failed; the remedy is a later kill or a
+  gate on fewer rows, not a weaker check.
 - **Task 8 (mutations; no commit — each applied to the working tree, booted stub-free and fed for
   180 s with the screen check beside it, and reverted).** Observed: 1, `console_write` skipping the
   framebuffer — the screen check only (`only 0 non-blank rows`); 2, a store at `x + 1` in the bin's

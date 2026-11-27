@@ -426,8 +426,10 @@ jobs:
       - name: Build the disk-image tool (host)
         run: cargo build --locked --release -p minixrs-mkimage
       # tools/fbcheck is the HOST tool behind the screen check (slice 6.7):
-      # tools/screendump.sh takes a QMP screendump of each full boot and
-      # fbcheck decodes it and looks for its text in that boot's serial log.
+      # tools/screendump.sh takes QMP screendumps of each full boot and
+      # fbcheck decodes each one and requires the screen, read top to bottom,
+      # to be one unbroken stretch of that boot's console text in its serial
+      # log.
       # Built here for mkimage's reason, and handed to the script through
       # MINIXRS_FBCHECK so no cargo runs beside the boot at all.
       - name: Build the screen-check tool (host)
@@ -613,10 +615,16 @@ jobs:
           # tools/screendump.sh runs beside each one, waits for `stdin ok` in
           # the boot's log, then pauses the guest over QMP (target/qmp.sock,
           # made by tools/qemu-run.sh), dumps the ramfb screen and has
-          # fbcheck decode it against the same log, retrying until one dump
-          # passes. It must have finished by the time the boot's `timeout`
-          # kills QEMU: one still running then never saw its gate line or
-          # never got a passing dump, and is killed and counted as failed
+          # fbcheck decode it against the same log. It looks again every few
+          # seconds until a dump passes OF A SCREEN THAT HAS SCROLLED: the
+          # gate line appears with the screen two thirds full, and a pass
+          # there would never exercise the scroll's repaint (slice 6.7,
+          # mutation 7). A dump that is fine but not yet scrolled is `early`
+          # and costs nothing; one that fails costs one of ten tries. It
+          # must have finished by the time the boot's `timeout` kills QEMU:
+          # one still running then never saw its gate line or never got a
+          # passing dump of a scrolled screen, and is killed and counted as
+          # failed
           # (the script cannot see QEMU die). Its verdict goes to
           # fb-<boot>.rc for the check step, so all three boots still run.
           # The reboot is not screen-checked.
