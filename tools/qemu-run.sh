@@ -40,7 +40,8 @@
 #   MINIXRS_QMP=<socket>            QEMU's QMP socket, instead of target/qmp.sock;
 #                                   its path must be shorter than 104 bytes
 #   MINIXRS_DISPLAY=none|window     `none` (the default) shows nothing; `window`
-#                                   opens QEMU's own display window
+#                                   opens QEMU's own display window, scaled
+#                                   to the window's size
 
 set -euo pipefail
 
@@ -84,8 +85,15 @@ BUS_VCON=8
 #
 #   none    (default) `-display none`: no window. The framebuffer is still
 #           there and still drawn on; QMP's `screendump` reads it.
-#   window  `-display none` is left off and QEMU picks its default UI (cocoa on
-#           macOS, gtk or sdl elsewhere). The serial console stays on stdio.
+#   window  QEMU opens a window, and the window SCALES: the guest's screen is
+#           the firmware's 800x600, which a high-density display shows very
+#           small, so the UI is asked to zoom the picture to whatever size the
+#           window is dragged or maximised to (`zoom-to-fit=on`). The guest
+#           still draws 800x600 -- nothing it prints and no screendump
+#           changes. The UI is the first of cocoa (macOS) and gtk that this
+#           QEMU was built with; with neither, `-display none` is simply left
+#           off and QEMU picks its default, unscaled. The serial console stays
+#           on stdio.
 #
 # Anything else is refused: a misspelt `window` would otherwise run as a
 # perfectly good headless boot and look like a display that does not work.
@@ -114,7 +122,16 @@ BUS_VCON=8
 DISPLAY_MODE="${MINIXRS_DISPLAY:-none}"
 case "$DISPLAY_MODE" in
     none) DISPLAY_ARGS=(-display none) ;;
-    window) DISPLAY_ARGS=() ;;
+    window)
+        DISPLAY_ARGS=()
+        backends="$(qemu-system-aarch64 -display help 2>/dev/null || true)"
+        for ui in cocoa gtk; do
+            if grep -qx "$ui" <<<"$backends"; then
+                DISPLAY_ARGS=(-display "$ui,zoom-to-fit=on")
+                break
+            fi
+        done
+        ;;
     *)
         echo "error: MINIXRS_DISPLAY must be 'none' or 'window', got '$DISPLAY_MODE'" >&2
         exit 64
@@ -349,7 +366,7 @@ FB_ARGS=(
 # `force-legacy=false` makes the mmio transports modern (version 2); the
 # drivers refuse version 1, and edk2 boots from a modern one (measured, 6.4
 # P11.1). "$@" stays last so a later -global can override it for the refusal
-# boots. `DISPLAY_ARGS` is empty for a window boot, hence the `+` expansion:
+# boots. `DISPLAY_ARGS` can be empty for a window boot, hence the `+` expansion:
 # bash before 4.4 treats an empty array as unset under `set -u`.
 QEMU=(
     qemu-system-aarch64

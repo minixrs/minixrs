@@ -413,7 +413,11 @@ Whether anything *shows* the display is separate, and is chosen by `MINIXRS_DISP
 | `MINIXRS_DISPLAY` | What the runner does                                                           |
 | ----------------- | ------------------------------------------------------------------------------ |
 | `none` (default)  | passes `-display none`: no window. The framebuffer is still there and drawn on |
-| `window`          | leaves `-display none` off, so QEMU opens its default UI (cocoa on macOS)      |
+| `window`          | passes `-display cocoa,zoom-to-fit=on` (gtk where there is no cocoa): a window |
+
+The window scales the guest's 800×600 screen to whatever size it is dragged to; the guest draws the
+same pixels either way, so no marker and no screendump depends on it. A QEMU built with neither UI
+gets no `-display` argument at all and opens its default, unscaled.
 
 Any other value is refused (exit 64): a misspelt `window` would otherwise run as a perfectly good
 headless boot and look like a display that does not work. The serial console stays on stdio either

@@ -501,10 +501,12 @@ hold the detail; the rules:
   serial-only. All of those are forbidden markers, so such a boot fails `check-boot-log.sh` by
   design. There is no runner switch for it.
 - **`MINIXRS_DISPLAY=none|window`** says whether anything *shows* the display. `none`, the default,
-  passes `-display none`; the framebuffer is still there and still drawn on. `window` leaves the
-  flag off and QEMU opens its default UI, with the serial console still on stdio. Any other value is
-  refused, exit 64 — a misspelt `window` would otherwise be a healthy headless boot that looks like
-  a broken display.
+  passes `-display none`; the framebuffer is still there and still drawn on. `window` passes
+  `-display cocoa,zoom-to-fit=on` (gtk where QEMU has no cocoa; no `-display` at all where it has
+  neither), so the window scales the guest's 800×600 screen to the size it is dragged to — the guest
+  draws the same pixels, and the serial console is still on stdio. Any other value is refused, exit
+  64 — a misspelt `window` would otherwise be a healthy headless boot that looks like a broken
+  display.
 - **A QMP socket is unconditional too**: `-qmp unix:<socket>,server=on,wait=off`, at
   `target/qmp.sock`. QEMU listens and does not wait for a client, so a boot nobody connects to is
   unchanged. It is the only way in to a display nobody shows, and the screen check

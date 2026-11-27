@@ -412,10 +412,12 @@ boot, ask for a window:
 MINIXRS_DISPLAY=window timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release
 ```
 
-QEMU opens its own display window and the serial log stays on the terminal as before. The window
-shows only what user space writes to the console; the kernel's trace lines and the servers' `[diag]`
-lines are on the serial line alone. `MINIXRS_DISPLAY` and the QMP socket's `MINIXRS_QMP` are
-described with the runner, under [The display](boot/overview.md#the-display).
+QEMU opens its own display window and the serial log stays on the terminal as before. The guest's
+screen is 800×600, which a high-density display shows very small, so the window scales: drag it
+larger or maximise it and the picture is zoomed to fit. The window shows only what user space writes
+to the console; the kernel's trace lines and the servers' `[diag]` lines are on the serial line
+alone. `MINIXRS_DISPLAY` and the QMP socket's `MINIXRS_QMP` are described with the runner, under
+[The display](boot/overview.md#the-display).
 
 ### The screen check
 
