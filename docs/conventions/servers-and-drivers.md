@@ -732,9 +732,12 @@ kernel's half — the window, the mapping, the carve — is in
   output and `[diag]` lines are not console output and never reach the screen.
 - **TTY re-validates the kernel's reply instead of trusting it**, and prints exactly one `fb` line:
   `fb ok …`, `fb none rc=…` or `fb FAIL <reason>`. The reply is all that stands between a wrong
-  number and a store through a device mapping. The kernel applied the same conditions first, so `fb
-  FAIL` means the two validators disagree — when one side's conditions change, change the other's
-  (`kernel-shared::framebuffer::validate` and `paint::Format::new` with `reply::accept`).
+  number and a store through a device mapping. The kernel applied the format conditions first, so
+  `fb FAIL` for any reason but one means the kernel's validator and TTY's have drifted apart — when
+  one side's conditions change, change the other's (`kernel-shared::framebuffer::validate` and
+  `paint::Format::new` with `reply::accept`). The one is `grid`: the kernel accepts a screen smaller
+  than one 8×16 cell (any non-zero size passes it) and TTY refuses it, which is a difference in what
+  each is asked, not a disagreement.
 - **The console's state is a `main`-frame local, which is why `main` writes the banner.** A SEF
   callback is a plain `fn` pointer and cannot reach `main`'s locals without a static and the
   `unsafe` that goes with one, so the banner moved out of `tty_init` (which now only publishes to

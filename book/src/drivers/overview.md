@@ -1206,10 +1206,14 @@ store through a device mapping, so TTY **validates it again rather than trusting
 | `window`         | `pitch * height` is more than the framebuffer window could hold mapped |
 | `grid`           | the screen is smaller than one 8×16 cell                               |
 
-The kernel applied the same conditions to Limine's answer before it mapped anything, so an `fb FAIL`
-means the two validators disagree. After `fb none` or `fb FAIL` TTY is **serial-only** for the rest
-of the boot: the screen half of `console_write` does nothing, and every serial marker still passes.
-The runner gives every boot a display, so both lines are forbidden markers.
+The kernel applied the format conditions to Limine's answer before it mapped anything, and it wrote
+the address and bounded the size by the same window, so an `fb FAIL` for any of the first seven
+reasons means the kernel's validator and TTY's disagree. `grid` is the exception, and an honest
+refusal: the kernel accepts any screen with a non-zero width and height, including one smaller than
+a character cell, and it is TTY that has no use for it. After `fb none` or `fb FAIL` TTY is
+**serial-only** for the rest of the boot: the screen half of `console_write` does nothing, and every
+serial marker still passes. The runner gives every boot a display, so both lines are forbidden
+markers.
 
 On acceptance TTY stores the background colour in every pixel of the screen, and only then prints
 `fb ok` — so that line also says that a whole screen of stores through the mapping did not fault —
@@ -1535,18 +1539,20 @@ Since slice 6.7 three more lines, required of every full boot, say that the cons
 
 The first is the kernel accepting
 [the bootloader's framebuffer](../boot/overview.md#the-boot-framebuffer), the second the loader
-mapping it into TTY, the third [TTY's own verdict](#asking-for-it). Each ends in the one field that
-follows the firmware's memory map, `pa=`, so that everything before it can be asserted. None of the
-numbers is a constant of this repository: they are the mode the firmware set, so a firmware with
-another default moves all three lines together — the size in the first, `pages=` in the second, and
-the size and the grid in the third.
+mapping it into TTY, the third [TTY's own verdict](#asking-for-it). The two kernel lines end in the
+one field that follows the firmware's memory map, `pa=`, so that everything before it can be
+asserted; TTY's line has no such field and is asserted whole. None of the numbers is a constant of
+this repository: they are the mode the firmware set, so a firmware with another default moves all
+three lines together — the size in the first, `pages=` in the second, and the size and the grid in
+the third.
 
 Those lines are serial evidence, and the most they can say is that TTY believed it had a screen and
 that its stores did not fault. **That the right pixels arrived is not something a driver can print
 about itself.** It is proved from the host: [the screen check](../build.md#the-screen-check) takes a
-dump of the running guest's display, decodes every character cell with the renderer's own
-`decode_cell`, and looks each row of text up in the boot's serial log — which the UART sink wrote,
-not the renderer.
+dump of the running guest's display once the console has scrolled, decodes every character cell with
+the renderer's own `decode_cell`, and requires the screen, read top to bottom, to be one unbroken
+stretch of the console's text in the boot's serial log — which the UART sink wrote, not the
+renderer.
 
 ## The BDEV protocol and the `memory` ramdisk
 

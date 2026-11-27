@@ -129,19 +129,23 @@ whole-project picture.
   settles the script with a small shell function, `finish_screen`: a script that has exited leaves
   its exit status in `fb-<boot>.rc`; **one still running when the boot's `timeout` has fired is
   killed and counted as failed** (`1` in the `.rc`, and a line saying so appended to the
-  `.verdict`), because the script cannot see QEMU die and one that is still polling never saw its
-  gate line or never got a passing dump. Nothing fails there — all three boots still run. The check
-  step then prints each `fb-<boot>.verdict` and fails, with an `::error::` naming the `.ppm`, unless
-  the `.rc` holds `0`; it does so after the three `check-boot-log.sh` calls and whatever they said,
-  so one run still shows the whole story. **The reboot is not screen-checked.** What the check
-  proves, what it forgives and how to read its verdict line are under
-  [The screen check](./testing-and-markers.md#the-screen-check)
+  `.verdict`), because the script cannot see QEMU die and one that is still looking never saw its
+  gate line, never saw the screen scroll, or never got a scrolled dump to pass. **A pass in CI is a
+  pass of a scrolled screen**: the script asks `fbcheck` for one and keeps looking, every 10 s,
+  through any number of `early` verdicts — the first cut took the first dump that passed, which in
+  the default boot is an unscrolled one, and let a TTY whose scroll painted nothing through. Nothing
+  fails there — all three boots still run. The check step then prints each `fb-<boot>.verdict` and
+  fails, with an `::error::` naming the `.ppm`, unless the `.rc` holds `0`; it does so after the
+  three `check-boot-log.sh` calls and whatever they said, so one run still shows the whole story.
+  **The reboot is not screen-checked.** What the check proves, what it forgives and how to read its
+  verdict line are under [The screen check](./testing-and-markers.md#the-screen-check)
 - **The artifact carries the dumps.** `qemu-boot-log` uploads `fb-*.ppm` and `fb-*.verdict` with the
   three logs, on every run (`if: always()`), pass or fail. Each `.ppm` is the **last** dump its
-  script took — the passing one on a pass, the last refused one on a failure — and each `.verdict`
-  holds every try's message, which is where a refused dump says why. `fb-*.rc` is the step's own
-  bookkeeping and is not uploaded. A boot whose script never reached a dump (no gate line, no
-  socket) has a `.verdict` and no `.ppm`
+  script took — the passing one on a pass, the last one looked at otherwise — and each `.verdict`
+  holds the script's whole stderr: an `early … (not scrolled yet)` line per change in the number of
+  rows on the screen, every failed look's reason, and the final `ok … scrolled=yes`. `early` lines
+  in a passing verdict are normal. `fb-*.rc` is the step's own bookkeeping and is not uploaded. A
+  boot whose script never reached a dump (no gate line, no socket) has a `.verdict` and no `.ppm`
 - **`qemu-smoke` builds `tools/fbcheck` in a step of its own before the first boot**, for
   `mkimage`'s reason below and one more: handed to the script through `MINIXRS_FBCHECK`, the
   pre-built binary means **no cargo runs beside a boot at all**. Left to build it itself the script

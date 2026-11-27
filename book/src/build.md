@@ -428,24 +428,35 @@ things that *are* known — the renderer and the boot's own serial log — in th
 failure being the answer:
 
 1. **Geometry.** The dump is exactly the size TTY reported in its `[diag tty] fb ok w=… h=… cols=…
-   rows=…` line (the last one in the log), and the renderer library derives the same grid from that
-   size.
+   rows=…` line (the last one in the log, read exactly), and the renderer library derives the same
+   grid from that size.
 2. **Every cell is a glyph.** Each 8×16 cell decodes, pixel for pixel, to one printable character in
    the console's two colours, and every pixel outside the grid is background. The decoded text is
    then painted again with the same library and must reproduce the dump exactly.
-3. **The text is the boot's.** At least eight rows are non-blank, and every non-blank row is found
-   in the console's part of the serial log.
+3. **The text is the boot's, and it is where the boot put it.** At least eight rows are non-blank,
+   and the screen, read top to bottom, is one unbroken stretch of what the console wrote: each row
+   where the row above leaves off, a line ending where a row stops short of the last column, a line
+   wrapping where it does not.
 
 Step 3 is what makes this more than the renderer agreeing with itself: the serial log was written by
 TTY's UART sink, which shares nothing with the renderer but the bytes. It is also not a plain
 substring search, because the serial line has two other writers. The kernel writes whole trace lines
-— which can begin in the middle of a console line — and one byte per timer tick, the first letter of
-the running process's name, singly or in runs. So the check first removes every kernel line from the
-log (a `[`, a lower-case name, then a space or `]`, through the end of the line), and then finds a
-row if what is left holds its bytes in order with nothing between them but tick bytes — ASCII
-letters or `?` — at most 32 of them in a row of text. The price of that tolerance is that a row
-which *lost* a few letters still passes; the repository's `docs/conventions/testing-and-markers.md`
-lists what the check does not see.
+— which can begin in the middle of a console line — and one byte per 10 ms of guest time, the first
+letter of the running process's name, singly or in runs. So the check cuts the log at TTY's `fb ok`
+line, removes every kernel line from the rest (a `[`, a lower-case name, then a space or `]`,
+through the end of the line), and walks the screen's rows through what is left. Between the bytes of
+a row only tick bytes are forgiven — ASCII letters or `?` — at most 120 in a row of text; between
+rows there may be any number. A row cut short, shifted, repeated, out of order or left over from
+before a scroll breaks the stretch and is refused.
+
+**A pass also needs a screen that has scrolled.** Until it has, nothing has exercised the scroll
+path — the text grid shifting up and the screen being repainted from it. The check can tell from the
+dump and the log alone: a screen that has not scrolled begins with the first thing the console wrote
+(TTY's banner); one that has begins later in the stream and is written down to its last rows. A
+screen that is right but has not scrolled is reported as *early*, not as a pass.
+
+The price of forgiving tick bytes is that a row which *lost* letters still passes; the repository's
+`docs/conventions/testing-and-markers.md` lists that and the other things the check does not see.
 
 `tools/screendump.sh <qemu-log> <out.ppm>` wraps the tool for a boot in progress. It runs **beside**
 a fed boot, as a background job pointed at the log that boot is writing:
@@ -455,7 +466,7 @@ tools/screendump.sh disk.log screen.ppm &
 dumper=$!
 MINIXRS_SDK=/nonexistent timeout 600 cargo run -p minixrs-kernel --target aarch64-unknown-none --release \
   < <(tools/feed-console.sh disk.log) > disk.log 2>&1
-wait "$dumper"      # 0: a dump passed
+wait "$dumper"      # 0: a dump of a scrolled screen passed
 ```
 
 It works in three stages:
@@ -464,45 +475,61 @@ It works in three stages:
    runs the binary directly. `MINIXRS_FBCHECK=<binary>` names one already built and skips the build,
    which is what CI does so that no cargo runs beside the boot.
 2. It polls the log for `minix.rs init: stdin ok` — the last line [the feeder](#feeding-the-console)
-   causes, so by then every proof child has printed and `init`'s rotation is what keeps the screen
-   moving. Like the feeder it wants the line on two polls in a row, because the log is usually one
-   an earlier boot wrote. An unfed boot never prints the line, and the script then waits out its
-   ceiling and fails.
-3. It runs `minixrs-fbcheck dump-and-check <socket> <out.ppm> <qemu-log>` up to ten times, three
-   seconds apart. Each try stops the guest over QMP, has QEMU write the screen to `<out.ppm>`, lets
-   the guest run again — always, whatever the dump did — and only then reads the log and checks.
-   **The first try that passes wins.** The retries are there because a dump can catch a glyph half
-   painted, or a row whose bytes have not reached the log file yet; a screen that is actually wrong
-   fails every try the same way.
+   causes, so the pauses of stage 3 cannot disturb the feeder's timed exchanges. Like the feeder it
+   wants the line on two polls in a row, because the log is usually one an earlier boot wrote. An
+   unfed boot never prints the line, and the script then waits out its ceiling and fails.
+3. It looks, every ten seconds, with `minixrs-fbcheck dump-and-check --scrolled <socket> <out.ppm>
+   <qemu-log>`. Each look stops the guest over QMP, has QEMU write the screen to `<out.ppm>`, lets
+   the guest run again — always, whatever the dump did — and only then reads the log and checks. So
+   every look pauses the guest, for the milliseconds the dump takes. A scrolled screen that passes
+   ends the script with status 0. An *early* screen costs nothing: the script looks again. A failed
+   look uses up one of ten tries — a dump can catch a glyph half painted or a scroll half repainted,
+   and the next look is of a different instant — and when they are gone the script exits 1. A screen
+   that is actually wrong fails every try.
 
-The script exits 0 when a dump passed and 1 otherwise, and writes everything to stderr. `<out.ppm>`
-is overwritten by each try and never deleted, so after a failure it is the last dump taken.
-`SCREENDUMP_TRIES`, `SCREENDUMP_GAP` (seconds between tries) and `SCREENDUMP_CEILING` (how long to
-wait for stage 2's line; 1300 by default) adjust it, and it finds the socket through `MINIXRS_QMP`
-as the runner does. It cannot see QEMU exit, so a script whose line never came waits out its
-ceiling; CI instead kills one that is still running when the boot's timeout fires, and counts it as
-failed.
+The script writes everything to stderr. `<out.ppm>` is overwritten by each look and never deleted,
+so when the script ends it is the last dump taken. It finds the socket through `MINIXRS_QMP` as the
+runner does, and three variables adjust it:
+
+| Variable             | Default | Meaning                                                                       |
+| -------------------- | ------: | ----------------------------------------------------------------------------- |
+| `SCREENDUMP_GAP`     |      10 | seconds between looks (may be fractional)                                     |
+| `SCREENDUMP_TRIES`   |      10 | failed looks allowed; an *early* look is not one                              |
+| `SCREENDUMP_CEILING` |    1300 | seconds after its start at which the script gives up, whatever stage it is in |
+
+It cannot see QEMU exit, so a script whose screen never scrolled waits out its ceiling; CI instead
+kills one that is still running when the boot's timeout fires, and counts it as failed. A scrolled
+screen is not long in coming: in the default disk boot the 38th console row is written about 5% of
+the way through the log.
 
 The tool can also be used by hand, against any running boot or any dump:
 
 ```sh
 cargo build --release -p minixrs-fbcheck
-target/release/minixrs-fbcheck dump target/qmp.sock screen.ppm      # stop, screendump, cont
-target/release/minixrs-fbcheck check screen.ppm disk.log            # the three steps above
+target/release/minixrs-fbcheck dump target/qmp.sock screen.ppm            # stop, screendump, cont
+target/release/minixrs-fbcheck check screen.ppm disk.log                  # the three steps above
+target/release/minixrs-fbcheck check --scrolled screen.ppm disk.log       # …and it must have scrolled
+target/release/minixrs-fbcheck dump-and-check --scrolled target/qmp.sock screen.ppm disk.log
 ```
 
-The dump is a binary PPM (`P6`). The verdict is one line — on stdout when the check passes, on
-stderr as `fbcheck: FAIL <reason>` when it does not:
+The dump is a binary PPM (`P6`). One line says what happened:
 
-```text
-fbcheck: ok <w>x<h> <cols>x<rows> rows=<n> wraps=<n> stray=<n> worst=<n>
-```
+| Line                                           | On     | Exit |
+| ---------------------------------------------- | ------ | ---: |
+| `fbcheck: ok <fields> scrolled=yes` (or `=no`) | stdout |    0 |
+| `fbcheck: early <fields> (not scrolled yet)`   | stdout |    2 |
+| `fbcheck: FAIL <reason>`                       | stderr |    1 |
+| `fbcheck: dumped <file>` (`dump` only)         | stdout |    0 |
 
-That is the screen's size in pixels and in cells (`800x600 100x37` under QEMU), then four counts:
-`rows`, the non-blank rows; `wraps`, the rows that fill the last column and run straight on into the
-next row's text in the log (long lines seen whole — informational, it refuses nothing); `stray`, the
-rows found only by allowing tick bytes inside them; and `worst`, the most tick bytes any one row
-needed, to be read against the limit of 32.
+A usage error exits 64. Without `--scrolled`, a screen that is right but has not scrolled is `ok …
+scrolled=no`, exit 0; with it, that screen is `early`, exit 2 — look again later. A wrong screen is
+`FAIL` either way.
+
+`<fields>` is `<w>x<h> <cols>x<rows> rows=<n> wraps=<n> stray=<n> worst=<n>`: the screen's size in
+pixels and in cells (`800x600 100x37` under QEMU), then four counts. `rows` is the non-blank rows.
+`wraps` is the rows that reached the last column and whose line carried straight on in the row below
+— wrapped lines. `stray` is the rows that matched only by allowing tick bytes inside them, and
+`worst` the most tick bytes any one row needed, to be read against the limit of 120.
 
 ## Debugging with GDB
 

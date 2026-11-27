@@ -64,9 +64,11 @@ disagree, **the spec wins** and the plan gets corrected.
    (`tty::paint` test with an 13×21 surface).
 7. **Deferred wrap** and scroll at the last row (`tty::grid` tests).
 8. **`fbcheck` refuses**: one flipped pixel, wrong geometry, a row absent from the log, too few rows
-   (`fbcheck` tests) — and passes a dump with a wrapped row, and a row with a kernel line or a run
-   of tick bytes inside it in the log. Know what it accepts by design: a row that lost letters, and
-   rows in any order (spec F10).
+   (`fbcheck` tests), and a row cut short, repeated, out of order or left over from before a scroll
+   — and passes a dump with a wrapped row, and a row with a kernel line or a run of tick bytes
+   inside it in the log. A screen that has not scrolled is `early`, not a pass, under `--scrolled`.
+   Know what it accepts by design: letters lost from a row (up to 120 inside it, any number at a
+   line's start or end), a last row cut short, and a frozen screen (spec F10).
 9. **Tripwires grown, not left:** `callnr.rs`'s selector asserts; `GETINFO_DENIED` users.
 10. **`book/`** read end to end for every chapter touched.
 
@@ -118,9 +120,11 @@ hand `screendump` that shows text. Commit.
 Files: `tools/fbcheck/` (new workspace member: `Cargo.toml`, `src/{lib,main,check,ppm,qmp}.rs`), the
 root `Cargo.toml` and `Cargo.lock`, `tools/screendump.sh`. `tools/qemu-run.sh` is **not** edited
 here — Task 2 did all of F1. Tests first for decode and the refusals. Proof: the check passes on a
-fed disk boot. Commit. A fix round followed, in its own commit, when a real log refused an honest
-screen: kernel lines stripped, tick-byte runs tolerated (`tools/fbcheck/src/{check,lib,main}.rs`,
-`tools/screendump.sh`).
+fed disk boot. Commit. Two fix rounds followed, each its own commit over
+`tools/fbcheck/src/{check,lib,main}.rs` and `tools/screendump.sh`: the first when a real log refused
+an honest screen (kernel lines stripped, tick-byte runs tolerated); the second when Task 8's
+mutation 7 passed the check (rows anchored into one unbroken stretch, a scrolled screen required,
+`--scrolled`, `early`).
 
 ### Task 6: CI and the budget (F11, F13.2, F13.3)
 
@@ -161,5 +165,139 @@ One entry per task: its commit, what was verified, and every ruling made in it.
   anyway, device, and TTY never stores past `pitch * height`. *If wrong:* map `floor` pages and
   shorten the drawable height by a row. (b) **A QMP socket path over 104 bytes is refused by QEMU**
   on macOS; `target/qmp.sock` under a deep checkout could hit it, so `qemu-run.sh` checks the length
-  and says so (Task 5). (c) F13.2 and F13.3 are measured on the real code at Task 6, not with the
+  and says so (Task 2). (c) F13.2 and F13.3 are measured on the real code at Task 6, not with the
   probe.
+- **Task 1 (`8301ac9`).** `kernel-shared`: the framebuffer window in `uspace`, `GET_FRAMEBUFFER` and
+  its offsets in `callnr`, and the new `memrange::subtract`. Verified by host tests only, as the
+  task is pure: `subtract`'s sixteen, the selector's layout test and the pairwise selector sweep,
+  the four-window disjointness test. **Rulings:** (a) `subtract` returns two fixed slots, below and
+  above, rather than a compacted list, and treats an empty or inverted hole as "remove nothing"
+  instead of panicking. *If wrong:* a caller that passes a malformed hole loses the carve silently —
+  which is why Task 2's seed asserts the hole first. (b) The six window pairs are asserted pairwise,
+  not neighbour to neighbour. *If wrong:* nothing; it is strictly more checking. (c) The selector
+  tripwire became a table swept pairwise. *If wrong:* nothing moves on the wire.
+- **Task 3 (`3de0058`; landed before Task 2).** TTY's library half: `font`, `grid`, `paint`, the
+  vendored Spleen file with its `LICENSE` and `README.md`, and the `kernel/build.rs` watch on
+  `font/`. Verified by the library's host tests. **Rulings:** (a) **the upstream 8×16 file is PSF
+  version 1, not the PSF2 the spec named**; it is vendored unconverted and `font.rs` validates a
+  PSF1 header (spec F7 rewritten, section 7). *If wrong:* a release that ships PSF2 fails the build
+  at the `const` check, loudly. (b) The 95 printable glyphs are copied into a table at build time
+  rather than sliced out of the file at run time. *If wrong:* a few hundred bytes of image either
+  way. (c) `forbid(unsafe_code)` on the library. *If wrong:* delete one line. (d) The font directory
+  gets a watch of its own in `kernel/build.rs`, for TTY alone. *If wrong:* a swapped font is not
+  re-packed until something else changes.
+- **Task 2 (`8244abb`).** The kernel half and the runner: `kernel-shared::framebuffer::validate`,
+  `arch/aarch64/framebuffer.rs`, the Limine request, the seed around the hole, the TTY arm, the
+  selector's handler, `qemu-run.sh`'s `ramfb`, QMP socket, `MINIXRS_QMP` and `MINIXRS_DISPLAY`; also
+  6.6's debt 14 (`proc/table.rs`) and the C-header not-emitted list. Verified: `validate`'s host
+  tests, and `[fb] ok` and `[devmap] tty fb` in a stub-free boot. **Rulings:** (a) the decision is a
+  pure function in `kernel-shared` with the accepted record in one kernel static read by all three
+  consumers, where the spec had a "validated accessor" in `limine.rs`. *If wrong:* move a function;
+  the single record is what keeps the carve, the mapping and the reply from disagreeing. (b) The
+  `[fb]` line is printed after the allocator seed, because it carries `usable=`. *If wrong:* the
+  line moves a few lines up the log. (c) Two refusal tokens exist outside `validate` — `pointer`,
+  and `address` when there is no HHDM response. *If wrong:* a token's text. (d) **The runner refuses
+  a QMP socket path of 104 bytes or more itself** (Task 0's finding b), on Linux too. *If wrong:* a
+  path that Linux would have accepted is refused; set `MINIXRS_QMP`. (e) A stale socket is removed
+  just before QEMU starts; anything else at the path is refused. *If wrong:* a boot after a killed
+  boot fails to bind. (f) The seed asserts the hole is non-empty and page-aligned. *If wrong:* a
+  panic at boot where a silent no-carve would have been.
+- **Task 4 (`cff8851`).** TTY's binary: `console_write`, `fb_bring_up`, `Screen::store`, and the
+  fourth library module `reply`; the marker files (three expected, four forbidden); the two kernel
+  lines reordered. Verified: `reply`'s host tests; `[diag tty] fb ok w=800 h=600 cols=100 rows=37`
+  in a boot and a hand `screendump` showing text. **Rulings:** (a) **the banner is written by
+  `main`, not `tty_init`**, because the console's state is a `main`-frame local. *If wrong:* a
+  static and a second `unsafe` to put it back; the serial order is unchanged either way. (b) **The
+  reply check is its own module, `reply`**, with the tokens `va`, `window` and `grid` beside
+  `Format`'s five. *If wrong:* fold it into `paint`. (c) **`pa=` is last on both kernel lines**, so
+  the stable fields are asserted as one prefix. *If wrong:* two `writeln!`s and two marker lines.
+  (d) `[fb] none` and `fb none` are forbidden as well as the two `FAIL`s, since `ramfb` is on every
+  boot. *If wrong:* a hand-run boot without the device fails the checker — which it does, by design.
+  (e) `Screen::store` re-checks its bound on every store, in pixels. *If wrong:* a compare per pixel
+  store. (f) TTY refuses a screen smaller than one cell (`grid`) that the kernel accepts. *If
+  wrong:* such a machine boots serial-only with a forbidden `fb FAIL grid` line; the kernel's
+  validator would have to refuse it too.
+- **Task 5 (`f61718c`, then fix rounds `2e96e21` and `d923ea8`).** `tools/fbcheck` and
+  `tools/screendump.sh`. Verified by `fbcheck`'s host tests and by the check passing beside a fed
+  disk boot. The first cut looked each row up in the raw log allowing two stray single bytes; a real
+  log (54 MB, kernel lines mid-console-line, tick bytes in runs) refused an honest screen, and
+  `2e96e21` stripped kernel lines and allowed 32 tick bytes a row. Task 8's mutation 7 then passed
+  that check, and `d923ea8` rebuilt it: the screen as one unbroken stretch of the console stream
+  after the last `fb ok` line, a scrolled screen required, `MAX_STRAY` 120, the `fb ok` line read
+  exactly. **Rulings:** (a) **tick bytes are forgiven inside a row, so a row that lost letters
+  passes** — up to 120 inside it and any number at a line's start or end. *If wrong:* the check
+  cannot be both tolerant of the kernel's bytes and strict about letters; the alternative is to stop
+  the kernel printing tick bytes. (b) **`MAX_STRAY` is 120, four times the longest run measured
+  (30)**, for a slower host. *If wrong:* too low refuses an honest screen on CI; too high forgives
+  more lost letters. (c) **A pass requires a scrolled screen**; an unscrolled one is `early`, exit
+  2. *If wrong:* a boot whose console never fills 37 rows can never pass — today's fills them 5% of
+  the way through. (d) A later stretch on a screen that is not full is refused. *If wrong:* a
+  console that legitimately clears would be refused; nothing clears today. (e) The last non-blank
+  row is matched as a prefix. *If wrong:* a last row cut short passes (stated). (f) The script looks
+  every 10 s, `early` costs no try, a `FAIL` costs one of ten, and the ceiling covers the whole
+  script. *If wrong:* three constants; ten tries also forgive an intermittent defect. (g) The gate
+  is `minix.rs init: stdin ok`, so the check is for fed boots only and its pauses come after the
+  feeder's exchanges. *If wrong:* an earlier gate risks pausing the guest inside the feeder's timed
+  gaps. (h) Console text holding `[word]` is falsely refused. *If wrong:* the first program to print
+  such text fails the check and the rule has to learn the kernel's real prefixes.
+- **Task 6 (`42e3b69`, CI in `297b544`).** The budget and CI. **F13.2:** three 300 s stub-free unfed
+  boots ended at `[ipc]` 11.29 M with no painting, 1.79 M with a full repaint on scroll and 7.69 M
+  with the changed-cells repaint — a steady-state slowdown against no painting of 6.3× falling to
+  1.47×. On the final code the last required marker is at 65.02% of a 600 s local disk log and
+  41.53% of the ramdisk one, against 6.5's recorded 63.20% / 41.41% for the previous merge base (not
+  re-measured back to back). **No timeout moved.** **F13.3:** `stop`/`screendump`/`cont` beside a
+  fed boot disturbed nothing — 197 of 197 on both backends. **Rulings:** (a) **the changed-cells
+  repaint replaced the full repaint**, with a 10 240-byte shadow in `main`'s frame (21 376 bytes of
+  the 64 KiB stack, from 11 136). *If wrong:* `paint_all` back in `console_write` and the shadow
+  dropped, at about a quarter of the throughput. (b) Every paint after the clear must go through the
+  two `_diff` functions or the shadow goes stale. *If wrong:* stale glyphs after a scroll — which
+  the rebuilt screen check now sees. (c) CI pre-builds `fbcheck` and hands it over by
+  `MINIXRS_FBCHECK`. *If wrong:* a cargo beside the boot, charged to its timeout. (d) **CI kills a
+  script still running when the boot ends and counts it failed**, deciding by `kill -0` on its pid.
+  *If wrong:* a recycled pid could be signalled or a finished script miscounted — a debt in the
+  phase file. (e) The dump and verdict are uploaded on every run, not only on failure. *If wrong:* a
+  few megabytes of artifact per run. (f) Both boots use the default QMP socket, safe only because
+  they run in sequence. *If wrong:* a second concurrent boot takes the socket. (g) The budget
+  comparison is against a figure recorded by an earlier slice, not a same-day baseline. *If wrong:*
+  the two-point rise (63.20% → 65.02%) is partly host drift; no timeout depends on it.
+- **Task 7 (recorded boots): TO BE FILLED BY THE COORDINATOR.**
+- **Task 8 (mutations; no commit — each applied to the working tree, booted stub-free and fed for
+  180 s with the screen check beside it, and reverted).** Observed: 1, `console_write` skipping the
+  framebuffer — the screen check only (`only 0 non-blank rows`); 2, a store at `x + 1` in the bin's
+  `Surface` — the screen check only (a cell that is not a glyph), and the same edit in the lib's
+  `paint_cell` fails 21 `paint::tests`; 3, the window one page short — `[pf] proc=t far=0x1001d4000
+  flags=0x1 -> VM` during `clear`, `fb ok` and the banner missing, the boot stalled near `[ipc
+  1700]`, no forbidden marker, and `pages=468` in the honest form; 4, the gate naming another proc —
+  `[diag tty] fb none rc=-1`, expected missing, forbidden hit, screen check fails; 5, red and blue
+  swapped — nothing moves; 6, the carve skipped — nothing moves; 7, a scroll that repaints nothing —
+  **passed the original script**, caught by the rebuilt check on a scrolled screen (`screen row 36
+  is not in the serial log's console text…`); 8, `ramfb` dropped — `[fb] none`, `fb none rc=-2`,
+  three expected missing, two forbidden, screen check fails cleanly. **Rulings:** (a) **mutation 7's
+  pass was treated as a defect in the check, not as an honest row**, and the check was rebuilt (Task
+  5, `d923ea8`). *If wrong:* nothing is lost but the stricter rule's new false-failure risks. (b)
+  Mutations 5 and 6 are recorded as honest "nothing moves" rows and as debts (colour; a carve no
+  boot has run). *If wrong:* a red/blue swap or a missing carve ships unnoticed on a machine where
+  it matters. (c) Mutation 3's silent stall is recorded as a debt rather than fixed. *If wrong:* a
+  framebuffer mapping fault keeps reading like a starved boot.
+- **Task 9 (`104ffe3`, and the fix round that carries this ledger).** The book, the conventions, the
+  spec and the plan. Verified: `dprint check` and `tools/check-md-links.py` clean; every statement
+  taken from the code at the commit it describes. **Rulings:** (a) the kernel's rules for the
+  framebuffer got a section of their own in `kernel.md`, which the spec's section 4 had not listed.
+  *If wrong:* a section to fold into "Device memory". (b) The screen check's limits live in
+  `testing-and-markers.md` and its mechanism in the book's build chapter. *If wrong:* the two drift;
+  both point at `check.rs`'s module docs as the rule. (c) The definition of done in
+  `docs-and-workflow.md` was **not** changed to name the screen check. *If wrong:* a slice can call
+  itself done locally without running it; CI still blocks. (d) Stale comments in `.rs`, `.yml` and
+  `tests/` found by the sweep were reported, not edited.
+- **Review round (`6d1cb26`, with `297b544`'s comment corrections).** The whole-branch review found
+  that a framebuffer whose page-rounded end passes 2^48 would have been mapped at another address —
+  the mapper masks a physical address to 48 bits — with no assert firing; `validate` now refuses it
+  as `address` (`PA_LIMIT`), with a host test at the limit and one page past it. It also found the
+  comments a later task had falsified (where TTY's `unsafe` lives, where the grid is kept, PSF1, who
+  compares the framebuffer with its window, `kernel-shared`'s carve-out), three documentation errors
+  (each of the three marker lines "ends in `pa=`"; "a mutation proves the wiring"; "`fb FAIL` means
+  the two validators disagree"), and that the framebuffer's range is not checked against the memory
+  map's non-usable kinds. **Rulings:** (a) the 2^48 refusal reuses the `address` token. *If wrong:*
+  one more token and one marker comment. (b) The range-versus-memmap-kinds check was **not** added;
+  it is a debt in the phase file. *If wrong:* a firmware that reports a framebuffer overlapping the
+  kernel image or a module would have it mapped into TTY as device memory.

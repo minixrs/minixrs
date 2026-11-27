@@ -93,15 +93,17 @@ cannot be. The conditions are checked in this order and the first that fails nam
 | `shift`     | each mask's shift is 0, 8, 16 or 24, and the three are distinct                              |
 | `size`      | width and height are non-zero                                                                |
 | `pitch`     | the pitch is at least `width * 4` and a multiple of 4                                        |
-| `address`   | the address lies in the higher-half direct map (and its end is a representable address)      |
+| `address`   | the address lies in the higher-half direct map, and its page-rounded end does not pass 2^48  |
 | `align`     | the physical address is page-aligned                                                         |
 | `window`    | `pitch * height` fits [the framebuffer window](../memory/overview.md#the-framebuffer-window) |
 
-Every product and sum is checked for overflow. Two more tokens belong to the reading rather than the
-judging: `pointer`, when a non-empty response carries a null array or a null first entry, and
-`address` again when there is no HHDM response to tell a direct-map address by. One pixel format is
-accepted because one is all the renderer has: 24 or 16 bits per pixel would need unaligned or merged
-stores, which a device mapping does not tolerate.
+Every product and sum is checked for overflow. The 2^48 bound (`PA_LIMIT`) is the reach of a page
+descriptor: it holds 48 bits of physical address and the kernel's mapper masks the rest away, so a
+framebuffer page above that would be mapped at a different address with no assert firing. Two more
+tokens belong to the reading rather than the judging: `pointer`, when a non-empty response carries a
+null array or a null first entry, and `address` again when there is no HHDM response to tell a
+direct-map address by. One pixel format is accepted because one is all the renderer has: 24 or 16
+bits per pixel would need unaligned or merged stores, which a device mapping does not tolerate.
 
 The kernel prints exactly one line:
 

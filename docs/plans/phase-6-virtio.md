@@ -95,6 +95,10 @@ measurements:
    CI's firmware build has not been measured.
 3. **Whether the ramfb framebuffer reaches the kernel** (6.7) — that Limine reports it and that it
    survives `ExitBootServices`. How it is then mapped is not a measurement: H9 decides it.
+   **Measured by 6.7 (2026-11-26, QEMU 11.0.3, Homebrew's edk2): it does.** Limine reports one
+   framebuffer, 800×600, pitch 3200, 32 bpp RGB with 8-bit channels at shifts r16/g8/b0; the memory
+   map lists its range as kind 7 (`FRAMEBUFFER`), not usable; and a store through it after
+   `ExitBootServices` shows in a `screendump`. CI's firmware build has not been measured.
 
 ## Locked design decisions
 
@@ -1319,7 +1323,8 @@ ledger's, each with what it costs if it was wrong.
     exit SENDREC refused instead, and VFS never resets that descriptor row. Harmless for a boot
     stub, which holds none.
 14. **`kernel/src/proc/table.rs` still says only `vblk` has a boot module** (owner: the next slice
-    that touches the kernel). Left alone to keep `kernel/src` unchanged by this slice.
+    that touches the kernel). Left alone to keep `kernel/src` unchanged by this slice. **Paid by
+    6.7**, which corrected the comment in the commit that added the kernel's framebuffer code.
 15. **`vcon.ds ok` does not police `vcon < vfs`** (mutation 10; owner: none unless the lookup moves
     earlier in VFS's prologue). The order is kept by convention.
 16. **The `hvc0` probe reports lost bytes as a hang** (mutation 1; owner: whoever gives the feeder
@@ -1336,6 +1341,154 @@ windowed mode that drops `-display none`.
 **Proof:** a QMP `screendump` of the running guest matches an image the host renders from the same
 text with the same renderer library — a mechanical check that pixels reached the display, not a
 marker TTY prints about itself.
+
+**Design:**
+[`2026-11-26-framebuffer-console-design.md`](../superpowers/specs/2026-11-26-framebuffer-console-design.md),
+decisions `F1…F13`. **Plan:**
+[`2026-11-26-framebuffer-console.md`](../superpowers/plans/2026-11-26-framebuffer-console.md), whose
+ledger records every ruling made during the run.
+
+**Unverified fact 3: it holds** (measured 2026-11-26, QEMU 11.0.3, Homebrew's edk2, before any
+design-dependent code). Limine reports one framebuffer — 800×600, pitch 3200, 32 bpp, RGB, 8-bit
+channels at r16/g8/b0 — the memory map calls its range kind 7 (`FRAMEBUFFER`), and it survives
+`ExitBootServices`: a block stored through the HHDM afterwards is in a `screendump`. CI's firmware
+(`qemu-efi-aarch64`) is unmeasured until the branch's first run (debt 10).
+
+**What it settled.** The kernel asks Limine for a framebuffer and decides **once**, at boot, whether
+TTY may have it. The decision is the pure `kernel-shared::framebuffer::validate` (F2): 32 bpp, RGB,
+8-bit channels at distinct byte-aligned shifts, a non-zero size, a pitch that covers the width, a
+page-aligned direct-map address, `pitch * height` inside the window, and — added by the review — a
+page-rounded end that does not pass 2^48. The accepted record lives in one static
+(`kernel/src/arch/aarch64/framebuffer.rs`) that three consumers read, so they cannot disagree: the
+frame allocator's seed, which subtracts the framebuffer's page-rounded range from every usable entry
+with `kernel-shared::memrange::subtract` (F5) and is why **the framebuffer is read before the
+allocator is seeded**; `load_boot_server`'s TTY arm, which maps `ceil(pitch * height / 4096)` pages
+`Prot::DEVICE_RW` at `FB_VA`, the base of a **fourth kernel-owned window** at 4 GiB (F3); and
+`SYS_GETINFO(GET_FRAMEBUFFER)`, selector 67, gated to TTY and answering `ENOENT` when there is no
+framebuffer (F4). The kernel prints one `[fb] ok|none|FAIL` line and never draws.
+
+`drivers/tty` is now a library and a binary (F6). The library — `font`, `grid`, `paint`, `reply` —
+is pure, `forbid(unsafe_code)` and host-tested, with no feature gate; the binary is the only half
+that touches a device. TTY asks for the framebuffer once, **re-validates the reply instead of
+trusting it** (`reply::accept`), clears the screen and prints one `[diag tty] fb ok|none|FAIL` line
+before its banner, which `main` now writes (F9). Every console byte goes through one
+`console_write`: **the UART first, then the screen**. Kernel output and `[diag]` lines stay on the
+serial line only. The framebuffer is touched by one aligned volatile `u32` store and nothing else —
+never a read, a slice or a bulk copy (H9) — and a scroll shifts the text grid and **repaints only
+the cells whose byte changed**, found from a shadow of what was painted (`paint::Shown`, F8): a full
+repaint on every scroll cost the console a factor of 6.3 in steady-state throughput against no
+painting, the changed-cells repaint 1.47 (300 s stub-free boots ending at `[ipc]` 11.29 M, 1.79 M
+and 7.69 M). The font is Spleen 8×16, the upstream release file byte for byte — PSF version 1, not
+the PSF2 the spec first named — with its BSD-2-Clause licence beside it (F7). There is no cursor, no
+colour and no escape-sequence terminal.
+
+`tools/qemu-run.sh` attaches `-device ramfb` and a QMP socket to **every** boot (F1);
+`MINIXRS_DISPLAY=window` opens a window, `MINIXRS_QMP` moves the socket, and a socket path of 104
+bytes or more is refused. The proof is `tools/fbcheck` with `tools/screendump.sh` (F10, F11): a QMP
+`screendump` of the running guest is decoded cell by cell with the renderer library, re-rendered,
+and required to be **one unbroken stretch of the console's text in the boot's own serial log** —
+every row where the row above leaves off — on a screen that **has scrolled**. CI runs it beside both
+full boots and it blocks. The check reached that form in three steps, the last forced by the
+mutation run below; what it still does not see is debt 7.
+
+Budget: the last required marker sits at 65.02% of a 600 s local disk log and 41.53% of the ramdisk
+one, against 6.5's recorded 63.20% / 41.41% for the previous merge base (not re-measured back to
+back). No timeout moved. `stop`/`screendump`/`cont` beside a fed boot disturbed nothing: 197 of 197
+marker checks on both backends.
+
+No `Message` layout, call number, endpoint or errno value moved (H12): `GET_FRAMEBUFFER` is additive
+and, like its three driver-gated neighbours, not emitted into the generated C headers. Three lines
+joined the common expected markers and four the forbidden ones. The working rules are in
+[`kernel.md`](../conventions/kernel.md#the-framebuffer-window),
+[`servers-and-drivers.md`](../conventions/servers-and-drivers.md#ttys-screen-a-library-half-and-stores-only)
+and [`testing-and-markers.md`](../conventions/testing-and-markers.md#the-screen-check); how it works
+is in [the book](../../book/src/drivers/overview.md#the-screen).
+
+**Debts this slice paid.** 6.6's debt 14: `kernel/src/proc/table.rs` no longer says only `vblk` has
+a boot module.
+
+**Mutations.** All eight were applied, booted stub-free and fed for 180 s with the screen check
+beside the boot, and reverted.
+
+| # | Mutation                                    | Observed                                                                                                                                                                                               |
+| - | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1 | `console_write` skips the framebuffer       | the screen check only: `only 0 non-blank rows`                                                                                                                                                         |
+| 2 | the store lands at `x + 1`                  | in the bin's `Surface`: the screen check only (a cell that is not a glyph); in the lib's `paint_cell`: 21 `paint::tests` fail                                                                          |
+| 3 | the window is mapped one page short         | `[pf] proc=t far=0x1001d4000 flags=0x1 -> VM` during `clear`; `fb ok` and the banner missing; the boot stalls near `[ipc 1700]`; **no forbidden marker fires**. The honest form also gives `pages=468` |
+| 4 | `GET_FRAMEBUFFER`'s gate names another proc | `[diag tty] fb none rc=-1`: expected missing, forbidden hit, screen check fails                                                                                                                        |
+| 5 | red and blue shifts swapped                 | nothing moves — grey is channel-symmetric (debt 1)                                                                                                                                                     |
+| 6 | the carve skipped                           | nothing moves on QEMU — `usable=0` either way (debt 2)                                                                                                                                                 |
+| 7 | a scroll repaints nothing                   | caught on a scrolled screen: `screen row 36 is not in the serial log's console text…`. **Passed the script as first built**                                                                            |
+| 8 | `-device ramfb` dropped                     | `[fb] none`, `[diag tty] fb none rc=-2`: three expected missing, two forbidden hit, screen check fails cleanly                                                                                         |
+
+**Not as predicted:**
+
+- **7 passed, and that is why the screen check was rebuilt.** In the default boot the script's gate
+  line (`minix.rs init: stdin ok`) appears with 22 of the screen's 37 rows drawn, and the script
+  took the first dump that passed — so CI never judged a scrolled screen, and rows looked up one at
+  a time said nothing about where they were. A pass now requires `scrolled=yes` and every row is
+  anchored to the one above it.
+- **1 and 2 are caught by the screen check and by nothing else.** A TTY that draws nothing, or draws
+  every glyph a pixel to the right, passes all 197 marker checks.
+- **3 stalls the whole boot with no forbidden marker** and reads like a starved boot; the `[pf]
+  proc=t far=0x1001…` line is the discriminator (debt 6).
+
+**Debt carried from 6.7.**
+
+1. **A red/blue swap is invisible** (mutation 5; owner: whoever adds colour to the console). The
+   console draws grey, whose channels are equal, so neither a marker nor the screen check can tell a
+   wrong channel order from a right one.
+2. **The carve has never been executed by a boot** (mutation 6; owner: whoever first boots on a
+   machine whose memory map reports the framebuffer as usable RAM). QEMU reports it as its own kind,
+   so `usable=0` and `memrange::subtract` removes nothing. The arithmetic is host-tested; the call
+   in `init_from_limine_memmap` is held by reading.
+3. **`GET_FRAMEBUFFER`'s `EPERM` gate is unprobed in the too-wide direction** (owner: the next slice
+   that adds a driver, which can add 67 to its own deny battery). TTY's `getinfo.deny` asks for the
+   two virtio selectors only and no other process asks for 67, so a gate opened to a second process
+   moves no marker. The too-narrow direction is mutation 4.
+4. **The framebuffer's range is not checked against the memory map's non-usable kinds** (found by
+   the review; owner: whoever ports to real hardware, or the x86_64 port). `validate` bounds the
+   range by the window and by 2^48, and the carve handles usable RAM; nothing refuses a framebuffer
+   that overlaps the kernel image, a module or bootloader-reclaimable memory. It would be mapped
+   into TTY as device memory.
+5. **The last mapped page holds 0x400 bytes that are not the framebuffer's** (owner: none unless the
+   slack is ever found to matter). 1 920 000 bytes is 468.75 pages; the 469th runs into
+   firmware-reserved memory, mapped device into TTY. TTY bounds every store by the screen's size in
+   pixels. The alternative is to map `floor` pages and lose a row of pixels.
+6. **A fault in a framebuffer store is silent and stalls the boot** (mutation 3; owner: whoever
+   gives VM or RS a way to report a boot driver's death). TTY has no `ipc_to` path that turns a
+   device-VA fault into a message; it stops in its start-up clear, everything behind it stalls, no
+   forbidden marker fires, and the log looks starved. `testing-and-markers.md` names the `[pf]
+   proc=t` line to look for.
+7. **What the screen check does not see** (owner: 6.8, which puts interactive text on the console,
+   or whoever stops the kernel printing tick bytes on the console's line). Letters lost from a row —
+   up to 120 inside it, and any number at the very start or end of a line, so a line of nothing but
+   letters can be a blank row; the end of the last non-blank row, matched as a prefix; the head of a
+   scrolled screen's top row, and a wrapped line that begins there; a frozen screen, which is still
+   an unbroken stretch. And as false *failures*: console text holding `[word]` or `[word `, a tab,
+   an unprintable byte or a bare `\r`, and a line ending in a blank with tick bytes after it.
+8. **CI's `finish_screen` decides by `kill -0` on a pid** (owner: whoever next edits that step). A
+   script that has just exited and whose pid has been reused would be signalled, or its real status
+   lost. One runner, one job, seconds between the two — but it is a pid, not a handle.
+9. **A second concurrent boot steals the default QMP socket** (owner: with 6.6's debt 7). The runner
+   removes a stale socket at `target/qmp.sock` before it starts; a boot already running there loses
+   its socket to the newcomer. `MINIXRS_QMP` exists for this and nothing enforces it.
+10. **CI's QEMU and firmware are unmeasured** (owner: this branch's first CI run). Whether Limine
+    reports a framebuffer under `qemu-efi-aarch64`, in what mode — another default moves three
+    expected markers together — and how large `worst=` gets on a slower host against the cap of 120.
+11. **The renderer's host tests under Miri are untimed** (owner: this branch's first CI run).
+    `minixrs-tty` was already on the advisory Miri job's list, and several new tests paint whole
+    800×600 images.
+12. **Tick bytes inside console lines can break `grep -F` markers** (pre-existing; owner: whoever
+    takes the per-tick byte off the serial line or makes the checker tolerant). Measured here for
+    the first time: a tick byte lands inside 0.13% of console lines with no painting and 0.09% with
+    the changed-cells repaint. `check-boot-log.sh` allows for none.
+13. **The `MAX_REGIONS` panic message is wrong when the carve caused the split** (owner: with debt
+    2). It says Limine reported too many usable regions; a framebuffer in the middle of the
+    sixteenth would be the real cause.
+14. **`cargo doc -D warnings` fails in `kernel-shared`** (owner: whoever adds a doc gate). One
+    redundant explicit link is new in `framebuffer.rs` and one is old in `execstack.rs`. No CI job
+    builds the docs.
 
 ### Slice 6.8: `virtio-input` keyboard — sub-milestone: non-headless boot
 

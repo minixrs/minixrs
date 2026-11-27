@@ -567,8 +567,11 @@ follows is the engine and the policy.
   pa=…` when one was mapped. The tokens are `validate`'s nine, in the order it tests them — `bpp`,
   `model`, `mask-size`, `shift`, `size`, `pitch`, `address`, `align`, `window` — plus `pointer` for
   a null array or first entry, and `address` again when there is no HHDM response to judge an
-  address by (`validate` given a zero offset would pass every address, so it is not called). Which
-  of these are markers is in [`testing-and-markers.md`](./testing-and-markers.md#markers)
+  address by (`validate` given a zero offset would pass every address, so it is not called).
+  `address` also covers a range whose page-rounded end passes `framebuffer::PA_LIMIT`, 2^48: a page
+  descriptor holds 48 bits of physical address and `map_page_in` masks the rest away, so such a page
+  would be mapped somewhere else with no assert firing (found by the whole-branch review). Which of
+  these are markers is in [`testing-and-markers.md`](./testing-and-markers.md#markers)
 
 ## `exec` — the kernel call
 

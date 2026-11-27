@@ -73,7 +73,10 @@ line naming the failed condition and carries on with no framebuffer:
   8, 16 or 24, pairwise distinct;
 - `width`, `height` non-zero; `pitch >= width * 4` and `pitch % 4 == 0`;
 - `address` is an HHDM address and its physical address is page-aligned;
-- `pitch * height`, rounded up to pages, fits `FB_WINDOW_SIZE` (all products `checked_`).
+- `pitch * height`, rounded up to pages, fits `FB_WINDOW_SIZE` (all products `checked_`);
+- the page-rounded physical end, `pa + pages * 4096`, does not pass `PA_LIMIT`, 2^48. A page
+  descriptor holds 48 bits of physical address and the kernel's mapper masks the rest away, so a
+  page above that would be mapped at another address with no assert firing. Refused as `address`.
 
 The decision is one pure function, `kernel-shared::framebuffer::validate`, host-tested because
 `kernel/src` cannot be; `limine.rs` only copies the fields out. The accepted line is `[fb] ok w=…
@@ -127,8 +130,10 @@ split that would exceed `MAX_REGIONS` panics with the existing message. The kern
 and validates the framebuffer response **before** it seeds the allocator.
 
 On QEMU the range is expected to be reported as `LIMINE_MEMMAP_FRAMEBUFFER`, not usable, so the
-carving arm does not run at boot. That is stated as an honest "nothing moves" row (section 3): the
-host tests prove the arithmetic and a mutation proves the wiring.
+carving arm does not run at boot. That is stated as an honest "nothing moves" row (section 3,
+mutation 6): the host tests prove the arithmetic, and **nothing proves the wiring** — with the carve
+skipped altogether no marker moved, `usable=0` either way. The call in `init_from_limine_memmap` has
+never been executed by a boot with something to carve; it is held by reading.
 
 *Rejected:* refusing an overlapping framebuffer (simpler, and contradicts H9); carving after
 allocation has begun (frames already handed out could be the screen).
@@ -224,44 +229,65 @@ rows=37` — and four the forbidden one: `[fb] none`, `[fb] FAIL`, `[diag tty] f
 tty] fb FAIL`. `ramfb` is on every boot, so a boot with no screen is a failure whichever side says
 so. The reboot boot's seven-line set is unchanged.
 
-### F10 — the proof: decode the screen, and find its text in the serial log
+### F10 — the proof: decode the screen, and place it in the serial log
 
 The screen is never quiet — init's rotation prints for ever — so there is no fixed image to compare
 against. `tools/fbcheck` (a host crate depending on the TTY lib) instead checks a dump against the
 renderer and against the boot's own serial log:
 
-1. **Geometry.** The dump's size equals the `w=`/`h=` of the log's last complete `[diag tty] fb ok`
-   line, and the grid the library derives from that size equals its `cols=`/`rows=`.
+1. **Geometry.** The dump's size equals the `w=`/`h=` of the log's last `[diag tty] fb ok` line, and
+   the grid the library derives from that size equals its `cols=`/`rows=`. The line must be complete
+   and is read exactly, with no allowance for stray bytes: the kernel writes a `[diag …]` line
+   whole, inside one kernel call.
 2. **Every cell is a glyph.** Each 8×16 cell inside the grid decodes, pixel-exactly, to one byte
    drawn by `paint` in the two console colours; every pixel outside the grid is background.
    Re-rendering the decoded grid with the same library reproduces the dump — the phase file's
    "matches an image the host renders from the same text".
-3. **The text is the boot's.** At least `MIN_ROWS` (8) rows are non-blank, and every non-blank row,
-   trailing blanks removed, is found in the **console's part** of the serial log. The log has three
-   writers (measured: 54 MB of log for 80 KB of console), so it is read in two passes. First every
-   kernel line is taken out: from a `[` followed by one or more of `a`–`z`, `_`, `.`, `-` and then a
-   space or `]`, through the next `\n` — such lines are written whole but can begin in the middle of
-   a console line. Then a row is found if what is left holds its bytes in order with nothing between
-   them but the kernel's per-tick bytes: ASCII letters or `?`, in runs of any length, at most
-   `MAX_STRAY` (32) per row. A digit, a space, punctuation or a line end between two bytes of a row
-   is never forgiven, nor a missing or different byte.
+3. **The text is the boot's, and it is where the boot put it.** At least `MIN_ROWS` (8) rows are
+   non-blank, and **the screen, read top to bottom, is one unbroken stretch of the console stream**.
 
-   **The wrap join is counted, never required.** A row that ends in the last column and whose text,
-   followed directly by the next row's, is in the log adds one to `wraps`; a row for which that is
-   not so is still accepted on its own. Requiring the join would refuse an honest screen — a line of
-   exactly `cols` bytes followed by a newline fills its row and is not continued below (F8) — and
-   since a joined text can only be found where both rows are found, the row-by-row rule accepts
-   exactly the same screens.
+   The *console stream* is the log from that `fb ok` line on — nothing before it was drawn by this
+   TTY — with every kernel line taken out: from a `[` followed by one or more of `a`–`z`, `_`, `.`,
+   `-` and then a space or `]`, through the next `\n`. (The log has three writers — measured, 54 MB
+   of log for some 60 KB of console — and a kernel line, though written whole, can begin in the
+   middle of a console line.) What is left still holds the kernel's per-tick bytes, the *strays*:
+   ASCII letters or `?`.
 
-   What step 3 knowingly does not see: **row order** (rows are looked up one at a time); **lost
-   letters** (up to 32 letters the log has and a row lacks are taken for tick bytes — `minix.rs it:
-   stdin ok` is found in `minix.rs init: stdin ok`); and console text that itself looks like a
-   kernel line (`[word]` or `[word `), which is taken out in the first pass and its row then refused
-   — a false failure, never a false pass.
+   Walking the rows from the top to the last non-blank one, the stream must hold, in order and with
+   nothing else between: the row's text (trailing blanks removed), byte for byte, with strays
+   allowed between two of its bytes, at most `MAX_STRAY` (120) per row; then up to the row's width
+   in blanks; then a line end — or, only if the row reached the last column, nothing, the line
+   having wrapped into the next row. A full row may be followed by either, since a line of exactly
+   `cols` bytes followed by a newline takes one row (F8). Strays *between* those pieces are not
+   counted and may come in any number, except after a trailing blank. The last non-blank row needs
+   only its text to be there: it may be the line still being written.
 
-The verdict is one line, `fbcheck: ok <W>x<H> <C>x<R> rows=<N> wraps=<N> stray=<N> worst=<N>` on
-stdout — the size in pixels and in cells, the non-blank rows, the wrapped lines seen whole, the rows
-that needed tick bytes allowed, and the most one row needed — or `fbcheck: FAIL <reason>` on stderr.
+   So every row is anchored to the one above it. **Row order, a repeated row, a row cut short, a row
+   shifted left and a row left over from before a scroll are all refused**, each with its own reason
+   (`… not in the serial log's console text`, `… but not where the screen has it`, `… stops where
+   the serial log's console text goes on`).
+
+   **Scrolled, or not yet.** A screen whose top row begins at the very start of the console stream
+   has not scrolled. One that begins later has — and must then be full, its last non-blank row the
+   last row or the one above it; a later stretch on a screen that is not full is refused (a scroll
+   that cleared instead of moving). The not-scrolled reading is tried first. Only a scrolled screen
+   has exercised the scroll path, so `--scrolled` asks for one, and a screen that is right but has
+   not scrolled is then `early`: neither a pass nor a failure.
+
+   What step 3 knowingly does not see: **lost letters** — up to 120 inside a row (`minix.rs it:
+   stdin ok` for `minix.rs init: stdin ok`), and any number at the very start or very end of a line,
+   so a line of nothing but letters can be shown as a blank row; **the end of the last non-blank
+   row**, matched as a prefix; **the head of a scrolled screen's top row**, and a wrapped line that
+   begins there and lost characters anywhere along it; **a frozen screen**, which is still an
+   unbroken stretch; and, as false failures rather than false passes, console text that looks like a
+   kernel line (`[word]` or `[word `) and bytes the screen draws differently (a tab, an unprintable
+   byte, a bare `\r`).
+
+One line says what happened, and the exit status with it: `fbcheck: ok <fields> scrolled=yes|no` on
+stdout, exit 0; `fbcheck: early <fields> (not scrolled yet)` on stdout, exit 2, with `--scrolled`
+only; `fbcheck: FAIL <reason>` on stderr, exit 1; usage, 64. `<fields>` is `<W>x<H> <C>x<R> rows=<N>
+wraps=<N> stray=<N> worst=<N>` — the size in pixels and in cells, the non-blank rows, the rows whose
+line wrapped into the next, the rows that needed strays allowed, and the most one row needed.
 
 Step 3 is what makes the check more than the renderer agreeing with itself: the serial log is
 written by `pl011`, not by the renderer. One hand-drawn golden glyph in the host tests covers the
@@ -272,28 +298,39 @@ reconstructing the console stream from the serial log and rendering it (kernel l
 interleave with it unpredictably, which
 [`testing-and-markers.md`](../../conventions/testing-and-markers.md) already records).
 
-### F11 — taking the dump: stop, dump, continue, retry
+### F11 — taking the dump: stop, dump, continue, until the screen has scrolled
 
 `tools/screendump.sh <qemu-log> <out.ppm>` works in three stages. It first makes sure it has the
 checker: it builds `minixrs-fbcheck` once (`cargo build --release`) and from then on runs the binary
 directly, or takes one already built from `MINIXRS_FBCHECK` and builds nothing. It then polls the
-log for `minix.rs init: stdin ok` (the last event the feeder drives), which must be **seen on two
-consecutive polls**, because the log path is usually one an earlier boot wrote and the script starts
-an instant before the boot truncates it. Then it runs `fbcheck dump-and-check` up to
-`SCREENDUMP_TRIES` (10) times, `SCREENDUMP_GAP` (3) seconds apart: over QMP it sends `stop`,
-`screendump` (PPM), `cont` — `cont` always, whatever the dump did — and then reads the log and
-applies F10. The first pass wins; a dump caught with a glyph half-painted fails step 2 and is simply
-retried. It exits non-zero, with the last dump kept, if no try passes or if the gate line has not
-appeared `SCREENDUMP_CEILING` (1300) seconds after it started. `fbcheck`'s QMP client is a few lines
-over `UnixStream`, each step bounded at 10 s; no new host dependency.
+log for `minix.rs init: stdin ok` (the last event the feeder drives, so that the pauses below cannot
+disturb the feeder's timed exchanges), which must be **seen on two consecutive polls**, because the
+log path is usually one an earlier boot wrote and the script starts an instant before the boot
+truncates it. Then it **looks every `SCREENDUMP_GAP` (10) seconds** with `fbcheck dump-and-check
+--scrolled`: over QMP it sends `stop`, `screendump` (PPM), `cont` — `cont` always, whatever the dump
+did — and then reads the log and applies F10. Every look therefore pauses the guest. The first `ok …
+scrolled=yes` wins. An `early` verdict is not a pass and **does not use up a try**: the script looks
+again. A `FAIL` uses up one of `SCREENDUMP_TRIES` (10) — a dump caught with a glyph half-painted or
+a scroll half-repainted is simply looked at again — and when they are gone the script exits 1.
+`SCREENDUMP_CEILING` (1300) seconds after it started the script exits 1 **whichever stage it is
+in**: because the gate line never came, or because the screen never scrolled. The last dump is kept
+either way. `fbcheck`'s QMP client is a few lines over `UnixStream`, each step bounded at 10 s; no
+new host dependency.
+
+**Why a scrolled screen.** In the default boot the gate line appears with 22 of the screen's 37 rows
+written. As first built the script ran up to ten tries three seconds apart and the first passing
+dump won — so no dump it judged had ever scrolled, and a TTY whose scroll repainted nothing passed
+(section 3, mutation 7). A scrolled screen is not long in coming: the 38th console row is written
+about 5% of the way through a default disk boot's log.
 
 CI builds `fbcheck` in a step of its own and hands it over through `MINIXRS_FBCHECK`, so that no
 cargo runs beside a boot. It starts the script as a background job beside each of the two full boots
 and settles it when the boot's `timeout` has fired: a script that has exited leaves its status in
 `fb-<boot>.rc`, and **one still running is killed and counted as failed** — the script cannot see
-QEMU die, and one still polling never saw its gate line or never got a passing dump. The check step
-fails the job on a non-zero status. `fb-<boot>.ppm` and `fb-<boot>.verdict` are uploaded with the
-logs on every run, pass or fail. The reboot boot is not checked.
+QEMU die, and one still looking never saw its gate line, never saw the screen scroll, or never got a
+scrolled dump to pass. The check step fails the job on a non-zero status. `fb-<boot>.ppm` and
+`fb-<boot>.verdict` are uploaded with the logs on every run, pass or fail. The reboot boot is not
+checked.
 
 ### F12 — what does not change
 
@@ -313,9 +350,14 @@ Task 0, before any design-dependent code, on this machine (QEMU 11.0.3, Homebrew
    merge base, with full repaint on scroll. The slice moves no timeout without that figure; over
    budget, F8's changed-cells-only repaint is tried before any timeout is. **Measured, and the
    changed-cells repaint was adopted** (section 7 has the figures): a full repaint is 3700 cells,
-   473,600 device stores, on every newline once the screen is full.
+   473,600 device stores, on every newline once the screen is full. **The budget, measured on the
+   final code:** the last required marker sits at 65.02% of a 600 s local disk log and 41.53% of the
+   ramdisk one, against the 63.20% / 41.41% slice 6.5 recorded for the previous merge base. The two
+   were not re-measured back to back, so this is a comparison with a recorded figure, not a same-day
+   baseline. No timeout moved.
 3. **Whether `stop`/`screendump`/`cont` disturbs the boot** — the markers and the feeder's exchange
-   still pass with the dumper running.
+   still pass with the dumper running. **Measured: nothing was disturbed** — beside a fed boot with
+   the dumper looking, both backends passed 197 of 197 marker checks.
 
 CI's QEMU and firmware (`qemu-efi-aarch64`) are unmeasured until the branch's first run, as in 6.4
 and 6.6.
@@ -349,36 +391,52 @@ and 6.6.
   tokens, `window`, `grid`) and the measured reply accepted.
 - `fbcheck` — a rendered image decodes back to its text; one flipped pixel, a wrong size, a row
   absent from the log, and too few rows are each refused; kernel lines stripped and tick-byte runs
-  tolerated up to the limit and no further; the wrap join counted; the QMP exchange against a mock
-  server, `cont` always sent.
+  tolerated up to the limit and no further; a row cut short, a repeated row, rows out of order and
+  rows left over from before a scroll each refused; a full-width line and a wrapped one told apart;
+  a screen that begins with the console's first line is not scrolled, one whose first line has
+  scrolled away is, one that reads both ways is reported as not scrolled, and a later stretch on a
+  screen that is not full is refused; a row that lost letters still passes (the stated cost); the
+  QMP exchange against a mock server, `cont` always sent.
 
 **Boot markers:** `[fb] ok`, `[devmap] tty fb`, `[diag tty] fb ok` in the common expected file;
 `[fb] none`, `[fb] FAIL`, `[diag tty] fb none` and `[diag tty] fb FAIL` forbidden (F9 has the full
 text of each). Both full boots, the reboot and `diff-backends.sh` as the definition of done
 requires.
 
-**The screen check** (F10–F11) passes on both full boots.
+**The screen check** (F10–F11) passes on both full boots, on a screen that has scrolled.
 
-**Mutations** (each observed, then reverted):
+**Mutations.** All eight were applied, booted stub-free and fed for 180 s with the screen check
+beside the boot, and reverted. The column is what was **observed**, not what was predicted.
 
-| # | Mutation                                             | Expected to move                    |
-| - | ---------------------------------------------------- | ----------------------------------- |
-| 1 | `console_write` skips the framebuffer                | screen check: too few rows          |
-| 2 | `paint` stores at `x + 1`                            | screen check: cells do not decode   |
-| 3 | the kernel maps the window one page short            | TTY faults / `fb ok` missing        |
-| 4 | `GET_FRAMEBUFFER`'s gate names another proc          | `fb none rc=-1`, `fb ok` missing    |
-| 5 | swap red and blue shifts in the reply                | none on grey text — honest row      |
-| 6 | the loader treats the range as usable (skip carving) | none on QEMU — honest row (F5)      |
-| 7 | scroll shifts the grid without repainting            | screen check: a row not found — TBO |
-| 8 | drop `-device ramfb`                                 | `[fb] none`, `fb ok` missing        |
+| # | Mutation                                              | Observed                                                                                                                                                                                                                                              |
+| - | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 | `console_write` skips the framebuffer                 | **the screen check only**: `only 0 non-blank rows`. No serial marker moves                                                                                                                                                                            |
+| 2 | the store lands at `x + 1`                            | in the bin's `Surface`: **the screen check only** (a cell that is not a glyph). The same edit in the lib's `paint_cell` fails 21 `paint::tests`                                                                                                       |
+| 3 | the kernel maps the window one page short             | `[pf] proc=t far=0x1001d4000 flags=0x1 -> VM` during TTY's `clear`; `[diag tty] fb ok` and the banner missing; **the whole boot stalls near `[ipc 1700]` and no forbidden marker fires**. The honest form of the edit also moves `pages=469` to `468` |
+| 4 | `GET_FRAMEBUFFER`'s gate names another proc           | `[diag tty] fb none rc=-1`: an expected marker missing, a forbidden one hit, and the screen check fails                                                                                                                                               |
+| 5 | red and blue shifts swapped in the reply              | **nothing moves** — grey is channel-symmetric                                                                                                                                                                                                         |
+| 6 | the loader treats the range as usable (carve skipped) | **nothing moves** on QEMU — `usable=0` either way (F5)                                                                                                                                                                                                |
+| 7 | a scroll shifts the grid and repaints nothing         | caught by the screen check **on a scrolled screen**: `screen row 36 is not in the serial log's console text…`. With the script as first built it **passed**                                                                                           |
+| 8 | `-device ramfb` dropped                               | `[fb] none` and `[diag tty] fb none rc=-2`: three expected markers missing, two forbidden hit, and the screen check fails cleanly                                                                                                                     |
 
-Mutation 5 has no proof while the console draws grey; it is recorded as a debt owned by whoever adds
-colour. Mutation 7's symptom is **to be observed** (TBO), not assumed, and it cannot be the one
-first written here: `fbcheck` does not check row order (F10), so "rows not in log order" is not
-something it can report. A screen left unrepainted after a scroll shows rows of text that were all
-written at some time, so each may well still be in the log; what should give it away is the drawn
-character that lands on a stale row and makes a row nobody wrote — a row not found — but if every
-row is found, this is an honest "nothing moves" row and a debt against F10's order blindness.
+Four of the rows say something the predictions did not:
+
+- **Mutations 1 and 2 are caught by the screen check and by nothing else.** Without it a TTY that
+  draws nothing, or draws every glyph one pixel to the right, passes all 197 marker checks.
+- **Mutation 3 looks like a starved boot.** TTY faults inside its start-up clear, VM has nothing to
+  map at a framebuffer address, and TTY never returns: everything after stalls and the missing
+  markers are contiguous to the end of the log, with a tiny IPC count. No forbidden marker fires.
+  The `[pf] proc=t far=0x1001…` line — a fault address inside the framebuffer window — is the
+  discriminator, and
+  [`testing-and-markers.md`](../../conventions/testing-and-markers.md#mutation-testing) now says to
+  look for it.
+- **Mutations 5 and 6 are honest "nothing moves" rows, and debts.** 5 has no proof while the console
+  draws grey, and is owned by whoever adds colour. 6 means the carve's *wiring* has never been
+  executed by a boot: it is held by the host tests of the arithmetic and by reading (F5).
+- **Mutation 7 is why the screen check was rebuilt.** In the default boot the script's gate line
+  appears with 22 of 37 rows drawn; the first passing try won; so CI never judged a scrolled screen,
+  and a scroll that painted nothing passed. A pass now requires `scrolled=yes`, and each row is
+  anchored to the one above it (F10, F11).
 
 ---
 
@@ -402,22 +460,25 @@ row is found, this is an honest "nothing moves" row and a debt against F10's ord
 
 Decisions the phase file did not make. Each is undone by the change in its last column.
 
-| #   | Ruling                                                                      | If wrong                                                                        |
-| --- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| F1  | `ramfb` and a QMP socket on every boot; window by `MINIXRS_DISPLAY=window`  | Two lines in `qemu-run.sh`                                                      |
-| F2  | Only 32 bpp RGB with 8-bit channels is accepted; anything else = no screen  | A second `paint` path; the reply already carries shifts and bpp                 |
-| F3  | The window is at 4 GiB and 16 MiB                                           | Two constants; nothing else names the address                                   |
-| F4  | Selector 67, shifts as bytes, no mask sizes on the wire                     | Not emitted to C, so a repack is one Rust edit on both sides                    |
-| F5  | Overlap arithmetic lives in `kernel-shared`, applied at allocator seed time | Move the function; the boot order change (fb before allocator) is the real cost |
-| F6  | No `server` feature on the TTY crate                                        | Add the gate as `fs/mfs` has it, plus its extra clippy step in CI               |
-| F7  | Spleen 8×16 as the upstream `.psfu` (PSF1), indexed by byte                 | Swap the file; if the ASCII identity fails, a 95-entry map in `font`            |
-| F8  | Deferred wrap; `?` for unknown bytes; grey on black; no cursor              | `grid` and its tests only; 6.8 will want the cursor anyway                      |
-| F8  | Scroll repaints only changed cells, found from a shadow array; no fb reads  | `paint_all` back in `console_write`, drop `Shown` — at a quarter the throughput |
-| F9  | UART first, then screen; one `fb` verdict line                              | Reorder two calls                                                               |
-| F10 | The proof decodes the dump and matches rows to the serial log; no test card | A test card needs a quiet console, i.e. a change to init's rotation             |
-| F11 | The dumper pauses the guest (`stop`/`cont`) and retries                     | Drop the pause; retries alone still converge, more slowly                       |
-| F11 | The screen check runs on both full boots in CI and blocks                   | Make it one boot, or non-blocking, in `ci.yml`                                  |
-| F13 | No Limine `resolution:` is set; the firmware's mode is taken as found       | One line in `tools/limine.conf`                                                 |
+| #   | Ruling                                                                                                   | If wrong                                                                                         |
+| --- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| F1  | `ramfb` and a QMP socket on every boot; window by `MINIXRS_DISPLAY=window`                               | Two lines in `qemu-run.sh`                                                                       |
+| F2  | Only 32 bpp RGB with 8-bit channels is accepted; anything else = no screen                               | A second `paint` path; the reply already carries shifts and bpp                                  |
+| F3  | The window is at 4 GiB and 16 MiB                                                                        | Two constants; nothing else names the address                                                    |
+| F4  | Selector 67, shifts as bytes, no mask sizes on the wire                                                  | Not emitted to C, so a repack is one Rust edit on both sides                                     |
+| F5  | Overlap arithmetic lives in `kernel-shared`, applied at allocator seed time                              | Move the function; the boot order change (fb before allocator) is the real cost                  |
+| F6  | No `server` feature on the TTY crate                                                                     | Add the gate as `fs/mfs` has it, plus its extra clippy step in CI                                |
+| F7  | Spleen 8×16 as the upstream `.psfu` (PSF1), indexed by byte                                              | Swap the file; if the ASCII identity fails, a 95-entry map in `font`                             |
+| F8  | Deferred wrap; `?` for unknown bytes; grey on black; no cursor                                           | `grid` and its tests only; 6.8 will want the cursor anyway                                       |
+| F8  | Scroll repaints only changed cells, found from a shadow array; no fb reads                               | `paint_all` back in `console_write`, drop `Shown` — at a quarter the throughput                  |
+| F9  | UART first, then screen; one `fb` verdict line                                                           | Reorder two calls                                                                                |
+| F10 | The proof decodes the dump and places the screen in the serial log as one unbroken stretch; no test card | A test card needs a quiet console, i.e. a change to init's rotation                              |
+| F10 | Tick bytes are forgiven inside a row, up to 120; lost letters therefore pass                             | Lower `MAX_STRAY`; too low refuses an honest screen on a slow host (CI's `worst=` is unmeasured) |
+| F10 | Only a scrolled screen passes in CI (`--scrolled`); an unscrolled one is `early`                         | Drop the flag in `screendump.sh` — and mutation 7 passes again                                   |
+| F11 | The dumper pauses the guest (`stop`/`cont`) on every look, every 10 s, until a scrolled screen passes    | Drop the pause; half-repainted dumps then cost tries. A shorter gap pauses the guest more often  |
+| F11 | `early` costs no try; a `FAIL` costs one of ten; the ceiling covers the whole script                     | Three constants in `screendump.sh`. Ten forgiven failures also forgive an intermittent defect    |
+| F11 | The screen check runs on both full boots in CI and blocks                                                | Make it one boot, or non-blocking, in `ci.yml`                                                   |
+| F13 | No Limine `resolution:` is set; the firmware's mode is taken as found                                    | One line in `tools/limine.conf`                                                                  |
 
 ---
 
@@ -466,21 +527,39 @@ Decisions the phase file did not make. Each is undone by the change in its last 
   in each cell; the framebuffer is still never read. What remains is the 128 stores a drawn
   character costs and the cells a scroll really does change. A screendump taken 200 seconds into the
   third boot decoded in every cell, so the diff leaves no stale glyph behind.
-- **F10's step 3 was rewritten to the rule that was built** (Task 5's fix round). The first text
-  said every non-blank row "occurs in the serial log", with a full-width row joined to the one below
-  before the search. A real log defeats both halves: kernel lines begin mid-console-line and tick
-  bytes arrive in runs, so rows are looked up in the log with kernel lines removed and up to 32 tick
-  bytes allowed inside a row; and the join is only counted (`wraps=`), because requiring it refuses
-  a line of exactly `cols` bytes. The verdict format, `ok WxH CxR rows=N wraps=N stray=N worst=N`,
-  is stated there too. Cost, also stated there: lost letters pass, and row order is unchecked.
-- **F11 now says what the script does** (Tasks 5 and 6): the gate line must be seen on two
-  consecutive polls; the script builds the checker or takes `MINIXRS_FBCHECK`; and CI kills a script
-  still running when the boot ends and counts it failed. The dump and verdict are uploaded on every
-  run, not only on failure.
+- **F10's step 3 was rewritten twice, and now states the rule that is built.** The first text said
+  every non-blank row "occurs in the serial log", with a full-width row joined to the one below
+  before the search. A real log defeated that (Task 5's first fix round): kernel lines begin
+  mid-console-line and tick bytes arrive in runs, so rows were looked up one at a time in the log
+  with kernel lines removed and up to 32 tick bytes allowed inside a row. **The mutation run then
+  defeated that rule** (Task 8): rows looked up one at a time say nothing about where they are, and
+  mutation 7 — a scroll that repaints nothing — passed. The rule as built (Task 5's second fix
+  round, `d923ea8`) is F10's text above: one unbroken stretch of the console stream after the last
+  `fb ok` line, every row anchored to the one above, `MAX_STRAY` 120 with room for a slow host, the
+  `fb ok` line read exactly, and a screen classed as scrolled or not.
+- **F11 now says what the script does** (Tasks 5, 6 and 8): the gate line must be seen on two
+  consecutive polls; the script builds the checker or takes `MINIXRS_FBCHECK`; it looks every 10 s
+  for a **scrolled** screen, an `early` verdict costing no try and a `FAIL` one of ten; the ceiling
+  covers the whole script; and CI kills a script still running when the boot ends and counts it
+  failed. The dump and verdict are uploaded on every run, not only on failure. The first script —
+  ten tries three seconds apart, first pass wins — is what let mutation 7 through: its gate line
+  appears with 22 of 37 rows drawn.
 - **F1 gained the socket path limit** (Task 0's finding b, implemented in Task 2): under 104 bytes,
   refused by the runner.
-- **Section 3's mutation row 7 no longer predicts "rows not in log order"**: `fbcheck` does not
-  check order. Its symptom is to be observed.
+- **Section 3's mutation table now records what was observed** (Task 8), in place of its "Expected
+  to move" column. Row 7's first prediction ("rows not in log order") could not be reported by the
+  checker of the time, and the mutation passed it; with the rebuilt checker it fails on a scrolled
+  screen. Rows 1 and 2 turned out to be caught by the screen check alone, and row 3 to stall the
+  boot with no forbidden marker.
+- **F5 said "a mutation proves the wiring"; none does** (Task 8, mutation 6). Skipping the carve
+  moves nothing on QEMU. F5 was reworded.
+- **F2 gained a condition: the page-rounded end must not pass 2^48** (`PA_LIMIT`; review,
+  `6d1cb26`), refused as `address`. The mapper masks a physical address to 48 bits, so a range
+  crossing the limit would have been mapped elsewhere with no assert firing.
+- **F13.2 and F13.3 have their outcomes** (Task 6): 65.02% / 41.53% of a 600 s log for the last
+  required marker, no timeout moved; and the dumper beside a fed boot disturbed nothing.
+- **`fb FAIL` does not always mean the two validators disagree** (review). For `grid` it does not:
+  the kernel accepts a screen smaller than one 8×16 cell and TTY refuses it.
 - **Section 3's host-test list names the modules as built**: `kernel-shared::memrange` and
   `kernel-shared::framebuffer` (the validator, which the first list did not have at all), and
   `tty::reply` beside `tty::paint`.
